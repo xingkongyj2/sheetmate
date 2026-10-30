@@ -93,7 +93,6 @@ async function logout() {
                 <span class="truncate">{{ conv.customer.name }}</span>
               </template>
               <span v-else>临时对话</span>
-              <span>· {{ conv.mode === 'modify' ? '修改' : '分析' }}</span>
             </span>
           </RouterLink>
           <button

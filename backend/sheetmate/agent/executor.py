@@ -60,6 +60,8 @@ class AgentExecutor:
         tools = self.registry.for_context(ctx)
         conversation = [{"role": "system", "content": build_system_prompt(ctx, message)}, *history[-12:],
                         {"role": "user", "content": f"原始需求：{message}\n下面按计划逐步执行。"}]
+        yield {"type": "plan_start", "steps": [{"id": index, "description": str(step.get("description") or f"第 {index} 步")}
+                                                for index, step in enumerate(steps, start=1)]}
         for i, step in enumerate(steps, start=1):
             description = str(step.get("description") or f"第 {i} 步")
             yield {"type": "step_start", "step_num": i, "total": len(steps), "description": description}
@@ -70,22 +72,37 @@ class AgentExecutor:
             # 把这一步真实的工具调用和结果都记进对话（TabClaw 原来只保留文字结论，模型会以为说了就等于做了）
             transcript: list[dict[str, Any]] = []
             step_text = ""
+            waiting = False
+            question = ""
+            unresolved_tools: set[str] = set()
             async for event in self.agent_stream(conversation, tools, ctx, transcript=transcript):
                 if event["type"] == "text_chunk":
                     step_text += event["content"]  # 每一步的文字小结是过程，不是给用户的最终回答
                     continue
-                if event["type"] == "note" and not event.get("content"):
-                    step_text = ""  # 已经攒着的文字被判定为过程说明，不算这一步的小结
+                if event["type"] == "note":
+                    step_text = ""
+                    yield {**event, "step_num": i}
                     continue
                 if event["type"] == "final_text":
+                    step_text = event.get("content", "")
                     continue
                 yield event
                 if event["type"] == "error":
+                    yield {"type": "step_done", "step_num": i, "status": "error", "summary": event.get("content", "执行失败")}
                     return
+                if event["type"] == "clarify":
+                    waiting = True
+                    question = event.get("question", "需要确认后才能继续")
+                if event["type"] == "tool_result":
+                    if event["ok"]:
+                        unresolved_tools.discard(event["tool"])
+                    else:
+                        unresolved_tools.add(event["tool"])
             conversation.extend(transcript)
-            if step_text.strip():
-                yield {"type": "note", "content": step_text.strip()}
-            yield {"type": "step_done", "step_num": i}
+            status = "waiting" if waiting else "warning" if unresolved_tools else "done"
+            yield {"type": "step_done", "step_num": i, "status": status, "summary": question if waiting else step_text.strip()}
+            if waiting:
+                return
         yield {"type": "reflect_start"}
         conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message)}
         reflect = REFLECT_MESSAGE.format(message=message, total=len(steps))

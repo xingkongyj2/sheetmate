@@ -22,7 +22,6 @@ const route = useRoute()
 const toast = useToast()
 
 const text = ref('')
-const mode = ref<'analyze' | 'modify'>('analyze')
 const plan = ref(false)
 const customerId = ref<string | null>(typeof route.query.customer === 'string' ? route.query.customer : null)
 const files = ref<{ key: string; file: File; kind: 'input' | 'expected' }[]>([])
@@ -49,7 +48,7 @@ async function send() {
   if (!message || busy.value) return
   busy.value = true
   try {
-    const conv = await conversationApi.create({ customer_id: customerId.value, mode: mode.value })
+    const conv = await conversationApi.create({ customer_id: customerId.value })
     const ids: string[] = []
     for (const item of files.value) {
       const att = attachments.value.find((a) => a.key === item.key)!
@@ -82,26 +81,25 @@ async function send() {
 
       <div class="mt-[112px]">
         <div class="relative z-10">
-          <div class="pointer-events-none absolute bottom-full right-4 h-[97px] w-[160px] overflow-hidden sm:right-8">
-            <Mascot :variant="customer?.mascot ?? 'blob'" :size="160" :mood="busy ? 'working' : 'idle'" :shadow="false" />
+          <div class="pointer-events-none absolute bottom-full right-4 aspect-[33/20] w-[160px] max-w-[calc(100%-1rem)] overflow-hidden sm:right-8">
+            <Mascot :variant="customer?.mascot ?? 'blob'" :size="160" :mood="busy ? 'working' : 'idle'" :shadow="false" class="h-auto w-full" />
           </div>
           <ChatComposer
             v-model="text"
-            v-model:mode="mode"
             v-model:plan="plan"
             :attachments="attachments"
             :busy="busy"
             large
             autofocus
-            :placeholder="mode === 'modify' ? '描述要怎么整理表格，可以附上人工做好的结果' : '问点什么，或把表格拖进来'"
+            appearance="card"
+            placeholder="描述要统计什么或怎么修改表格，也可以先把文件拖进来"
             @attach="attach"
             @remove="remove"
             @send="send"
           />
         </div>
 
-        <!-- 抽屉：从输入框下面延伸出来，比输入框窄一点，边框和输入框连成一体 -->
-        <div class="animate-drawer relative mx-6 -mt-5 rounded-b-[18px] border border-t-0 border-line bg-paper/70 pt-5">
+        <div class="animate-drawer relative mx-6 -mt-5 rounded-b-[22px] bg-white pt-5 shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.03)] transition focus-within:shadow-[0_6px_28px_rgba(0,0,0,0.09),0_2px_6px_rgba(0,0,0,0.04)]">
           <CustomerPicker v-model="customerId" />
         </div>
       </div>

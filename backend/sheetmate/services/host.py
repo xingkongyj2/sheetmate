@@ -20,6 +20,7 @@ from sheetmate.services import files as file_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import runs as run_service
+from sheetmate.services.analysis import AnalysisWorkspace
 from sheetmate.services.errors import NotFound, ServiceError
 
 
@@ -32,6 +33,7 @@ class ConversationHost:
         self.customer_id = customer_id
         self.ws = ws
         self.saved_recipes: list[dict[str, Any]] = []
+        self.analysis: AnalysisWorkspace | None = None
 
     # ------------------------------------------------------------------
     # 文件
@@ -57,7 +59,8 @@ class ConversationHost:
         """上传文件在本机的路径（输出时复制它来保持原样式）；文件没了就返回 None。"""
         with session_scope() as db:
             try:
-                return Path(file_service.get_file(db, file_id).stored_path)
+                path = Path(file_service.get_file(db, file_id).stored_path)
+                return self.analysis.file_copy(path) if self.analysis else path
             except NotFound:
                 return None
 
@@ -66,7 +69,8 @@ class ConversationHost:
             record = file_service.get_file(db, file_id)
             if record.customer_id != self.customer_id and record.conversation_id != self.conversation_id:
                 raise ServiceError("这个文件不属于当前客户或会话")
-            return file_service.load_into_workspace(self.ws, record)
+            path = self.analysis.file_copy(Path(record.stored_path)) if self.analysis else None
+            return file_service.load_into_workspace(self.ws, record, path=path)
 
     def export_excel(self, sheets: list[tuple[str, str]], filename: str) -> dict[str, Any]:
         for table, _ in sheets:
@@ -154,7 +158,7 @@ class ConversationHost:
             record: FileRecord | None = None
             metrics = None
             if register_output and handle.output_path.exists() and has_reviewable_output(report):
-                suffix = "_结果.xlsx" if report.get("status") in {"success", "warning"} else "_结果_未通过校验.xlsx"
+                suffix = ("_结果" if report.get("status") in {"success", "warning"} else "_结果_未通过校验") + handle.output_path.suffix
                 record = file_service.register_output(db, path=handle.output_path, filename=f"{recipe.name}{suffix}",
                                                       customer_id=self.customer_id, conversation_id=self.conversation_id,
                                                       run_id=handle.run_id, user_id=self.user_id)

@@ -23,13 +23,11 @@ router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
 class CreateBody(BaseModel):
     customer_id: str | None = None
-    mode: str = "analyze"
     title: str = ""
 
 
 class UpdateBody(BaseModel):
     title: str | None = None
-    mode: str | None = None
     customer_id: str | None = None
 
 
@@ -40,7 +38,6 @@ class BindBody(BaseModel):
 
 class ChatBody(BaseModel):
     message: str
-    mode: str | None = None
     plan_steps: list[dict[str, Any]] | None = None
     attachments: list[str] | None = None
 
@@ -65,7 +62,7 @@ def list_conversations(customer_id: str | None = None, db: Session = Depends(get
 
 @router.post("")
 def create_conversation(body: CreateBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
-    conv = conv_service.create_conversation(db, user, customer_id=body.customer_id, mode=body.mode, title=body.title)
+    conv = conv_service.create_conversation(db, user, customer_id=body.customer_id, title=body.title)
     return {"ok": True, "conversation": conv_service.conversation_dict(db, conv)}
 
 
@@ -149,7 +146,7 @@ def set_table_role(conversation_id: str, name: str, body: RoleBody, db: Session 
 @router.post("/{conversation_id}/chat")
 async def chat(conversation_id: str, body: ChatBody, user: User = Depends(current_user)):
     # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）
-    job = chat_service.start_chat(user, conversation_id, body.message, mode=body.mode, plan_steps=body.plan_steps,
+    job = chat_service.start_chat(user, conversation_id, body.message, plan_steps=body.plan_steps,
                                   attachments=body.attachments)
     return sse_response(job)
 

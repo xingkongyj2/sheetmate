@@ -10,11 +10,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import ExitStack, aclosing
 from typing import Any
 
 from sqlalchemy import select
 
 from sheetmate.agent.executor import AgentExecutor
+from sheetmate.agent.intent import infer_mode
 from sheetmate.agent.llm import LLMError, get_llm
 from sheetmate.agent.memory import extract_memories
 from sheetmate.agent.multi_agent import execute_multi, should_activate
@@ -30,13 +32,15 @@ from sheetmate.services import customers as customer_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import runs as run_service
+from sheetmate.services.analysis import AnalysisWorkspace, analysis_workspace
+from sheetmate.services.errors import Conflict
 from sheetmate.services.host import ConversationHost
 from sheetmate.services.jobs import Job, jobs
 
 _registry = ToolRegistry()
 _background: set[asyncio.Task] = set()  # 持有后台任务的引用，防止被垃圾回收
 _KEEP_EVENTS = {
-    "note", "tool_call", "tool_result", "table", "file", "clarify", "memory_saved", "field_mapping_saved", "step_start", "step_done",
+    "note", "tool_call", "tool_result", "table", "file", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
@@ -60,7 +64,7 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
     return ctx, host
 
 
-def start_chat(user: User, conversation_id: str, message: str, *, mode: str | None = None,
+def start_chat(user: User, conversation_id: str, message: str, *,
                plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None) -> Job:
     text = (message or "").strip()
     if not text:
@@ -69,68 +73,100 @@ def start_chat(user: User, conversation_id: str, message: str, *, mode: str | No
         raise ServiceError("消息不能为空")
     with session_scope() as db:
         conv = conv_service.get_conversation(db, user, conversation_id)
-        if mode in conv_service.MODES:
-            conv.mode = mode
-        meta = {"mode": conv.mode, "attachments": attachments or []}
+        if jobs.running(conversation_id):
+            raise Conflict("上一个任务还在处理中，请稍等它完成")
+        meta = {"attachments": attachments or []}
         if plan_steps:
             meta["plan"] = plan_steps
-        conv_service.add_message(db, conv, "user", text, meta=meta)
+        message_id = conv_service.add_message(db, conv, "user", text, meta=meta).id
     user_id = user.id
 
     async def work(job: Job) -> None:
-        await _run_chat(job, user_id, conversation_id, text, plan_steps)
+        await _run_chat(job, user_id, conversation_id, text, plan_steps, message_id)
 
     return jobs.start(conversation_id, work)
 
 
-async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None) -> None:
+async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
+                    message_id: int) -> None:
     recorder = WorkflowRecorder(message)
     stored: list[dict[str, Any]] = []
     text_parts: list[str] = []
     final_text = ""
+    analysis: AnalysisWorkspace | None = None
 
     async def emit(event: dict[str, Any]) -> None:
         nonlocal final_text
         recorder.observe(event)
         if event["type"] == "text_chunk":
             text_parts.append(event["content"])
+        elif event["type"] == "note":
+            text_parts.clear()
+            final_text = ""
+            stored.append(_slim(event))
         elif event["type"] == "final_text":
             final_text = event.get("content", "")
             return  # 文本已经以 text_chunk 推送过
         elif event["type"] in _KEEP_EVENTS:
             stored.append(_slim(event))
+        if analysis is not None and event["type"] == "table":
+            name = event.get("table", {}).get("name")
+            if name and analysis.ws.exists(name):
+                analysis.publish(name)
         await job.emit(event)
 
     try:
         llm = get_llm()
-    except LLMError as exc:
+        ctx, host = build_context(user_id, conversation_id, llm)
+        history = await _history(conversation_id, llm, emit)
+        ctx.mode = await infer_mode(llm, ctx, message, history, plan_steps)
+    except asyncio.CancelledError:
+        recorder.error = "用户停止了生成"
+        _save_assistant(conversation_id, "（已停止，尚未处理文件）", stored, recorder, None)
+        raise
+    except Exception as exc:
         await emit({"type": "error", "content": str(exc)})
         _save_assistant(conversation_id, f"⚠️ {exc}", stored, recorder, None)
         await job.emit({"type": "done"})
         return
 
-    ctx, host = build_context(user_id, conversation_id, llm)
-    history = await _history(conversation_id, llm, emit)
+    with session_scope() as db:
+        conv = db.get(Conversation, conversation_id)
+        if conv is not None:
+            conv.mode = ctx.mode
+        request = db.get(Message, message_id)
+        if request is not None:
+            request.meta = {**(request.meta or {}), "mode": ctx.mode}
     executor = AgentExecutor(llm, _registry, max_iterations=settings.agent_max_iterations)
     run_id = None
-    if ctx.mode == "analyze":
-        with session_scope() as db:
-            run_id = run_service.create_run(db, kind="analysis", user_id=user_id, customer_id=ctx.host.customer_id,
-                                            conversation_id=conversation_id, request_text=message).id
-    await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None})
     try:
-        if plan_steps:
-            stream = executor.execute_plan(ctx, message, plan_steps, history)
-        elif should_activate(ctx, message):
-            stream = execute_multi(executor, ctx, message, history)
-        else:
-            stream = executor.execute(ctx, message, history)
-        async for event in stream:
-            await emit(event)
+        with ExitStack() as resources:
+            if ctx.mode == "analyze":
+                analysis = resources.enter_context(analysis_workspace(ctx.ws))
+                ctx.ws = host.ws = analysis.ws
+                host.analysis = analysis
+                for table in ctx.ws.list_tables():
+                    if table.file_id:
+                        host.file_path(table.file_id)
+                with session_scope() as db:
+                    run_id = run_service.create_run(db, kind="analysis", user_id=user_id, customer_id=ctx.host.customer_id,
+                                                    conversation_id=conversation_id, request_text=message).id
+            await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None})
+            if plan_steps:
+                stream = executor.execute_plan(ctx, message, plan_steps, history)
+            elif should_activate(ctx, message):
+                stream = execute_multi(executor, ctx, message, history)
+            else:
+                stream = executor.execute(ctx, message, history)
+            async with aclosing(stream):
+                async for event in stream:
+                    await emit(event)
     except asyncio.CancelledError:
         recorder.error = "用户停止了生成"
         _save_assistant(conversation_id, ("".join(text_parts) + "\n\n（已停止）").strip(), stored, recorder, run_id)
         raise
+    except Exception as exc:
+        await emit({"type": "error", "content": f"处理出错：{exc}"})
 
     answer = final_text or "".join(text_parts).strip()
     if not answer and recorder.error:
@@ -175,7 +211,7 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
         if conv is None:
             return
         conv_service.add_message(db, conv, "assistant", content, events=events,
-                                 meta={"digest": recorder.digest(), "tool_sequence": record["tool_sequence"], "run_id": run_id})
+                                 meta={"mode": conv.mode, "digest": recorder.digest(), "tool_sequence": record["tool_sequence"], "run_id": run_id})
         if run_id:
             if record["steps"]:
                 run_service.finish_analysis_run(db, run_id, record)

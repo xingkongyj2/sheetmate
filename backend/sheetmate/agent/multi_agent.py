@@ -94,13 +94,18 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
 
     tasks = [asyncio.create_task(run_agent(t.name)) for t in tables]
     finished = 0
-    while finished < len(tasks):
-        event = await queue.get()
-        if event is done_marker:
-            finished += 1
-        else:
-            yield event
-    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        while finished < len(tasks):
+            event = await queue.get()
+            if event is done_marker:
+                finished += 1
+            else:
+                yield event
+    finally:
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
     yield {"type": "aggregate_start"}
     labels = {t.name: t.label or t.name for t in tables}

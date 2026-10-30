@@ -10,9 +10,10 @@
 import type { AgentEvent, DiffCard, RecipeFlowData, RecipeJSON, StepReport, VerifyReport } from '@/api/types'
 
 export type ToolStatus = 'running' | 'ok' | 'error'
+export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' | 'error' | 'stopped'
 
 export type TimelineItem =
-  | { kind: 'note'; key: string; text: string }
+  | { kind: 'note'; key: string; text: string; step?: number }
   | { kind: 'thinking'; key: string; text: string }
   | {
       kind: 'tool'
@@ -25,8 +26,9 @@ export type TimelineItem =
       summary?: string
       text?: string
       duration_ms?: number
+      step?: number
     }
-  | { kind: 'plan'; key: string; num: number; total: number; description: string; status: 'running' | 'done' }
+  | { kind: 'plan'; key: string; num: number; total: number; description: string; status: PlanStatus; summary?: string }
   | { kind: 'agent'; key: string; id: string; table: string; status: 'running' | 'done' | 'error'; conclusion?: string }
   | { kind: 'info'; key: string; text: string; tone?: 'memory' | 'mapping' | 'compact' | 'reflect' | 'aggregate' }
 
@@ -269,7 +271,9 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     case 'note':
       // 后端判定：刚才这一轮文字后面跟着工具调用，是过程说明——撤回已经实时输出的部分，挪进「执行过程」
       msg.content = ''
-      if (typeof e.content === 'string' && e.content.trim()) msg.timeline.push({ kind: 'note', key: uid('t'), text: e.content.trim() })
+      if (typeof e.content === 'string' && e.content.trim()) {
+        msg.timeline.push({ kind: 'note', key: uid('t'), text: e.content.trim(), step: e.step_num ?? activePlan(msg)?.num })
+      }
       break
     case 'thinking': {
       const last = msg.timeline[msg.timeline.length - 1]
@@ -279,7 +283,7 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     }
     case 'tool_call':
       flushNote(msg)
-      msg.timeline.push({ kind: 'tool', key: uid('t'), id: e.id, tool: e.tool, label: e.label, params: e.params ?? {}, status: 'running' })
+      msg.timeline.push({ kind: 'tool', key: uid('t'), id: e.id, tool: e.tool, label: e.label, params: e.params ?? {}, status: 'running', step: activePlan(msg)?.num })
       if (RECIPE_TOOLS.has(e.tool)) {
         const progress = newProgress(e.tool === 'run_recipe' ? 'replay' : e.tool === 'revise_recipe' ? 'revise' : 'learn', e.id)
         msg.artifacts.push({ kind: 'recipe', key: progress.key, progress })
@@ -319,14 +323,25 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     case 'compacted':
       msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'compact', text: `对话较长，已把前 ${e.old_count} 条消息压缩成摘要` })
       break
-    case 'step_start':
-      flushNote(msg)
-      msg.timeline.push({ kind: 'plan', key: uid('t'), num: e.step_num, total: e.total, description: e.description, status: 'running' })
+    case 'plan_start':
+      for (const step of e.steps ?? []) {
+        msg.timeline.push({ kind: 'plan', key: uid('t'), num: step.id, total: e.steps.length, description: step.description, status: 'pending' })
+      }
       break
+    case 'step_start': {
+      flushNote(msg)
+      const item = msg.timeline.find((entry) => entry.kind === 'plan' && entry.num === e.step_num)
+      if (item?.kind === 'plan') item.status = 'running'
+      else msg.timeline.push({ kind: 'plan', key: uid('t'), num: e.step_num, total: e.total, description: e.description, status: 'running' })
+      break
+    }
     case 'step_done': {
       const item = [...msg.timeline].reverse().find((t) => t.kind === 'plan' && t.num === e.step_num)
-      if (item && item.kind === 'plan') item.status = 'done'
       flushNote(msg)
+      if (item && item.kind === 'plan') {
+        item.status = ['done', 'warning', 'waiting', 'error', 'stopped'].includes(e.status) ? e.status : 'done'
+        if (typeof e.summary === 'string') item.summary = e.summary
+      }
       break
     }
     case 'reflect_start':
@@ -349,12 +364,14 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     case 'aggregate_start':
       msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'aggregate', text: '汇总各专员的结论，做跨表对比' })
       break
-    case 'error':
+    case 'error': {
       msg.error = e.content
+      const step = activePlan(msg)
+      if (step) step.status = e.content?.includes('已停止') ? 'stopped' : 'error'
       break
+    }
     case 'done':
-      msg.streaming = false
-      for (const item of msg.timeline) if (item.kind === 'tool' && item.status === 'running') item.status = 'error'
+      finishMessage(msg)
       break
   }
 }
@@ -362,8 +379,22 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
 /** 工具调用前已经输出的文字，挪到过程里作为「中间说明」 */
 function flushNote(msg: UiMessage) {
   const text = msg.content.trim()
-  if (text) msg.timeline.push({ kind: 'note', key: uid('t'), text })
+  if (text) msg.timeline.push({ kind: 'note', key: uid('t'), text, step: activePlan(msg)?.num })
   msg.content = ''
+}
+
+function activePlan(msg: UiMessage) {
+  return msg.timeline.find((item): item is Extract<TimelineItem, { kind: 'plan' }> => item.kind === 'plan' && item.status === 'running')
+}
+
+export function finishMessage(msg: UiMessage): void {
+  msg.streaming = false
+  for (const item of msg.timeline) {
+    if (item.kind === 'tool' && item.status === 'running') item.status = 'error'
+    if (item.kind === 'plan' && item.status === 'running') {
+      item.status = msg.error && !msg.error.includes('已停止') ? 'error' : 'stopped'
+    }
+  }
 }
 
 function findProgress(msg: UiMessage, toolCallId: string): RecipeProgress | undefined {
@@ -392,10 +423,9 @@ export function fromStored(stored: { id: number; role: 'user' | 'assistant'; con
   }
   if (stored.role === 'assistant') {
     for (const e of stored.events ?? []) applyEvent(msg, e)
-    for (const item of msg.timeline) if (item.kind === 'tool' && item.status === 'running') item.status = 'error'
   }
   msg.content = stored.content
-  msg.streaming = false
+  finishMessage(msg)
   return msg
 }
 

@@ -96,10 +96,10 @@ export const conversationApi = {
   list: async (customerId?: string) =>
     (await http.get<{ conversations: ConversationBrief[] }>('/conversations', { params: { customer_id: customerId } })).data
       .conversations,
-  create: async (payload: { customer_id?: string | null; mode?: string; title?: string }) =>
+  create: async (payload: { customer_id?: string | null; title?: string }) =>
     (await http.post<{ conversation: ConversationBrief }>('/conversations', payload)).data.conversation,
   get: async (id: string) => (await http.get<{ conversation: ConversationDetail & { running: boolean } }>(`/conversations/${id}`)).data.conversation,
-  update: async (id: string, payload: Partial<{ title: string; mode: string; customer_id: string | null }>) =>
+  update: async (id: string, payload: Partial<{ title: string; customer_id: string | null }>) =>
     (await http.put<{ conversation: ConversationBrief }>(`/conversations/${id}`, payload)).data.conversation,
   remove: async (id: string) => http.delete(`/conversations/${id}`),
   bind: async (id: string, payload: { customer_id?: string; new_customer?: { name: string; code?: string; description?: string } }) =>
@@ -121,7 +121,7 @@ export const conversationApi = {
   plan: async (id: string, message: string) =>
     (await http.post<{ plan: { title: string; steps: PlanStep[] } }>(`/conversations/${id}/plan`, { message })).data.plan,
   stop: async (id: string) => http.post(`/conversations/${id}/stop`),
-  chat: (id: string, body: { message: string; mode?: string; plan_steps?: PlanStep[]; attachments?: string[] }, onEvent: (e: AgentEvent) => void) =>
+  chat: (id: string, body: { message: string; plan_steps?: PlanStep[]; attachments?: string[] }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/conversations/${id}/chat`, body, onEvent),
 }
 

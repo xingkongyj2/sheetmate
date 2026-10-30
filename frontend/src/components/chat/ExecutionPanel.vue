@@ -166,7 +166,7 @@ function stepFlow(r: ConversationDetail['recipes'][number]) {
       <!-- 流程 -->
       <template v-else>
         <div v-if="!detail?.recipes.length" class="py-14 text-center text-sm leading-relaxed text-faint">
-          这次对话还没有生成流程<br />切换到「修改」模式让 AI 整理表格，<br />或在分析后说「保存成流程」
+          这次对话还没有生成流程<br />直接告诉 AI 要怎么整理表格，<br />或在统计后说「保存成流程」
         </div>
         <div v-for="r in detail?.recipes ?? []" :key="r.recipe_id" class="mb-4 rounded-2xl border border-line p-3">
           <div class="flex items-center gap-2">

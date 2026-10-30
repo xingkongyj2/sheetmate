@@ -28,7 +28,7 @@ from sheetmate.engine.profile import dtype_label
 from sheetmate.engine.reader import ReadError, SheetData, read_sheet, read_workbook
 from sheetmate.engine.runner import StepOutcome, apply_formula
 from sheetmate.engine.sqlutil import frame_to_text, quote_ident
-from sheetmate.engine.template_writer import TemplateSource, write_like_original
+from sheetmate.engine.template_writer import TemplatePreservationError, TemplateSource, write_like_original
 from sheetmate.engine.workspace import Workspace
 from sheetmate.engine.writer import SheetSpec, write_excel
 from sheetmate.recipe.schema import Recipe, RecipeInput, RecipeStep, step_table_refs
@@ -99,6 +99,7 @@ class RecipeRunner:
         self.max_repair = max_repair
         self.recipe_changed = False
         self.input_frames: dict[str, pd.DataFrame] = {}
+        self.output_path: Path | None = None
         # 每个输入对应的原文件位置：输出时「复制原文件、在里面改写」要用它找样式
         self.sources: dict[str, TemplateSource] = {}
         self.report: dict[str, Any] = {
@@ -113,7 +114,7 @@ class RecipeRunner:
             "validation": None,
             "error": "",
             "escalation": "",
-            "output_style": "",  # original 沿用原文件样式 / default 默认样式（原文件不是 xlsx 或打不开）
+            "output_style": "",
             "failed_stage": "",  # input 输入不符 / step 某步修不好 / validation 运行校验不通过 / error 其他错误
             "repaired_steps": [],
             "duration_ms": 0,
@@ -156,7 +157,7 @@ class RecipeRunner:
                 outputs = await asyncio.to_thread(self.collect_outputs)
                 written = await asyncio.to_thread(self.write_outputs, output_path, outputs)
                 self.report["outputs"] = written
-                yield {"type": "recipe_output", "path": str(output_path), "sheets": written}
+                yield {"type": "recipe_output", "path": str(self.output_path), "sheets": written}
                 validation = await asyncio.to_thread(validate_run, self.recipe, self.input_frames or self._input_frames(), outputs, history)
                 self.report["validation"] = validation
                 yield {"type": "recipe_validation", "report": validation}
@@ -241,15 +242,17 @@ class RecipeRunner:
                        sheet: SheetData | None) -> TemplateSource | None:
         """记下这个输入在原文件里的位置（哪个 sheet、表头在哪、每一列在第几列），输出时用来沿用原样式。"""
         if src.path is None or not Path(src.path).exists():
+            if src.file_id and Path(src.filename).suffix.lower() in {".xlsx", ".xlsm", ".xls"}:
+                raise RecipeInputError(f"无法找到「{src.filename}」的原文件，不能保留原表格式")
             return None
         try:
             if sheet is None:  # DataFrame 来源（会话里已加载的表）：回原文件重新定位一次
                 sheet = read_sheet(Path(src.path), sheet_name or None, header_hint=src.header or inp.header)
-        except ReadError:
-            return None
+        except ReadError as exc:
+            raise RecipeInputError(f"无法定位原工作表，不能保留原表格式：{exc}") from exc
         col_index = sheet.header.col_index
         if col_index is None or len(col_index) != len(df.columns):
-            return None
+            raise RecipeInputError("原表列位置与输入数据不一致，无法安全保留原表格式")
         columns = [str(c) for c in df.columns]
         tpl = TemplateSource(
             alias=inp.alias, path=Path(src.path), sheet=sheet.name, header_row=sheet.header.header_row,
@@ -493,24 +496,30 @@ class RecipeRunner:
     def write_outputs(self, path: Path, outputs: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
         """写出 Excel（可以在调整 output_spec 后重新写一次）。
 
-        优先「复制原始文件，在里面改写」，输入什么样式输出就是什么样式；原文件不是 xlsx、打不开或者
-        结果里没有任何一个 sheet 能对应到原表时，退回默认样式。
+        Excel 必须沿用原工作簿；无法保留时停止输出。CSV 和没有原工作簿的数据使用新表。
         """
         if not outputs:
             raise ValueError("没有可以输出的结果：所有步骤都失败了，或 output_spec 指向的表不存在")
         if self.sources:
-            try:
-                plans = plan_outputs(self.recipe, self.library, self.sources, outputs)
-                written = write_like_original(path, plans)
-            except Exception:  # 样式处理出任何意外都不能让整次运行失败：退回默认样式
-                written = None
+            if any(source.path.suffix.lower() == ".xls" for source in self.sources.values()):
+                raise TemplatePreservationError("暂不支持保留旧版 .xls 的原格式，请先用 Excel 另存为 .xlsx 后再编辑")
+            plans = plan_outputs(self.recipe, self.library, self.sources, outputs)
+            base = next((plan.template for plan in plans if plan.template and plan.template.usable()), None)
+            if base is not None:
+                path = path.with_suffix(base.path.suffix.lower())
+            written = write_like_original(path, plans)
             if written is not None:
                 self.report["output_style"] = "original"
+                self.output_path = path
                 return written
+            if any(source.path.suffix.lower() in {".xlsx", ".xlsm"} for source in self.sources.values()):
+                raise TemplatePreservationError("无法确定结果对应的原工作簿，已停止输出以避免丢失格式")
         self.report["output_style"] = "default"
         split = {o.name: o.split_by for o in self.recipe.output_spec}
         sheets = [SheetSpec(name=name, df=df, split_by=split.get(name)) for name, df in outputs.items()]
-        return write_excel(path, sheets)
+        written = write_excel(path, sheets)
+        self.output_path = path
+        return written
 
     # ------------------------------------------------------------------
 

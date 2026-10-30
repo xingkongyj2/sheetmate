@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import io
+from zipfile import ZipFile
 
 import openpyxl
 import pandas as pd
 import pytest
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.comments import Comment
+from openpyxl.formatting.rule import CellIsRule
+from openpyxl.worksheet.datavalidation import DataValidation
+from openpyxl.worksheet.table import Table, TableStyleInfo
 
 from sheetmate.demo.samples import demo_recipe_body
 from sheetmate.engine.formulas import FormulaLibrary
@@ -229,3 +234,194 @@ def test_rerun_from_step_still_writes_in_original_style(client):
     file_event = next(e for e in events if e["type"] == "file")
     wb = openpyxl.load_workbook(io.BytesIO(client.get(file_event["download_url"]).content))
     assert wb["明细"]["A1"].value == "顺达物流 · 2026 年 9 月运费明细"
+
+
+def _amount_recipe():
+    return _recipe([{"id": 1, "name": "修改金额", "formula": "compute_column",
+                     "params": {"table": "订单", "column": "金额", "expression": '"金额" + 10'}, "output": "结果"}],
+                   output="结果", name="订单")
+
+
+def test_value_edits_keep_cell_details_formulas_and_other_sheets(tmp_path):
+    source = tmp_path / "原表.xlsx"
+    _styled_workbook(source)
+    workbook = openpyxl.load_workbook(source)
+    sheet = workbook["订单"]
+    sheet.merge_cells("B3:B4")
+    sheet["D5"].fill = PatternFill("solid", fgColor="FFFF0000")
+    sheet["D5"].comment = Comment("保留说明", "财务")
+    sheet["A5"].hyperlink = "https://example.com/order/A003"
+    sheet.row_dimensions[5].height = 37
+    sheet.row_dimensions[5].hidden = True
+    sheet.column_dimensions["C"].hidden = True
+    sheet["F2"] = "公式"
+    sheet["F3"] = "=D3*2"
+    workbook["说明"]["B1"] = "='订单'!D3"
+    validation = DataValidation(type="decimal", operator="greaterThan", formula1=0)
+    sheet.add_data_validation(validation)
+    validation.add(sheet["D5"])
+    sheet.conditional_formatting.add("D3:D8", CellIsRule(operator="greaterThan", formula=[100],
+                                                      fill=PatternFill("solid", fgColor="FFFFFF00")))
+    workbook.save(source)
+    original_bytes = source.read_bytes()
+    output = tmp_path / "修改.xlsx"
+    runner = _run(_amount_recipe(), source, output)
+    assert runner.report["status"] in {"success", "warning"}, runner.report
+    result = openpyxl.load_workbook(output)
+    edited = result["订单"]
+    assert edited["D5"].value == 1210.25
+    assert edited["D5"]._style == sheet["D5"]._style
+    assert edited["D5"].comment.text == "保留说明"
+    assert edited["A5"].hyperlink.target == sheet["A5"].hyperlink.target
+    assert edited.row_dimensions[5].height == 37 and edited.row_dimensions[5].hidden
+    assert edited.column_dimensions["C"].hidden
+    assert {str(merged) for merged in edited.merged_cells.ranges} == {"A1:E1", "B3:B4"}
+    assert edited["F3"].value == "=D3*2"
+    assert result["说明"]["B1"].value == "='订单'!D3"
+    assert edited.data_validations.count == 1
+    assert len(edited.conditional_formatting) == 1
+    assert source.read_bytes() == original_bytes
+
+
+def test_value_edits_keep_blank_rows_and_leading_columns(tmp_path):
+    source = tmp_path / "空行.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "订单"
+    sheet.append([None, "订单号", "金额"])
+    sheet.append([None, "A001", 10])
+    sheet.append([None, None, None])
+    sheet.append([None, "A002", 20])
+    sheet.row_dimensions[3].height = 40
+    workbook.save(source)
+    recipe = Recipe(name="修改", inputs=[{"alias": "订单", "sheet": "订单"}],
+                    steps=_amount_recipe().steps, output_spec=[{"name": "订单", "source": "结果"}])
+    output = tmp_path / "修改.xlsx"
+    runner = _run(recipe, source, output)
+    assert runner.report["status"] in {"success", "warning"}, runner.report
+    result = openpyxl.load_workbook(output)["订单"]
+    assert result["C2"].value == 20 and result["C4"].value == 30
+    assert result["A2"].value is None and result["B3"].value is None
+    assert result.row_dimensions[3].height == 40
+
+
+def test_summary_only_does_not_replace_original_sheet(tmp_path):
+    source = tmp_path / "原表.xlsx"
+    _styled_workbook(source)
+    recipe = _recipe([{"id": 1, "name": "汇总", "formula": "group_aggregate",
+                       "params": {"table": "订单", "group_by": ["客户"],
+                                  "aggregations": [{"column": "金额", "func": "sum", "as": "合计"}]},
+                       "output": "汇总"}], output="汇总", name="客户汇总")
+    output = tmp_path / "汇总.xlsx"
+    runner = _run(recipe, source, output)
+    assert runner.report["status"] in {"success", "warning"}, runner.report
+    workbook = openpyxl.load_workbook(output)
+    assert workbook.sheetnames == ["订单", "说明", "客户汇总"]
+    assert list(workbook["订单"].values) == list(openpyxl.load_workbook(source)["订单"].values)
+    assert workbook["订单"]["A2"].fill.fgColor.rgb == HEADER_FILL
+
+
+def test_edits_two_original_sheets_without_duplicating_them(tmp_path):
+    source = tmp_path / "原表.xlsx"
+    _styled_workbook(source)
+    workbook = openpyxl.load_workbook(source)
+    workbook.copy_worksheet(workbook["订单"]).title = "订单二"
+    workbook.save(source)
+    recipe = _amount_recipe()
+    recipe.inputs.append(recipe.inputs[0].model_copy(update={"alias": "订单二", "sheet": "订单二"}))
+    recipe.steps.append(recipe.steps[0].model_copy(update={"id": 2, "output": "结果二",
+                         "params": {"table": "订单二", "column": "金额", "expression": '"金额" + 20'}}))
+    recipe.output_spec.append(recipe.output_spec[0].model_copy(update={"name": "订单二", "source": "结果二"}))
+    output = tmp_path / "修改.xlsx"
+    runner = _run(recipe, source, output)
+    assert runner.report["status"] in {"success", "warning"}, runner.report
+    result = openpyxl.load_workbook(output)
+    assert result.sheetnames == ["订单", "说明", "订单二"]
+    assert result["订单"]["D3"].value == 110.5 and result["订单二"]["D3"].value == 120.5
+    assert result["订单二"]["A2"].fill.fgColor.rgb == HEADER_FILL
+
+
+@pytest.mark.parametrize("feature", ["formula", "merge", "comment", "unique_style", "hidden_row"])
+def test_unsafe_structural_edit_stops_without_plain_output(tmp_path, feature):
+    source = tmp_path / "原表.xlsx"
+    _styled_workbook(source)
+    workbook = openpyxl.load_workbook(source)
+    sheet = workbook["订单"]
+    if feature == "formula":
+        workbook["说明"]["B1"] = "='订单'!D3"
+    elif feature == "merge":
+        sheet.merge_cells("B3:B4")
+    elif feature == "comment":
+        sheet["D5"].comment = Comment("不能丢", "财务")
+    elif feature == "unique_style":
+        sheet["D5"].fill = PatternFill("solid", fgColor="FFFF0000")
+    else:
+        sheet.row_dimensions[5].hidden = True
+    workbook.save(source)
+    original_bytes = source.read_bytes()
+    recipe = _recipe([{"id": 1, "name": "筛选", "formula": "filter_rows",
+                       "params": {"table": "订单", "condition": '"金额" > 100'}, "output": "结果"}],
+                     output="结果", name="订单")
+    output = tmp_path / "修改.xlsx"
+    runner = _run(recipe, source, output)
+    assert runner.report["status"] == "failed"
+    assert "已停止输出" in runner.report["error"]
+    assert not output.exists() and not runner.report["outputs"]
+    assert source.read_bytes() == original_bytes
+
+
+def test_existing_excel_table_keeps_metadata_when_column_is_added(tmp_path):
+    source = tmp_path / "原表.xlsx"
+    _styled_workbook(source)
+    workbook = openpyxl.load_workbook(source)
+    table = Table(displayName="Orders", ref="A2:E8")
+    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium9", showRowStripes=True)
+    workbook["订单"].add_table(table)
+    workbook.save(source)
+    recipe = _recipe([{"id": 1, "name": "添加金额", "formula": "compute_column",
+                       "params": {"table": "订单", "column": "含税金额", "expression": '"金额" * 1.06'},
+                       "output": "结果"}], output="结果", name="订单")
+    output = tmp_path / "修改.xlsx"
+    runner = _run(recipe, source, output)
+    assert runner.report["status"] in {"success", "warning"}, runner.report
+    result = openpyxl.load_workbook(output)["订单"].tables["Orders"]
+    assert result.ref == "A2:F8" and result.autoFilter.ref == "A2:F8"
+    assert result.tableStyleInfo.name == "TableStyleMedium9"
+    assert [column.name for column in result.tableColumns] == ["订单号", "客户", "状态", "金额", "日期", "含税金额"]
+
+
+def test_macro_workbook_keeps_vba_and_xlsm_extension(tmp_path):
+    original = tmp_path / "原表.xlsx"
+    _styled_workbook(original)
+    source = tmp_path / "原表.xlsm"
+    macro = b"test VBA project payload"
+    with ZipFile(original) as archive, ZipFile(source, "w") as target:
+        for name in archive.namelist():
+            data = archive.read(name)
+            if name == "[Content_Types].xml":
+                data = data.replace(b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                                    b"application/vnd.ms-excel.sheet.macroEnabled.main+xml")
+                data = data.replace(b"</Types>", b'<Override PartName="/xl/vbaProject.bin" ContentType="application/vnd.ms-office.vbaProject"/></Types>')
+            elif name == "xl/_rels/workbook.xml.rels":
+                data = data.replace(b"</Relationships>", b'<Relationship Id="rIdVBA" Type="http://schemas.microsoft.com/office/2006/relationships/vbaProject" Target="vbaProject.bin"/></Relationships>')
+            target.writestr(name, data)
+        target.writestr("xl/vbaProject.bin", macro)
+    original_bytes = source.read_bytes()
+    requested = tmp_path / "修改.xlsx"
+    runner = _run(_amount_recipe(), source, requested)
+    assert runner.report["status"] in {"success", "warning"}, runner.report
+    assert runner.output_path == requested.with_suffix(".xlsm") and not requested.exists()
+    with ZipFile(runner.output_path) as result:
+        assert result.read("xl/vbaProject.bin") == macro
+    assert source.read_bytes() == original_bytes
+
+
+def test_unsupported_workbook_content_does_not_silently_disappear(tmp_path):
+    source = tmp_path / "原表.xlsx"
+    _styled_workbook(source)
+    with ZipFile(source, "a") as archive:
+        archive.writestr("xl/ctrlProps/ctrlProp1.xml", "<control/>")
+    output = tmp_path / "修改.xlsx"
+    runner = _run(_amount_recipe(), source, output)
+    assert runner.report["status"] == "failed" and "不能完整保留" in runner.report["error"]
+    assert not output.exists()

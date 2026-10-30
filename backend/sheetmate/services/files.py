@@ -170,9 +170,9 @@ def table_base_name(filename: str) -> str:
     return stem or Path(filename).stem
 
 
-def load_into_workspace(ws: Workspace, record: FileRecord) -> list[TableInfo]:
+def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None = None) -> list[TableInfo]:
     """把文件的每个 sheet 存成工作区里的一张表。期望结果文件的表名用「期望_sheet名」。"""
-    sheets = read_workbook(Path(record.stored_path))
+    sheets = read_workbook(path or Path(record.stored_path))
     for info in ws.list_tables():  # 同一个文件重复加载时先清掉旧表
         if info.file_id == record.id:
             ws.drop(info.name)
