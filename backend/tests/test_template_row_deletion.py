@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-from copy import copy
-
+import asyncio
 import openpyxl
-import pandas as pd
 from openpyxl.comments import Comment
 from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import PatternFill
@@ -66,8 +64,6 @@ def _run(source, output):
         source_info = InputSource("排班", path=source, filename=source.name)
         return [event async for event in runner.run({"排班": source_info}, output_path=output)]
 
-    import asyncio
-
     asyncio.run(go())
     return runner
 
@@ -89,6 +85,6 @@ def test_filtered_rows_keep_original_row_objects_and_ranges(tmp_path):
     assert sheet["A4"].hyperlink.target == "https://example.com/employee"
     assert sheet.row_dimensions[4].height == 31 and sheet.row_dimensions[4].hidden
     assert sheet.auto_filter.ref == "A2:C5"
-    assert str(next(iter(sheet.conditional_formatting))) == "C3:C5"
+    assert str(next(iter(sheet.conditional_formatting)).sqref) == "C3:C5"
     assert workbook["引用"]["A1"].value == "='排班'!C5"
     assert "A1:C1" in {str(rng) for rng in sheet.merged_cells.ranges}

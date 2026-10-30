@@ -341,16 +341,14 @@ def test_edits_two_original_sheets_without_duplicating_them(tmp_path):
     assert result["订单二"]["A2"].fill.fgColor.rgb == HEADER_FILL
 
 
-@pytest.mark.parametrize("feature", ["formula", "merge", "comment", "unique_style", "hidden_row"])
-def test_unsafe_structural_edit_stops_without_plain_output(tmp_path, feature):
+@pytest.mark.parametrize("feature", ["formula", "comment", "unique_style", "hidden_row"])
+def test_filtered_rows_preserve_original_details(tmp_path, feature):
     source = tmp_path / "原表.xlsx"
     _styled_workbook(source)
     workbook = openpyxl.load_workbook(source)
     sheet = workbook["订单"]
     if feature == "formula":
         workbook["说明"]["B1"] = "='订单'!D3"
-    elif feature == "merge":
-        sheet.merge_cells("B3:B4")
     elif feature == "comment":
         sheet["D5"].comment = Comment("不能丢", "财务")
     elif feature == "unique_style":
@@ -364,9 +362,20 @@ def test_unsafe_structural_edit_stops_without_plain_output(tmp_path, feature):
                      output="结果", name="订单")
     output = tmp_path / "修改.xlsx"
     runner = _run(recipe, source, output)
-    assert runner.report["status"] == "failed"
-    assert "已停止输出" in runner.report["error"]
-    assert not output.exists() and not runner.report["outputs"]
+    assert runner.report["status"] in {"success", "warning"}, runner.report
+    result = openpyxl.load_workbook(output)
+    edited = result["订单"]
+    assert [edited.cell(row, 1).value for row in range(3, 6)] == ["A001", "A003", "A005"]
+    for result_row, source_row in zip(range(3, 6), (3, 5, 7)):
+        assert [cell._style for cell in edited[result_row]] == [cell._style for cell in sheet[source_row]]
+    if feature == "formula":
+        assert result["说明"]["B1"].value == "='订单'!D3"
+    elif feature == "comment":
+        assert edited["D4"].comment.text == "不能丢"
+    elif feature == "unique_style":
+        assert edited["D4"].fill.fgColor.rgb == "FFFF0000"
+    else:
+        assert edited.row_dimensions[4].hidden
     assert source.read_bytes() == original_bytes
 
 

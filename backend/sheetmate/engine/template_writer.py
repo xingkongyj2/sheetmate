@@ -29,8 +29,9 @@ import openpyxl
 import pandas as pd
 from openpyxl.cell.cell import MergedCell
 from openpyxl.formatting.formatting import ConditionalFormattingList
+from openpyxl.formula.translate import Translator
 from openpyxl.styles.cell_style import StyleArray
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import coordinate_to_tuple, get_column_letter
 from openpyxl.worksheet.cell_range import CellRange, MultiCellRange
 from openpyxl.worksheet.table import TableColumn
 from openpyxl.worksheet.worksheet import Worksheet
@@ -397,6 +398,8 @@ def _move_original_cells(ws: Worksheet, deleted_rows: list[int]) -> None:
         cells[(cell.row, column)] = cell
     for merged, anchor in anchors:
         anchor.row = merged.min_row
+        if anchor.comment:
+            anchor.comment = copy(anchor.comment)
         if anchor.hyperlink:
             anchor.hyperlink.ref = anchor.coordinate
         cells[(anchor.row, anchor.column)] = anchor
@@ -416,22 +419,30 @@ def _adjust_workbook_formulas(workbook: openpyxl.Workbook, deleted: dict[str, se
                               edited: Worksheet, removed: set[int]) -> None:
     for sheet in workbook.worksheets:
         for cell in sheet._cells.values():
+            if cell.data_type == "f" and not isinstance(cell.value, str):
+                raise ValueError("暂不能移动数组公式或数据表公式")
             if sheet is edited and cell.row in removed:
                 continue
             if cell.data_type == "f":
-                if not isinstance(cell.value, str):
-                    raise ValueError("暂不能移动数组公式或数据表公式")
                 cell.value = adjust_formula(cell.value, sheet.title, deleted)
             if not isinstance(cell, MergedCell) and cell.hyperlink and cell.hyperlink.location:
                 cell.hyperlink.location = adjust_formula(cell.hyperlink.location, sheet.title, deleted)
         for validation in sheet.data_validations.dataValidation:
+            if sheet is edited and not shift_range_ref(str(validation.sqref), removed):
+                continue
             for attribute in ("formula1", "formula2"):
                 formula = getattr(validation, attribute)
                 if formula:
+                    if sheet is edited:
+                        formula = _move_rule_origin(formula, validation.sqref, removed)
                     setattr(validation, attribute, adjust_formula(formula, sheet.title, deleted))
         for formatting in sheet.conditional_formatting:
+            if sheet is edited and not shift_range_ref(str(formatting.sqref), removed):
+                continue
             for rule in formatting.rules:
-                rule.formula = [adjust_formula(formula, sheet.title, deleted) for formula in rule.formula]
+                formulas = [_move_rule_origin(formula, formatting.sqref, removed)
+                            if sheet is edited else formula for formula in rule.formula]
+                rule.formula = [adjust_formula(formula, sheet.title, deleted) for formula in formulas]
         for table in sheet.tables.values():
             for column in table.tableColumns:
                 for attribute in ("calculatedColumnFormula", "totalsRowFormula"):
@@ -444,6 +455,25 @@ def _adjust_workbook_formulas(workbook: openpyxl.Workbook, deleted: dict[str, se
     for definition in workbook.defined_names.values():
         if definition.attr_text:
             definition.attr_text = adjust_formula(definition.attr_text, "", deleted)
+
+
+def _move_rule_origin(formula: str, references: MultiCellRange, deleted: set[int]) -> str:
+    ranges = sorted(references.ranges, key=lambda reference: (reference.min_row, reference.min_col))
+    if not ranges:
+        return formula
+    original = ranges[0]
+    if original.min_row not in deleted:
+        return formula
+    for reference in ranges:
+        first = reference.min_row
+        while first in deleted and first <= reference.max_row:
+            first += 1
+        if first <= reference.max_row:
+            origin = f"{get_column_letter(original.min_col)}{original.min_row}"
+            target = f"{get_column_letter(reference.min_col)}{first}"
+            translated = Translator(formula if formula.startswith("=") else f"={formula}", origin=origin).translate_formula(target)
+            return translated if formula.startswith("=") else translated[1:]
+    return formula
 
 
 def _adjust_sheet_ranges(ws: Worksheet, deleted: set[int]) -> None:
@@ -471,9 +501,17 @@ def _adjust_sheet_ranges(ws: Worksheet, deleted: set[int]) -> None:
                 formatting_list.add(updated, rule)
     ws.conditional_formatting = formatting_list
     for table in ws.tables.values():
+        original = CellRange(table.ref)
+        if (table.headerRowCount and original.min_row in deleted
+                or table.totalsRowCount and original.max_row in deleted):
+            raise ValueError("不能删除 Excel 表格的表头或合计行")
         table.ref = shift_range_ref(table.ref, deleted)
         if table.autoFilter is not None and table.autoFilter.ref:
             table.autoFilter.ref = table.ref
+        if table.sortState:
+            table.sortState.ref = shift_range_ref(table.sortState.ref, deleted)
+            for condition in table.sortState.sortCondition:
+                condition.ref = shift_range_ref(condition.ref, deleted)
     if ws.print_area:
         ws.print_area = [shift_range_ref(str(reference), deleted) for reference in ws._print_area.ranges
                          if shift_range_ref(str(reference), deleted)]
@@ -481,6 +519,24 @@ def _adjust_sheet_ranges(ws: Worksheet, deleted: set[int]) -> None:
         ws.print_title_rows = shift_range_ref(ws.print_title_rows, deleted) or None
     for page_break in ws.row_breaks.brk:
         page_break.id -= sum(row <= page_break.id for row in deleted)
+    for view in ws.views.sheetView:
+        if view.topLeftCell:
+            view.topLeftCell = _shift_view_cell(view.topLeftCell, deleted)
+        if view.pane:
+            if view.pane.topLeftCell:
+                view.pane.topLeftCell = _shift_view_cell(view.pane.topLeftCell, deleted)
+            if view.pane.state in {"frozen", "frozenSplit"} and view.pane.ySplit:
+                view.pane.ySplit -= sum(row <= view.pane.ySplit for row in deleted)
+        for selection in view.selection:
+            if selection.activeCell:
+                selection.activeCell = _shift_view_cell(selection.activeCell, deleted)
+            if selection.sqref:
+                selection.sqref = shift_range_ref(selection.sqref, deleted) or selection.activeCell or "A1"
+
+
+def _shift_view_cell(reference: str, deleted: set[int]) -> str:
+    row, column = coordinate_to_tuple(reference)
+    return f"{get_column_letter(column)}{max(1, row - sum(item < row for item in deleted))}"
 
 
 def _has_special_layout(ws: Worksheet, snap: _Snapshot, rows: list[int]) -> bool:

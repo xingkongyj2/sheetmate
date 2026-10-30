@@ -1,0 +1,218 @@
+"""Safely adjust Excel A1 references after worksheet rows are deleted.
+
+Only ordinary A1 references are rewritten. Structured references, defined names,
+array constants and other unsupported Excel reference forms are left alone or
+rejected explicitly so a formula is never silently changed into a bad formula.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+
+from openpyxl.formula import Tokenizer
+from openpyxl.formula.tokenizer import TokenizerError
+
+_CELL = re.compile(r"(?P<col>\$?[A-Za-z]{1,3})(?P<row>\$?\d+)$")
+_ROW = re.compile(r"(?P<first>\$?\d+)(?::(?P<last>\$?\d+))?$")
+_COL = re.compile(r"(?P<first>\$?[A-Za-z]{1,3})(?::(?P<last>\$?[A-Za-z]{1,3}))?$")
+
+
+@dataclass(frozen=True)
+class _Reference:
+    prefix: str
+    body: str
+    sheet: str | None
+
+
+def adjust_formula(formula: str, current_sheet: str, deleted: dict[str, set[int]]) -> str:
+    """Adjust ordinary A1 references in *formula* after deleting worksheet rows.
+
+    A direct reference to a deleted cell, an all-deleted range, a 3-D reference,
+    or an external workbook reference raises ``ValueError``. Defined names and
+    structured references are preserved unchanged because their rows cannot be
+    safely inferred here.
+    """
+    if not isinstance(formula, str):
+        return formula
+    had_equals = formula.startswith("=")
+    expression = formula if had_equals else "=" + formula
+    try:
+        tokens = Tokenizer(expression).items
+    except TokenizerError as exc:
+        raise ValueError(f"unsupported formula syntax: {exc}") from exc
+    if any(token.type == "ARRAY" for token in tokens):
+        raise ValueError("array formulas/constants are not supported for row deletion")
+    pieces: list[str] = []
+    for token in tokens:
+        if token.type != "OPERAND" or token.subtype != "RANGE":
+            pieces.append(token.value)
+            continue
+        pieces.append(_adjust_token(token.value, current_sheet, deleted))
+    rendered = "".join(pieces)
+    return "=" + rendered if had_equals else rendered
+
+
+def shift_range_ref(reference: str, deleted: set[int]) -> str:
+    """Shift an A1 range after deleting rows.
+
+    Multiple areas separated by whitespace are handled independently. If every
+    row in an area is deleted, that area is omitted; an empty return means all
+    areas were deleted. Column-only ranges are unchanged.
+    """
+    if not reference:
+        return ""
+    areas = _split_areas(reference)
+    shifted: list[str] = []
+    for area in areas:
+        value = _shift_area(area, deleted)
+        if value:
+            shifted.append(value)
+    return " ".join(shifted)
+
+
+def _adjust_token(token: str, current_sheet: str, deleted: dict[str, set[int]]) -> str:
+    ref = _parse_reference(token)
+    if ref is None:
+        return token
+    rows = _lookup_deleted(deleted, ref.sheet or current_sheet)
+    if not rows:
+        return token
+    shifted = _shift_area(token, rows, reject_single=True)
+    if not shifted:
+        raise ValueError(f"reference {token!r} is fully deleted")
+    return shifted
+
+
+def _shift_area(area: str, deleted: set[int], *, reject_single: bool = False) -> str:
+    ref = _parse_reference(area)
+    if ref is None:
+        return area
+    body = ref.body
+    if _COL.fullmatch(body):
+        return area
+    row_match = _ROW.fullmatch(body)
+    if row_match:
+        first = int(row_match.group("first").lstrip("$"))
+        last = int((row_match.group("last") or row_match.group("first")).lstrip("$"))
+        if last < first:
+            raise ValueError(f"reversed row range {area!r} is unsupported")
+        mapped = _mapped_rows(first, last, deleted)
+        if not mapped:
+            return ""
+        first_text = _shift_number(row_match.group("first"), mapped[0])
+        if row_match.group("last") is None:
+            return f"{ref.prefix}{first_text}"
+        last_text = _shift_number(row_match.group("last"), mapped[-1])
+        return f"{ref.prefix}{first_text}:{last_text}"
+    parts = body.split(":")
+    if len(parts) == 1:
+        match = _CELL.fullmatch(parts[0])
+        if not match:
+            return area
+        row = int(match.group("row").lstrip("$"))
+        if row in deleted:
+            if not reject_single:
+                return ""
+            raise ValueError(f"reference {area!r} points to a deleted cell")
+        return f"{ref.prefix}{match.group('col')}{_shift_number(match.group('row'), row - _count_before(deleted, row))}"
+    if len(parts) != 2:
+        raise ValueError(f"unsupported range reference {area!r}")
+    start, end = (_CELL.fullmatch(part) for part in parts)
+    if start is None or end is None:
+        return area
+    start_row = int(start.group("row").lstrip("$"))
+    end_row = int(end.group("row").lstrip("$"))
+    if end_row < start_row:
+        raise ValueError(f"reversed cell range {area!r} is unsupported")
+    mapped = _mapped_rows(start_row, end_row, deleted)
+    if not mapped:
+        return ""
+    return (
+        f"{ref.prefix}{start.group('col')}{_shift_number(start.group('row'), mapped[0])}:"
+        f"{end.group('col')}{_shift_number(end.group('row'), mapped[-1])}"
+    )
+
+
+def _mapped_rows(first: int, last: int, deleted: set[int]) -> list[int]:
+    return [row - _count_before(deleted, row) for row in range(first, last + 1) if row not in deleted]
+
+
+def _count_before(deleted: set[int], row: int) -> int:
+    return sum(item < row for item in deleted)
+
+
+def _lookup_deleted(deleted: dict[str, set[int]], sheet: str) -> set[int] | None:
+    if sheet in deleted:
+        return deleted[sheet]
+    folded = sheet.casefold()
+    return next((rows for name, rows in deleted.items() if name.casefold() == folded), None)
+
+
+def _shift_number(original: str, value: int) -> str:
+    return ("$" if original.startswith("$") else "") + str(value)
+
+
+def _parse_reference(value: str) -> _Reference | None:
+    if "[" in value or "]" in value:
+        if "!" in value:
+            raise ValueError(f"external workbook reference is unsupported: {value!r}")
+        return None
+    bang = _find_sheet_separator(value)
+    if bang < 0:
+        prefix, body, sheet = "", value, None
+    else:
+        prefix, body = value[: bang + 1], value[bang + 1 :]
+        sheet_text = value[:bang]
+        if ":" in sheet_text:
+            raise ValueError(f"3-D sheet reference is unsupported: {value!r}")
+        sheet = _decode_sheet(sheet_text)
+    if _CELL.fullmatch(body) or ":" in body and (_CELL.fullmatch(body.split(":")[0]) and _CELL.fullmatch(body.split(":")[-1])):
+        return _Reference(prefix, body, sheet)
+    if _ROW.fullmatch(body) or _COL.fullmatch(body):
+        return _Reference(prefix, body, sheet)
+    return None
+
+
+def _find_sheet_separator(value: str) -> int:
+    quoted = False
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "'":
+            if quoted and index + 1 < len(value) and value[index + 1] == "'":
+                index += 2
+                continue
+            quoted = not quoted
+        elif char == "!" and not quoted:
+            return index
+        index += 1
+    return -1
+
+
+def _decode_sheet(value: str) -> str:
+    if value.startswith("'") and value.endswith("'"):
+        return value[1:-1].replace("''", "'")
+    return value
+
+
+def _split_areas(value: str) -> list[str]:
+    areas: list[str] = []
+    start = 0
+    quoted = False
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "'":
+            if quoted and index + 1 < len(value) and value[index + 1] == "'":
+                index += 2
+                continue
+            quoted = not quoted
+        elif char.isspace() and not quoted:
+            if start < index:
+                areas.append(value[start:index])
+            start = index + 1
+        index += 1
+    if start < len(value):
+        areas.append(value[start:])
+    return areas
