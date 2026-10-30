@@ -9,29 +9,38 @@
 - 结果里多出来的 sheet（例如汇总表）：追加到这份副本里，表头和数据样式照着原表
 - 原文件里没被动过的 sheet 原样保留
 
-只支持 .xlsx / .xlsm 的原文件（openpyxl 能读写的格式）；.xls、.csv 或者原文件打不开时返回 None，由调用方退回默认样式。
-已知限制：openpyxl 不保留图表、数据透视表、宏；这些在输出里会丢掉（单元格数据和格式不受影响）。
+支持 .xlsx / .xlsm 的原文件。检测到无法保留的内容或结构变更时停止输出，不退回普通表格。
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import warnings
 from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
+from xml.etree import ElementTree
+from zipfile import ZipFile
 
 import openpyxl
 import pandas as pd
+from openpyxl.cell.cell import MergedCell
 from openpyxl.styles.cell_style import StyleArray
 from openpyxl.utils import get_column_letter
-from openpyxl.worksheet.filters import AutoFilter
+from openpyxl.worksheet.table import TableColumn
 from openpyxl.worksheet.worksheet import Worksheet
 
 from sheetmate.engine.profile import dtype_label
+from sheetmate.engine.reader import read_sheet
 from sheetmate.engine.writer import _display_width, _excel_value, safe_sheet_name
 
 TEMPLATE_SUFFIXES = {".xlsx", ".xlsm"}
+
+
+class TemplatePreservationError(ValueError):
+    pass
 
 
 @dataclass
@@ -137,7 +146,7 @@ class _Snapshot:
 
 
 def _same(a: dict[int, StyleArray], b: dict[int, StyleArray]) -> bool:
-    return all(tuple(a[c]) == tuple(b.get(c, ())) for c in a)
+    return all(a[column] == b.get(column) for column in a)
 
 
 def _read_dims(ws: Worksheet) -> dict[int, _Dim]:
@@ -156,38 +165,89 @@ def _read_dims(ws: Worksheet) -> dict[int, _Dim]:
 
 
 def write_like_original(path: Path, plans: list[OutputPlan]) -> list[dict[str, Any]] | None:
-    """复制原文件、改写、保存到 path。返回每个 sheet 的 {sheet, rows, columns}；不能按原样式写出时返回 None。"""
-    base = next((p for p in plans if p.edit and p.template and p.template.usable()), None)
+    """在原工作簿基础上输出副本；有原工作簿但不能保留时抛出错误。"""
+    base = next((plan for plan in plans if plan.template and plan.template.usable()), None)
     if base is None:
         return None
     tpl = base.template
     assert tpl is not None
-    try:
-        wb = openpyxl.load_workbook(tpl.path)  # 不用 data_only：没动过的 sheet 里的公式要原样保留
-    except Exception:
-        return None
-    if tpl.sheet not in wb.sheetnames:
-        return None
-    ws = wb[tpl.sheet]
-    snap = _Snapshot.capture(ws, tpl)
+    if path.resolve() == tpl.path.resolve():
+        raise TemplatePreservationError("编辑结果必须另存副本，不能覆盖原文件")
+    if tpl.path.suffix.lower() == ".xlsm" and path.suffix.lower() != ".xlsm":
+        raise TemplatePreservationError("含宏工作簿必须另存为 .xlsm，不能丢弃宏后输出 .xlsx")
+    _check_package(tpl.path)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        try:
+            workbook = openpyxl.load_workbook(tpl.path, keep_vba=tpl.path.suffix.lower() == ".xlsm", rich_text=True)
+        except Exception as exc:
+            raise TemplatePreservationError(f"无法完整保留原工作簿，已停止输出：{exc}") from exc
+        try:
+            return _write_workbook(workbook, path, plans, tpl)
+        except UserWarning as exc:
+            raise TemplatePreservationError(f"原工作簿包含不能完整保留的内容，已停止输出：{exc}") from exc
+        finally:
+            workbook.close()
+            if workbook.vba_archive is not None:
+                workbook.vba_archive.close()
 
+
+def _check_package(path: Path) -> None:
+    with ZipFile(path) as archive:
+        unsupported = ("xl/activeX/", "xl/ctrlProps/", "xl/slicers/", "xl/slicerCaches/", "xl/embeddings/",
+                       "xl/threadedComments/", "customXml/")
+        for name in archive.namelist():
+            if name.startswith(unsupported):
+                raise TemplatePreservationError("原文件包含控件、切片器或其他暂不能完整保留的内容，已停止输出以避免丢失")
+            if name.startswith("xl/drawings/") and name.endswith(".xml"):
+                drawing = ElementTree.fromstring(archive.read(name))
+                if any(node.tag.rsplit("}", 1)[-1] in {"sp", "grpSp", "cxnSp", "contentPart"} for node in drawing.iter()):
+                    raise TemplatePreservationError("原文件包含暂不能完整保留的绘图形状，已停止输出以避免丢失")
+
+
+def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputPlan], base: TemplateSource) -> list[dict[str, Any]]:
+    snapshots: dict[str, _Snapshot] = {}
+    for source in [base, *(plan.template for plan in plans if plan.template)]:
+        if source.path != base.path:
+            continue
+        if source.sheet not in workbook.sheetnames:
+            raise TemplatePreservationError(f"原工作簿中找不到「{source.sheet}」，无法保留原格式")
+        snapshots[source.sheet] = _Snapshot.capture(workbook[source.sheet], source)
     written: list[dict[str, Any]] = []
-    used = set(wb.sheetnames)
+    used = set(workbook.sheetnames)
+    edited: set[str] = set()
     for plan in plans:
-        if plan is base:
-            title = _unique_title(plan.name, used - {ws.title}) if plan.name != ws.title else ws.title
-            used.discard(ws.title)
+        source = plan.template
+        snap = snapshots.get(source.sheet, snapshots[base.sheet]) if source else snapshots[base.sheet]
+        if plan.edit:
+            if source is None or source.path != base.path or source.sheet in edited:
+                raise TemplatePreservationError("输出与原工作表的对应关系不明确，已停止输出以避免丢失格式")
+            sheet = workbook[source.sheet]
+            title = _unique_title(plan.name, used - {sheet.title}) if plan.name != sheet.title else sheet.title
+            if title != sheet.title and _has_formulas(workbook):
+                raise TemplatePreservationError("重命名工作表可能破坏现有公式引用，请保留原工作表名称")
+            _rewrite_sheet(sheet, snap, plan.df)
+            used.discard(sheet.title)
             used.add(title)
-            _rewrite_sheet(ws, snap, plan.df)
-            ws.title = title
-            written.append(_info(title, plan.df))
+            sheet.title = title
+            edited.add(source.sheet)
         else:
             title = safe_sheet_name(plan.name, used)
-            _append_sheet(wb, title, snap, plan.df)
-            written.append(_info(title, plan.df))
+            _append_sheet(workbook, title, snap, plan.df)
+        written.append(_info(title, plan.df))
     path.parent.mkdir(parents=True, exist_ok=True)
-    wb.save(path)
+    with NamedTemporaryFile(dir=path.parent, suffix=path.suffix, delete=False) as temporary:
+        staging = Path(temporary.name)
+    try:
+        workbook.save(staging)
+        staging.replace(path)
+    finally:
+        staging.unlink(missing_ok=True)
     return written
+
+
+def _has_formulas(workbook: openpyxl.Workbook) -> bool:
+    return any(cell.data_type == "f" for sheet in workbook for row in sheet for cell in row)
 
 
 def _info(title: str, df: pd.DataFrame) -> dict[str, Any]:
@@ -217,6 +277,22 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame) -> None:
     same_columns = columns == tpl.columns
     header_row, first_data = tpl.header_row, tpl.header_row + 1
 
+    original = read_sheet(tpl.path, tpl.sheet, header_hint={"header_row": tpl.header_row, "header_rows": tpl.header_rows})
+    if len(original.df.columns) != len(tpl.columns):
+        raise TemplatePreservationError("原工作表列结构已变化，无法安全编辑")
+    if columns[:len(tpl.columns)] == tpl.columns and len(df) == len(original.df):
+        _patch_cells(ws, snap, df, original.df, original.header.row_index or [], mapping)
+        return
+    merged_data = any(merged.max_row > tpl.header_row for merged in ws.merged_cells.ranges)
+    if (_has_formulas(ws.parent) or merged_data or (tpl.header_rows > 1 and not same_columns)
+            or ws.conditional_formatting or ws.data_validations.count or ws._charts or ws._images or ws._pivots
+            or ws.tables or _has_special_layout(ws, snap, original.header.row_index or [])
+            or (not same_columns and any(merged.max_row == tpl.header_row for merged in ws.merged_cells.ranges))
+            or ws.auto_filter.filterColumn or ws.auto_filter.sortState):
+        raise TemplatePreservationError(
+            "本次行列重排会影响原表的公式、合并结构或其他格式，暂不能安全保留；已停止输出，原文件未改动"
+        )
+
     # 1. 数据区里的合并单元格先拆掉（否则删行会留下残骸），然后整块删除
     for rng in list(ws.merged_cells.ranges):
         if rng.min_row >= first_data:
@@ -242,6 +318,64 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame) -> None:
             ws.row_dimensions[excel_row].height = height
 
     _fix_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
+
+
+def _has_special_layout(ws: Worksheet, snap: _Snapshot, rows: list[int]) -> bool:
+    if snap.tpl.col_index != list(range(len(snap.tpl.columns))):
+        return True
+    if rows != list(range(snap.tpl.header_row, ws.max_row)):
+        return True
+    for index, row in enumerate(rows):
+        dimension = ws.row_dimensions.get(row + 1)
+        if dimension is not None and (dimension.hidden or dimension.outlineLevel or dimension.collapsed
+                                      or dimension.has_style or dimension.thickTop or dimension.thickBot
+                                      or dimension.height != snap.height(index)):
+            return True
+        for cell in ws[row + 1]:
+            if cell.comment or cell.hyperlink or cell._style != snap.data_style(index, cell.column):
+                return True
+    return False
+
+
+def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: pd.DataFrame,
+                 rows: list[int], mapping: list[int | None]) -> None:
+    if len(rows) != len(frame):
+        raise TemplatePreservationError("无法定位原表数据行，已停止输出以避免破坏排版")
+    positions = [index + 1 for index in snap.tpl.col_index]
+    added = len(frame.columns) - len(positions)
+    positions.extend(range(ws.max_column + 1, ws.max_column + 1 + added))
+    styles = _column_styles(snap, frame, mapping)
+    values = {(row + 1, positions[index]): _excel_value(value)
+              for row, record in zip(rows, frame.itertuples(index=False, name=None)) for index, value in enumerate(record)}
+    for merged in ws.merged_cells.ranges:
+        affected = [value for (row, column), value in values.items()
+                    if merged.min_row <= row <= merged.max_row and merged.min_col <= column <= merged.max_col]
+        if affected and any(value != affected[0] for value in affected):
+            raise TemplatePreservationError(f"修改后的内容无法放入原合并单元格 {merged}，已停止输出以保留原格式")
+    for row_index, excel_index in enumerate(rows):
+        for column_index, column in enumerate(positions):
+            cell = ws.cell(row=excel_index + 1, column=column)
+            value = values[(excel_index + 1, column)]
+            if isinstance(cell, MergedCell):
+                continue
+            if column_index < len(snap.tpl.columns):
+                previous = _excel_value(original.iloc[row_index, column_index])
+                if value == previous:
+                    continue
+                if cell.data_type == "f":
+                    raise TemplatePreservationError(f"本次处理会把公式 {cell.coordinate} 替换成数值，已停止输出以保护原公式")
+                cell.value = value
+            else:
+                _put(cell, value, styles[column_index][row_index % len(snap.data_styles)])
+    for index in range(len(snap.tpl.columns), len(positions)):
+        column = positions[index]
+        left = ws.cell(row=snap.tpl.header_row, column=column - 1)
+        cell = ws.cell(row=snap.tpl.header_row, column=column)
+        cell.value = str(frame.columns[index])
+        cell._style = copy(left._style)
+        ws.column_dimensions[get_column_letter(column)].width = _auto_width(frame.iloc[:, index], str(frame.columns[index]))
+    if added and (ws.tables or ws.auto_filter.ref):
+        _fix_table_objects(ws, snap.tpl.header_row, positions[-1], max(rows, default=snap.tpl.header_row) + 1)
 
 
 def _rewrite_header(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, mapping: list[int | None], columns: list[str]) -> tuple[int, int]:
@@ -328,20 +462,23 @@ def _auto_width(series: pd.Series, name: str) -> float:
 
 def _fix_table_objects(ws: Worksheet, header_row: int, width: int, last_row: int) -> None:
     """原表如果是「Excel 表格」对象或有筛选，范围要跟着新数据区走，否则 Excel 打开会报修复。"""
-    ref = f"A{header_row}:{get_column_letter(width)}{max(last_row, header_row + 1)}"
     for name in list(ws.tables):
         table = ws.tables[name]
-        try:
-            table.ref = ref
-            table.autoFilter = AutoFilter(ref=ref) if table.autoFilter is not None else None
-            table.tableColumns = []
-            table._initialise_columns()
-            for column, cell in zip(table.tableColumns, ws[header_row]):
-                column.name = str(cell.value if cell.value is not None else column.name)
-        except Exception:
-            del ws.tables[name]  # 实在对不上就去掉表格对象，单元格样式不受影响
+        left, top, right, bottom = openpyxl.utils.range_boundaries(table.ref)
+        if (len(ws.tables) != 1 or top != header_row or bottom != last_row or table.totalsRowCount
+                or len(table.tableColumns) != right - left + 1):
+            raise TemplatePreservationError("无法安全扩展原表的 Excel 表格范围，已停止输出")
+        for column in range(right + 1, width + 1):
+            table.tableColumns.append(TableColumn(id=max(item.id for item in table.tableColumns) + 1,
+                                                   name=str(ws.cell(header_row, column).value)))
+        table.ref = f"{get_column_letter(left)}{top}:{get_column_letter(width)}{bottom}"
+        if table.autoFilter is not None:
+            table.autoFilter.ref = table.ref
     if ws.auto_filter is not None and ws.auto_filter.ref:
-        ws.auto_filter.ref = ref
+        left, top, _, _ = openpyxl.utils.range_boundaries(ws.auto_filter.ref)
+        if top != header_row:
+            raise TemplatePreservationError("筛选区域与原表表头不一致，已停止输出以保留原格式")
+        ws.auto_filter.ref = f"{get_column_letter(left)}{header_row}:{get_column_letter(width)}{max(last_row, header_row + 1)}"
 
 
 # ---------------------------------------------------------------------------

@@ -37,28 +37,45 @@ def plan_outputs(
 ) -> list[OutputPlan]:
     """按上面的规则排出每个输出 sheet 的写法。outputs 的 key 是输出 sheet 名，顺序和 output_spec 一致。"""
     primary = primary_inputs(recipe, library)
+    summaries: set[str] = set()
+    for step in recipe.ordered_steps():
+        if step.formula == "group_aggregate" or any(ref in summaries for ref in step_table_refs(step, library)):
+            summaries.add(step.output)
     spec_by_name = {o.name: o for o in recipe.output_spec}
     candidates: list[tuple[str, pd.DataFrame, TemplateSource | None]] = []
     for name, df in outputs.items():
         spec = spec_by_name.get(name)
-        alias = primary.get(spec.source) if spec else None
+        fallback = recipe.ordered_steps()[-1].output if recipe.steps else None
+        alias = primary.get(spec.source if spec else fallback)
         src = sources.get(alias) if alias else None
         candidates.append((name, df, src if src is not None and src.usable() else None))
 
     base_index = _choose_base(candidates)
+    base_source = candidates[base_index][2] if base_index is not None else next(iter(sources.values()), None)
+    base_path = base_source.path if base_source else None
+    edits: dict[str, tuple[tuple[int, int, int], int]] = {}
+    for index, (name, frame, source) in enumerate(candidates):
+        spec = spec_by_name.get(name)
+        output_source = spec.source if spec else recipe.ordered_steps()[-1].output if recipe.steps else None
+        if source is None or source.path != base_path or output_source in summaries or (spec and spec.split_by):
+            continue
+        score = (int(name == source.sheet), len(set(frame.columns) & set(source.columns)), -index)
+        if source.sheet not in edits or score > edits[source.sheet][0]:
+            edits[source.sheet] = (score, index)
+    edit_indices = {index for _, index in edits.values()}
     keep_original_name = not recipe.metadata.get("has_expected")
     plans: list[OutputPlan] = []
     for i, (name, df, src) in enumerate(candidates):
         spec = spec_by_name.get(name)
-        if i == base_index and src is not None:
+        if i in edit_indices and src is not None:
             plans.append(OutputPlan(name=src.sheet if keep_original_name else name, df=df, template=src, edit=True))
             continue
         split = spec.split_by if spec else None
         if split and split in df.columns:
             groups = df.groupby(df[split].fillna("(空)").astype(str), sort=False)
-            plans.extend(OutputPlan(name=str(value), df=part.reset_index(drop=True), template=None) for value, part in groups)
+            plans.extend(OutputPlan(name=str(value), df=part.reset_index(drop=True), template=base_source) for value, part in groups)
         else:
-            plans.append(OutputPlan(name=name, df=df, template=None))
+            plans.append(OutputPlan(name=name, df=df, template=src if src and src.path == base_path else base_source))
     return plans
 
 

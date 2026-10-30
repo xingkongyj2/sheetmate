@@ -67,7 +67,8 @@ class JobManager:
         job = self._jobs.get(key)
         if job is None or job.task is None or job.finished:
             return False
-        job.task.cancel()
+        if not job.task.cancelling():
+            job.task.cancel()
         return True
 
 

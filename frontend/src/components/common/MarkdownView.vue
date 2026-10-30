@@ -1,14 +1,12 @@
 <script setup lang="ts">
 /** Markdown 渲染（marked + DOMPurify 防 XSS） */
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
 import { computed } from 'vue'
+
+import { renderMarkdown } from '@/composables/markdown'
 
 const props = defineProps<{ source: string; streaming?: boolean }>()
 
-marked.setOptions({ gfm: true, breaks: true })
-
-const html = computed(() => DOMPurify.sanitize(marked.parse(props.source || '', { async: false }) as string))
+const html = computed(() => renderMarkdown(props.source))
 </script>
 
 <template>

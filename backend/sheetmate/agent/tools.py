@@ -494,6 +494,7 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
                                      path=ctx.host.file_path(info.file_id) if info.file_id else None)
     async for event in runner.run(sources, output_path=handle.output_path, history=host.history_metrics(recipe.id)):
         yield event
+    handle.output_path = runner.output_path or handle.output_path
     file_info = host.finish_run(handle, runner.recipe, runner.report)
     if file_info:
         yield {"type": "file", **file_info}
@@ -624,7 +625,7 @@ def _static_tools() -> list[Tool]:
         Tool("run_recipe", "用已保存的流程直接处理当前的表（不需要重新生成），输出 Excel。",
              _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名}，不填自动按列匹配"},
                    "allow_repair": {"type": "boolean", "description": "出错时是否允许 AI 自动修复，默认 true"}}, ["recipe_id"]),
-             both, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
+             modify, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
         Tool("save_as_recipe", "把分析过程中用公式生成的结果表沉淀成可重复执行的流程（不调用 AI，按依赖自动整理步骤）。",
              _obj({"output_tables": {**_STR_LIST, "description": "最终要输出的结果表"}, "name": _STR,
                    "description": {**_STR, "description": "流程说明"}}, ["output_tables", "name"]),
@@ -683,7 +684,17 @@ async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> A
                 yield ToolResult("工具没有返回结果", ok=False)
         else:
             assert tool.run is not None
-            yield await asyncio.to_thread(tool.run, args, ctx)
+            worker = asyncio.create_task(asyncio.to_thread(tool.run, args, ctx))
+            try:
+                result = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                ctx.ws.interrupt()
+                try:
+                    await worker
+                except Exception:
+                    pass
+                raise
+            yield result
     except Exception as exc:  # 工具出错时把错误当结果交给 LLM，让它自己纠正
         message = str(exc) or type(exc).__name__
         yield ToolResult(f"工具 `{tool.name}` 出错：{message}", ok=False, summary=message[:200])

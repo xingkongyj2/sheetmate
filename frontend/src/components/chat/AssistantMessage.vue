@@ -1,34 +1,59 @@
 <script setup lang="ts">
 /**
- * 助手消息：阶段小结（边做边说的几句话）→ 处理流程卡片 → 执行过程（默认折叠成一行）→ 回答（Markdown）→ 结果表 / 文件 / 澄清问题。
- * 阶段小结让用户知道大概干了什么；工具调用、参数等细节藏起来，想看再点开。
+ * 助手消息：计划步骤与状态 → 处理流程 → 折叠的执行过程 → Markdown 回答与产物 → 两种复制操作。
  */
-import { ChevronRight, CircleAlert, Download, FileSpreadsheet, LoaderCircle, MessageCircleQuestion, PanelRight } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, Code, Copy, Download, FileSpreadsheet, LoaderCircle, MessageCircleQuestion, PanelRight } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import Mascot from '@/components/brand/Mascot.vue'
 import MarkdownView from '@/components/common/MarkdownView.vue'
 import RecipeProgressCard from '@/components/recipe/RecipeProgressCard.vue'
 import type { UiMessage } from '@/composables/chatModel'
+import { copyMarkdown } from '@/composables/markdown'
+import { lastResultTable, messageMarkdown, planSteps } from '@/composables/messagePresentation'
+import { useToast } from '@/composables/useToast'
 
+import PlanProgress from './PlanProgress.vue'
 import TableCard from './TableCard.vue'
 import TimelineList from './TimelineList.vue'
 
 const props = defineProps<{ message: UiMessage; customerId?: string | null; selected?: boolean; mascot?: string | null }>()
 const emit = defineEmits<{ answer: [text: string]; openTable: [name: string]; inspect: [] }>()
+const toast = useToast()
+const copying = ref(false)
+const copied = ref<'formatted' | 'markdown' | null>(null)
+let copiedTimer = 0
+const markdown = computed(() => messageMarkdown(props.message))
+const hasPlan = computed(() => planSteps(props.message).length > 0)
+
+async function copyReply(format: 'formatted' | 'markdown') {
+  if (copying.value) return
+  copying.value = true
+  try {
+    await copyMarkdown(markdown.value, format)
+    copied.value = format
+    window.clearTimeout(copiedTimer)
+    copiedTimer = window.setTimeout(() => { copied.value = null }, 2000)
+    toast.success(format === 'formatted' ? '已复制带格式的回复' : '已复制 Markdown 源文')
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '复制失败，请重试')
+  } finally {
+    copying.value = false
+  }
+}
 
 // 执行过程默认折叠：正在执行时也不会自动展开，想看自己点开
 const showProcess = ref(false)
-// 阶段小结：模型每做完一个阶段说的一两句话，留在消息里（不是被后面的内容替换掉）
+// 非计划任务执行时显示最新进展，结束后过程说明收进执行明细。
 const stageNotes = computed(() => props.message.timeline.flatMap((t) => (t.kind === 'note' ? [t] : [])))
-const processItems = computed(() => props.message.timeline.filter((t) => t.kind !== 'note'))
+const processItems = computed(() => props.message.timeline.filter((t) => t.kind !== 'plan'))
 const toolCount = computed(() => props.message.timeline.filter((t) => t.kind === 'tool').length)
 const runningTool = computed(() => [...props.message.timeline].reverse().find((t) => t.kind === 'tool' && t.status === 'running'))
 const mood = computed(() => (props.message.streaming ? (runningTool.value ? 'working' : 'thinking') : props.message.error ? 'idle' : 'happy'))
 
 // 一条回答里可能有好几张中间表，消息里只放最后一张（最终结果）；其余的在右侧「执行明细」里看
 // 「查询结果」是看数据时的探索（取值分布等），不是用户要的结果，不放进消息；它们在右侧「执行明细」里
-const lastTable = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'table' && a.table.role !== 'query' ? [a.table] : [])).at(-1))
+const lastTable = computed(() => lastResultTable(props.message))
 const recipes = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'recipe' ? [a] : [])))
 const others = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'file' || a.kind === 'clarify' ? [a] : [])))
 
@@ -54,7 +79,10 @@ watch(
     else if (!timer) timer = window.setInterval(tick, 30)
   },
 )
-onBeforeUnmount(() => window.clearInterval(timer))
+onBeforeUnmount(() => {
+  window.clearInterval(timer)
+  window.clearTimeout(copiedTimer)
+})
 const typing = computed(() => props.message.streaming || shown.value.length < props.message.content.length)
 </script>
 
@@ -65,7 +93,8 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
     </div>
     <div class="min-w-0 flex-1 space-y-3">
       <!-- 阶段小结：知道大概干了什么 -->
-      <MarkdownView v-for="n in stageNotes" :key="n.key" :source="n.text" class="animate-rise text-[14px] leading-relaxed text-mute" />
+      <PlanProgress v-if="hasPlan" :message="message" />
+      <MarkdownView v-else-if="message.streaming && stageNotes.length" :source="stageNotes.at(-1)!.text" class="animate-rise !text-[14px] !text-mute" />
 
       <!-- 处理流程：一张精简卡片（细节折叠在里面） -->
       <RecipeProgressCard v-for="a in recipes" :key="a.key" :progress="a.progress" :customer-id="customerId" />
@@ -78,7 +107,7 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
           <template v-if="message.streaming">
             {{ runningTool && runningTool.kind === 'tool' ? `正在${runningTool.label}…` : '思考中…' }}
           </template>
-          <template v-else>{{ showProcess ? '收起执行过程' : `查看执行过程${toolCount ? ` · ${toolCount} 步` : ''}` }}</template>
+          <template v-else>{{ showProcess ? '收起执行过程' : `查看执行过程${toolCount ? ` · ${toolCount} 次工具调用` : ''}` }}</template>
         </button>
         <div v-if="showProcess && processItems.length" class="mt-2 border-l-2 border-line pl-3.5">
           <TimelineList :items="processItems" />
@@ -99,12 +128,32 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
           </div>
           <a :href="a.file.download_url" class="btn-ink py-2"><Download class="size-4" />下载</a>
         </div>
-        <div v-else-if="a.kind === 'clarify'" class="rounded-2xl border border-fun-yellow/50 bg-fun-yellow/10 p-4">
-          <div class="flex items-center gap-2 text-[14px] font-medium"><MessageCircleQuestion class="size-4 text-[#b7860b]" />{{ a.question }}</div>
-          <div class="mt-3 flex flex-wrap gap-2">
-            <button v-for="opt in a.options" :key="opt" class="btn-line bg-white" :disabled="message.streaming" @click="emit('answer', opt)">{{ opt }}</button>
+        <section v-else-if="a.kind === 'clarify'" class="overflow-hidden rounded-2xl border border-[#eadfc9] bg-[#fffcf6]">
+          <div class="flex items-start gap-3 px-4 pb-3 pt-4 sm:px-5 sm:pt-5">
+            <span class="flex size-9 shrink-0 items-center justify-center rounded-xl bg-[#fff1d2] text-[#a56d0d]">
+              <MessageCircleQuestion class="size-[18px]" />
+            </span>
+            <div class="min-w-0 flex-1">
+              <div class="text-[11px] font-semibold tracking-wide text-[#9a6b20]">需要你确认</div>
+              <h3 class="mt-1 break-words text-[15px] font-semibold leading-6 [overflow-wrap:anywhere]">{{ a.question }}</h3>
+              <p class="mt-1 text-xs leading-5 text-mute">请选择一项，点击后将继续处理</p>
+            </div>
           </div>
-        </div>
+          <ol class="space-y-2 px-3 pb-3 sm:px-4 sm:pb-4" :aria-label="a.question">
+            <li v-for="(opt, index) in a.options" :key="opt">
+              <button
+                type="button"
+                class="group/option flex min-h-12 w-full items-center gap-3 rounded-xl border border-[#eee9df] bg-white px-3.5 py-3 text-left text-[13px] leading-5 text-ink shadow-[0_1px_2px_rgba(28,25,17,0.03)] transition enabled:hover:border-[#d6bf8d] enabled:hover:bg-[#fffdf8] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d7a337] disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="message.streaming"
+                @click="emit('answer', opt)"
+              >
+                <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center rounded-lg bg-paper text-[11px] font-semibold text-mute transition group-hover/option:bg-[#fff1d2] group-hover/option:text-[#9a6b20]">{{ index + 1 }}</span>
+                <span class="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ opt }}</span>
+                <ChevronRight aria-hidden="true" class="size-4 shrink-0 text-faint transition group-hover/option:translate-x-0.5 group-hover/option:text-[#a56d0d]" />
+              </button>
+            </li>
+          </ol>
+        </section>
       </template>
 
       <div v-if="message.error" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
@@ -115,8 +164,14 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
         </span>
       </div>
 
-      <div v-if="!message.streaming && message.timeline.length" class="opacity-0 transition group-hover:opacity-100">
-        <button class="btn-text -ml-2 text-xs" :class="{ '!text-ink': selected }" @click="emit('inspect')"><PanelRight class="size-3.5" />在右侧查看执行明细</button>
+      <div v-if="!message.streaming && markdown" class="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-line/60 pt-2">
+        <button class="btn-text -ml-2 text-xs" :disabled="copying" title="复制带格式的回复，含计划摘要、结果预览和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
+          <Check v-if="copied === 'formatted'" class="size-3.5 text-success" /><Copy v-else class="size-3.5" />{{ copied === 'formatted' ? '已复制' : '复制格式' }}
+        </button>
+        <button class="btn-text text-xs" :disabled="copying" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
+          <Check v-if="copied === 'markdown'" class="size-3.5 text-success" /><Code v-else class="size-3.5" />{{ copied === 'markdown' ? '已复制' : '复制 Markdown' }}
+        </button>
+        <button v-if="message.timeline.length" class="btn-text text-xs sm:ml-auto" :class="{ '!text-ink': selected }" @click="emit('inspect')"><PanelRight class="size-3.5" />执行明细</button>
       </div>
     </div>
   </div>

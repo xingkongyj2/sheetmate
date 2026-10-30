@@ -15,8 +15,8 @@ from tests.conftest import read_sse
 # ---------------------------------------------------------------------------
 
 
-def _new_conversation(client, mode="analyze", customer_id=None) -> str:
-    r = client.post("/api/conversations", json={"mode": mode, "customer_id": customer_id})
+def _new_conversation(client, customer_id=None) -> str:
+    r = client.post("/api/conversations", json={"customer_id": customer_id})
     assert r.status_code == 200, r.text
     return r.json()["conversation"]["id"]
 
@@ -242,7 +242,7 @@ def test_save_analysis_as_recipe_then_bind_new_customer(client, samples, fake_ll
 
 
 def _modify_conversation(client, samples) -> str:
-    conv = _new_conversation(client, mode="modify")
+    conv = _new_conversation(client)
     _upload(client, conv, samples["fees_sep"])
     _upload(client, conv, samples["owners"])
     _upload(client, conv, samples["expected_sep"], kind="expected")
@@ -252,6 +252,7 @@ def _modify_conversation(client, samples) -> str:
 def test_modify_mode_builds_verified_recipe(client, samples, fake_llm):
     conv = _modify_conversation(client, samples)
     llm = fake_llm(
+        intent_mode="modify",
         script=[{"tools": [("build_recipe", {"requirement": "费用拆列、算合计、匹配归属（匹配不到记新食研）、按归属汇总"})]},
                 {"text": "## ✅ 操作结果\n- 已生成流程"}],
         json_handlers=[("Recipe 生成器", _llm_recipe())],
@@ -273,6 +274,7 @@ def test_modify_mode_builds_verified_recipe(client, samples, fake_llm):
 def test_modify_mode_refines_until_verified(client, samples, fake_llm):
     conv = _modify_conversation(client, samples)
     fake_llm(
+        intent_mode="modify",
         script=[{"tools": [("build_recipe", {"requirement": "整理账单"})]}, {"text": "完成"}],
         json_handlers=[("比对没有通过", _llm_recipe()), ("Recipe 生成器", _llm_recipe(broken="no_fill"))],
     )
@@ -290,6 +292,7 @@ def test_modify_mode_repairs_broken_step_with_llm(client, samples, fake_llm):
     conv = _modify_conversation(client, samples)
     fixed = _llm_recipe()["steps"][2]
     fake_llm(
+        intent_mode="modify",
         script=[{"tools": [("build_recipe", {"requirement": "整理账单"})]}, {"text": "完成"}],
         json_handlers=[("步骤修复器", {"formula": "lookup", "params": fixed["params"], "explanation": "列名应为店铺名称"}),
                        ("Recipe 生成器", _llm_recipe(broken="wrong_key"))],
@@ -339,10 +342,10 @@ def test_run_existing_recipe_in_chat_with_field_mapping(client, samples, fake_ll
     customer_id = _demo_customer_id(client)
     detail = client.get(f"/api/customers/{customer_id}").json()["customer"]
     seed_recipe = next(r for r in detail["recipes"] if r["created_by"] == "human")
-    conv = _new_conversation(client, mode="modify", customer_id=customer_id)
+    conv = _new_conversation(client, customer_id=customer_id)
     _upload(client, conv, samples["fees_oct"])
     _upload(client, conv, samples["owners"])
-    llm = fake_llm(script=[{"tools": [("run_recipe", {"recipe_id": seed_recipe["recipe_id"]})]}, {"text": "## ✅ 操作结果\n- 已处理 10 月账单"}])
+    llm = fake_llm(intent_mode="modify", script=[{"tools": [("run_recipe", {"recipe_id": seed_recipe["recipe_id"]})]}, {"text": "## ✅ 操作结果\n- 已处理 10 月账单"}])
     events = _chat(client, conv, "用月结账单流程处理 10 月的新文件")
     # 系统提示里列出了客户已有的流程，并标出和当前表的匹配关系
     system = llm.calls[0][0]["content"]
@@ -363,6 +366,7 @@ def test_revise_recipe_creates_new_version(client, samples, fake_llm):
     revised["steps"][3]["description"] = "按归属统计票数、金额合计和运费合计"
     revised["steps"][3]["explanation"] = "按用户要求：汇总里加上运费合计"
     fake_llm(
+        intent_mode="modify",
         script=[{"tools": [("build_recipe", {"requirement": "整理账单"})]}, {"text": "完成"},
                 {"tools": [("revise_recipe", {"instruction": "归属汇总里再加一列运费合计"})]}, {"text": "已修改"}],
         json_handlers=[("用户要求修改已有的流程", revised), ("Recipe 生成器", _llm_recipe())],
@@ -398,6 +402,7 @@ def test_revise_rule_change_is_not_reverted(client, samples, fake_llm):
     revised = _llm_recipe()
     revised["steps"][2]["params"]["missing_fill"] = {"归属": "其他"}
     llm = fake_llm(
+        intent_mode="modify",
         script=[{"tools": [("build_recipe", {"requirement": "整理账单"})]}, {"text": "完成"},
                 {"tools": [("revise_recipe", {"instruction": "匹配不到归属的改记为其他"})]}, {"text": "已修改"}],
         json_handlers=[("用户要求修改已有的流程", revised), ("Recipe 生成器", _llm_recipe())],

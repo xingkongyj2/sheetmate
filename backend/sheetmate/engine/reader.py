@@ -47,6 +47,7 @@ class HeaderInfo:
     title: str = ""  # 表头上方的标题/说明文字
     # DataFrame 的每一列在原 sheet 里的列位置（0 起）。输出时「复制原文件改写」要靠它找到每一列原来的样式
     col_index: list[int] | None = None
+    row_index: list[int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -59,6 +60,8 @@ class HeaderInfo:
             header_row=int(data.get("header_row", 1)),
             header_rows=int(data.get("header_rows", 1)),
             title=str(data.get("title", "")),
+            col_index=data.get("col_index"),
+            row_index=data.get("row_index"),
         )
 
 
@@ -228,7 +231,8 @@ def _raw_to_sheet(raw: _RawSheet, hint: HeaderInfo | None) -> SheetData | None:
 
     header_idx, header_rows = _detect_header(grid, raw.merged_rows, hint)
     header_block = grid[header_idx - header_rows + 1 : header_idx + 1]
-    data_rows = [row for row in grid[header_idx + 1 :] if any(not _is_blank(v) for v in row)]
+    row_index = [index for index in range(header_idx + 1, len(grid)) if any(not _is_blank(value) for value in grid[index])]
+    data_rows = [grid[index] for index in row_index]
     title = _title_text(grid[: header_idx - header_rows + 1])
 
     width = max([len(r) for r in header_block] + [len(r) for r in data_rows] + [0])
@@ -246,7 +250,8 @@ def _raw_to_sheet(raw: _RawSheet, hint: HeaderInfo | None) -> SheetData | None:
     df = pd.DataFrame(data, columns=columns)
     df = df.reset_index(drop=True)
 
-    header = HeaderInfo(header_row=header_idx + 1, header_rows=header_rows, title=title, col_index=list(keep))
+    header = HeaderInfo(header_row=header_idx + 1, header_rows=header_rows, title=title, col_index=list(keep),
+                        row_index=row_index)
     return SheetData(name=raw.name, df=df, header=header, hidden=raw.hidden)
 
 

@@ -112,7 +112,7 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
                               max_repair=settings.repair_max_attempts, run_id=run_id)
         async for event in runner.run(sources, output_path=out_path, history=history):
             await job.emit(event)
-        await _finish(job, user.id, runner, out_path, note="执行时自动修复")
+        await _finish(job, user.id, runner, runner.output_path or out_path, note="执行时自动修复")
 
     return jobs.start(f"run:{run_id}", work)
 
@@ -151,7 +151,7 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
             runner.recipe_changed = True
         runner.report["steps"] = kept_steps + runner.report["steps"]
         runner.report["inputs"] = kept_inputs
-        await _finish(job, user.id, runner, out_path, note=f"手动调整第 {step_id} 步参数后重跑")
+        await _finish(job, user.id, runner, runner.output_path or out_path, note=f"手动调整第 {step_id} 步参数后重跑")
 
     return jobs.start(f"run:{run_id}", work)
 
@@ -169,7 +169,7 @@ async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, 
         record = None
         metrics = None
         if out_path.exists() and has_reviewable_output(report):
-            suffix = "_结果.xlsx" if report["status"] in {"success", "warning"} else "_结果_未通过校验.xlsx"
+            suffix = ("_结果" if report["status"] in {"success", "warning"} else "_结果_未通过校验") + out_path.suffix
             record = file_service.register_output(db, path=out_path, filename=f"{runner.recipe.name}{suffix}",
                                                   customer_id=run.customer_id, conversation_id=run.conversation_id,
                                                   run_id=run.id, user_id=user_id)

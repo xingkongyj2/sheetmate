@@ -111,6 +111,7 @@ class RecipePipeline:
             async for event in runner.run(self._sources(ctx), output_path=handle.output_path,
                                           history=self.host.history_metrics(recipe.id)):
                 yield {**event, "round": round_no}
+            handle.output_path = runner.output_path or handle.output_path
             recipe, report = runner.recipe, runner.report
             attempt = _Attempt(runner, handle, informational=revising)
             attempts.append(attempt)
@@ -244,6 +245,7 @@ def _keep_requested_columns(recipe: Recipe, runner: RecipeRunner, handle: RunHan
     if added:
         outputs = runner.collect_outputs()
         runner.report["outputs"] = runner.write_outputs(handle.output_path, outputs)
+        handle.output_path = runner.output_path or handle.output_path
         runner.report["validation"] = validate_run(recipe, runner.input_frames, outputs)
     return added
 

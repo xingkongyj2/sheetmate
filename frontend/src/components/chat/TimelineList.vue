@@ -4,6 +4,8 @@ import { Brain, Check, ChevronRight, CircleAlert, ListChecks, LoaderCircle, Mess
 import { ref } from 'vue'
 
 import { duration, type TimelineItem } from '@/composables/chatModel'
+import { PLAN_STATUS_LABELS } from '@/composables/messagePresentation'
+import MarkdownView from '@/components/common/MarkdownView.vue'
 
 withDefaults(defineProps<{ items: TimelineItem[]; detailed?: boolean }>(), { detailed: false })
 const open = ref<Record<string, boolean>>({})
@@ -15,7 +17,7 @@ const open = ref<Record<string, boolean>>({})
       <!-- 中间说明 -->
       <div v-if="item.kind === 'note'" class="flex gap-2 py-0.5 text-mute">
         <MessageSquareText class="mt-0.5 size-3.5 shrink-0" />
-        <span class="line-clamp-3 leading-relaxed">{{ item.text }}</span>
+        <MarkdownView :source="item.text" class="min-w-0 flex-1 !text-[13px] !leading-6" />
       </div>
 
       <!-- 模型思考 -->
@@ -45,9 +47,10 @@ const open = ref<Record<string, boolean>>({})
       <!-- 计划步骤 -->
       <div v-else-if="item.kind === 'plan'" class="flex items-center gap-2 py-1">
         <LoaderCircle v-if="item.status === 'running'" class="size-3.5 animate-spin text-info" />
-        <ListChecks v-else class="size-3.5 text-success" />
+        <ListChecks v-else class="size-3.5" :class="item.status === 'done' ? 'text-success' : 'text-mute'" />
         <span class="font-medium">第 {{ item.num }}/{{ item.total }} 步</span>
         <span class="truncate text-mute">{{ item.description }}</span>
+        <span class="shrink-0 text-xs text-faint">{{ PLAN_STATUS_LABELS[item.status] }}</span>
       </div>
 
       <!-- 多表专员 -->

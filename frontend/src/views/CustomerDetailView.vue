@@ -74,7 +74,7 @@ const inputFiles = computed(() => customer.value?.files ?? [])
 
 async function newChat() {
   try {
-    const conv = await conversationApi.create({ customer_id: props.id, mode: 'analyze' })
+    const conv = await conversationApi.create({ customer_id: props.id })
     store.upsertConversation(conv)
     router.push({ name: 'chat', params: { id: conv.id } })
   } catch (err) {
@@ -247,7 +247,7 @@ async function loadPreview(offset: number, limit: number) {
           </div>
           <div v-else class="card-soft flex flex-col items-center p-8 text-center">
             <Mascot :variant="customer.mascot" :size="72" mood="thinking" />
-            <p class="mt-3 text-sm text-mute">还没有处理流程。<br />新建对话、上传表格，切换到「修改」模式让 AI 整理，<br />就会沉淀成可以每月重复执行的流程。</p>
+            <p class="mt-3 text-sm text-mute">还没有处理流程。<br />新建对话、上传表格，告诉 AI 要怎么整理，<br />就会沉淀成可以每月重复执行的流程。</p>
             <button class="btn-ink mt-4" @click="newChat"><MessageSquarePlus class="size-4" />新建对话</button>
           </div>
           <div class="card-soft p-5">
@@ -256,7 +256,6 @@ async function loadPreview(offset: number, limit: number) {
             </div>
             <RouterLink v-for="c in customer.conversations.slice(0, 6)" :key="c.id" :to="{ name: 'chat', params: { id: c.id } }" class="flex items-center gap-2 rounded-xl px-2 py-2 text-sm hover:bg-paper">
               <span class="min-w-0 flex-1 truncate">{{ c.title }}</span>
-              <span class="tag">{{ c.mode === 'modify' ? '修改' : '分析' }}</span>
               <span class="text-xs text-faint">{{ timeAgo(c.updated_at) }}</span>
             </RouterLink>
             <p v-if="!customer.conversations.length" class="py-3 text-center text-sm text-faint">还没有对话</p>

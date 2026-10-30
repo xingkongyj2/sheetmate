@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 输入框：文字 + 附件（要处理的表 / 人工做好的结果）+ 模式（分析/修改）+ 先出计划 + 发送/停止。
+ * 输入框：文字 + 附件（要处理的表 / 人工做好的结果）+ 先出计划 + 发送/停止。
  * 中文输入法组字时按回车不会发送；支持把文件直接拖进来。
  */
 import { ArrowUp, FileCheck2, FileSpreadsheet, ListChecks, LoaderCircle, Plus, Square, X } from '@lucide/vue'
@@ -18,20 +18,19 @@ export interface Attachment {
 const props = withDefaults(
   defineProps<{
     modelValue: string
-    mode: 'analyze' | 'modify'
     plan?: boolean
     attachments?: Attachment[]
     busy?: boolean
     placeholder?: string
     autofocus?: boolean
     large?: boolean
+    appearance?: 'outlined' | 'card'
   }>(),
-  { plan: false, attachments: () => [], busy: false, placeholder: '描述你要对表格做什么…', autofocus: false, large: false },
+  { plan: false, attachments: () => [], busy: false, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
 )
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
-  'update:mode': [value: 'analyze' | 'modify']
   'update:plan': [value: boolean]
   attach: [files: File[], kind: 'input' | 'expected']
   remove: [key: string]
@@ -105,8 +104,13 @@ defineExpose({ focus: () => textarea.value?.focus() })
 
 <template>
   <div
-    class="relative rounded-[22px] border bg-white transition"
-    :class="[dragging ? 'border-ink ring-4 ring-black/5' : 'border-line shadow-[0_8px_30px_-18px_rgba(0,0,0,0.25)] focus-within:border-ink/30']"
+    class="relative rounded-[22px] bg-white transition"
+    :class="[
+      appearance === 'card'
+        ? 'shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.03)] focus-within:shadow-[0_6px_28px_rgba(0,0,0,0.09),0_2px_6px_rgba(0,0,0,0.04)]'
+        : ['border', dragging ? 'border-ink' : 'border-line shadow-[0_8px_30px_-18px_rgba(0,0,0,0.25)] focus-within:border-ink/30'],
+      dragging && 'ring-4 ring-black/5',
+    ]"
     @dragover.prevent="dragging = true"
     @dragleave.prevent="dragging = false"
     @drop.prevent="onDrop"
@@ -150,13 +154,13 @@ defineExpose({ focus: () => textarea.value?.focus() })
       <div class="relative">
         <button class="icon-btn" title="上传表格" @click="menuOpen = !menuOpen"><Plus class="size-[18px]" /></button>
         <div v-if="menuOpen" class="absolute bottom-10 left-0 z-30 w-72 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl" @mouseleave="menuOpen = false">
-          <button class="flex w-full items-start gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper" @click="pick('input')">
-            <FileSpreadsheet class="mt-0.5 size-4 text-fun-green" />
-            <span><span class="block text-sm font-medium">上传要处理的表格</span><span class="block text-xs text-mute">xlsx / xls / csv，可多选</span></span>
+          <button class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper" @click="pick('input')">
+            <FileSpreadsheet class="size-4 text-fun-green" />
+            <span class="text-sm font-medium">上传要处理的表格</span>
           </button>
-          <button class="flex w-full items-start gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper" @click="pick('expected')">
-            <FileCheck2 class="mt-0.5 size-4 text-[#b7860b]" />
-            <span><span class="block text-sm font-medium">上传人工做好的结果</span><span class="block text-xs text-mute">AI 会比对输入和结果，学出可重复执行的流程</span></span>
+          <button class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper" @click="pick('expected')">
+            <FileCheck2 class="size-4 text-[#b7860b]" />
+            <span class="text-sm font-medium">上传人工做好的结果</span>
           </button>
         </div>
       </div>
@@ -164,24 +168,6 @@ defineExpose({ focus: () => textarea.value?.focus() })
 
       <slot name="tools" />
 
-      <div class="flex items-center rounded-full bg-paper p-0.5 text-xs">
-        <button
-          class="rounded-full px-3 py-1 transition"
-          :class="mode === 'analyze' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute hover:text-ink'"
-          title="统计、查询、对比，不改动原表"
-          @click="emit('update:mode', 'analyze')"
-        >
-          分析
-        </button>
-        <button
-          class="rounded-full px-3 py-1 transition"
-          :class="mode === 'modify' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute hover:text-ink'"
-          title="整理改造表格，生成可重复执行的流程"
-          @click="emit('update:mode', 'modify')"
-        >
-          修改
-        </button>
-      </div>
       <button
         class="flex items-center gap-1 rounded-full px-2.5 py-1 text-xs transition"
         :class="plan ? 'bg-ink text-white' : 'text-mute hover:bg-paper hover:text-ink'"

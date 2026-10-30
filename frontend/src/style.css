@@ -158,6 +158,13 @@ body {
 /* Markdown 正文 */
 .prose-sm {
   @apply text-[15px] leading-7 text-ink;
+  overflow-wrap: anywhere;
+}
+.prose-sm > :first-child {
+  margin-top: 0;
+}
+.prose-sm > :last-child {
+  margin-bottom: 0;
 }
 .prose-sm h1,
 .prose-sm h2,
@@ -166,10 +173,13 @@ body {
   @apply mt-5 mb-2 font-semibold text-ink;
 }
 .prose-sm h2 {
-  @apply text-base;
+  @apply text-lg;
 }
 .prose-sm h3 {
-  @apply text-[15px];
+  @apply text-base;
+}
+.prose-sm h1 {
+  @apply text-xl;
 }
 .prose-sm p {
   @apply my-2;
@@ -187,6 +197,9 @@ body {
 .prose-sm li {
   @apply my-1;
 }
+.prose-sm li > p {
+  @apply my-1;
+}
 .prose-sm code {
   @apply rounded bg-paper px-1 py-0.5 font-mono text-[13px];
 }
@@ -197,14 +210,24 @@ body {
   @apply bg-transparent p-0;
 }
 .prose-sm table {
-  @apply my-3 w-full border-collapse text-sm;
+  @apply my-3 block max-w-full overflow-x-auto border-collapse text-sm;
 }
 .prose-sm th,
 .prose-sm td {
-  @apply border border-line px-2 py-1 text-left;
+  @apply border border-line px-3 py-2 align-top;
 }
 .prose-sm th {
-  @apply bg-paper font-medium;
+  @apply whitespace-nowrap bg-paper font-semibold;
+}
+.prose-sm th:not([align]),
+.prose-sm td:not([align]) {
+  text-align: left;
+}
+.prose-sm tbody tr:nth-child(even) {
+  @apply bg-paper/40;
+}
+.prose-sm hr {
+  @apply my-5 border-line;
 }
 .prose-sm strong {
   @apply font-semibold;
