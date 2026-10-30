@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 新对话（首页）：一句标题、一个输入框，IP 形象蹲在输入框的右上角，输入框下面挂着一个窄一点的抽屉「选择客户」。
+ * 新对话（首页）：一句标题、一个输入框，IP 形象从输入框右上角探出，输入框下面挂着一个窄一点的抽屉「选择客户」。
  * 选客户相当于 Qoder 里「选择目录」，可以不选。发送时：建会话 → 上传附件 → 跳到对话页继续。
  */
 import { computed, ref } from 'vue'
@@ -30,11 +30,6 @@ const attachments = ref<Attachment[]>([])
 const busy = ref(false)
 
 const customer = computed(() => store.customers.find((c) => c.id === customerId.value))
-
-// IP 形象蹲在输入框上沿：身体底部在 SVG 的 107/120 处，往下压 SIT_DEPTH 像素，看起来是坐在边上而不是飘着
-const MASCOT_SIZE = 72
-const SIT_DEPTH = 6
-const mascotTop = computed(() => `${-(MASCOT_SIZE * (107 / 120) - SIT_DEPTH)}px`)
 
 function attach(list: File[], kind: 'input' | 'expected') {
   for (const file of list) {
@@ -85,17 +80,11 @@ async function send() {
     <div class="mx-auto flex w-full max-w-[680px] flex-1 flex-col justify-center px-6 pb-[26vh] pt-10">
       <h1 class="animate-rise text-center text-[30px] font-semibold leading-tight tracking-tight">你的专属表格 Agent 助手</h1>
 
-      <div class="mt-[84px]">
-        <!-- 输入框：IP 形象蹲在右上角（装饰，不挡点击） -->
+      <div class="mt-[112px]">
         <div class="relative z-10">
-          <Mascot
-            :variant="customer?.mascot ?? 'blob'"
-            :size="MASCOT_SIZE"
-            :mood="busy ? 'working' : 'idle'"
-            :shadow="false"
-            class="pointer-events-none absolute right-11"
-            :style="{ top: mascotTop }"
-          />
+          <div class="pointer-events-none absolute bottom-full right-4 h-[97px] w-[160px] overflow-hidden sm:right-8">
+            <Mascot :variant="customer?.mascot ?? 'blob'" :size="160" :mood="busy ? 'working' : 'idle'" :shadow="false" />
+          </div>
           <ChatComposer
             v-model="text"
             v-model:mode="mode"

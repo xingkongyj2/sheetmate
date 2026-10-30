@@ -5,18 +5,15 @@
 import { Check, ChevronDown, Plus, Search, Users, UserRoundX } from '@lucide/vue'
 import { computed, nextTick, ref } from 'vue'
 
-import { customerApi } from '@/api'
-import { errorText } from '@/api/http'
 import type { CustomerCard } from '@/api/types'
 import Mascot from '@/components/brand/Mascot.vue'
-import { useToast } from '@/composables/useToast'
+import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import { useWorkspaceStore } from '@/stores/conversations'
 
 const props = defineProps<{ modelValue: string | null }>()
 const emit = defineEmits<{ 'update:modelValue': [value: string | null] }>()
 
 const store = useWorkspaceStore()
-const toast = useToast()
 const open = ref(false)
 const dropUp = ref(false) // 下面放不下就向上展开
 const root = ref<HTMLElement | null>(null)
@@ -24,7 +21,6 @@ const search = ref<HTMLInputElement | null>(null)
 const panelEl = ref<HTMLElement | null>(null)
 const query = ref('')
 const creating = ref(false)
-const newName = ref('')
 
 const current = computed<CustomerCard | undefined>(() => store.customers.find((c) => c.id === props.modelValue))
 const filtered = computed(() => {
@@ -50,17 +46,17 @@ function choose(id: string | null) {
   open.value = false
 }
 
-async function create() {
-  if (!newName.value.trim()) return
-  try {
-    const customer = await customerApi.create({ name: newName.value.trim() })
-    await store.refreshCustomers()
-    newName.value = ''
-    creating.value = false
-    choose(customer.id)
-  } catch (err) {
-    toast.error(errorText(err))
-  }
+function startCreating() {
+  open.value = false
+  creating.value = true
+}
+
+function onCreated(customer: CustomerCard) {
+  creating.value = false
+  query.value = ''
+  store.customers = [customer, ...store.customers.filter((c) => c.id !== customer.id)]
+  choose(customer.id)
+  store.refreshCustomers().catch(() => undefined)
 }
 </script>
 
@@ -107,15 +103,12 @@ async function create() {
         </button>
       </div>
       <div class="mt-1 border-t border-line pt-1.5">
-        <div v-if="creating" class="flex gap-2 p-1">
-          <input v-model="newName" class="field py-1.5" placeholder="新客户名称" @keydown.enter.prevent="create" />
-          <button class="btn-ink px-3 py-1.5" @click="create">创建</button>
-        </div>
-        <button v-else class="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-sm text-mute hover:bg-paper hover:text-ink" @click="creating = true">
+        <button class="flex w-full items-center gap-2 rounded-xl px-2.5 py-2 text-sm text-mute hover:bg-paper hover:text-ink" @click="startCreating">
           <Plus class="size-4" />新建客户
         </button>
       </div>
     </div>
     <div v-if="open" class="fixed inset-0 z-30" @click="open = false" />
+    <CustomerFormDialog v-if="creating" @close="creating = false" @saved="onCreated" />
   </div>
 </template>
