@@ -1,0 +1,250 @@
+/*
+ * SheetMate 设计系统
+ * 简约黑白为主，彩色只出现在 IP 形象和插画里（参考稿：白卡片 + 黑字 + 彩色小物件 + 黑色团子角色）
+ * Tailwind CSS 4 + daisyUI 5，自定义主题 sheetmate
+ */
+@import "tailwindcss";
+@import "@fontsource-variable/outfit";
+
+@plugin "daisyui" {
+  themes: false;
+}
+
+@plugin "daisyui/theme" {
+  name: "sheetmate";
+  default: true;
+  prefersdark: false;
+  color-scheme: light;
+  --color-base-100: #ffffff;
+  --color-base-200: #f6f6f7;
+  --color-base-300: #e9e9ec;
+  --color-base-content: #111111;
+  --color-primary: #0b0b0c;
+  --color-primary-content: #ffffff;
+  --color-secondary: #f1f1f3;
+  --color-secondary-content: #111111;
+  --color-accent: #ff7a1a;
+  --color-accent-content: #ffffff;
+  --color-neutral: #1b1b1d;
+  --color-neutral-content: #ffffff;
+  --color-info: #2f7bff;
+  --color-info-content: #ffffff;
+  --color-success: #1fa463;
+  --color-success-content: #ffffff;
+  --color-warning: #f2a21b;
+  --color-warning-content: #111111;
+  --color-error: #ef4444;
+  --color-error-content: #ffffff;
+  --radius-selector: 999px;
+  --radius-field: 0.8rem;
+  --radius-box: 1.25rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 0;
+  --noise: 0;
+}
+
+@theme {
+  --font-sans: "Outfit Variable", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
+  --color-ink: #0b0b0c;
+  --color-mute: #6b6b73;
+  --color-faint: #a1a1aa;
+  --color-line: #ececef;
+  --color-paper: #f7f7f8;
+  --color-fun-orange: #ff7a1a;
+  --color-fun-blue: #2f7bff;
+  --color-fun-green: #22b573;
+  --color-fun-yellow: #ffc531;
+  --color-fun-purple: #8b6cf6;
+  --color-fun-pink: #ff6fae;
+  --color-fun-sky: #3fc1f3;
+  --color-fun-red: #ff5a5f;
+  --animate-float: float 6s ease-in-out infinite;
+  --animate-blink: blink 4.8s ease-in-out infinite;
+  --animate-bob: bob 3.6s ease-in-out infinite;
+  --animate-pop: pop 0.35s cubic-bezier(0.2, 0.9, 0.3, 1.3) both;
+  --animate-rise: rise 0.45s ease-out both;
+
+  @keyframes float {
+    0%, 100% { transform: translate3d(0, 0, 0) rotate(var(--r0, -4deg)); }
+    50% { transform: translate3d(0, -12px, 0) rotate(var(--r1, 5deg)); }
+  }
+  @keyframes blink {
+    0%, 92%, 100% { transform: scaleY(1); }
+    95% { transform: scaleY(0.08); }
+  }
+  @keyframes bob {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-4px); }
+  }
+  @keyframes pop {
+    from { opacity: 0; transform: scale(0.92) translateY(6px); }
+    to { opacity: 1; transform: none; }
+  }
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: none; }
+  }
+}
+
+html,
+body,
+#app {
+  height: 100%;
+}
+
+body {
+  @apply bg-base-100 text-ink antialiased;
+  font-feature-settings: "ss01", "cv11";
+}
+
+::selection {
+  background: #111;
+  color: #fff;
+}
+
+/* 细滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #d9d9de transparent;
+}
+
+@layer components {
+  /* 黑色胶囊按钮（主操作） */
+  .btn-ink {
+    @apply inline-flex items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-sm font-medium text-white
+      transition hover:bg-black/85 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  /* 白底描边按钮（次操作） */
+  .btn-line {
+    @apply inline-flex items-center justify-center gap-2 rounded-full border border-line bg-white px-4 py-2 text-sm font-medium
+      text-ink transition hover:border-ink/30 hover:bg-paper active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  /* 文字按钮 */
+  .btn-text {
+    @apply inline-flex items-center gap-1.5 rounded-lg px-2 py-1 text-sm text-mute transition hover:bg-paper hover:text-ink;
+  }
+  .icon-btn {
+    @apply inline-flex size-8 items-center justify-center rounded-lg text-mute transition hover:bg-paper hover:text-ink;
+  }
+  .card-soft {
+    @apply rounded-2xl border border-line bg-white;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-white px-2.5 py-1 text-xs text-mute;
+  }
+  .tag {
+    @apply inline-flex items-center rounded-md bg-paper px-1.5 py-0.5 text-[11px] font-medium text-mute;
+  }
+  .field {
+    @apply w-full rounded-xl border border-line bg-white px-3.5 py-2.5 text-sm outline-none transition placeholder:text-faint
+      focus:border-ink/40 focus:ring-4 focus:ring-black/5;
+  }
+  .label-mini {
+    @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-faint;
+  }
+  .headline-ghost {
+    @apply font-semibold uppercase leading-[1.05] tracking-tight text-[#cfd0d6];
+  }
+}
+
+/* Markdown 正文 */
+.prose-sm {
+  @apply text-[15px] leading-7 text-ink;
+}
+.prose-sm h1,
+.prose-sm h2,
+.prose-sm h3,
+.prose-sm h4 {
+  @apply mt-5 mb-2 font-semibold text-ink;
+}
+.prose-sm h2 {
+  @apply text-base;
+}
+.prose-sm h3 {
+  @apply text-[15px];
+}
+.prose-sm p {
+  @apply my-2;
+}
+.prose-sm ul,
+.prose-sm ol {
+  @apply my-2 pl-5;
+}
+.prose-sm ul {
+  list-style: disc;
+}
+.prose-sm ol {
+  list-style: decimal;
+}
+.prose-sm li {
+  @apply my-1;
+}
+.prose-sm code {
+  @apply rounded bg-paper px-1 py-0.5 font-mono text-[13px];
+}
+.prose-sm pre {
+  @apply my-3 overflow-x-auto rounded-xl bg-paper p-3 text-[13px];
+}
+.prose-sm pre code {
+  @apply bg-transparent p-0;
+}
+.prose-sm table {
+  @apply my-3 w-full border-collapse text-sm;
+}
+.prose-sm th,
+.prose-sm td {
+  @apply border border-line px-2 py-1 text-left;
+}
+.prose-sm th {
+  @apply bg-paper font-medium;
+}
+.prose-sm strong {
+  @apply font-semibold;
+}
+.prose-sm blockquote {
+  @apply border-l-2 border-line pl-3 text-mute;
+}
+.prose-sm a {
+  @apply underline underline-offset-2;
+}
+
+/* 打字光标 */
+.typing-caret::after {
+  content: "";
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -2px;
+  border-radius: 2px;
+  background: #111;
+  animation: caret 1s steps(2) infinite;
+}
+@keyframes caret {
+  50% {
+    opacity: 0;
+  }
+}
+
+/* 流程连线的流动虚线 */
+@keyframes dash {
+  to {
+    stroke-dashoffset: -16;
+  }
+}
+.flow-dash {
+  stroke-dasharray: 4 4;
+  animation: dash 0.8s linear infinite;
+}
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}

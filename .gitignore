@@ -1,0 +1,17 @@
+# 本地配置与数据（API Key、数据库、上传和输出的文件都在这里，不要提交）
+.env
+backend/data/
+backend/.venv/
+**/__pycache__/
+.pytest_cache/
+*.duckdb
+*.duckdb.wal
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+frontend/node_modules/.tmp/
+
+# 系统
+.DS_Store
+.claude/

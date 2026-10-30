@@ -1,0 +1,143 @@
+"""运行记录（任务流水）与运行工作区。
+
+每次运行一个独立的 DuckDB 文件（data/runs/{run_id}.duckdb），所有中间表都保留：
+可以单步查看每一步的输入/输出，也可以从某一步断点续跑（复用前面已经算好的中间表）。
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from sheetmate.config import settings
+from sheetmate.db.models import Run, new_id, now
+from sheetmate.engine.workspace import WorkspaceManager
+from sheetmate.recipe.validator import output_metrics
+from sheetmate.services.errors import NotFound
+
+run_workspaces = WorkspaceManager(settings.runs_dir, max_open=12)
+
+STATUS_LABELS = {
+    "running": "运行中", "success": "成功", "warning": "完成（有提示）", "failed": "失败", "escalated": "需要人工处理",
+}
+KIND_LABELS = {"analysis": "分析", "modify": "生成流程", "replay": "重复执行"}
+
+
+def create_run(db: Session, *, kind: str, user_id: int | None, customer_id: str | None, conversation_id: str | None,
+               recipe_id: str | None = None, recipe_version: int | None = None, request_text: str = "",
+               input_file_ids: list[str] | None = None) -> Run:
+    run = Run(id=new_id("run"), kind=kind, user_id=user_id, customer_id=customer_id, conversation_id=conversation_id,
+              recipe_id=recipe_id, recipe_version=recipe_version, request_text=request_text[:2000],
+              input_file_ids=input_file_ids or [], status="running")
+    db.add(run)
+    db.flush()
+    return run
+
+
+def output_path(run: Run, filename: str) -> Path:
+    owner = run.customer_id or (f"conv_{run.conversation_id}" if run.conversation_id else "shared")
+    folder = settings.outputs_dir / owner
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder / f"{run.id}_{filename}"
+
+
+def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification: dict[str, Any] | None = None,
+               output_file_id: str | None = None, diff: dict[str, Any] | None = None, outputs_metrics: dict[str, float] | None = None) -> Run:
+    run = db.get(Run, run_id)
+    if run is None:
+        raise NotFound("运行记录不存在")
+    run.status = report.get("status", "failed")
+    if run.status == "running":
+        run.status = "failed"
+    run.steps = [_slim_step(s) for s in report.get("steps", [])]
+    run.tool_sequence = " → ".join(str(s.get("formula")) for s in report.get("steps", []))
+    validation = dict(report.get("validation") or {})
+    if outputs_metrics:
+        validation["metrics"] = outputs_metrics
+    if diff:
+        validation["before_after"] = diff
+    validation["inputs"] = report.get("inputs", [])
+    validation["outputs"] = report.get("outputs", [])
+    run.validation = validation
+    run.verification = verification or {}
+    run.error = report.get("error", "")
+    run.summary = report.get("escalation") or ""
+    run.output_file_id = output_file_id
+    run.duration_ms = int(report.get("duration_ms", 0))
+    run.recipe_version = report.get("recipe_version") or run.recipe_version
+    run.finished_at = now()
+    return run
+
+
+def finish_analysis_run(db: Session, run_id: str, record: dict[str, Any]) -> None:
+    run = db.get(Run, run_id)
+    if run is None:
+        return
+    run.status = "failed" if record.get("error") else "success"
+    run.steps = record.get("steps", [])
+    run.tool_sequence = record.get("tool_sequence", "")
+    run.error = record.get("error", "")
+    run.summary = record.get("final_text", "")[:1000]
+    run.duration_ms = int(record.get("duration_ms", 0))
+    run.output_file_id = (record.get("files") or [None])[-1]
+    run.finished_at = now()
+
+
+def _slim_step(step: dict[str, Any]) -> dict[str, Any]:
+    """入库时只保留预览的前 20 行，避免数据库膨胀（完整数据在运行工作区里）。"""
+    item = dict(step)
+    preview = item.get("preview")
+    if isinstance(preview, dict) and preview.get("rows"):
+        item["preview"] = {**preview, "rows": preview["rows"][:20]}
+    return item
+
+
+def run_dict(run: Run, *, with_steps: bool = True) -> dict[str, Any]:
+    data = {
+        "run_id": run.id, "kind": run.kind, "kind_label": KIND_LABELS.get(run.kind, run.kind),
+        "status": run.status, "status_label": STATUS_LABELS.get(run.status, run.status),
+        "customer_id": run.customer_id, "conversation_id": run.conversation_id,
+        "recipe_id": run.recipe_id, "recipe_version": run.recipe_version, "request_text": run.request_text,
+        "tool_sequence": run.tool_sequence, "error": run.error, "summary": run.summary,
+        "output_file_id": run.output_file_id, "duration_ms": run.duration_ms,
+        "created_at": run.created_at.isoformat(), "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+        "verification": {k: run.verification.get(k) for k in ("status", "overall_match_rate", "summary")} if run.verification else None,
+    }
+    if with_steps:
+        data["steps"] = run.steps
+        data["validation"] = run.validation
+        data["verification_detail"] = run.verification
+    return data
+
+
+def get_run(db: Session, run_id: str) -> Run:
+    run = db.get(Run, run_id)
+    if run is None:
+        raise NotFound("运行记录不存在")
+    return run
+
+
+def list_runs(db: Session, *, customer_id: str | None = None, conversation_id: str | None = None,
+              recipe_id: str | None = None, limit: int = 30) -> list[Run]:
+    stmt = select(Run).order_by(Run.created_at.desc()).limit(limit)
+    if customer_id:
+        stmt = stmt.where(Run.customer_id == customer_id)
+    if conversation_id:
+        stmt = stmt.where(Run.conversation_id == conversation_id)
+    if recipe_id:
+        stmt = stmt.where(Run.recipe_id == recipe_id)
+    return list(db.scalars(stmt))
+
+
+def history_metrics(db: Session, recipe_id: str, limit: int = 12) -> list[dict[str, float]]:
+    """同一流程以往成功运行的输出指标（historical_range 校验用）。"""
+    runs = db.scalars(select(Run).where(Run.recipe_id == recipe_id, Run.status.in_(["success", "warning"]))
+                      .order_by(Run.created_at.desc()).limit(limit))
+    return [r.validation.get("metrics", {}) for r in runs if (r.validation or {}).get("metrics")]
+
+
+def metrics_of(outputs: dict) -> dict[str, float]:
+    return output_metrics(outputs)

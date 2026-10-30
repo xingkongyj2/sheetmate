@@ -1,0 +1,170 @@
+"""会话：列表 / 新建 / 详情 / 修改 / 删除 / 保存到客户、上传文件、工作区表格、对话（SSE）、计划、澄清、停止。"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+
+from sheetmate.api.deps import current_user, sse_response
+from sheetmate.db.database import get_db
+from sheetmate.db.models import User
+from sheetmate.services import chat as chat_service
+from sheetmate.services import conversations as conv_service
+from sheetmate.services import customers as customer_service
+from sheetmate.services import files as file_service
+from sheetmate.services.errors import ServiceError
+from sheetmate.services.jobs import jobs
+
+router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+
+
+class CreateBody(BaseModel):
+    customer_id: str | None = None
+    mode: str = "analyze"
+    title: str = ""
+
+
+class UpdateBody(BaseModel):
+    title: str | None = None
+    mode: str | None = None
+    customer_id: str | None = None
+
+
+class BindBody(BaseModel):
+    customer_id: str | None = None
+    new_customer: dict[str, Any] | None = None
+
+
+class ChatBody(BaseModel):
+    message: str
+    mode: str | None = None
+    plan_steps: list[dict[str, Any]] | None = None
+    attachments: list[str] | None = None
+
+
+class MessageBody(BaseModel):
+    message: str
+
+
+class LoadFileBody(BaseModel):
+    file_id: str
+
+
+class RoleBody(BaseModel):
+    role: str
+
+
+@router.get("")
+def list_conversations(customer_id: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    convs = conv_service.list_conversations(db, user, customer_id=customer_id)
+    return {"ok": True, "conversations": [{**conv_service.conversation_dict(db, c), "running": jobs.running(c.id)} for c in convs]}
+
+
+@router.post("")
+def create_conversation(body: CreateBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    conv = conv_service.create_conversation(db, user, customer_id=body.customer_id, mode=body.mode, title=body.title)
+    return {"ok": True, "conversation": conv_service.conversation_dict(db, conv)}
+
+
+@router.get("/{conversation_id}")
+def get_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    conv = conv_service.get_conversation(db, user, conversation_id)
+    return {"ok": True, "conversation": {**conv_service.detail(db, conv), "running": jobs.running(conv.id)}}
+
+
+@router.put("/{conversation_id}")
+def update_conversation(conversation_id: str, body: UpdateBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    conv = conv_service.get_conversation(db, user, conversation_id)
+    conv_service.update_conversation(db, conv, user, body.model_dump(exclude_unset=True))
+    return {"ok": True, "conversation": conv_service.conversation_dict(db, conv)}
+
+
+@router.delete("/{conversation_id}")
+def delete_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    conv = conv_service.get_conversation(db, user, conversation_id)
+    jobs.stop(conversation_id)
+    conv_service.delete_conversation(db, conv)
+    return {"ok": True}
+
+
+@router.post("/{conversation_id}/bind")
+def bind_customer(conversation_id: str, body: BindBody, background: BackgroundTasks, db: Session = Depends(get_db),
+                  user: User = Depends(current_user)) -> dict[str, Any]:
+    """保存到客户：选择已有客户或新建客户，会话的文件、流程、记忆一起归到客户名下，然后后台更新客户总结。"""
+    conv = conv_service.get_conversation(db, user, conversation_id)
+    customer = conv_service.bind_to_customer(db, conv, user, customer_id=body.customer_id, new_customer=body.new_customer)
+    db.commit()  # 先提交，后台任务才能读到迁移后的数据
+    background.add_task(customer_service.auto_refresh_summary, customer.id)
+    return {"ok": True, "conversation": conv_service.conversation_dict(db, conv), "customer_id": customer.id}
+
+
+@router.post("/{conversation_id}/files")
+async def upload_file(conversation_id: str, file: UploadFile = File(...), kind: str = Form("input"),
+                      db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """上传到会话并立即加载到工作区。绑定了客户的会话，文件同时进入客户资料库。"""
+    conv = conv_service.get_conversation(db, user, conversation_id)
+    record = file_service.save_upload(db, data=await file.read(), filename=file.filename or "file", user=user,
+                                      customer_id=conv.customer_id, conversation_id=conv.id, kind=kind)
+    tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
+    return {"ok": True, "file": file_service.file_dict(record), "tables": [conv_service._table_brief(t) for t in tables]}
+
+
+@router.post("/{conversation_id}/load-file")
+def load_file(conversation_id: str, body: LoadFileBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    conv = conv_service.get_conversation(db, user, conversation_id)
+    record = file_service.get_file(db, body.file_id)
+    if record.conversation_id != conv.id and (not conv.customer_id or record.customer_id != conv.customer_id):
+        raise ServiceError("只能加载本会话或当前客户的文件")
+    tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
+    return {"ok": True, "tables": [conv_service._table_brief(t) for t in tables]}
+
+
+@router.get("/{conversation_id}/tables/{name}")
+def table_page(conversation_id: str, name: str, offset: int = 0, limit: int = 50,
+               db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    conv_service.get_conversation(db, user, conversation_id)
+    return {"ok": True, "table": conv_service.workspace(conversation_id).page(name, offset, min(limit, 500))}
+
+
+@router.delete("/{conversation_id}/tables/{name}")
+def drop_table(conversation_id: str, name: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    conv_service.get_conversation(db, user, conversation_id)
+    conv_service.workspace(conversation_id).drop(name)
+    return {"ok": True}
+
+
+@router.put("/{conversation_id}/tables/{name}/role")
+def set_table_role(conversation_id: str, name: str, body: RoleBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """标记一张表是输入，还是人工做好的期望结果（生成流程时用来比对）。"""
+    conv_service.get_conversation(db, user, conversation_id)
+    if body.role not in {"input", "expected"}:
+        raise ServiceError("role 只能是 input 或 expected")
+    info = conv_service.workspace(conversation_id).update_meta(name, role=body.role)
+    return {"ok": True, "table": conv_service._table_brief(info)}
+
+
+@router.post("/{conversation_id}/chat")
+async def chat(conversation_id: str, body: ChatBody, user: User = Depends(current_user)):
+    # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）
+    job = chat_service.start_chat(user, conversation_id, body.message, mode=body.mode, plan_steps=body.plan_steps,
+                                  attachments=body.attachments)
+    return sse_response(job)
+
+
+@router.post("/{conversation_id}/plan")
+async def plan(conversation_id: str, body: MessageBody, user: User = Depends(current_user)) -> dict[str, Any]:
+    return {"ok": True, "plan": await chat_service.plan(user, conversation_id, body.message)}
+
+
+@router.post("/{conversation_id}/clarify")
+async def clarify(conversation_id: str, body: MessageBody, user: User = Depends(current_user)) -> dict[str, Any]:
+    return {"ok": True, **await chat_service.clarify(user, conversation_id, body.message)}
+
+
+@router.post("/{conversation_id}/stop")
+def stop(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    conv_service.get_conversation(db, user, conversation_id)
+    return {"ok": True, "stopped": jobs.stop(conversation_id)}

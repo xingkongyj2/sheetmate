@@ -1,0 +1,150 @@
+<script setup lang="ts">
+/**
+ * 对话里的「处理流程」卡片：实时展示 生成 → 执行（含自动修复）→ 校验 → 比对 → 保存 的全过程。
+ * 执行已有流程（重复执行）也用这张卡片。
+ */
+import { CircleAlert, Download, ExternalLink, FileSpreadsheet, MessageCircleQuestion, ShieldCheck } from '@lucide/vue'
+import { computed, ref } from 'vue'
+
+import FunObject from '@/components/brand/FunObject.vue'
+import Mascot from '@/components/brand/Mascot.vue'
+import StatusPill from '@/components/common/StatusPill.vue'
+import type { RecipeProgress, StepState } from '@/composables/chatModel'
+
+import DiffCards from './DiffCards.vue'
+import RecipeFlow from './RecipeFlow.vue'
+import StepDetail from './StepDetail.vue'
+import VerifyBadge from './VerifyBadge.vue'
+
+const props = defineProps<{ progress: RecipeProgress; customerId?: string | null }>()
+
+const selected = ref<StepState | null>(null)
+const showEvidence = ref(false)
+
+const MODE_LABEL = { learn: '生成处理流程', revise: '修订处理流程', replay: '执行已有流程' }
+const STATUS_LABEL: Record<string, string> = {
+  thinking: '规划中', running: '执行中', verifying: '比对中', refining: '修正中', done: '完成', failed: '没有完成',
+}
+
+const flow = computed(() => {
+  if (props.progress.flow) return props.progress.flow
+  if (!props.progress.steps.length) return null
+  return {
+    inputs: props.progress.inputs.map((i) => ({ alias: i.alias, description: i.filename, file_pattern: '' })),
+    steps: props.progress.steps.map((s) => ({
+      id: s.step_id, name: s.name, action: '', formula: s.formula, formula_kind: s.formula_kind as 'builtin' | 'customer',
+      description: s.description, output: s.output, inputs: [],
+    })),
+    outputs: (props.progress.outputs ?? []).map((o) => ({ name: o.sheet, source: '' })),
+  }
+})
+
+const busy = computed(() => ['thinking', 'running', 'verifying', 'refining'].includes(props.progress.status))
+const renames = computed(() => props.progress.inputs.filter((i) => Object.keys(i.renames).length || i.warnings.length))
+const pillStatus = computed(() => {
+  if (busy.value) return 'running'
+  if (props.progress.status === 'failed') return 'failed'
+  return props.progress.runStatus === 'warning' ? 'warning' : 'success'
+})
+const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id === id)
+</script>
+
+<template>
+  <div class="card-soft animate-rise overflow-hidden">
+    <!-- 标题 -->
+    <div class="flex items-center gap-3 border-b border-line bg-paper/60 px-4 py-3">
+      <FunObject kind="blocks" :size="30" />
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2">
+          <span class="truncate text-[14px] font-semibold">{{ progress.recipeName || progress.saved?.name || MODE_LABEL[progress.mode] }}</span>
+          <span v-if="progress.saved" class="tag">v{{ progress.saved.version }}</span>
+          <span v-else-if="progress.recipeVersion" class="tag">v{{ progress.recipeVersion }}</span>
+        </div>
+        <div class="text-xs text-mute">
+          {{ MODE_LABEL[progress.mode] }}<template v-if="progress.round > 1"> · 第 {{ progress.round }} 轮</template>
+        </div>
+      </div>
+      <StatusPill :status="pillStatus" :label="STATUS_LABEL[progress.status]" />
+    </div>
+
+    <div class="space-y-3 px-4 py-4">
+      <!-- 规划中 -->
+      <div v-if="progress.status === 'thinking' && !flow" class="flex items-center gap-3">
+        <Mascot :size="44" mood="thinking" :shadow="false" />
+        <div class="text-sm text-mute">{{ progress.thinking || '正在理解需求…' }}</div>
+      </div>
+
+      <!-- 证据：输入 vs 人工结果 -->
+      <div v-if="progress.evidence?.length">
+        <button class="btn-text -ml-2 text-xs" @click="showEvidence = !showEvidence">
+          🔍 比对了输入和人工结果，发现 {{ progress.evidence.reduce((n, c) => n + c.highlights.length, 0) }} 处关键变化
+          <span class="text-faint">{{ showEvidence ? '收起' : '展开' }}</span>
+        </button>
+        <DiffCards v-if="showEvidence" class="mt-2" :cards="progress.evidence" />
+      </div>
+
+      <!-- 输入识别 -->
+      <div v-if="renames.length" class="space-y-1">
+        <div v-for="inp in renames" :key="inp.alias" class="flex flex-wrap items-center gap-1.5 text-xs text-mute">
+          <FileSpreadsheet class="size-3.5" />
+          <span class="font-medium text-ink">{{ inp.alias }}</span> ← {{ inp.filename }}
+          <span v-for="(std, raw) in inp.renames" :key="raw" class="rounded bg-info/10 px-1.5 text-info">{{ raw }} → {{ std }}</span>
+          <span v-for="w in inp.warnings" :key="w" class="rounded bg-warning/10 px-1.5 text-[#8a5a00]">{{ w }}</span>
+        </div>
+      </div>
+
+      <!-- 流程图 -->
+      <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" @select="(id) => (selected = progress.steps.find((s) => s.step_id === id) ?? null)" />
+
+      <!-- 需要确认的问题 -->
+      <div v-if="progress.questions?.length" class="rounded-xl bg-fun-yellow/15 px-3 py-2.5 text-[13px]">
+        <div class="mb-1 flex items-center gap-1.5 font-medium text-[#8a6400]"><MessageCircleQuestion class="size-4" />需要你确认</div>
+        <ul class="list-disc space-y-0.5 pl-5 text-[#6b5000]">
+          <li v-for="q in progress.questions" :key="q.question">{{ q.question }}<span v-if="q.options?.length" class="text-[#a68a3a]">（{{ q.options.join(' / ') }}）</span></li>
+        </ul>
+      </div>
+
+      <!-- 比对 / 校验 -->
+      <VerifyBadge v-if="progress.verify" :report="progress.verify" :rounds="progress.verifyHistory.length" />
+      <div v-if="progress.validation" class="flex items-center gap-2 text-xs text-mute">
+        <ShieldCheck class="size-4" :class="progress.validation.status === 'fail' ? 'text-error' : progress.validation.status === 'warn' ? 'text-warning' : 'text-success'" />
+        运行校验：{{ progress.validation.summary }}
+      </div>
+
+      <!-- 失败 -->
+      <div v-if="progress.escalation || progress.failed" class="flex gap-2 rounded-xl bg-error/5 px-3 py-2.5 text-[13px] text-error">
+        <CircleAlert class="mt-0.5 size-4 shrink-0" />
+        <div class="whitespace-pre-wrap leading-relaxed">{{ progress.escalation || progress.failed }}</div>
+      </div>
+      <p v-else-if="progress.runSummary && !busy" class="text-xs text-mute">{{ progress.runSummary }}</p>
+    </div>
+
+    <!-- 操作 -->
+    <div v-if="progress.file || progress.saved" class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
+      <a v-if="progress.file" :href="progress.file.download_url" class="btn-ink py-2"><Download class="size-4" />下载结果 Excel</a>
+      <span v-if="progress.saved" class="flex items-center gap-1.5 text-xs text-mute">
+        流程已保存为 v{{ progress.saved.version }} · <StatusPill :status="progress.saved.status" />
+      </span>
+      <RouterLink v-if="progress.saved && customerId" :to="{ name: 'customer', params: { id: customerId }, query: { tab: 'recipes' } }" class="btn-text ml-auto">
+        在客户页查看<ExternalLink class="size-3.5" />
+      </RouterLink>
+    </div>
+
+    <StepDetail
+      v-if="selected"
+      :step-id="selected.step_id"
+      :name="selected.name"
+      :formula-name="selected.formula_name"
+      :formula-kind="selected.formula_kind"
+      :description="selected.description"
+      :explanation="recipeStep(selected.step_id)?.explanation"
+      :status="selected.status"
+      :report="selected.report"
+      :params="recipeStep(selected.step_id)?.params"
+      :run-id="progress.runId"
+      :error="selected.error"
+      :repairs="selected.repairs"
+      @close="selected = null"
+    />
+  </div>
+</template>

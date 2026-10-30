@@ -1,0 +1,20 @@
+# SheetMate 后端依赖
+# Web 框架（沿用 TabClaw：FastAPI + SSE）
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+pydantic>=2.7
+
+# 本地存储
+sqlalchemy>=2.0
+
+# 执行引擎（SheetMate：DuckDB）与 Excel 读写
+duckdb>=1.1
+pandas>=2.2
+numpy>=1.26
+openpyxl>=3.1
+xlrd>=2.0
+
+# LLM（OpenAI 兼容接口，默认 DeepSeek）
+openai>=1.40
+python-dotenv>=1.0
