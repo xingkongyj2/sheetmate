@@ -87,11 +87,11 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
 </script>
 
 <template>
-  <div class="group flex gap-3.5">
-    <div class="w-9 shrink-0 pt-0.5">
-      <Mascot :variant="mascot ?? 'blob'" :size="34" :mood="mood" :shadow="false" :track="false" />
+  <div class="assistant-message group flex items-start gap-3 sm:gap-4">
+    <div class="size-12 shrink-0">
+      <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
-    <div class="min-w-0 flex-1 space-y-3">
+    <div class="assistant-content min-w-0 flex-1 space-y-3">
       <!-- 阶段小结：知道大概干了什么 -->
       <PlanProgress v-if="hasPlan" :message="message" />
       <MarkdownView v-else-if="message.streaming && stageNotes.length" :source="stageNotes.at(-1)!.text" class="animate-rise !text-[14px] !text-mute" />
@@ -100,7 +100,7 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
       <RecipeProgressCard v-for="a in recipes" :key="a.key" :progress="a.progress" :customer-id="customerId" />
 
       <!-- 执行过程：默认折叠成一行，正在执行时这一行显示当前在做什么 -->
-      <div v-if="processItems.length || message.streaming">
+      <div v-if="processItems.length || message.streaming" class="assistant-process">
         <button class="flex items-center gap-1.5 text-xs text-mute hover:text-ink" @click="showProcess = !showProcess">
           <LoaderCircle v-if="message.streaming" class="size-3.5 animate-spin" />
           <ChevronRight v-else class="size-3.5 transition" :class="{ 'rotate-90': showProcess }" />
@@ -175,3 +175,23 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
     </div>
   </div>
 </template>
+
+<style scoped>
+.assistant-message {
+  --assistant-avatar-size: 3rem;
+}
+
+.assistant-content > :deep(.prose-sm:first-child > :first-child) {
+  padding-top: max(0px, calc((var(--assistant-avatar-size) - 1lh) / 2));
+}
+
+.assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child),
+.assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child > p:first-child),
+.assistant-content > :deep(.prose-sm:first-child > blockquote:first-child > :first-child) {
+  margin-top: 0;
+}
+
+.assistant-process:first-child > button {
+  min-height: var(--assistant-avatar-size);
+}
+</style>
