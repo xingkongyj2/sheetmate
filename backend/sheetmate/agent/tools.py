@@ -2,7 +2,7 @@
 
 工具分组：
 - 只读分析：table_info / value_counts / column_stats / preview_table / run_sql
-- 公式工具：每个公式自动生成一个工具（内置公式 + 客户独有公式），结果存成新表（仅分析模式）
+- 公式工具：每个公式自动生成一个工具（内置公式 + 客户独有公式），两个模式均可生成辅助分析表
 - 文件：list_files / load_file / export_excel
 - Recipe：build_recipe / revise_recipe / run_recipe（修改模式）、save_as_recipe / get_recipe
 - 记忆：remember / save_field_mapping
@@ -64,6 +64,7 @@ class ToolHost(Protocol):
 
     def list_files(self) -> list[dict[str, Any]]: ...
     def file_path(self, file_id: str) -> Path | None: ...
+    def original_file_path(self, file_id: str) -> Path | None: ...
     def load_file(self, file_id: str) -> list[TableInfo]: ...
     def export_excel(self, sheets: list[tuple[str, str]], filename: str) -> dict[str, Any]: ...
     def list_recipes(self) -> list[dict[str, Any]]: ...
@@ -152,11 +153,8 @@ def ephemeral_payload(label: str, df: pd.DataFrame, total: int | None = None) ->
 
 
 def _result_name(ctx: AgentContext, requested: str | None, default: str) -> str:
-    """结果表命名：覆盖之前分析算出来的同名表；不覆盖上传的原始表和期望结果。"""
+    """保留输入和历次中间表，避免同名计算覆盖依赖链，方便重新执行。"""
     base = sanitize_table_name(requested or default)
-    info = ctx.ws.info(base)
-    if info is None or (info.source == "computed" and info.role == "derived"):
-        return base
     return ctx.ws.unique_name(base)
 
 
@@ -200,7 +198,7 @@ def _tool_preview(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
 
 def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     sql = assert_single_select(str(args.get("sql", "")))
-    result_name = args.get("result_name") if ctx.mode == "analyze" else None
+    result_name = args.get("result_name")
     if result_name:
         out = _result_name(ctx, result_name, "查询结果")
         ctx.ws.create_table_as(
@@ -270,7 +268,7 @@ def formula_tool(spec: Formula, kind: str) -> Tool:
         table = args.get("table") or args.get("left") or ", ".join(args.get("tables") or [])
         return f"{spec.name} · {table}" if table else spec.name
 
-    return Tool(fid, description, _obj(properties, required), frozenset({"analyze"}), run=run, label=label)
+    return Tool(fid, description, _obj(properties, required), frozenset({"analyze", "modify"}), run=run, label=label)
 
 
 # ---------------------------------------------------------------------------
@@ -319,15 +317,26 @@ def _tool_export_excel(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
 
 
 def _table_meta(info: TableInfo, ctx: AgentContext) -> InputMeta:
-    path = ctx.host.file_path(info.file_id) if info.file_id else None
+    path = ctx.host.original_file_path(info.file_id) if info.file_id else None
     return InputMeta(filename=info.filename or info.label, sheet=info.sheet, header=info.header, file_id=info.file_id, path=path)
+
+
+def _recipe_input(ctx: AgentContext, table: str) -> TableInfo:
+    info = ctx.ws.require(table)
+    if info.source != "uploaded" or info.role != "input":
+        inputs = "、".join(_default_inputs(ctx)) or "（请先加载原始文件）"
+        raise ValueError(
+            f"「{table}」可用于辅助分析；修改流程需要从上传的原始输入表开始以保留格式。"
+            f"请将分析得出的处理步骤写入流程，并选择输入表：{inputs}"
+        )
+    return info
 
 
 def _learn_context(ctx: AgentContext, requirement: str, inputs: dict[str, str], expected_tables: list[str],
                    recipe_name: str | None = None, mode: str = "learn") -> LearnContext:
     frames, meta = {}, {}
     for alias, table in inputs.items():
-        info = ctx.ws.require(table)
+        info = _recipe_input(ctx, table)
         frames[alias] = ctx.ws.df(table)
         meta[alias] = _table_meta(info, ctx)
     expected, sources = {}, []
@@ -473,16 +482,17 @@ def _resolve_inputs(ctx: AgentContext, recipe: Recipe, explicit: Any) -> dict[st
     pending = [i for i in recipe.inputs if i.alias not in mapping]
     if pending:
         candidates = [Candidate(key=t.name, columns=t.column_names, filename=t.filename, sheet=t.sheet, rows=t.rows)
-                      for t in ctx.ws.list_tables() if t.source == "uploaded" and t.name not in mapping.values()]
+                      for t in ctx.ws.list_tables() if t.source == "uploaded" and t.role == "input"
+                      and t.name not in mapping.values()]
         partial = Recipe(name=recipe.name, inputs=pending)
         for alias, hit in match_inputs(partial, candidates, ctx.host.field_mapping()).items():
             mapping[alias] = hit["key"]
     missing = [i.alias for i in recipe.inputs if i.alias not in mapping]
     if missing:
-        tables = "、".join(t.name for t in ctx.ws.list_tables() if t.source == "uploaded") or "（没有）"
+        tables = "、".join(_default_inputs(ctx)) or "（没有）"
         raise ValueError(f"找不到流程需要的输入 {missing}。工作区里的表：{tables}。请用 inputs 参数指定 {{输入名: 表名}}，或先上传对应文件")
     for table in mapping.values():
-        ctx.ws.require(table)
+        _recipe_input(ctx, table)
     return mapping
 
 
@@ -504,7 +514,7 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
         info = ctx.ws.require(table)
         sources[alias] = InputSource(alias=alias, df=ctx.ws.df(table), filename=info.filename or info.label,
                                      sheet=info.sheet, file_id=info.file_id, header=info.header,
-                                     path=ctx.host.file_path(info.file_id) if info.file_id else None)
+                                     path=ctx.host.original_file_path(info.file_id) if info.file_id else None)
     async for event in runner.run(sources, output_path=handle.output_path, history=host.history_metrics(recipe.id)):
         yield event
     handle.output_path = runner.output_path or handle.output_path
@@ -608,9 +618,9 @@ def _static_tools() -> list[Tool]:
         Tool("preview_table", "查看表的若干行原始数据。",
              _obj({"table": _STR, "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "最多 100"}}, ["table"]),
              both, run=_tool_preview, label=lambda a: f"查看数据 · {a.get('table', '')}"),
-        Tool("run_sql", "执行一条 DuckDB SELECT 查询做统计（只读）。列名和表名用双引号。分析模式下给 result_name 会把结果保存成表。",
+        Tool("run_sql", "在分析副本上执行一条 DuckDB SELECT，辅助分析或修改。列名和表名用双引号。给 result_name 可保存中间表；不改原件或最终格式副本。",
              _obj({"sql": {**_STR, "description": "一条 SELECT 语句"},
-                   "result_name": {**_STR, "description": "可选：保存为表的名字（仅分析模式）"},
+                   "result_name": {**_STR, "description": "可选：辅助分析结果表名，两种模式均可使用"},
                    "description": {**_STR, "description": "可选：这条查询做什么"}}, ["sql"]),
              both, run=_tool_run_sql, label=lambda a: "SQL 查询" + (f" → {a['result_name']}" if a.get("result_name") else "")),
         Tool("list_files", "列出可以加载的文件（本会话上传的、客户资料库里的），以及是否已加载。", _obj({}), both,
@@ -625,7 +635,7 @@ def _static_tools() -> list[Tool]:
              "生成并执行一个可重复执行的处理流程（Recipe）：系统会比对输入和人工结果（如有）、规划步骤、用 DuckDB 执行、"
              "出错自动修复、校验并验证能否复现人工结果，最后输出 Excel 并保存流程。",
              _obj({"requirement": {**_STR, "description": "清楚的处理说明：要做哪些处理、业务规则、输出什么（相当于 SheetAgent 的 process.md）"},
-                   "input_tables": {**_STR_LIST, "description": "输入表名；不填表示所有上传的输入表"},
+                   "input_tables": {**_STR_LIST, "description": "原始上传的输入表名；不填自动使用。辅助分析结果用于完善 requirement，不代替原始输入"},
                    "expected_tables": {**_STR_LIST, "description": "人工做好的期望结果表（如有）；不填会自动使用标记为期望结果的表"},
                    "recipe_name": {**_STR, "description": "可选：流程名"}}, ["requirement"]),
              modify, stream=_stream_build_recipe, label=lambda a: "生成处理流程"),
@@ -669,7 +679,7 @@ class ToolRegistry:
 
     def for_context(self, ctx: AgentContext) -> list[Tool]:
         tools = [t for t in self._static.values() if ctx.mode in t.modes and (not t.needs_customer or ctx.customer)]
-        if ctx.mode == "analyze":
+        if ctx.mode in {"analyze", "modify"}:
             for spec in ctx.library.customer_specs():
                 tools.append(formula_tool(spec, "customer"))
             for spec in ctx.library.builtin_specs():

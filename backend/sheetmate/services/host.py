@@ -58,13 +58,19 @@ class ConversationHost:
             return result
 
     def file_path(self, file_id: str) -> Path | None:
-        """上传文件在本机的路径（输出时复制它来保持原样式）；文件没了就返回 None。"""
+        """供分析工具修改的临时副本；Recipe 模板使用 original_file_path。"""
+        path = self.original_file_path(file_id)
+        if path is None:
+            return None
+        if self.analysis:
+            return self.analysis.file_copy(path)
+        return self.files.file_copy(path) if self.files else path
+
+    def original_file_path(self, file_id: str) -> Path | None:
+        """仅供内部 Recipe 定位原件，由执行器复制后读取和写出。"""
         with session_scope() as db:
             try:
-                path = Path(file_service.get_file(db, file_id).stored_path)
-                if self.analysis:
-                    return self.analysis.file_copy(path)
-                return self.files.file_copy(path) if self.files else path
+                return Path(file_service.get_file(db, file_id).stored_path)
             except NotFound:
                 return None
 
