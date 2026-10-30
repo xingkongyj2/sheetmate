@@ -2,7 +2,7 @@
 /**
  * 助手消息：计划步骤与状态 → 处理流程 → 折叠的执行过程 → Markdown 回答与产物 → 两种复制操作。
  */
-import { Check, ChevronRight, CircleAlert, Code, Copy, Download, FileSpreadsheet, LoaderCircle, MessageCircleQuestion, PanelRight } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, Code, Copy, Download, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import Mascot from '@/components/brand/Mascot.vue'
@@ -17,8 +17,8 @@ import PlanProgress from './PlanProgress.vue'
 import TableCard from './TableCard.vue'
 import TimelineList from './TimelineList.vue'
 
-const props = defineProps<{ message: UiMessage; customerId?: string | null; selected?: boolean; mascot?: string | null }>()
-const emit = defineEmits<{ answer: [text: string]; openTable: [name: string]; inspect: [] }>()
+const props = defineProps<{ message: UiMessage; customerId?: string | null; mascot?: string | null }>()
+const emit = defineEmits<{ answer: [text: string]; openTable: [name: string] }>()
 const toast = useToast()
 const copying = ref(false)
 const copied = ref<'formatted' | 'markdown' | null>(null)
@@ -164,14 +164,13 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
         </span>
       </div>
 
-      <div v-if="!message.streaming && markdown" class="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-line/60 pt-2">
-        <button class="btn-text -ml-2 text-xs" :disabled="copying" title="复制带格式的回复，含计划摘要、结果预览和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
-          <Check v-if="copied === 'formatted'" class="size-3.5 text-success" /><Copy v-else class="size-3.5" />{{ copied === 'formatted' ? '已复制' : '复制格式' }}
+      <div v-if="!message.streaming && markdown" class="flex items-center gap-1 border-t border-line/60 pt-2">
+        <button type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含计划摘要、结果预览和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
+          <Check v-if="copied === 'formatted'" class="size-4 text-success" /><Copy v-else class="size-4" />
         </button>
-        <button class="btn-text text-xs" :disabled="copying" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
-          <Check v-if="copied === 'markdown'" class="size-3.5 text-success" /><Code v-else class="size-3.5" />{{ copied === 'markdown' ? '已复制' : '复制 Markdown' }}
+        <button type="button" class="icon-btn disabled:opacity-50" :disabled="copying" aria-label="复制 Markdown" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
+          <Check v-if="copied === 'markdown'" class="size-4 text-success" /><Code v-else class="size-4" />
         </button>
-        <button v-if="message.timeline.length" class="btn-text text-xs sm:ml-auto" :class="{ '!text-ink': selected }" @click="emit('inspect')"><PanelRight class="size-3.5" />执行明细</button>
       </div>
     </div>
   </div>

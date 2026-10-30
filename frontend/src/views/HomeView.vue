@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
+import LogoMark from '@/components/brand/LogoMark.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import ChatComposer, { type Attachment } from '@/components/chat/ChatComposer.vue'
 import CustomerPicker from '@/components/chat/CustomerPicker.vue'
@@ -77,7 +78,10 @@ async function send() {
 <template>
   <div class="flex h-full flex-col overflow-y-auto">
     <div class="mx-auto flex w-full max-w-[680px] flex-1 flex-col justify-center px-6 pb-[26vh] pt-10">
-      <h1 class="animate-rise text-center text-[30px] font-semibold leading-tight tracking-tight">你的专属表格 Agent 助手</h1>
+      <h1 class="animate-rise flex items-center justify-center gap-3 text-center text-[30px] font-semibold leading-tight tracking-tight">
+        <LogoMark :size="32" class="shrink-0" aria-hidden="true" />
+        <span class="min-w-0">SheetMate · 表格 Agent 助手</span>
+      </h1>
 
       <div class="mt-[112px]">
         <div class="relative z-10">

@@ -11,6 +11,7 @@ from typing import Any
 
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import FileRecord
+from sheetmate.engine.file_copies import FileCopies
 from sheetmate.engine.workspace import TableInfo, Workspace
 from sheetmate.recipe.matcher import Candidate, match_inputs
 from sheetmate.recipe.executor import has_reviewable_output
@@ -34,6 +35,7 @@ class ConversationHost:
         self.ws = ws
         self.saved_recipes: list[dict[str, Any]] = []
         self.analysis: AnalysisWorkspace | None = None
+        self.files: FileCopies | None = None
 
     # ------------------------------------------------------------------
     # 文件
@@ -60,7 +62,9 @@ class ConversationHost:
         with session_scope() as db:
             try:
                 path = Path(file_service.get_file(db, file_id).stored_path)
-                return self.analysis.file_copy(path) if self.analysis else path
+                if self.analysis:
+                    return self.analysis.file_copy(path)
+                return self.files.file_copy(path) if self.files else path
             except NotFound:
                 return None
 
@@ -69,7 +73,8 @@ class ConversationHost:
             record = file_service.get_file(db, file_id)
             if record.customer_id != self.customer_id and record.conversation_id != self.conversation_id:
                 raise ServiceError("这个文件不属于当前客户或会话")
-            path = self.analysis.file_copy(Path(record.stored_path)) if self.analysis else None
+            source = Path(record.stored_path)
+            path = self.analysis.file_copy(source) if self.analysis else (self.files.file_copy(source) if self.files else None)
             return file_service.load_into_workspace(self.ws, record, path=path)
 
     def export_excel(self, sheets: list[tuple[str, str]], filename: str) -> dict[str, Any]:

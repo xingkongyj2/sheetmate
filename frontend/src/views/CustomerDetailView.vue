@@ -30,6 +30,7 @@ import RunDetailDialog from '@/components/customer/RunDetailDialog.vue'
 import RunRecipeDialog from '@/components/customer/RunRecipeDialog.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { duration, percent, timeAgo } from '@/composables/chatModel'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
@@ -38,6 +39,7 @@ const props = defineProps<{ id: string }>()
 const route = useRoute()
 const router = useRouter()
 const toast = useToast()
+const { confirmDelete } = useConfirm()
 const store = useWorkspaceStore()
 const auth = useAuthStore()
 
@@ -128,15 +130,27 @@ async function upload(e: Event) {
 }
 
 async function removeFile(f: FileInfo) {
-  if (!window.confirm(`删除文件「${f.filename}」？`)) return
-  await fileApi.remove(f.file_id).catch((err) => toast.error(errorText(err)))
+  if (!await confirmDelete({
+    title: '删除这个文件？',
+    target: f.filename,
+    description: '文件将被永久删除，之后无法再预览或下载。此操作无法撤销。',
+    confirmText: '删除文件',
+    action: () => fileApi.remove(f.file_id),
+  })) return
   await load()
 }
 
 async function removeCustomer() {
-  if (!customer.value || !window.confirm(`删除客户「${customer.value.name}」？客户的流程、记忆会一起删除，文件记录保留。`)) return
+  if (!customer.value) return
+  const customerId = props.id
+  if (!await confirmDelete({
+    title: '删除这个客户？',
+    target: customer.value.name,
+    description: '客户的流程和记忆会一起删除，文件记录保留。此操作无法撤销。',
+    confirmText: '删除客户',
+    action: () => customerApi.remove(customerId),
+  })) return
   try {
-    await customerApi.remove(props.id)
     await store.refreshCustomers()
     router.replace({ name: 'customers' })
   } catch (err) {

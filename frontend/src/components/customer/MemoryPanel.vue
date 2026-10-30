@@ -6,11 +6,13 @@ import { computed, ref, watch } from 'vue'
 import { customerApi, memoryApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { MemoryItem } from '@/api/types'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
 const props = defineProps<{ customerId: string; memories: MemoryItem[]; mapping: Record<string, string[]> }>()
 const emit = defineEmits<{ changed: [] }>()
 const toast = useToast()
+const { confirmDelete } = useConfirm()
 
 const CATEGORIES = [
   { value: 'domain_knowledge', label: '业务规则' },
@@ -38,8 +40,14 @@ async function add() {
   }
 }
 
-async function remove(id: number) {
-  await memoryApi.remove(id).catch((err) => toast.error(errorText(err)))
+async function remove(memory: MemoryItem) {
+  if (!await confirmDelete({
+    title: '删除这条记忆？',
+    target: `${memory.key}：${memory.value}`,
+    description: '这条记忆将从客户资料中移除，之后的对话不再使用它。',
+    confirmText: '删除记忆',
+    action: () => memoryApi.remove(memory.id),
+  })) return
   emit('changed')
 }
 
@@ -81,7 +89,7 @@ async function saveMapping() {
               <span class="text-mute">：{{ m.value }}</span>
               <span class="ml-1 text-[10px] text-faint">{{ m.source === 'ai' ? 'AI 记录' : '人工' }}</span>
             </div>
-            <button class="rounded p-1 text-faint opacity-0 hover:text-error group-hover:opacity-100" @click="remove(m.id)"><Trash2 class="size-3.5" /></button>
+            <button class="rounded p-1 text-faint opacity-0 hover:text-error focus:opacity-100 group-hover:opacity-100" :aria-label="`删除记忆 ${m.key}`" @click="remove(m)"><Trash2 class="size-3.5" /></button>
           </div>
         </div>
         <p v-if="!memories.length" class="py-4 text-center text-sm text-faint">还没有记忆</p>

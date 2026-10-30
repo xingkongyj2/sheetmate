@@ -17,6 +17,7 @@ import {
   PARAM_TYPES, bodyFromFormula, draftFromBody, draftToBody, emptyDraft, exampleDraft, jsonErrorInfo, newParam, parseDefault,
   placeholdersIn, splitList, validateDraft, type FormulaDraft, type JsonErrorInfo, type ParamDraft,
 } from '@/composables/formulaDraft'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
 import FormulaTrialPanel from './FormulaTrialPanel.vue'
@@ -31,6 +32,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ close: []; saved: [formula: CustomerFormula] }>()
 const toast = useToast()
+const { confirm } = useConfirm()
 
 const draft = ref<FormulaDraft>(props.formula ? draftFromBody(bodyFromFormula(props.formula)) : emptyDraft())
 const initialBody = JSON.stringify(draftToBody(draft.value))
@@ -188,7 +190,13 @@ async function save() {
   if (!canSave.value) return
   const id = draft.value.id.trim()
   const overridden = catalog.value.builtinIds[id]
-  if (overridden && !window.confirm(`公式 id「${id}」和内置公式「${overridden}」相同。\n保存后，这个客户所有流程里用到它的步骤都会改用你写的版本。继续保存吗？`)) return
+  if (overridden && !await confirm({
+    title: '覆盖内置公式？',
+    target: `${overridden}（${id}）`,
+    description: '保存后，这个客户所有流程中使用该公式的步骤，都会改用你编写的版本。',
+    confirmText: '继续保存',
+    cancelText: '返回编辑',
+  })) return
   saving.value = true
   try {
     emit('saved', await customerApi.saveFormula(props.customerId, body.value))
@@ -199,8 +207,14 @@ async function save() {
   }
 }
 
-function requestClose() {
-  if (dirty.value && !window.confirm('放弃没有保存的修改？')) return
+async function requestClose() {
+  if (saving.value) return
+  if (dirty.value && !await confirm({
+    title: '放弃未保存的修改？',
+    description: '关闭后，本次尚未保存的公式修改将丢失。',
+    confirmText: '放弃修改',
+    cancelText: '继续编辑',
+  })) return
   emit('close')
 }
 </script>

@@ -376,6 +376,11 @@ def _recipe_result_text(result: dict[str, Any]) -> str:
     if result.get("error"):
         return f"流程生成失败：{result['error']}"
     lines = [f"流程「{recipe.name}」v{recipe.version}（recipe_id={recipe.id}）：执行状态 {_status_label(result['report']['status'])}。"]
+    report_error = str(result.get("report", {}).get("error") or "").strip()
+    if report_error:
+        lines.append(f"处理未完成：{report_error}")
+        if report_error.startswith("TemplatePreservationError:"):
+            lines.append("原始文件未修改，未生成可交付文件。请说明具体不能保留的结构；不能通过普通表格导出来绕过格式要求，也不要重复相同的修订尝试。")
     by_id = {s["step_id"]: s for s in result["report"]["steps"]}
     for step in recipe.ordered_steps():
         rep = by_id.get(step.id, {})

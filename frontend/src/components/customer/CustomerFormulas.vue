@@ -12,6 +12,7 @@ import type { CustomerFormula, FileInfo } from '@/api/types'
 import StatusPill from '@/components/common/StatusPill.vue'
 import { timeAgo } from '@/composables/chatModel'
 import { paramTypeLabel } from '@/composables/formulaDraft'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
 import FormulaEditorDialog from './FormulaEditorDialog.vue'
@@ -19,6 +20,7 @@ import FormulaEditorDialog from './FormulaEditorDialog.vue'
 const props = defineProps<{ customerId: string; formulas: CustomerFormula[]; files: FileInfo[]; fieldMapping: Record<string, string[]> }>()
 const emit = defineEmits<{ changed: [] }>()
 const toast = useToast()
+const { confirmDelete } = useConfirm()
 
 const editor = ref<{ formula: CustomerFormula | null; trial: boolean } | null>(null)
 
@@ -36,14 +38,16 @@ async function toggle(f: CustomerFormula) {
 }
 
 async function remove(f: CustomerFormula) {
-  if (!window.confirm(`删除公式「${f.name}」（${f.id}）？所有版本都会删除，不能恢复。`)) return
-  try {
-    await customerApi.removeFormula(props.customerId, f.id)
-    toast.success('已删除')
-    emit('changed')
-  } catch (err) {
-    toast.error(errorText(err))
-  }
+  const customerId = props.customerId
+  if (!await confirmDelete({
+    title: '删除这个公式？',
+    target: `${f.name}（${f.id}）`,
+    description: '这个公式的所有版本都会删除，删除后无法恢复。',
+    confirmText: '删除公式',
+    action: () => customerApi.removeFormula(customerId, f.id),
+  })) return
+  toast.success('已删除')
+  emit('changed')
 }
 
 function onSaved(saved: CustomerFormula) {

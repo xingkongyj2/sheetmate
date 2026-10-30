@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from sheetmate.engine.file_copies import FileCopies
 from sheetmate.engine.workspace import Workspace
 
 
@@ -22,13 +22,13 @@ class AnalysisWorkspace:
     source: Workspace
     ws: Workspace
     root: Path
+    files: FileCopies = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.files = FileCopies(self.root / "files")
 
     def file_copy(self, original: Path) -> Path:
-        destination = self.root / "files" / original.name
-        if not destination.exists():
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(original, destination)
-        return destination
+        return self.files.file_copy(original)
 
     def publish(self, name: str) -> None:
         existing = self.source.info(name)

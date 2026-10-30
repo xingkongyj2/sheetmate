@@ -15,8 +15,9 @@ from sqlalchemy.orm import Session
 
 from sheetmate.config import settings
 from sheetmate.db.models import FileRecord, User
+from sheetmate.engine.file_copies import temporary_file_copies
 from sheetmate.engine.profile import profile_workbook
-from sheetmate.engine.reader import SUPPORTED_SUFFIXES, ReadError, read_workbook
+from sheetmate.engine.reader import SUPPORTED_SUFFIXES, ReadError, SheetData, read_workbook
 from sheetmate.engine.sqlutil import frame_rows, sanitize_table_name
 from sheetmate.engine.workspace import TableInfo, Workspace
 from sheetmate.engine.writer import SheetSpec, write_excel
@@ -98,11 +99,16 @@ def register_output(db: Session, *, path: Path, filename: str, customer_id: str 
 
 def profile_file(path: Path) -> dict[str, Any]:
     """文件画像（不含数据预览，预览按需读取）。"""
-    sheets = read_workbook(path)
+    sheets = _read_file_copy(path)
     profile = profile_workbook(sheets, preview_rows=0)
     for sheet in profile["sheets"]:
         sheet.pop("preview", None)
     return profile
+
+
+def _read_file_copy(path: Path) -> list[SheetData]:
+    with temporary_file_copies() as files:
+        return read_workbook(files.file_copy(path))
 
 
 def file_dict(record: FileRecord) -> dict[str, Any]:
@@ -134,7 +140,7 @@ def get_file(db: Session, file_id: str) -> FileRecord:
 
 
 def preview(record: FileRecord, sheet: str | None = None, offset: int = 0, limit: int = 50) -> dict[str, Any]:
-    sheets = read_workbook(Path(record.stored_path))
+    sheets = _read_file_copy(Path(record.stored_path))
     chosen = next((s for s in sheets if s.name == sheet), sheets[0]) if sheet else sheets[0]
     part = chosen.df.iloc[offset : offset + limit]
     return {
@@ -172,7 +178,7 @@ def table_base_name(filename: str) -> str:
 
 def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None = None) -> list[TableInfo]:
     """把文件的每个 sheet 存成工作区里的一张表。期望结果文件的表名用「期望_sheet名」。"""
-    sheets = read_workbook(path or Path(record.stored_path))
+    sheets = read_workbook(path) if path is not None else _read_file_copy(Path(record.stored_path))
     for info in ws.list_tables():  # 同一个文件重复加载时先清掉旧表
         if info.file_id == record.id:
             ws.drop(info.name)

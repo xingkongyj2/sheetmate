@@ -15,13 +15,15 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import aclosing, contextmanager
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
 
+from sheetmate.engine.file_copies import FileCopies, temporary_file_copies
 from sheetmate.engine.field_mapping import apply_field_mapping, match_columns
 from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.profile import dtype_label
@@ -102,6 +104,8 @@ class RecipeRunner:
         self.output_path: Path | None = None
         # 每个输入对应的原文件位置：输出时「复制原文件、在里面改写」要用它找样式
         self.sources: dict[str, TemplateSource] = {}
+        self._files: FileCopies | None = None
+        self._input_paths: set[Path] = set()
         self.report: dict[str, Any] = {
             "run_id": run_id,
             "recipe_id": recipe.id,
@@ -133,12 +137,29 @@ class RecipeRunner:
         output_path: Path | None = None,
         history: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        with self._working_files():
+            async with aclosing(self._run(sources, start_step=start_step, stop_step=stop_step,
+                                          output_path=output_path, history=history)) as stream:
+                async for event in stream:
+                    yield event
+
+    async def _run(
+        self,
+        sources: dict[str, InputSource] | None = None,
+        *,
+        start_step: int = 1,
+        stop_step: int | None = None,
+        output_path: Path | None = None,
+        history: list[dict[str, Any]] | None = None,
+    ) -> AsyncIterator[dict[str, Any]]:
         started = time.perf_counter()
         yield {"type": "recipe_run_start", "run_id": self.report["run_id"], "recipe": self._recipe_brief(),
                "start_step": start_step, "stop_step": stop_step}
         try:
+            await self._in_worker(self._copy_templates)
             if sources is not None:
-                for event in await asyncio.to_thread(self._load_inputs, sources):
+                self._input_paths.update(source.path.resolve() for source in sources.values() if source.path is not None)
+                for event in await self._in_worker(self._load_inputs, sources):
                     yield event
             steps = [s for s in self.recipe.ordered_steps() if s.id >= start_step and (stop_step is None or s.id <= stop_step)]
             for step in steps:
@@ -154,11 +175,11 @@ class RecipeRunner:
                     break
             finished_all = stop_step is None or stop_step >= max((s.id for s in self.recipe.ordered_steps()), default=0)
             if self.report["status"] == "running" and finished_all and output_path is not None:
-                outputs = await asyncio.to_thread(self.collect_outputs)
-                written = await asyncio.to_thread(self.write_outputs, output_path, outputs)
+                outputs = await self._in_worker(self.collect_outputs)
+                written = await self._in_worker(self.write_outputs, output_path, outputs)
                 self.report["outputs"] = written
                 yield {"type": "recipe_output", "path": str(self.output_path), "sheets": written}
-                validation = await asyncio.to_thread(validate_run, self.recipe, self.input_frames or self._input_frames(), outputs, history)
+                validation = await self._in_worker(validate_run, self.recipe, self.input_frames or self._input_frames(), outputs, history)
                 self.report["validation"] = validation
                 yield {"type": "recipe_validation", "report": validation}
             if self.report["status"] == "running":
@@ -201,6 +222,8 @@ class RecipeRunner:
     def _load_input(self, inp: RecipeInput, src: InputSource) -> dict[str, Any]:
         warnings: list[str] = []
         sheet: SheetData | None = None
+        if src.path is not None and self._files is not None:
+            src = replace(src, path=self._files.file_copy(src.path))
         if src.df is not None:
             df, sheet_name = src.df.copy(), src.sheet or inp.sheet or ""
         else:
@@ -271,6 +294,39 @@ class RecipeRunner:
             path = path_of(data["file_id"])
             if path is not None:
                 self.sources[info["alias"]] = TemplateSource.from_persist(info["alias"], data, path)
+                self._input_paths.add(path.resolve())
+
+    @contextmanager
+    def _working_files(self) -> Iterator[FileCopies]:
+        if self._files is not None:
+            yield self._files
+            return
+        with temporary_file_copies() as files:
+            self._files = files
+            try:
+                yield files
+            finally:
+                self.sources = {alias: replace(source, path=files.original_path(source.path))
+                                for alias, source in self.sources.items()}
+                self._files = None
+
+    def _copy_templates(self) -> None:
+        assert self._files is not None
+        for alias, source in list(self.sources.items()):
+            self._input_paths.add(self._files.original_path(source.path).resolve())
+            self.sources[alias] = replace(source, path=self._files.file_copy(source.path))
+
+    async def _in_worker(self, action: Callable[..., Any], *args: Any) -> Any:
+        worker = asyncio.create_task(asyncio.to_thread(action, *args))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            self.ws.interrupt()
+            try:
+                await worker
+            except Exception:
+                pass
+            raise
 
     def _pick_sheet(self, inp: RecipeInput, src: InputSource) -> SheetData:
         """选 sheet：指定的 > Recipe 记录的同名 sheet > 列重合度最高的；表头位置自动识别，不理想时用 Recipe 记录的位置再试。"""
@@ -323,7 +379,7 @@ class RecipeRunner:
         started = time.perf_counter()
         while True:
             try:
-                outcome = await asyncio.to_thread(self._execute, current)
+                outcome = await self._in_worker(self._execute, current)
                 assertions = self._check_assertions(current, outcome)
                 failed = [a for a in assertions if a["status"] == "fail" and a["severity"] == "error"]
                 if failed:
@@ -498,6 +554,18 @@ class RecipeRunner:
 
         Excel 必须沿用原工作簿；无法保留时停止输出。CSV 和没有原工作簿的数据使用新表。
         """
+        with self._working_files():
+            self._copy_templates()
+            return self._write_outputs(path, outputs)
+
+    def _check_output_path(self, path: Path) -> None:
+        if path.resolve() in self._input_paths or (
+            path.exists() and any(source.exists() and path.samefile(source) for source in self._input_paths)
+        ):
+            raise TemplatePreservationError("编辑结果必须另存副本，不能覆盖原文件")
+
+    def _write_outputs(self, path: Path, outputs: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
+        self._check_output_path(path)
         if not outputs:
             raise ValueError("没有可以输出的结果：所有步骤都失败了，或 output_spec 指向的表不存在")
         if self.sources:
@@ -507,6 +575,7 @@ class RecipeRunner:
             base = next((plan.template for plan in plans if plan.template and plan.template.usable()), None)
             if base is not None:
                 path = path.with_suffix(base.path.suffix.lower())
+            self._check_output_path(path)
             written = write_like_original(path, plans)
             if written is not None:
                 self.report["output_style"] = "original"

@@ -41,7 +41,7 @@ const attachments = ref<Attachment[]>([])
 const recentlyUploaded = ref<FileInfo[]>([])
 const plan = ref<{ title: string; steps: PlanStep[]; message: string; attachments: string[] } | null>(null)
 const planning = ref(false)
-const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角或消息下方的「查看执行明细」
+const panelOpen = ref(false)
 const selectedKey = ref<string | null>(null)
 const viewing = ref<string | null>(null)
 const viewingFile = ref<FileInfo | null>(null)
@@ -198,13 +198,16 @@ async function requestPlan(message: string, ids: string[]) {
   }
 }
 
-function runPlan(steps: PlanStep[]) {
+async function runPlan(steps: PlanStep[]) {
   if (!plan.value) return
   const message = plan.value.message
   const ids = plan.value.attachments
   plan.value = null
   messages.value.pop() // 计划阶段临时显示的用户消息，正式发送时重新加上
-  send(message, { planSteps: steps, attachments: ids })
+  const draftAttachments = attachments.value
+  const running = send(message, { planSteps: steps, attachments: ids })
+  attachments.value = draftAttachments.filter((item) => !ids.includes(item.key))
+  await running
 }
 
 function cancelPlan() {
@@ -380,10 +383,8 @@ function answer(option: string) {
                 :message="m"
                 :customer-id="customer?.id"
                 :mascot="customer?.mascot"
-                :selected="selectedMessage?.key === m.key && panelOpen"
                 @answer="answer"
                 @open-table="(name) => (viewing = name)"
-                @inspect="() => { selectedKey = m.key; panelOpen = true }"
               />
             </template>
 

@@ -7,10 +7,9 @@ import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
-import { errorText } from '@/api/http'
 import LogoMark from '@/components/brand/LogoMark.vue'
 import { mascotStyle } from '@/components/brand/mascots'
-import { useToast } from '@/composables/useToast'
+import { useConfirm } from '@/composables/useConfirm'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
 
@@ -18,21 +17,22 @@ const store = useWorkspaceStore()
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
-const toast = useToast()
+const { confirmDelete } = useConfirm()
 const collapsed = ref(false)
 const menuOpen = ref(false)
 
 const initial = computed(() => (auth.user?.display_name || auth.user?.account || '?').slice(0, 1).toUpperCase())
 
 async function remove(id: string, title: string) {
-  if (!window.confirm(`删除对话「${title}」？对话里的临时数据也会删除。`)) return
-  try {
-    await conversationApi.remove(id)
-    store.removeConversation(id)
-    if (route.params.id === id) router.push({ name: 'home' })
-  } catch (err) {
-    toast.error(errorText(err))
-  }
+  if (!await confirmDelete({
+    title: '删除这段对话？',
+    target: title,
+    description: '对话记录和对话里的临时数据将一起删除，删除后无法恢复。',
+    confirmText: '删除对话',
+    action: () => conversationApi.remove(id),
+  })) return
+  store.removeConversation(id)
+  if (route.params.id === id) router.push({ name: 'home' })
 }
 
 async function logout() {
@@ -96,8 +96,9 @@ async function logout() {
             </span>
           </RouterLink>
           <button
-            class="absolute right-2 top-2.5 hidden rounded-md p-1 text-faint hover:bg-white hover:text-error group-hover:block"
+            class="absolute right-2 top-2.5 rounded-md p-1 text-faint opacity-0 transition hover:bg-white hover:text-error focus-visible:opacity-100 group-hover:opacity-100"
             title="删除对话"
+            :aria-label="`删除对话 ${conv.title}`"
             @click.prevent="remove(conv.id, conv.title)"
           >
             <Trash2 class="size-3.5" />

@@ -18,6 +18,7 @@ import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
 import VerifyBadge from '@/components/recipe/VerifyBadge.vue'
 import type { RecipeProgress, StepState, UiMessage } from '@/composables/chatModel'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
 import TimelineList from './TimelineList.vue'
@@ -25,6 +26,7 @@ import TimelineList from './TimelineList.vue'
 const props = defineProps<{ detail: ConversationDetail | null; message: UiMessage | null }>()
 const emit = defineEmits<{ close: []; openTable: [name: string]; refresh: [] }>()
 const toast = useToast()
+const { confirmDelete } = useConfirm()
 
 type Tab = 'process' | 'data' | 'files' | 'recipes'
 const tab = ref<Tab>('process')
@@ -57,13 +59,16 @@ async function toggleRole(t: TableBrief) {
 }
 
 async function drop(t: TableBrief) {
-  if (!props.detail || !window.confirm(`删除表「${t.name}」？`)) return
-  try {
-    await conversationApi.dropTable(props.detail.id, t.name)
-    emit('refresh')
-  } catch (err) {
-    toast.error(errorText(err))
-  }
+  if (!props.detail) return
+  const conversationId = props.detail.id
+  if (!await confirmDelete({
+    title: '删除这张表？',
+    target: t.name,
+    description: '这张计算结果表将从当前对话的工作区删除，上传的源文件会保留。',
+    confirmText: '删除表格',
+    action: () => conversationApi.dropTable(conversationId, t.name),
+  })) return
+  emit('refresh')
 }
 
 function stepFlow(r: ConversationDetail['recipes'][number]) {

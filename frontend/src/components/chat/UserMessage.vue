@@ -42,7 +42,7 @@ function fileDetails(file: FileInfo) {
                 <FileSpreadsheet v-else class="size-5" />
               </span>
               <span class="min-w-0 flex-1">
-                <span class="block truncate text-[13px] font-semibold text-ink">{{ attachment.file.filename }}</span>
+                <span class="block break-words text-[13px] font-semibold leading-5 text-ink [overflow-wrap:anywhere]">{{ attachment.file.filename }}</span>
                 <span class="mt-0.5 block truncate text-[11px] text-mute">{{ fileDetails(attachment.file) }}</span>
               </span>
             </button>

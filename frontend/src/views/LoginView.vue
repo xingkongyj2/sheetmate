@@ -44,10 +44,10 @@ async function submit() {
 </script>
 
 <template>
-  <AuthStage :mood="hidingEyes ? 'happy' : 'idle'">
+  <AuthStage :mood="hidingEyes ? 'happy' : 'idle'" full-screen>
     <div class="flex justify-center pt-4"><LogoMark :size="40" /></div>
 
-    <div class="mx-auto mt-12 w-full max-w-[360px] flex-1">
+    <div class="mx-auto mt-12 w-full max-w-[360px]">
       <h1 class="text-center text-[28px] font-semibold tracking-tight">{{ title }}</h1>
       <p class="mt-2 text-center text-sm text-mute">SheetMate · 会分析、会改表、会记住流程的 Excel 助手</p>
 

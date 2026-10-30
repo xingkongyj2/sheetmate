@@ -2,7 +2,7 @@
 /**
  * 选择客户（相当于 Qoder 里「选择目录」）：绑定客户后按客户的记忆和流程来聊；也可以不绑定，作为临时对话。
  */
-import { Check, ChevronDown, Plus, Search } from '@lucide/vue'
+import { Check, ChevronDown, CircleUserRound, Plus, Search } from '@lucide/vue'
 import { computed, nextTick, ref } from 'vue'
 
 import type { CustomerCard } from '@/api/types'
@@ -67,8 +67,9 @@ function onCreated(customer: CustomerCard) {
       class="flex h-10 w-full items-center gap-2.5 rounded-b-[22px] px-3.5 py-2 text-left text-[13px] text-mute transition hover:bg-black/[0.03] hover:text-ink"
       @click="toggle"
     >
-      <span class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-white">
-        <Mascot :variant="current?.mascot ?? 'blob'" :size="26" :shadow="false" :track="false" :class="{ 'grayscale opacity-40': !current }" />
+      <span class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-paper">
+        <CircleUserRound v-if="!current" class="size-4 text-mute" />
+        <Mascot v-else :variant="current.mascot" :size="26" :shadow="false" :track="false" />
       </span>
       <span class="min-w-0 truncate" :class="current ? 'font-medium text-ink' : ''">{{ current ? current.name : '选择客户' }}</span>
       <ChevronDown class="ml-auto size-3.5 shrink-0 text-faint transition" :class="{ 'rotate-180': open }" />
@@ -86,8 +87,8 @@ function onCreated(customer: CustomerCard) {
       </div>
       <div class="mt-1.5 max-h-72 overflow-y-auto">
         <button class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left hover:bg-paper" @click="choose(null)">
-          <span class="flex size-8 items-center justify-center overflow-hidden rounded-full bg-paper">
-            <Mascot variant="blob" :size="34" :shadow="false" :track="false" class="grayscale opacity-40" />
+          <span class="flex size-8 items-center justify-center rounded-full bg-paper">
+            <CircleUserRound class="size-5 text-mute" />
           </span>
           <span class="min-w-0 flex-1 text-sm">不绑定客户</span>
           <Check v-if="!modelValue" class="size-4" />

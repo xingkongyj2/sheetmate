@@ -27,6 +27,7 @@ from sheetmate.agent.tools import AgentContext, ToolRegistry
 from sheetmate.config import settings
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import Conversation, Customer, Message, User
+from sheetmate.engine.file_copies import temporary_file_copies
 from sheetmate.services import conversations as conv_service
 from sheetmate.services import customers as customer_service
 from sheetmate.services import memory as memory_service
@@ -151,6 +152,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 with session_scope() as db:
                     run_id = run_service.create_run(db, kind="analysis", user_id=user_id, customer_id=ctx.host.customer_id,
                                                     conversation_id=conversation_id, request_text=message).id
+            else:
+                host.files = resources.enter_context(temporary_file_copies())
             await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None})
             if plan_steps:
                 stream = executor.execute_plan(ctx, message, plan_steps, history)
