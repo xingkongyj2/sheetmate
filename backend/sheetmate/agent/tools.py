@@ -380,7 +380,9 @@ def _recipe_result_text(result: dict[str, Any]) -> str:
     if report_error:
         lines.append(f"处理未完成：{report_error}")
         if report_error.startswith("TemplatePreservationError:"):
-            lines.append("原始文件未修改，未生成可交付文件。请说明具体不能保留的结构；不能通过普通表格导出来绕过格式要求，也不要重复相同的修订尝试。")
+            lines.append("原始文件未修改，未生成可交付文件。请依据具体错误修正执行方式，重新复制原件后按步骤处理；修改交付以保留原格式的副本为基础，去格式化副本只辅助分析定位。副本内的格式或结构变化不需要再次授权，不要把手动处理或放弃修改作为前置条件。")
+    for warning in result["report"].get("output_warnings", []):
+        lines.append(f"输出提示：{warning}")
     by_id = {s["step_id"]: s for s in result["report"]["steps"]}
     for step in recipe.ordered_steps():
         rep = by_id.get(step.id, {})
@@ -398,8 +400,10 @@ def _recipe_result_text(result: dict[str, Any]) -> str:
                           for x in result["report"].get("outputs", []))
         lines.append(f"输出文件：「{result['file']['filename']}」（右侧可下载），包含 {sheets}")
     questions = recipe.metadata.get("questions") or []
-    if questions:
-        lines.append("需要和用户确认：" + "；".join(q["question"] for q in questions[:3]))
+    delivered = bool(result.get("file")) and result["report"].get("status") in {"success", "warning"}
+    if questions and not delivered:
+        lines.append("流程提出的待核实信息：" + "；".join(q["question"] for q in questions[:3]))
+        lines.append("只询问尚未明确的必要业务信息；当前明确要求优先旧记忆，已明确的修改和副本内格式变化不需要再次确认。")
     if result["report"].get("escalation"):
         lines.append("错误报告：\n" + result["report"]["escalation"])
     return "\n".join(lines)
@@ -430,7 +434,11 @@ async def _stream_revise_recipe(args: dict[str, Any], ctx: AgentContext) -> Asyn
         raise ValueError("没有找到要修订的流程。请先用 build_recipe 生成，或提供 recipe_id")
     mapping = _resolve_inputs(ctx, recipe, args.get("inputs"))
     expected_tables = [str(t) for t in (args.get("expected_tables") or _default_expected(ctx))]
-    requirement = (recipe.metadata.get("requirement") or recipe.description or "") + f"\n修改要求：{instruction}"
+    previous = recipe.metadata.get("requirement") or recipe.description or ""
+    requirement = (
+        f"历史处理说明（仅沿用未被本次要求覆盖的部分）：\n{previous}\n\n"
+        f"本次修改要求（与历史说明或客户记忆冲突时以本次要求为准）：\n{instruction}"
+    )
     lctx = _learn_context(ctx, requirement, mapping, expected_tables, mode="revise")
     pipeline = RecipePipeline(ctx.llm, ctx.library, ctx.host.pipeline_host(), max_rounds=ctx.verify_rounds, max_repair=ctx.max_repair)
     async for event in pipeline.build(lctx, base=recipe, instruction=instruction):

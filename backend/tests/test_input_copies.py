@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import openpyxl
 import pytest
+from openpyxl.styles import Font, PatternFill
 
 from sheetmate.agent.tools import Tool, ToolResult
 from sheetmate.engine.file_copies import temporary_file_copies
@@ -65,7 +66,7 @@ def test_file_copies_keep_same_named_sources_separate(tmp_path):
     assert first.read_text() == "first" and second.read_text() == "second"
 
 
-def test_recipe_reads_and_writes_the_same_disposable_copy(tmp_path, monkeypatch):
+def test_recipe_reads_and_writes_independent_disposable_copies(tmp_path, monkeypatch):
     source = tmp_path / "source.xlsx"
     _workbook(source)
     before = source.read_bytes()
@@ -79,7 +80,11 @@ def test_recipe_reads_and_writes_the_same_disposable_copy(tmp_path, monkeypatch)
         return real_read(path)
 
     def write(path, plans):
-        assert all(plan.template.path.resolve() == paths[0].resolve() for plan in plans)
+        output_template = plans[0].template.path
+        assert output_template not in {source, paths[0]}
+        assert output_template.read_bytes() == before
+        assert all(plan.template.path.resolve() == output_template.resolve() for plan in plans)
+        paths.append(output_template)
         return real_write(path, plans)
 
     monkeypatch.setattr(executor, "read_workbook", read)
@@ -90,7 +95,72 @@ def test_recipe_reads_and_writes_the_same_disposable_copy(tmp_path, monkeypatch)
         _run(runner, {"明细": InputSource("明细", path=source, filename=source.name)}, tmp_path / "output.xlsx")
         assert runner.report["status"] == "success"
         assert runner.sources["明细"].path == source
-        assert len(paths) == 1 and not paths[0].exists()
+        assert len(paths) == 2 and all(not path.exists() for path in paths)
+        assert source.read_bytes() == before
+    finally:
+        workspace.close()
+
+
+@pytest.mark.parametrize("damage", ["remove_formatting", "corrupt_file"])
+def test_output_recopies_original_after_read_copy_is_modified(tmp_path, monkeypatch, damage):
+    source = tmp_path / "source.xlsx"
+    output = tmp_path / "output.xlsx"
+    _workbook(source)
+    workbook = openpyxl.load_workbook(source)
+    sheet = workbook["明细"]
+    sheet["A1"].font = Font(bold=True, color="FF123456")
+    sheet["A1"].fill = PatternFill("solid", fgColor="FFABCDEF")
+    sheet["B2"].number_format = "#,##0.00"
+    sheet.column_dimensions["B"].width = 27
+    sheet.row_dimensions[2].height = 35
+    sheet.freeze_panes = "A2"
+    workbook.save(source)
+    workbook.close()
+    before = source.read_bytes()
+    read_paths = []
+    real_read = executor.read_workbook
+
+    def read_and_modify_copy(path):
+        assert path != source and path.read_bytes() == before
+        frames = real_read(path)
+        read_paths.append(path)
+        if damage == "corrupt_file":
+            path.write_bytes(b"unrecoverable working copy")
+            return frames
+        copy = openpyxl.load_workbook(path)
+        try:
+            copied_sheet = copy["明细"]
+            for row in copied_sheet:
+                for cell in row:
+                    cell._style = None
+            copied_sheet.column_dimensions.clear()
+            copied_sheet.row_dimensions.clear()
+            copied_sheet.freeze_panes = None
+            copy.save(path)
+        finally:
+            copy.close()
+        assert path.read_bytes() != before
+        return frames
+
+    monkeypatch.setattr(executor, "read_workbook", read_and_modify_copy)
+    workspace = Workspace(None)
+    try:
+        runner = _runner(workspace)
+        _run(runner, {"明细": InputSource("明细", path=source)}, output)
+        assert runner.report["status"] == "success", runner.report
+        result = openpyxl.load_workbook(output)
+        try:
+            edited = result["明细"]
+            assert edited["A1"].font.bold and edited["A1"].font.color.rgb == "FF123456"
+            assert edited["A1"].fill.fgColor.rgb == "FFABCDEF"
+            assert edited["B2"].number_format == "#,##0.00"
+            assert edited.column_dimensions["B"].width == 27
+            assert edited.row_dimensions[2].height == 35
+            assert edited.freeze_panes == "A2"
+            assert edited["B2"].value == 100
+        finally:
+            result.close()
+        assert read_paths and all(not path.exists() for path in read_paths)
         assert source.read_bytes() == before
     finally:
         workspace.close()

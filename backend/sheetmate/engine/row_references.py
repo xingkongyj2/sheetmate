@@ -135,7 +135,16 @@ def _shift_area(area: str, deleted: set[int], *, reject_single: bool = False) ->
 
 
 def _mapped_rows(first: int, last: int, deleted: set[int]) -> list[int]:
-    return [row - _count_before(deleted, row) for row in range(first, last + 1) if row not in deleted]
+    removed = sorted(row for row in deleted if first <= row <= last)
+    if len(removed) == last - first + 1:
+        return []
+    first_live = first
+    while first_live in deleted:
+        first_live += 1
+    last_live = last
+    while last_live in deleted:
+        last_live -= 1
+    return [first_live - _count_before(deleted, first_live), last_live - _count_before(deleted, last_live)]
 
 
 def _count_before(deleted: set[int], row: int) -> int:

@@ -119,6 +119,7 @@ class RecipeRunner:
             "error": "",
             "escalation": "",
             "output_style": "",
+            "output_warnings": [],
             "failed_stage": "",  # input 输入不符 / step 某步修不好 / validation 运行校验不通过 / error 其他错误
             "repaired_steps": [],
             "duration_ms": 0,
@@ -187,7 +188,7 @@ class RecipeRunner:
                 if failed:
                     self.report["failed_stage"] = "validation"
                     self.report["escalation"] = validation_report_text(self.report)
-                warned = any(s.get("warnings") for s in self.report["steps"]) or (
+                warned = bool(self.report.get("output_warnings")) or any(s.get("warnings") for s in self.report["steps"]) or (
                     self.report["validation"] and self.report["validation"]["status"] == "warn"
                 )
                 self.report["status"] = "failed" if failed else "warning" if warned else "success"
@@ -552,11 +553,19 @@ class RecipeRunner:
     def write_outputs(self, path: Path, outputs: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
         """写出 Excel（可以在调整 output_spec 后重新写一次）。
 
-        Excel 必须沿用原工作簿；无法保留时停止输出。CSV 和没有原工作簿的数据使用新表。
+        优先沿用原工作簿；格式不兼容时继续输出副本并记录提示。CSV 和没有原工作簿的数据使用新表。
         """
-        with self._working_files():
-            self._copy_templates()
-            return self._write_outputs(path, outputs)
+        sources = self.sources
+        with temporary_file_copies() as files:
+            try:
+                self.sources = {}
+                for alias, source in sources.items():
+                    original = self._files.original_path(source.path) if self._files is not None else source.path
+                    self._input_paths.add(original.resolve())
+                    self.sources[alias] = replace(source, path=files.file_copy(original))
+                return self._write_outputs(path, outputs)
+            finally:
+                self.sources = sources
 
     def _check_output_path(self, path: Path) -> None:
         if path.resolve() in self._input_paths or (
@@ -566,11 +575,10 @@ class RecipeRunner:
 
     def _write_outputs(self, path: Path, outputs: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
         self._check_output_path(path)
+        self.report["output_warnings"] = []
         if not outputs:
             raise ValueError("没有可以输出的结果：所有步骤都失败了，或 output_spec 指向的表不存在")
         if self.sources:
-            if any(source.path.suffix.lower() == ".xls" for source in self.sources.values()):
-                raise TemplatePreservationError("暂不支持保留旧版 .xls 的原格式，请先用 Excel 另存为 .xlsx 后再编辑")
             plans = plan_outputs(self.recipe, self.library, self.sources, outputs)
             base = next((plan.template for plan in plans if plan.template and plan.template.usable()), None)
             if base is not None:
@@ -578,11 +586,13 @@ class RecipeRunner:
             self._check_output_path(path)
             written = write_like_original(path, plans)
             if written is not None:
-                self.report["output_style"] = "original"
+                self.report["output_warnings"] = list(dict.fromkeys(
+                    notice for sheet in written for notice in sheet.get("warnings", [])))
+                self.report["output_style"] = "best_effort" if self.report["output_warnings"] else "original"
                 self.output_path = path
                 return written
-            if any(source.path.suffix.lower() in {".xlsx", ".xlsm"} for source in self.sources.values()):
-                raise TemplatePreservationError("无法确定结果对应的原工作簿，已停止输出以避免丢失格式")
+            if any(source.path.suffix.lower() in {".xlsx", ".xlsm", ".xls"} for source in self.sources.values()):
+                raise TemplatePreservationError("无法读取结果对应的原工作簿副本，请重新载入原始文件后重试")
         self.report["output_style"] = "default"
         split = {o.name: o.split_by for o in self.recipe.output_spec}
         sheets = [SheetSpec(name=name, df=df, split_by=split.get(name)) for name, df in outputs.items()]

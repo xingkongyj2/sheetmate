@@ -425,12 +425,14 @@ def test_macro_workbook_keeps_vba_and_xlsm_extension(tmp_path):
     assert source.read_bytes() == original_bytes
 
 
-def test_unsupported_workbook_content_does_not_silently_disappear(tmp_path):
+def test_unsupported_workbook_content_reports_warning_without_blocking_copy(tmp_path):
     source = tmp_path / "原表.xlsx"
     _styled_workbook(source)
     with ZipFile(source, "a") as archive:
         archive.writestr("xl/ctrlProps/ctrlProp1.xml", "<control/>")
+    original_bytes = source.read_bytes()
     output = tmp_path / "修改.xlsx"
     runner = _run(_amount_recipe(), source, output)
-    assert runner.report["status"] == "failed" and "不能完整保留" in runner.report["error"]
-    assert not output.exists()
+    assert runner.report["status"] == "warning" and runner.report["output_warnings"]
+    assert output.exists() and openpyxl.load_workbook(output)["订单"]["D3"].value == 110.5
+    assert source.read_bytes() == original_bytes

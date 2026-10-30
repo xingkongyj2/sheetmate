@@ -9,7 +9,7 @@
 - 结果里多出来的 sheet（例如汇总表）：追加到这份副本里，表头和数据样式照着原表
 - 原文件里没被动过的 sheet 原样保留
 
-支持 .xlsx / .xlsm 的原文件。检测到无法保留的内容或结构变更时停止输出，不退回普通表格。
+支持 .xlsx / .xlsm 的原文件。优先保留原格式；结构不兼容时重新加载副本基线继续修改，并报告格式变化。
 """
 
 from __future__ import annotations
@@ -170,7 +170,7 @@ def _read_dims(ws: Worksheet) -> dict[int, _Dim]:
 
 
 def write_like_original(path: Path, plans: list[OutputPlan]) -> list[dict[str, Any]] | None:
-    """在原工作簿基础上输出副本；有原工作簿但不能保留时抛出错误。"""
+    """优先保真输出；保真检查失败后从干净副本重试，原件覆盖检查始终保留。"""
     base = next((plan for plan in plans if plan.template and plan.template.usable()), None)
     if base is None:
         return None
@@ -180,21 +180,31 @@ def write_like_original(path: Path, plans: list[OutputPlan]) -> list[dict[str, A
         raise TemplatePreservationError("编辑结果必须另存副本，不能覆盖原文件")
     if tpl.path.suffix.lower() == ".xlsm" and path.suffix.lower() != ".xlsm":
         raise TemplatePreservationError("含宏工作簿必须另存为 .xlsm，不能丢弃宏后输出 .xlsx")
-    _check_package(tpl.path)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", UserWarning)
-        try:
+    notices: list[str] = []
+    try:
+        _check_package(tpl.path)
+    except TemplatePreservationError:
+        notices.append("工作簿包含当前编辑引擎不能完整保留的扩展对象，已在副本继续处理，这些对象可能变化。")
+    for relaxed in (False, True):
+        with warnings.catch_warnings(record=True) as observed:
+            warnings.simplefilter("always", UserWarning)
             workbook = openpyxl.load_workbook(tpl.path, keep_vba=tpl.path.suffix.lower() == ".xlsm", rich_text=True)
-        except Exception as exc:
-            raise TemplatePreservationError(f"无法完整保留原工作簿，已停止输出：{exc}") from exc
-        try:
-            return _write_workbook(workbook, path, plans, tpl)
-        except UserWarning as exc:
-            raise TemplatePreservationError(f"原工作簿包含不能完整保留的内容，已停止输出：{exc}") from exc
-        finally:
-            workbook.close()
-            if workbook.vba_archive is not None:
-                workbook.vba_archive.close()
+            try:
+                written = _write_workbook(workbook, path, plans, tpl, relaxed=relaxed, notices=notices)
+            except TemplatePreservationError:
+                if relaxed:
+                    raise
+                notices.append("部分修改与原有模板结构不兼容，已重新加载干净副本并完成修改；受影响区域的格式或引用可能变化。")
+                continue
+            finally:
+                workbook.close()
+                if workbook.vba_archive is not None:
+                    workbook.vba_archive.close()
+            notices.extend(str(item.message) for item in observed)
+            if notices and written:
+                written[0]["warnings"] = list(dict.fromkeys(notices))
+            return written
+    return None
 
 
 def _check_package(path: Path) -> None:
@@ -210,7 +220,9 @@ def _check_package(path: Path) -> None:
                     raise TemplatePreservationError("原文件包含暂不能完整保留的绘图形状，已停止输出以避免丢失")
 
 
-def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputPlan], base: TemplateSource) -> list[dict[str, Any]]:
+def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputPlan], base: TemplateSource,
+                    *, relaxed: bool = False, notices: list[str] | None = None) -> list[dict[str, Any]]:
+    notices = notices if notices is not None else []
     snapshots: dict[str, _Snapshot] = {}
     for source in [base, *(plan.template for plan in plans if plan.template)]:
         if source.path != base.path:
@@ -229,9 +241,9 @@ def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputP
                 raise TemplatePreservationError("输出与原工作表的对应关系不明确，已停止输出以避免丢失格式")
             sheet = workbook[source.sheet]
             title = _unique_title(plan.name, used - {sheet.title}) if plan.name != sheet.title else sheet.title
-            if title != sheet.title and _has_formulas(workbook):
+            if title != sheet.title and _has_formulas(workbook) and not relaxed:
                 raise TemplatePreservationError("重命名工作表可能破坏现有公式引用，请保留原工作表名称")
-            _rewrite_sheet(sheet, snap, plan.df)
+            _rewrite_sheet(sheet, snap, plan.df, relaxed=relaxed, notices=notices)
             used.discard(sheet.title)
             used.add(title)
             sheet.title = title
@@ -275,7 +287,9 @@ def _column_map(snap: _Snapshot, df: pd.DataFrame) -> list[int | None]:
     return [snap.tpl.col_index[pos[str(c)]] + 1 if str(c) in pos else None for c in df.columns]
 
 
-def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame) -> None:
+def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed: bool = False,
+                   notices: list[str] | None = None) -> None:
+    notices = notices if notices is not None else []
     tpl = snap.tpl
     mapping = _column_map(snap, df)
     columns = [str(c) for c in df.columns]
@@ -283,18 +297,31 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame) -> None:
     header_row, first_data = tpl.header_row, tpl.header_row + 1
 
     original = read_sheet(tpl.path, tpl.sheet, header_hint={"header_row": tpl.header_row, "header_rows": tpl.header_rows})
-    if len(original.df.columns) != len(tpl.columns):
+    if len(original.df.columns) != len(tpl.columns) and not relaxed:
         raise TemplatePreservationError("原工作表列结构已变化，无法安全编辑")
-    if columns[:len(tpl.columns)] == tpl.columns and len(df) == len(original.df):
-        _patch_cells(ws, snap, df, original.df, original.header.row_index or [], mapping)
+    if (columns[:len(tpl.columns)] == tpl.columns and len(df) == len(original.df)
+            and len(original.df.columns) == len(tpl.columns)):
+        _patch_cells(ws, snap, df, original.df, original.header.row_index or [], mapping, relaxed=relaxed)
         return
     if same_columns and len(df) < len(original.df):
-        matched = _match_original_rows(df, original.df)
+        try:
+            matched = _match_original_rows(df, original.df)
+        except TemplatePreservationError:
+            if not relaxed:
+                raise
+            matched = None
+        if matched is None:
+            matched = _match_edited_rows(df, original.df)
         if matched is not None:
-            _delete_original_rows(ws, original, matched)
+            previous_rows = original.header.row_index or []
+            removed = sorted(previous_rows[index] + 1 for index in range(len(previous_rows)) if index not in set(matched))
+            _delete_original_rows(ws, original, matched, relaxed=relaxed, notices=notices)
+            remaining_rows = [previous_rows[index] - bisect_left(removed, previous_rows[index] + 1) for index in matched]
+            _patch_cells(ws, snap, df, original.df.iloc[matched].reset_index(drop=True), remaining_rows, mapping,
+                         relaxed=relaxed)
             return
     merged_data = any(merged.max_row > tpl.header_row for merged in ws.merged_cells.ranges)
-    if (_has_formulas(ws.parent) or merged_data or (tpl.header_rows > 1 and not same_columns)
+    if not relaxed and (_has_formulas(ws.parent) or merged_data or (tpl.header_rows > 1 and not same_columns)
             or ws.conditional_formatting or ws.data_validations.count or ws._charts or ws._images or ws._pivots
             or ws.tables or _has_special_layout(ws, snap, original.header.row_index or [])
             or (not same_columns and any(merged.max_row == tpl.header_row for merged in ws.merged_cells.ranges))
@@ -305,7 +332,7 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame) -> None:
 
     # 1. 数据区里的合并单元格先拆掉（否则删行会留下残骸），然后整块删除
     for rng in list(ws.merged_cells.ranges):
-        if rng.min_row >= first_data:
+        if rng.min_row >= first_data or (relaxed and rng.max_row >= first_data):
             ws.unmerge_cells(str(rng))
     if (ws.max_row or 0) >= first_data:
         ws.delete_rows(first_data, ws.max_row - first_data + 1)
@@ -327,7 +354,10 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame) -> None:
         if height:
             ws.row_dimensions[excel_row].height = height
 
-    _fix_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
+    if relaxed:
+        _resize_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
+    else:
+        _fix_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
 
 
 def _match_original_rows(frame: pd.DataFrame, original: pd.DataFrame) -> list[int] | None:
@@ -355,7 +385,38 @@ def _match_original_rows(frame: pd.DataFrame, original: pd.DataFrame) -> list[in
     return earliest
 
 
-def _delete_original_rows(ws: Worksheet, original: Any, matched: list[int]) -> None:
+def _match_edited_rows(frame: pd.DataFrame, original: pd.DataFrame) -> list[int] | None:
+    """Use surviving unique fields to locate rows even when other fields were edited."""
+    source = [tuple(_excel_value(value) for value in record) for record in original.itertuples(index=False, name=None)]
+    result = [tuple(_excel_value(value) for value in record) for record in frame.itertuples(index=False, name=None)]
+    best: tuple[tuple[int, int], list[int]] | None = None
+    for column in range(len(original.columns)):
+        values = [record[column] for record in source]
+        if None in values or len(set(values)) != len(values):
+            continue
+        lookup = {value: index for index, value in enumerate(values)}
+        if any(record[column] not in lookup for record in result):
+            continue
+        positions = [lookup[record[column]] for record in result]
+        if len(set(positions)) != len(positions) or positions != sorted(positions):
+            continue
+        score = sum(left == right for record, position in zip(result, positions)
+                    for left, right in zip(record, source[position]))
+        result_values = [record[column] for record in result]
+        first_number = 0 if values[0] == 0 else 1
+        consecutive = (
+            values[0] in (0, 1)
+            and values == list(range(first_number, first_number + len(values)))
+            and result_values == list(range(first_number, first_number + len(result)))
+        )
+        rank = score, int(not consecutive)
+        if best is None or rank > best[0]:
+            best = rank, positions
+    return best[1] if best else None
+
+
+def _delete_original_rows(ws: Worksheet, original: Any, matched: list[int], *, relaxed: bool = False,
+                          notices: list[str] | None = None) -> None:
     """Delete filtered-out source rows while retaining the original cell/style objects."""
     row_index = original.header.row_index or []
     if len(row_index) != len(original.df):
@@ -365,11 +426,17 @@ def _delete_original_rows(ws: Worksheet, original: Any, matched: list[int]) -> N
     if not deleted_rows:
         return
     deleted_set = set(deleted_rows)
-    if any(sheet._charts or sheet._pivots for sheet in ws.parent) or ws._images:
+    if not relaxed and (any(sheet._charts or sheet._pivots for sheet in ws.parent) or ws._images):
         raise TemplatePreservationError("原表包含暂不能随行安全移动的图表或透视对象，已停止输出，原文件未改动")
     try:
-        _adjust_workbook_formulas(ws.parent, {ws.title: deleted_set}, ws, deleted_set)
-        _adjust_sheet_ranges(ws, deleted_set)
+        _adjust_workbook_formulas(ws.parent, {ws.title: deleted_set}, ws, deleted_set, notices=notices if relaxed else None)
+        try:
+            _adjust_sheet_ranges(ws, deleted_set)
+        except ValueError as exc:
+            if not relaxed:
+                raise
+            if notices is not None:
+                notices.append(f"部分工作表范围无法自动调整，已继续修改副本：{exc}")
         _move_original_cells(ws, deleted_rows)
     except ValueError as exc:
         raise TemplatePreservationError(f"无法安全保留原表引用或结构：{exc}；已停止输出，原文件未改动") from exc
@@ -416,17 +483,29 @@ def _move_original_cells(ws: Worksheet, deleted_rows: list[int]) -> None:
 
 
 def _adjust_workbook_formulas(workbook: openpyxl.Workbook, deleted: dict[str, set[int]],
-                              edited: Worksheet, removed: set[int]) -> None:
+                              edited: Worksheet, removed: set[int], *, notices: list[str] | None = None) -> None:
+    def update(formula: str, sheet_name: str) -> str:
+        try:
+            return adjust_formula(formula, sheet_name, deleted)
+        except ValueError as exc:
+            if notices is None:
+                raise
+            notices.append(f"部分公式引用未能自动调整，已保留原表达式并继续输出：{exc}")
+            return formula
+
     for sheet in workbook.worksheets:
         for cell in sheet._cells.values():
             if cell.data_type == "f" and not isinstance(cell.value, str):
-                raise ValueError("暂不能移动数组公式或数据表公式")
+                if notices is None:
+                    raise ValueError("暂不能移动数组公式或数据表公式")
+                notices.append("数组公式或数据表公式已随副本保留，其引用范围可能需要核对。")
+                continue
             if sheet is edited and cell.row in removed:
                 continue
             if cell.data_type == "f":
-                cell.value = adjust_formula(cell.value, sheet.title, deleted)
+                cell.value = update(cell.value, sheet.title)
             if not isinstance(cell, MergedCell) and cell.hyperlink and cell.hyperlink.location:
-                cell.hyperlink.location = adjust_formula(cell.hyperlink.location, sheet.title, deleted)
+                cell.hyperlink.location = update(cell.hyperlink.location, sheet.title)
         for validation in sheet.data_validations.dataValidation:
             if sheet is edited and not shift_range_ref(str(validation.sqref), removed):
                 continue
@@ -435,26 +514,26 @@ def _adjust_workbook_formulas(workbook: openpyxl.Workbook, deleted: dict[str, se
                 if formula:
                     if sheet is edited:
                         formula = _move_rule_origin(formula, validation.sqref, removed)
-                    setattr(validation, attribute, adjust_formula(formula, sheet.title, deleted))
+                    setattr(validation, attribute, update(formula, sheet.title))
         for formatting in sheet.conditional_formatting:
             if sheet is edited and not shift_range_ref(str(formatting.sqref), removed):
                 continue
             for rule in formatting.rules:
                 formulas = [_move_rule_origin(formula, formatting.sqref, removed)
                             if sheet is edited else formula for formula in rule.formula]
-                rule.formula = [adjust_formula(formula, sheet.title, deleted) for formula in formulas]
+                rule.formula = [update(formula, sheet.title) for formula in formulas]
         for table in sheet.tables.values():
             for column in table.tableColumns:
                 for attribute in ("calculatedColumnFormula", "totalsRowFormula"):
                     formula = getattr(column, attribute)
                     if formula and formula.text:
-                        formula.text = adjust_formula(formula.text, sheet.title, deleted)
+                        formula.text = update(formula.text, sheet.title)
         for definition in sheet.defined_names.values():
             if definition.attr_text:
-                definition.attr_text = adjust_formula(definition.attr_text, sheet.title, deleted)
+                definition.attr_text = update(definition.attr_text, sheet.title)
     for definition in workbook.defined_names.values():
         if definition.attr_text:
-            definition.attr_text = adjust_formula(definition.attr_text, "", deleted)
+            definition.attr_text = update(definition.attr_text, "")
 
 
 def _move_rule_origin(formula: str, references: MultiCellRange, deleted: set[int]) -> str:
@@ -557,7 +636,7 @@ def _has_special_layout(ws: Worksheet, snap: _Snapshot, rows: list[int]) -> bool
 
 
 def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: pd.DataFrame,
-                 rows: list[int], mapping: list[int | None]) -> None:
+                 rows: list[int], mapping: list[int | None], *, relaxed: bool = False) -> None:
     if len(rows) != len(frame):
         raise TemplatePreservationError("无法定位原表数据行，已停止输出以避免破坏排版")
     positions = [index + 1 for index in snap.tpl.col_index]
@@ -566,11 +645,21 @@ def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: 
     styles = _column_styles(snap, frame, mapping)
     values = {(row + 1, positions[index]): _excel_value(value)
               for row, record in zip(rows, frame.itertuples(index=False, name=None)) for index, value in enumerate(record)}
-    for merged in ws.merged_cells.ranges:
+    for merged in list(ws.merged_cells.ranges):
         affected = [value for (row, column), value in values.items()
                     if merged.min_row <= row <= merged.max_row and merged.min_col <= column <= merged.max_col]
         if affected and any(value != affected[0] for value in affected):
-            raise TemplatePreservationError(f"修改后的内容无法放入原合并单元格 {merged}，已停止输出以保留原格式")
+            if not relaxed:
+                raise TemplatePreservationError(f"修改后的内容无法放入原合并单元格 {merged}，已停止输出以保留原格式")
+            anchor = ws.cell(merged.min_row, merged.min_col)
+            style = copy(anchor._style)
+            value = anchor.value
+            ws.unmerge_cells(str(merged))
+            for merged_row in range(merged.min_row, merged.max_row + 1):
+                for merged_column in range(merged.min_col, merged.max_col + 1):
+                    cell = ws.cell(merged_row, merged_column)
+                    cell._style = copy(style)
+                    cell.value = value
     for row_index, excel_index in enumerate(rows):
         for column_index, column in enumerate(positions):
             cell = ws.cell(row=excel_index + 1, column=column)
@@ -581,7 +670,7 @@ def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: 
                 previous = _excel_value(original.iloc[row_index, column_index])
                 if value == previous:
                     continue
-                if cell.data_type == "f":
+                if cell.data_type == "f" and not relaxed:
                     raise TemplatePreservationError(f"本次处理会把公式 {cell.coordinate} 替换成数值，已停止输出以保护原公式")
                 cell.value = value
             else:
@@ -594,7 +683,8 @@ def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: 
         cell._style = copy(left._style)
         ws.column_dimensions[get_column_letter(column)].width = _auto_width(frame.iloc[:, index], str(frame.columns[index]))
     if added and (ws.tables or ws.auto_filter.ref):
-        _fix_table_objects(ws, snap.tpl.header_row, positions[-1], max(rows, default=snap.tpl.header_row) + 1)
+        resize = _resize_table_objects if relaxed else _fix_table_objects
+        resize(ws, snap.tpl.header_row, positions[-1], max(rows, default=snap.tpl.header_row) + 1)
 
 
 def _rewrite_header(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, mapping: list[int | None], columns: list[str]) -> tuple[int, int]:
@@ -677,6 +767,32 @@ def _apply_dims(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, mapping: list[
 def _auto_width(series: pd.Series, name: str) -> float:
     widest = max([_display_width(name)] + [_display_width(_excel_value(v)) for v in series.head(300).tolist()])
     return float(min(max(widest + 2, 8), 60))
+
+
+def _resize_table_objects(ws: Worksheet, header_row: int, width: int, last_row: int) -> None:
+    """Keep ordinary filter/table metadata usable after an unrestricted data rewrite."""
+    last_row = max(header_row + 1, last_row)
+    if ws.auto_filter.ref:
+        ws.auto_filter.ref = f"A{header_row}:{get_column_letter(width)}{last_row}"
+        ws.auto_filter.filterColumn = [item for item in ws.auto_filter.filterColumn if item.colId < width]
+        ws.auto_filter.sortState = None
+    for name in list(ws.tables):
+        table = ws.tables[name]
+        left, top, right, _ = openpyxl.utils.range_boundaries(table.ref)
+        if top != header_row or left > width:
+            del ws.tables[name]
+            continue
+        right = width if len(ws.tables) == 1 else min(right, width)
+        table.ref = f"{get_column_letter(left)}{top}:{get_column_letter(right)}{last_row}"
+        table.tableColumns = [TableColumn(id=column - left + 1, name=str(ws.cell(header_row, column).value or f"列{column}"))
+                              for column in range(left, right + 1)]
+        table.totalsRowCount = 0
+        table.totalsRowShown = False
+        table.sortState = None
+        if table.autoFilter is not None:
+            table.autoFilter.ref = table.ref
+            table.autoFilter.filterColumn = []
+            table.autoFilter.sortState = None
 
 
 def _fix_table_objects(ws: Worksheet, header_row: int, width: int, last_row: int) -> None:
