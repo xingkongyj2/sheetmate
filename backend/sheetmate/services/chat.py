@@ -163,12 +163,24 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                     await emit(event)
     except asyncio.CancelledError:
         recorder.error = "用户停止了生成"
-        _save_assistant(conversation_id, ("".join(text_parts) + "\n\n（已停止）").strip(), stored, recorder, run_id)
+        summary = _recipe_fallback(stored, interrupted=True) or "（已停止）"
+        separator = "\n\n" if text_parts else ""
+        await emit({"type": "text_chunk", "content": separator + summary})
+        answer = "".join(text_parts).strip()
+        await emit({"type": "final_text", "content": answer})
+        _save_assistant(conversation_id, answer, stored, recorder, run_id)
         raise
     except Exception as exc:
         await emit({"type": "error", "content": f"处理出错：{exc}"})
 
     answer = final_text or "".join(text_parts).strip()
+    if not answer or recorder.error:
+        summary = _recipe_fallback(stored, interrupted=bool(recorder.error))
+        if summary:
+            addition = ("\n\n" if answer else "") + summary
+            await emit({"type": "text_chunk", "content": addition})
+            answer += addition
+            await emit({"type": "final_text", "content": answer})
     if not answer and recorder.error:
         answer = f"⚠️ {recorder.error}"
     _save_assistant(conversation_id, answer, stored, recorder, run_id)
@@ -183,6 +195,66 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     task = asyncio.create_task(_learn_memories(llm, user_id, conversation_id, ctx.host.customer_id, message, answer))
     _background.add(task)
     task.add_done_callback(_background.discard)
+
+
+def _recipe_fallback(events: list[dict[str, Any]], *, interrupted: bool = False) -> str:
+    calls = [event for event in events if event.get("type") == "tool_call"
+             and event.get("tool") in {"build_recipe", "revise_recipe", "run_recipe"}]
+    if not calls:
+        return ""
+    results = {event.get("id"): event for event in events if event.get("type") == "tool_result"}
+    failed = sum(results.get(call.get("id"), {}).get("ok") is False for call in calls)
+    latest = results.get(calls[-1].get("id"))
+    selected_run = next((event["selected_run"] for event in reversed(events)
+                         if event.get("type") == "recipe_saved" and event.get("tool_call_id") == calls[-1].get("id")
+                         and isinstance(event.get("selected_run"), dict)), {})
+    files = {event.get("file_id") for event in events if event.get("type") == "file" and event.get("file_id")}
+    waiting = any(event.get("type") == "clarify" for event in events)
+    if interrupted:
+        outcome = "本次处理已中断，尚未完成最终结果确认。"
+    elif latest is None:
+        outcome = "最近一次流程尚未完成，暂时不能确认修改结果。"
+    elif latest.get("ok"):
+        outcome = "最近一次流程已执行完成。"
+    else:
+        outcome = "最近一次修改没有完成。"
+    blocks = [f"本轮共进行了 {len(calls)} 次流程处理，其中 {failed} 次返回失败。{outcome}"]
+    if latest is not None and latest.get("ok"):
+        report = selected_run.get("report") or {}
+        verification = selected_run.get("verification") or {}
+        if not verification.get("informational") and verification.get("status") in {"fail", "warn"}:
+            blocks.append("所选结果与提供的人工样例仍有差异，需要核对后再使用。")
+        elif report.get("status") == "warning" or (report.get("validation") or {}).get("status") in {"fail", "warn"}:
+            blocks.append("所选结果仍有运行校验或输出提示需要核对，请查看处理流程中的具体说明。")
+    if latest is not None and not latest.get("ok"):
+        related = [event for event in events if event.get("tool_call_id") == calls[-1].get("id")]
+        reason = next((str(event.get("error")) for event in reversed(related)
+                       if event.get("type") == "recipe_failed" and event.get("error")), "")
+        if not reason:
+            reason = next((str(event.get("summary")) for event in reversed(related)
+                           if event.get("type") == "recipe_run_done" and event.get("summary")), "")
+        reason = reason or str(latest.get("summary") or "")
+        if "TemplatePreservationError" in reason:
+            reason = "写回工作簿时，原表格式、合并结构或公式的兼容处理没有通过。"
+        elif "没有输入表" in reason or "没有找到" in reason or "找不到" in reason:
+            reason = "没有找到本次处理所需的文件、表格或已保存的流程。"
+        elif "JSON" in reason:
+            reason = "生成的处理步骤或参数无法被正确解析。"
+        elif reason:
+            reason = reason.splitlines()[0][:200]
+        if reason:
+            blocks.append(f"未完成的原因：{reason}")
+    blocks.append(f"本轮已生成 {len(files)} 个可下载文件，可先查看并核对已有结果。" if files
+                  else "本轮尚未生成可下载的结果文件。")
+    if interrupted:
+        blocks.append("可以继续本次任务，先核对已完成的步骤，再处理剩余部分。")
+    elif waiting:
+        blocks.append("请先回答下方的具体问题，确认处理口径后再继续。")
+    elif latest is None or not latest.get("ok"):
+        blocks.append("下一步可针对失败原因调整处理步骤，再从原文件的新副本继续；具体错误保留在执行明细中。")
+    elif not files:
+        blocks.append("下一步需要检查输出步骤，生成可下载的结果文件后再确认完成。")
+    return "\n\n".join(blocks)
 
 
 def _slim(event: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +272,13 @@ def _slim(event: dict[str, Any]) -> dict[str, Any]:
         report = dict(item["report"])
         report["steps"] = [{k: v for k, v in s.items() if k not in {"preview", "sql"}} for s in report.get("steps", [])]
         item["report"] = report
+    if item.get("type") == "recipe_saved" and isinstance(item.get("selected_run"), dict):
+        selected_run = dict(item["selected_run"])
+        if isinstance(selected_run.get("report"), dict):
+            report = dict(selected_run["report"])
+            report["steps"] = [{k: v for k, v in s.items() if k not in {"preview", "sql"}} for s in report.get("steps", [])]
+            selected_run["report"] = report
+        item["selected_run"] = selected_run
     return item
 
 

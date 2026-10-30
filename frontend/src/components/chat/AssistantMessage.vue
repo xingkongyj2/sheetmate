@@ -10,7 +10,7 @@ import MarkdownView from '@/components/common/MarkdownView.vue'
 import RecipeProgressCard from '@/components/recipe/RecipeProgressCard.vue'
 import type { UiMessage } from '@/composables/chatModel'
 import { copyMarkdown } from '@/composables/markdown'
-import { lastResultTable, messageMarkdown, planSteps } from '@/composables/messagePresentation'
+import { lastResultTable, messageMarkdown, planSteps, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
 import { useToast } from '@/composables/useToast'
 
 import PlanProgress from './PlanProgress.vue'
@@ -25,6 +25,13 @@ const copied = ref<'formatted' | 'markdown' | null>(null)
 let copiedTimer = 0
 const markdown = computed(() => messageMarkdown(props.message))
 const hasPlan = computed(() => planSteps(props.message).length > 0)
+const attempts = computed(() => recipeAttempts(props.message))
+const previousAttempts = computed(() => {
+  const previous = attempts.value.slice(0, -1)
+  return previous.length && previous.every((attempt) => recipeFailure(attempt.progress) && !attempt.progress.file) ? previous : []
+})
+const visibleAttempts = computed(() => previousAttempts.value.length ? attempts.value.slice(-1) : attempts.value)
+const reply = computed(() => props.message.content.trim() ? props.message.content : recipeOutcomeSummary(props.message))
 
 async function copyReply(format: 'formatted' | 'markdown') {
   if (copying.value) return
@@ -46,23 +53,30 @@ async function copyReply(format: 'formatted' | 'markdown') {
 const showProcess = ref(false)
 // 非计划任务执行时显示最新进展，结束后过程说明收进执行明细。
 const stageNotes = computed(() => props.message.timeline.flatMap((t) => (t.kind === 'note' ? [t] : [])))
+const stageNote = computed(() => {
+  const latest = stageNotes.value.at(-1)?.text
+  return latest && !attempts.value.some((attempt) => attempt.notes.includes(latest)) ? latest : ''
+})
 const processItems = computed(() => props.message.timeline.filter((t) => t.kind !== 'plan'))
 const toolCount = computed(() => props.message.timeline.filter((t) => t.kind === 'tool').length)
 const runningTool = computed(() => [...props.message.timeline].reverse().find((t) => t.kind === 'tool' && t.status === 'running'))
-const mood = computed(() => (props.message.streaming ? (runningTool.value ? 'working' : 'thinking') : props.message.error ? 'idle' : 'happy'))
+const mood = computed(() => {
+  if (props.message.streaming) return runningTool.value ? 'working' : 'thinking'
+  const latest = attempts.value.at(-1)
+  return props.message.error || (latest && recipeFailure(latest.progress)) ? 'idle' : 'happy'
+})
 
 // 一条回答里可能有好几张中间表，消息里只放最后一张（最终结果）；其余的在右侧「执行明细」里看
 // 「查询结果」是看数据时的探索（取值分布等），不是用户要的结果，不放进消息；它们在右侧「执行明细」里
 const lastTable = computed(() => lastResultTable(props.message))
-const recipes = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'recipe' ? [a] : [])))
 const others = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'file' || a.kind === 'clarify' ? [a] : [])))
 
 // 回答正文逐字显示：后端把最终回答整段给过来，这里做一个很快的打字动画；打开历史消息时直接整段显示
 const animate = props.message.streaming
-const shown = ref(animate ? '' : props.message.content)
+const shown = ref(animate ? '' : reply.value)
 let timer = 0
 function tick() {
-  const full = props.message.content
+  const full = reply.value
   if (!full.startsWith(shown.value)) shown.value = '' // 已显示的部分被撤回（其实是过程说明）：从头来
   const remaining = full.length - shown.value.length
   if (remaining <= 0) {
@@ -73,7 +87,7 @@ function tick() {
   shown.value = full.slice(0, shown.value.length + Math.max(3, Math.ceil(remaining / 14)))
 }
 watch(
-  () => props.message.content,
+  reply,
   (full) => {
     if (!animate) shown.value = full
     else if (!timer) timer = window.setInterval(tick, 30)
@@ -83,7 +97,7 @@ onBeforeUnmount(() => {
   window.clearInterval(timer)
   window.clearTimeout(copiedTimer)
 })
-const typing = computed(() => props.message.streaming || shown.value.length < props.message.content.length)
+const typing = computed(() => props.message.streaming || shown.value.length < reply.value.length)
 </script>
 
 <template>
@@ -92,12 +106,33 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
     <div class="assistant-content min-w-0 flex-1 space-y-3">
+      <MarkdownView v-if="shown" :source="shown" :streaming="typing" />
+
       <!-- 阶段小结：知道大概干了什么 -->
       <PlanProgress v-if="hasPlan" :message="message" />
-      <MarkdownView v-else-if="message.streaming && stageNotes.length" :source="stageNotes.at(-1)!.text" class="animate-rise !text-[14px] !text-mute" />
+      <MarkdownView v-else-if="message.streaming && !shown && stageNote" :source="stageNote" class="animate-rise !text-[14px] !text-mute" />
 
       <!-- 处理流程：一张精简卡片（细节折叠在里面） -->
-      <RecipeProgressCard v-for="a in recipes" :key="a.key" :progress="a.progress" :customer-id="customerId" />
+      <template v-for="attempt in visibleAttempts" :key="attempt.key">
+        <p v-if="attempt.notes.length && attempts.length > 1" class="text-xs font-medium text-mute">{{ attempt.label }}</p>
+        <MarkdownView v-if="attempt.notes.length" :source="attempt.notes.join('\n\n')" class="!text-[14px] !leading-6" />
+        <p v-else class="assistant-attempt-note text-[14px] leading-6 text-mute">{{ attempt.label }}</p>
+        <RecipeProgressCard :progress="attempt.progress" :customer-id="customerId" />
+      </template>
+
+      <details v-if="previousAttempts.length" class="group/attempts rounded-xl border border-line px-4 py-3">
+        <summary class="flex cursor-pointer list-none items-center gap-1.5 text-xs text-mute hover:text-ink [&::-webkit-details-marker]:hidden">
+          <ChevronRight class="size-3.5 transition group-open/attempts:rotate-90" />
+          查看前 {{ previousAttempts.length }} 次未完成的尝试
+        </summary>
+        <div class="mt-4 space-y-5">
+          <section v-for="attempt in previousAttempts" :key="attempt.key" class="space-y-2.5" :aria-label="attempt.label">
+            <p class="text-xs font-medium text-mute">{{ attempt.label }}</p>
+            <MarkdownView v-if="attempt.notes.length" :source="attempt.notes.join('\n\n')" class="!text-[14px] !leading-6" />
+            <RecipeProgressCard :progress="attempt.progress" :customer-id="customerId" />
+          </section>
+        </div>
+      </details>
 
       <!-- 执行过程：默认折叠成一行，正在执行时这一行显示当前在做什么 -->
       <div v-if="processItems.length || message.streaming" class="assistant-process">
@@ -113,9 +148,6 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
           <TimelineList :items="processItems" />
         </div>
       </div>
-
-      <!-- 最终回答 -->
-      <MarkdownView v-if="shown" :source="shown" :streaming="typing" />
 
       <!-- 结果：最后一张表、文件、需要用户回答的问题 -->
       <TableCard v-if="lastTable" :table="lastTable" @open="(n) => emit('openTable', n)" />
@@ -192,6 +224,12 @@ const typing = computed(() => props.message.streaming || shown.value.length < pr
 }
 
 .assistant-process:first-child > button {
+  min-height: var(--assistant-avatar-size);
+}
+
+.assistant-attempt-note:first-child {
+  display: flex;
+  align-items: center;
   min-height: var(--assistant-avatar-size);
 }
 </style>

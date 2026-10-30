@@ -10,6 +10,7 @@ import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import type { RecipeProgress, StepState } from '@/composables/chatModel'
+import { recipeFailure } from '@/composables/messagePresentation'
 
 import DiffCards from './DiffCards.vue'
 import RecipeFlow from './RecipeFlow.vue'
@@ -41,6 +42,7 @@ const flow = computed(() => {
 })
 
 const busy = computed(() => ['thinking', 'running', 'verifying', 'refining'].includes(props.progress.status))
+const failure = computed(() => recipeFailure(props.progress))
 const renames = computed(() => props.progress.inputs.filter((i) => Object.keys(i.renames).length || i.warnings.length))
 const pillStatus = computed(() => {
   if (busy.value) return 'running'
@@ -90,7 +92,7 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
       </div>
 
       <!-- 结束：一句话小结 -->
-      <p v-else-if="progress.runSummary && !progress.escalation && !progress.failed" class="text-[13px] leading-relaxed text-mute">{{ progress.runSummary }}</p>
+      <p v-else-if="progress.runSummary && !failure" class="text-[13px] leading-relaxed text-mute">{{ progress.runSummary }}</p>
 
       <!-- 需要确认的问题 -->
       <div v-if="progress.questions?.length" class="rounded-xl bg-fun-yellow/15 px-3 py-2.5 text-[13px]">
@@ -101,17 +103,24 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
       </div>
 
       <!-- 失败 -->
-      <div v-if="progress.escalation || progress.failed" class="flex gap-2 rounded-xl bg-error/5 px-3 py-2.5 text-[13px] text-error">
-        <CircleAlert class="mt-0.5 size-4 shrink-0" />
-        <div class="whitespace-pre-wrap leading-relaxed">{{ progress.escalation || progress.failed }}</div>
+      <div v-if="failure" class="flex gap-2.5 text-[13px] leading-relaxed">
+        <CircleAlert class="mt-0.5 size-4 shrink-0 text-error" />
+        <div class="min-w-0 space-y-1">
+          <p class="text-ink">{{ failure.summary }}</p>
+          <p class="text-mute">{{ failure.nextStep }}</p>
+        </div>
       </div>
 
       <!-- 细节：默认收起 -->
-      <div v-if="flow || progress.verify || progress.validation || progress.evidence?.length">
-        <button class="flex items-center gap-1 text-xs text-mute hover:text-ink" @click="showDetail = !showDetail">
-          <ChevronRight class="size-3.5 transition" :class="{ 'rotate-90': showDetail }" />{{ showDetail ? '收起处理流程' : '查看处理流程和校验' }}
+      <div v-if="flow || progress.verify || progress.validation || progress.evidence?.length || failure">
+        <button class="flex items-center gap-1 text-xs text-mute hover:text-ink" :aria-expanded="showDetail" @click="showDetail = !showDetail">
+          <ChevronRight class="size-3.5 transition" :class="{ 'rotate-90': showDetail }" />{{ showDetail ? '收起处理流程' : failure ? '查看处理流程和错误详情' : '查看处理流程和校验' }}
         </button>
         <div v-if="showDetail" class="mt-3 space-y-3">
+          <div v-if="failure?.detail" class="rounded-xl bg-paper px-3 py-2.5 text-xs leading-5">
+            <h4 class="mb-1 font-medium">错误详情</h4>
+            <p class="whitespace-pre-wrap break-words text-mute [overflow-wrap:anywhere]">{{ failure.detail }}</p>
+          </div>
           <!-- 证据：输入 vs 人工结果 -->
           <div v-if="progress.evidence?.length">
             <button class="btn-text -ml-2 text-xs" @click="showEvidence = !showEvidence">

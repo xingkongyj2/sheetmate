@@ -165,6 +165,12 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.round = e.round ?? p.round
       p.inputs = []
       p.validation = undefined
+      p.failed = undefined
+      p.escalation = undefined
+      p.runStatus = undefined
+      p.runSummary = undefined
+      p.verify = undefined
+      p.outputs = undefined
       p.steps = (e.recipe?.steps ?? []).map((s: StepState) => ({
         step_id: (s as unknown as { id: number }).id,
         name: s.name,
@@ -241,6 +247,37 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
     case 'recipe_saved':
       p.saved = e as unknown as RecipeProgress['saved']
       if (e.flow) p.flow = e.flow
+      if (e.selected_run) {
+        const selected = e.selected_run
+        const report = selected.report
+        const reports = report.steps as StepReport[]
+        p.runId = selected.run_id
+        p.round = selected.round
+        p.recipe = selected.recipe
+        p.recipeName = selected.recipe?.name ?? p.recipeName
+        p.recipeVersion = selected.recipe?.version ?? e.version
+        p.runStatus = report.status
+        p.runSummary = selected.summary
+        p.failed = report.error || undefined
+        p.escalation = report.escalation || undefined
+        p.validation = report.validation || undefined
+        p.verify = selected.verification || undefined
+        p.inputs = report.inputs ?? []
+        p.outputs = report.outputs ?? []
+        p.steps = (p.recipe?.steps ?? []).map((step) => {
+          const result = reports.find((item) => item.step_id === step.id)
+          return {
+            step_id: step.id, name: step.name, formula: step.formula,
+            formula_name: result?.formula_name ?? step.formula,
+            formula_kind: result?.formula_kind ?? step.formula_kind ?? 'builtin',
+            description: step.description, output: step.output,
+            status: result?.status ?? 'pending', report: result, error: result?.error,
+            repairs: (result?.attempts ?? []).map((attempt) => ({
+              attempt: attempt.attempt, status: 'recorded', explanation: attempt.explanation,
+            })),
+          }
+        })
+      }
       if (p.mode !== 'replay' || p.status !== 'failed') p.status = p.runStatus === 'failed' || p.runStatus === 'escalated' ? 'failed' : 'done'
       return true
     case 'recipe_failed':
@@ -299,6 +336,9 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       }
       const progress = findProgress(msg, e.id)
       if (progress && progress.status !== 'done' && progress.status !== 'failed') progress.status = e.ok ? 'done' : 'failed'
+      if (progress && !e.ok && !progress.failed && !progress.escalation && !progress.runSummary) {
+        progress.failed = e.summary || e.text
+      }
       break
     }
     case 'table':
@@ -393,6 +433,12 @@ export function finishMessage(msg: UiMessage): void {
     if (item.kind === 'tool' && item.status === 'running') item.status = 'error'
     if (item.kind === 'plan' && item.status === 'running') {
       item.status = msg.error && !msg.error.includes('已停止') ? 'error' : 'stopped'
+    }
+  }
+  for (const artifact of msg.artifacts) {
+    if (artifact.kind === 'recipe' && !['done', 'failed'].includes(artifact.progress.status)) {
+      artifact.progress.status = 'failed'
+      artifact.progress.failed ||= msg.error || '处理已结束，但没有收到这次尝试的完成结果。'
     }
   }
 }

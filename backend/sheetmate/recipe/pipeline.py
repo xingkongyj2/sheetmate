@@ -182,7 +182,14 @@ class RecipePipeline:
         # 修订时用户明确要求了改动，和原样例的差异不影响启用；学习时必须复现人工结果才启用
         saved = self.host.save_recipe(recipe, verification=None if revising else verification, run_report=report)
         recipe.version = saved.get("version", recipe.version)
-        yield {"type": "recipe_saved", **saved, "flow": recipe.flow()}
+        yield {"type": "recipe_saved", **saved, "flow": recipe.flow(), "selected_run": {
+            "run_id": handle.run_id,
+            "round": attempts.index(best) + 1,
+            "recipe": recipe.to_dict(),
+            "report": report,
+            "summary": runner.summary(),
+            "verification": verification,
+        }}
         self.result = {
             "ok": ok,
             "recipe": recipe,

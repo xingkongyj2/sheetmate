@@ -288,6 +288,47 @@ def test_modify_mode_refines_until_verified(client, samples, fake_llm):
     assert saved["status"] == "active"
 
 
+def test_modify_mode_publishes_selected_earlier_run_after_failed_refinement(client, samples, fake_llm):
+    conversation = _modify_conversation(client, samples)
+    first_recipe = _llm_recipe(broken="no_fill")
+    first_recipe["validation_rules"] = []
+    first_recipe["steps"][1]["params"]["expression"] = "0"
+    fake_llm(
+        intent_mode="modify",
+        script=[{"tools": [("build_recipe", {"requirement": "整理账单"})]}, {"text": ""}],
+        json_handlers=[("比对没有通过", _llm_recipe(broken="wrong_key")), ("Recipe 生成器", first_recipe)],
+    )
+    events = _chat(client, conversation, "整理账单")
+    runs = [event for event in events if event["type"] == "recipe_run_done"]
+    assert len(runs) == 2
+    assert runs[0]["status"] in {"success", "warning"}
+    assert runs[1]["status"] in {"failed", "escalated"}
+    verification = next(event["report"] for event in events if event["type"] == "recipe_verify")
+    assert verification["status"] == "fail"
+    saved = next(event for event in events if event["type"] == "recipe_saved")
+    selected = saved["selected_run"]
+    assert selected["round"] == 1
+    assert selected["run_id"] == runs[0]["run_id"]
+    assert selected["report"] == runs[0]["report"]
+    assert selected["summary"] == runs[0]["summary"]
+    assert selected["verification"] == verification
+    assert selected["recipe"]["version"] == saved["version"]
+    assert selected["recipe"]["steps"][2]["params"]["key"] == first_recipe["steps"][2]["params"]["key"]
+    assert next(event for event in events if event["type"] == "file")["run_id"] == selected["run_id"]
+    message = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"][-1]
+    stored = next(event["selected_run"] for event in message["events"] if event["type"] == "recipe_saved")
+    assert stored["run_id"] == selected["run_id"]
+    assert stored["round"] == 1
+    assert stored["verification"] == verification
+    assert stored["summary"] == selected["summary"]
+    assert stored["recipe"] == selected["recipe"]
+    assert stored["report"]["status"] == runs[0]["status"]
+    assert len(stored["report"]["steps"]) == len(selected["report"]["steps"])
+    assert all("preview" not in step and "sql" not in step for step in stored["report"]["steps"])
+    assert "最近一次流程已执行完成" in message["content"]
+    assert "与提供的人工样例仍有差异" in message["content"]
+
+
 def test_modify_mode_repairs_broken_step_with_llm(client, samples, fake_llm):
     conv = _modify_conversation(client, samples)
     fixed = _llm_recipe()["steps"][2]
@@ -415,6 +456,11 @@ def test_revise_rule_change_is_not_reverted(client, samples, fake_llm):
     assert not any("比对没有通过" in p for p in llm.json_prompts)
     saved = next(e for e in events if e["type"] == "recipe_saved")
     assert saved["status"] == "active"
+    assert saved["selected_run"]["verification"] == verify["report"]
+    assert saved["selected_run"]["verification"]["informational"] is True
+    message = client.get(f"/api/conversations/{conv}").json()["conversation"]["messages"][-1]
+    stored = next(event for event in message["events"] if event["type"] == "recipe_saved")
+    assert stored["selected_run"]["verification"] == verify["report"]
     tables = client.get(f"/api/conversations/{conv}").json()["conversation"]["tables"]
     results = [t for t in tables if t["role"] == "result" and "账单明细" in t["name"]]
     assert len(results) == 1  # 同一个流程再次执行时覆盖上一次的结果表，不会越积越多
