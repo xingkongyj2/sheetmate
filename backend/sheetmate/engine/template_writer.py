@@ -15,8 +15,8 @@
 from __future__ import annotations
 
 import datetime as dt
-import re
 import warnings
+from bisect import bisect_left
 from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,13 +28,16 @@ from zipfile import ZipFile
 import openpyxl
 import pandas as pd
 from openpyxl.cell.cell import MergedCell
+from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.styles.cell_style import StyleArray
 from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.cell_range import CellRange, MultiCellRange
 from openpyxl.worksheet.table import TableColumn
 from openpyxl.worksheet.worksheet import Worksheet
 
 from sheetmate.engine.profile import dtype_label
 from sheetmate.engine.reader import read_sheet
+from sheetmate.engine.row_references import adjust_formula, shift_range_ref
 from sheetmate.engine.writer import _display_width, _excel_value, safe_sheet_name
 
 TEMPLATE_SUFFIXES = {".xlsx", ".xlsm"}
@@ -287,7 +290,7 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame) -> None:
     if same_columns and len(df) < len(original.df):
         matched = _match_original_rows(df, original.df)
         if matched is not None:
-            _delete_original_rows(ws, snap, original, matched)
+            _delete_original_rows(ws, original, matched)
             return
     merged_data = any(merged.max_row > tpl.header_row for merged in ws.merged_cells.ranges)
     if (_has_formulas(ws.parent) or merged_data or (tpl.header_rows > 1 and not same_columns)
@@ -328,43 +331,30 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame) -> None:
 
 def _match_original_rows(frame: pd.DataFrame, original: pd.DataFrame) -> list[int] | None:
     """Return an unambiguous ordered subsequence of original rows for a filtered result."""
-    matched: list[int] = []
-    cursor = 0
-    for record in frame.itertuples(index=False, name=None):
-        found: list[int] = []
-        for index in range(cursor, len(original)):
-            candidate = original.iloc[index].tolist()
-            if all(_same_cell_value(value, candidate[pos]) for pos, value in enumerate(record)):
-                found.append(index)
-                if len(found) > 1:
-                    break
-        if not found:
-            return None
-        # Repeated identical rows cannot be mapped safely without a stable key.
-        if len(found) > 1:
-            return None
-        matched.append(found[0])
-        cursor = found[0] + 1
-    return matched
+    source_records = [tuple(_excel_value(value) for value in record)
+                      for record in original.itertuples(index=False, name=None)]
+    result_records = [tuple(_excel_value(value) for value in record)
+                      for record in frame.itertuples(index=False, name=None)]
+    earliest: list[int] = []
+    wanted = 0
+    for index, record in enumerate(source_records):
+        if wanted < len(result_records) and record == result_records[wanted]:
+            earliest.append(index)
+            wanted += 1
+    if wanted != len(result_records):
+        return None
+    latest: list[int] = []
+    wanted = len(result_records) - 1
+    for index in range(len(source_records) - 1, -1, -1):
+        if wanted >= 0 and source_records[index] == result_records[wanted]:
+            latest.append(index)
+            wanted -= 1
+    if earliest != list(reversed(latest)):
+        raise TemplatePreservationError("结果包含无法唯一定位的重复行，已停止输出以避免删除错误的原始行")
+    return earliest
 
 
-def _same_cell_value(left: Any, right: Any) -> bool:
-    if left is None or right is None:
-        return left is None and right is None
-    try:
-        left_missing = bool(pd.isna(left))
-        right_missing = bool(pd.isna(right))
-        if left_missing or right_missing:
-            return left_missing and right_missing
-    except (TypeError, ValueError):
-        pass
-    try:
-        return bool(_excel_value(left) == _excel_value(right))
-    except (TypeError, ValueError):
-        return str(left) == str(right)
-
-
-def _delete_original_rows(ws: Worksheet, snap: _Snapshot, original: Any, matched: list[int]) -> None:
+def _delete_original_rows(ws: Worksheet, original: Any, matched: list[int]) -> None:
     """Delete filtered-out source rows while retaining the original cell/style objects."""
     row_index = original.header.row_index or []
     if len(row_index) != len(original.df):
@@ -374,94 +364,123 @@ def _delete_original_rows(ws: Worksheet, snap: _Snapshot, original: Any, matched
     if not deleted_rows:
         return
     deleted_set = set(deleted_rows)
-    affected_merges = [str(merged) for merged in ws.merged_cells.ranges
-                       if any(merged.min_row <= row <= merged.max_row for row in deleted_rows)]
-    if affected_merges:
-        raise TemplatePreservationError(
-            f"待删除行与合并单元格 {affected_merges[0]} 相交，暂不能安全保留；已停止输出，原文件未改动"
-        )
-    if ws._charts or ws._images or ws._pivots:
+    if any(sheet._charts or sheet._pivots for sheet in ws.parent) or ws._images:
         raise TemplatePreservationError("原表包含暂不能随行安全移动的图表或透视对象，已停止输出，原文件未改动")
-    for row in sorted(deleted_rows, reverse=True):
-        _delete_row_preserving_dimensions(ws, row)
-    _adjust_sheet_ranges(ws, deleted_set)
-    _adjust_workbook_formulas(ws.parent, {ws.title: deleted_set})
+    try:
+        _adjust_workbook_formulas(ws.parent, {ws.title: deleted_set}, ws, deleted_set)
+        _adjust_sheet_ranges(ws, deleted_set)
+        _move_original_cells(ws, deleted_rows)
+    except ValueError as exc:
+        raise TemplatePreservationError(f"无法安全保留原表引用或结构：{exc}；已停止输出，原文件未改动") from exc
 
 
-def _delete_row_preserving_dimensions(ws: Worksheet, row: int) -> None:
+def _move_original_cells(ws: Worksheet, deleted_rows: list[int]) -> None:
+    deleted = set(deleted_rows)
+    merged_ranges: list[str] = []
+    anchors: list[tuple[CellRange, Any]] = []
+    for merged in ws.merged_cells.ranges:
+        reference = shift_range_ref(str(merged), deleted)
+        if not reference:
+            continue
+        updated = CellRange(reference)
+        if updated.min_row != updated.max_row or updated.min_col != updated.max_col:
+            merged_ranges.append(reference)
+        if merged.min_row in deleted:
+            anchors.append((updated, copy(ws.cell(merged.min_row, merged.min_col))))
+    cells = {}
+    for (row, column), cell in ws._cells.items():
+        if row in deleted:
+            continue
+        cell.row = row - bisect_left(deleted_rows, row)
+        if not isinstance(cell, MergedCell) and cell.hyperlink:
+            cell.hyperlink.ref = cell.coordinate
+        cells[(cell.row, column)] = cell
+    for merged, anchor in anchors:
+        anchor.row = merged.min_row
+        if anchor.hyperlink:
+            anchor.hyperlink.ref = anchor.coordinate
+        cells[(anchor.row, anchor.column)] = anchor
+    ws._cells = cells
+    ws.merged_cells = MultiCellRange(merged_ranges)
     dimensions = {index: copy(dimension) for index, dimension in ws.row_dimensions.items()}
-    ws.delete_rows(row, 1)
     ws.row_dimensions.clear()
     for index, dimension in dimensions.items():
-        if index == row:
+        if index in deleted:
             continue
-        dimension.index = index - 1 if index > row else index
+        dimension.index = index - bisect_left(deleted_rows, index)
         ws.row_dimensions[dimension.index] = dimension
+    ws._current_row = ws.max_row if ws._cells else 0
 
 
-_CELL_REF_RE = re.compile(
-    r"(?P<prefix>(?:(?:'[^']*(?:''[^']*)*'|[A-Za-z_][A-Za-z0-9_. ]*)!)?)"
-    r"(?P<col>\$?[A-Z]{1,3})(?P<row>\$?\d+)"
-)
-
-
-def _adjust_workbook_formulas(workbook: openpyxl.Workbook, deleted: dict[str, set[int]]) -> None:
+def _adjust_workbook_formulas(workbook: openpyxl.Workbook, deleted: dict[str, set[int]],
+                              edited: Worksheet, removed: set[int]) -> None:
     for sheet in workbook.worksheets:
-        for row in sheet.iter_rows():
-            for cell in row:
-                if cell.data_type != "f" or not isinstance(cell.value, str):
-                    continue
-                cell.value = _adjust_formula(cell.value, sheet.title, deleted)
-
-
-def _adjust_formula(formula: str, current_sheet: str, deleted: dict[str, set[int]]) -> str:
-    def replace(match: re.Match[str]) -> str:
-        prefix = match.group("prefix")
-        target_sheet = current_sheet
-        if prefix:
-            target_sheet = prefix[:-1]
-            if target_sheet.startswith("'") and target_sheet.endswith("'"):
-                target_sheet = target_sheet[1:-1].replace("''", "'")
-        row_text = match.group("row")
-        row = int(row_text.lstrip("$"))
-        removed = deleted.get(target_sheet, set())
-        if row in removed:
-            raise TemplatePreservationError(
-                f"公式引用了待删除的 {target_sheet}!{match.group('col')}{row}，已停止输出以保护原公式"
-            )
-        shift = sum(item < row for item in removed)
-        if not shift:
-            return match.group(0)
-        return f"{prefix}{match.group('col')}{'$' if row_text.startswith('$') else ''}{row - shift}"
-
-    try:
-        return _CELL_REF_RE.sub(replace, formula)
-    except TemplatePreservationError:
-        raise
-    except (IndexError, ValueError):
-        raise TemplatePreservationError("原表包含无法安全调整的公式引用，已停止输出，原文件未改动")
+        for cell in sheet._cells.values():
+            if sheet is edited and cell.row in removed:
+                continue
+            if cell.data_type == "f":
+                if not isinstance(cell.value, str):
+                    raise ValueError("暂不能移动数组公式或数据表公式")
+                cell.value = adjust_formula(cell.value, sheet.title, deleted)
+            if not isinstance(cell, MergedCell) and cell.hyperlink and cell.hyperlink.location:
+                cell.hyperlink.location = adjust_formula(cell.hyperlink.location, sheet.title, deleted)
+        for validation in sheet.data_validations.dataValidation:
+            for attribute in ("formula1", "formula2"):
+                formula = getattr(validation, attribute)
+                if formula:
+                    setattr(validation, attribute, adjust_formula(formula, sheet.title, deleted))
+        for formatting in sheet.conditional_formatting:
+            for rule in formatting.rules:
+                rule.formula = [adjust_formula(formula, sheet.title, deleted) for formula in rule.formula]
+        for table in sheet.tables.values():
+            for column in table.tableColumns:
+                for attribute in ("calculatedColumnFormula", "totalsRowFormula"):
+                    formula = getattr(column, attribute)
+                    if formula and formula.text:
+                        formula.text = adjust_formula(formula.text, sheet.title, deleted)
+        for definition in sheet.defined_names.values():
+            if definition.attr_text:
+                definition.attr_text = adjust_formula(definition.attr_text, sheet.title, deleted)
+    for definition in workbook.defined_names.values():
+        if definition.attr_text:
+            definition.attr_text = adjust_formula(definition.attr_text, "", deleted)
 
 
 def _adjust_sheet_ranges(ws: Worksheet, deleted: set[int]) -> None:
     if ws.auto_filter is not None and ws.auto_filter.ref:
-        ws.auto_filter.ref = _shift_range_ref(ws.auto_filter.ref, ws.title, deleted)
+        ws.auto_filter.ref = shift_range_ref(ws.auto_filter.ref, deleted) or None
+    for owner in [ws.auto_filter, *(table.autoFilter for table in ws.tables.values() if table.autoFilter)]:
+        if owner.sortState:
+            owner.sortState.ref = shift_range_ref(owner.sortState.ref, deleted)
+            for condition in owner.sortState.sortCondition:
+                condition.ref = shift_range_ref(condition.ref, deleted)
+    validations = []
     for validation in ws.data_validations.dataValidation:
-        validation.sqref = _shift_range_ref(str(validation.sqref), ws.title, deleted)
+        reference = shift_range_ref(str(validation.sqref), deleted)
+        if reference:
+            validation.sqref = reference
+            validations.append(validation)
+    ws.data_validations.dataValidation = validations
+    formatting_list = ConditionalFormattingList()
     for formatting in ws.conditional_formatting:
-        formatting.sqref = _shift_range_ref(str(formatting.sqref), ws.title, deleted)
+        reference = shift_range_ref(str(formatting.sqref), deleted)
+        if reference:
+            updated = copy(formatting)
+            updated.sqref = reference
+            for rule in formatting.rules:
+                formatting_list.add(updated, rule)
+    ws.conditional_formatting = formatting_list
     for table in ws.tables.values():
-        table.ref = _shift_range_ref(table.ref, ws.title, deleted)
+        table.ref = shift_range_ref(table.ref, deleted)
         if table.autoFilter is not None and table.autoFilter.ref:
             table.autoFilter.ref = table.ref
-
-
-def _shift_range_ref(reference: str, sheet: str, deleted: set[int]) -> str:
-    def shift(match: re.Match[str]) -> str:
-        row_text = match.group("row")
-        row = int(row_text.lstrip("$"))
-        shift_count = sum(item < row for item in deleted)
-        return f"{match.group('col')}{'$' if row_text.startswith('$') else ''}{max(1, row - shift_count)}"
-    return _CELL_REF_RE.sub(shift, reference)
+    if ws.print_area:
+        ws.print_area = [shift_range_ref(str(reference), deleted) for reference in ws._print_area.ranges
+                         if shift_range_ref(str(reference), deleted)]
+    if ws.print_title_rows:
+        ws.print_title_rows = shift_range_ref(ws.print_title_rows, deleted) or None
+    for page_break in ws.row_breaks.brk:
+        page_break.id -= sum(row <= page_break.id for row in deleted)
 
 
 def _has_special_layout(ws: Worksheet, snap: _Snapshot, rows: list[int]) -> bool:

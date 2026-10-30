@@ -1,16 +1,16 @@
 <script setup lang="ts">
 /**
  * 对话页：中间是消息流和输入框，右侧是执行明细。
- * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、执行明细开关。
+ * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、模式切换、执行明细开关。
  */
 import { LoaderCircle, PanelRight, Pencil, Save } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { conversationApi, fileApi } from '@/api'
+import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { StreamHandle } from '@/api/sse'
-import type { ConversationDetail, FileInfo, PlanStep } from '@/api/types'
+import type { ConversationDetail, PlanStep } from '@/api/types'
 import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
@@ -18,9 +18,8 @@ import ChatComposer, { type Attachment } from '@/components/chat/ChatComposer.vu
 import ExecutionPanel from '@/components/chat/ExecutionPanel.vue'
 import PlanEditor from '@/components/chat/PlanEditor.vue'
 import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
-import UserMessage from '@/components/chat/UserMessage.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
-import { applyEvent, finishMessage, fromStored, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
+import { applyEvent, fromStored, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { pendingStarts } from '@/stores/pending'
@@ -36,15 +35,14 @@ const loading = ref(true)
 const streaming = ref(false)
 const backgroundRunning = ref(false)
 const text = ref('')
+const mode = ref<'analyze' | 'modify'>('analyze')
 const planMode = ref(false)
 const attachments = ref<Attachment[]>([])
-const recentlyUploaded = ref<FileInfo[]>([])
-const plan = ref<{ title: string; steps: PlanStep[]; message: string; attachments: string[] } | null>(null)
+const plan = ref<{ title: string; steps: PlanStep[]; message: string } | null>(null)
 const planning = ref(false)
-const panelOpen = ref(false)
+const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角或消息下方的「查看执行明细」
 const selectedKey = ref<string | null>(null)
 const viewing = ref<string | null>(null)
-const viewingFile = ref<FileInfo | null>(null)
 const saveOpen = ref(false)
 const editingTitle = ref(false)
 const titleDraft = ref('')
@@ -52,38 +50,25 @@ const scroller = ref<HTMLElement | null>(null)
 const content = ref<HTMLElement | null>(null)
 let handle: StreamHandle | null = null
 let pollTimer = 0
-let sideRefreshVersion = 0
 
 const selectedMessage = computed(() => {
   const assistants = messages.value.filter((m) => m.role === 'assistant')
   return assistants.find((m) => m.key === selectedKey.value) ?? assistants[assistants.length - 1] ?? null
 })
 const customer = computed(() => detail.value?.customer ?? null)
-const messageFiles = computed(() => {
-  const files = new Map(recentlyUploaded.value.map((file) => [file.file_id, file]))
-  for (const file of detail.value?.files ?? []) files.set(file.file_id, file)
-  return [...files.values()]
-})
-
-function acknowledgeUploads(files: FileInfo[]) {
-  const ids = new Set(files.map((file) => file.file_id))
-  recentlyUploaded.value = recentlyUploaded.value.filter((file) => !ids.has(file.file_id))
-}
 
 // ------------------------------------------------------------------ 加载
 
 async function load(silent = false) {
-  const version = sideRefreshVersion
   if (!silent) loading.value = true
   try {
     const data = await conversationApi.get(props.id)
-    if (detail.value && version !== sideRefreshVersion) data.files = detail.value.files
     detail.value = data
-    acknowledgeUploads(data.files)
     if (!streaming.value) {
       messages.value = data.messages.map((m) => reactive(fromStored(m)) as UiMessage)
       scrollToBottom(true) // 打开会话（包括后台任务跑完刷新）都停在最新一条
     }
+    mode.value = data.mode
     backgroundRunning.value = data.running && !streaming.value
     if (backgroundRunning.value) schedulePoll()
   } catch (err) {
@@ -103,16 +88,14 @@ function schedulePoll() {
 }
 
 async function refreshSide() {
-  const version = ++sideRefreshVersion
   try {
     const data = await conversationApi.get(props.id)
-    if (detail.value && version === sideRefreshVersion) {
+    if (detail.value) {
       detail.value.tables = data.tables
       detail.value.files = data.files
       detail.value.recipes = data.recipes
       detail.value.title = data.title
       detail.value.customer = data.customer
-      acknowledgeUploads(data.files)
     }
   } catch {
     /* 忽略 */
@@ -131,13 +114,8 @@ onMounted(async () => {
   const pending = pendingStarts.get(props.id)
   if (pending) {
     pendingStarts.delete(props.id)
-    if (pending.plan) {
-      attachments.value = pending.attachments.flatMap((id) => {
-        const file = detail.value?.files.find((item) => item.file_id === id)
-        return file ? [{ key: id, name: file.filename, kind: file.kind === 'expected' ? 'expected' as const : 'input' as const, status: 'done' as const }] : []
-      })
-      await requestPlan(pending.message, pending.attachments)
-    } else await send(pending.message, { attachments: pending.attachments })
+    if (pending.plan) await requestPlan(pending.message, pending.attachments)
+    else await send(pending.message, { attachments: pending.attachments })
   }
 })
 
@@ -187,7 +165,7 @@ async function requestPlan(message: string, ids: string[]) {
   scrollToBottom(true)
   try {
     const result = await conversationApi.plan(props.id, message)
-    plan.value = { ...result, message, attachments: [...ids] }
+    plan.value = { ...result, message }
   } catch (err) {
     toast.error(errorText(err))
     messages.value.pop()
@@ -198,16 +176,12 @@ async function requestPlan(message: string, ids: string[]) {
   }
 }
 
-async function runPlan(steps: PlanStep[]) {
+function runPlan(steps: PlanStep[]) {
   if (!plan.value) return
   const message = plan.value.message
-  const ids = plan.value.attachments
   plan.value = null
   messages.value.pop() // 计划阶段临时显示的用户消息，正式发送时重新加上
-  const draftAttachments = attachments.value
-  const running = send(message, { planSteps: steps, attachments: ids })
-  attachments.value = draftAttachments.filter((item) => !ids.includes(item.key))
-  await running
+  send(message, { planSteps: steps })
 }
 
 function cancelPlan() {
@@ -228,7 +202,7 @@ async function send(message: string, opts: { attachments?: string[]; planSteps?:
 
   handle = conversationApi.chat(
     props.id,
-    { message, plan_steps: opts.planSteps, attachments: opts.attachments },
+    { message, mode: mode.value, plan_steps: opts.planSteps, attachments: opts.attachments },
     (event) => {
       applyEvent(assistant, event)
       if (event.type === 'title' && detail.value) {
@@ -243,7 +217,7 @@ async function send(message: string, opts: { attachments?: string[]; planSteps?:
   } catch (err) {
     if ((err as Error).name !== 'AbortError') assistant.error = errorText(err)
   } finally {
-    finishMessage(assistant)
+    assistant.streaming = false
     streaming.value = false
     handle = null
     store.patchConversation(props.id, { running: false, updated_at: new Date().toISOString() })
@@ -263,9 +237,6 @@ async function attach(files: File[], kind: 'input' | 'expected') {
     attachments.value.push(local)
     try {
       const result = await conversationApi.upload(props.id, file, kind)
-      sideRefreshVersion++
-      recentlyUploaded.value = [...recentlyUploaded.value.filter((item) => item.file_id !== result.file.file_id), result.file]
-      if (detail.value) detail.value.files = [result.file, ...detail.value.files.filter((item) => item.file_id !== result.file.file_id)]
       local.key = result.file.file_id
       local.status = 'done'
       local.tables = result.tables.map((t) => t.name)
@@ -279,6 +250,16 @@ async function attach(files: File[], kind: 'input' | 'expected') {
 
 function removeAttachment(key: string) {
   attachments.value = attachments.value.filter((a) => a.key !== key)
+}
+
+async function changeMode(value: 'analyze' | 'modify') {
+  mode.value = value
+  try {
+    await conversationApi.update(props.id, { mode: value })
+    store.patchConversation(props.id, { mode: value })
+  } catch (err) {
+    toast.error(errorText(err))
+  }
 }
 
 function startEditTitle() {
@@ -303,12 +284,6 @@ async function onSaved() {
 async function loadTable(offset: number, limit: number) {
   const page = await conversationApi.tablePage(props.id, viewing.value!, offset, limit)
   return { columns: page.columns.map((c) => c.name), rows: page.rows, total: page.total }
-}
-
-async function loadFile(offset: number, limit: number) {
-  const file = viewingFile.value!
-  const page = await fileApi.preview(file.file_id, file.sheets[0]?.sheet, offset, limit)
-  return { columns: page.columns, rows: page.rows, total: page.total }
 }
 
 function answer(option: string) {
@@ -366,7 +341,7 @@ function answer(option: string) {
             <Mascot :variant="customer?.mascot ?? 'blob'" :size="96" />
             <h2 class="mt-5 text-xl font-semibold">{{ customer ? `我已经了解「${customer.name}」了` : '把表格拖进来，告诉我要做什么' }}</h2>
             <p class="mt-2 max-w-md text-sm leading-relaxed text-mute">
-              {{ customer ? '我会按这个客户的处理逻辑、流程和业务规则来处理。' : '直接说你的需求，我会自动判断处理方式。修改表格时保留原有格式，源文件始终保留。' }}
+              {{ customer ? '我会按这个客户的处理逻辑、流程和业务规则来处理。' : '「分析」用来统计查询；「修改」会把整理过程做成流程，下个月换个文件就能一键重复。' }}
             </p>
             <div class="mt-6 flex gap-6 opacity-90">
               <FunObject kind="sheet" :size="40" class="animate-float" />
@@ -377,14 +352,24 @@ function answer(option: string) {
 
           <div v-else class="space-y-8">
             <template v-for="m in messages" :key="m.key">
-              <UserMessage v-if="m.role === 'user'" :message="m" :files="messageFiles" @preview="(file) => (viewingFile = file)" />
+              <div v-if="m.role === 'user'" class="flex justify-end">
+                <div class="max-w-[85%]">
+                  <div class="whitespace-pre-wrap rounded-[20px] rounded-br-md bg-paper px-4 py-2.5 text-[15px] leading-relaxed">{{ m.content }}</div>
+                  <div v-if="(m.meta.attachments as string[] | undefined)?.length" class="mt-1 text-right text-[11px] text-faint">
+                    附带 {{ (m.meta.attachments as string[]).length }} 个文件
+                  </div>
+                  <div v-if="m.meta.plan" class="mt-1 text-right text-[11px] text-faint">按计划执行（{{ (m.meta.plan as PlanStep[]).length }} 步）</div>
+                </div>
+              </div>
               <AssistantMessage
                 v-else
                 :message="m"
                 :customer-id="customer?.id"
                 :mascot="customer?.mascot"
+                :selected="selectedMessage?.key === m.key && panelOpen"
                 @answer="answer"
                 @open-table="(name) => (viewing = name)"
+                @inspect="() => { selectedKey = m.key; panelOpen = true }"
               />
             </template>
 
@@ -405,16 +390,18 @@ function answer(option: string) {
         <div class="mx-auto w-full max-w-[820px]">
           <ChatComposer
             v-model="text"
+            :mode="mode"
             v-model:plan="planMode"
             :attachments="attachments"
             :busy="streaming"
-            placeholder="继续追问、提出修改要求，或上传新的表格…"
+            :placeholder="mode === 'modify' ? '继续说要怎么改，或者「把第 3 步改成…」' : '继续追问，或上传新的表格…'"
+            @update:mode="changeMode"
             @attach="attach"
             @remove="removeAttachment"
             @send="onSend"
             @stop="stop"
           />
-          <p class="mt-2 text-center text-[11px] text-faint">AI 生成的结果可能存在错误，请核对重要数据后再使用。</p>
+          <p class="mt-2 text-center text-[11px] text-faint">AI 负责理解与规划，数据由本地 DuckDB 引擎确定性执行 · 源文件只读，结果另存新文件</p>
         </div>
       </div>
     </div>
@@ -429,6 +416,61 @@ function answer(option: string) {
     />
 
     <TableViewer v-if="viewing" :key="viewing" :title="viewing" :loader="loadTable" @close="viewing = null" />
+ * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、执行明细开关。
+import { conversationApi, fileApi } from '@/api'
+import type { ConversationDetail, FileInfo, PlanStep } from '@/api/types'
+import UserMessage from '@/components/chat/UserMessage.vue'
+import { applyEvent, finishMessage, fromStored, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
+const recentlyUploaded = ref<FileInfo[]>([])
+const plan = ref<{ title: string; steps: PlanStep[]; message: string; attachments: string[] } | null>(null)
+const panelOpen = ref(false)
+const viewingFile = ref<FileInfo | null>(null)
+let sideRefreshVersion = 0
+const messageFiles = computed(() => {
+  const files = new Map(recentlyUploaded.value.map((file) => [file.file_id, file]))
+  for (const file of detail.value?.files ?? []) files.set(file.file_id, file)
+  return [...files.values()]
+})
+
+function acknowledgeUploads(files: FileInfo[]) {
+  const ids = new Set(files.map((file) => file.file_id))
+  recentlyUploaded.value = recentlyUploaded.value.filter((file) => !ids.has(file.file_id))
+}
+  const version = sideRefreshVersion
+    if (detail.value && version !== sideRefreshVersion) data.files = detail.value.files
+    acknowledgeUploads(data.files)
+  const version = ++sideRefreshVersion
+    if (detail.value && version === sideRefreshVersion) {
+      acknowledgeUploads(data.files)
+    if (pending.plan) {
+      attachments.value = pending.attachments.flatMap((id) => {
+        const file = detail.value?.files.find((item) => item.file_id === id)
+        return file ? [{ key: id, name: file.filename, kind: file.kind === 'expected' ? 'expected' as const : 'input' as const, status: 'done' as const }] : []
+      })
+      await requestPlan(pending.message, pending.attachments)
+    } else await send(pending.message, { attachments: pending.attachments })
+    plan.value = { ...result, message, attachments: [...ids] }
+async function runPlan(steps: PlanStep[]) {
+  const ids = plan.value.attachments
+  const draftAttachments = attachments.value
+  const running = send(message, { planSteps: steps, attachments: ids })
+  attachments.value = draftAttachments.filter((item) => !ids.includes(item.key))
+  await running
+    { message, plan_steps: opts.planSteps, attachments: opts.attachments },
+    finishMessage(assistant)
+      sideRefreshVersion++
+      recentlyUploaded.value = [...recentlyUploaded.value.filter((item) => item.file_id !== result.file.file_id), result.file]
+      if (detail.value) detail.value.files = [result.file, ...detail.value.files.filter((item) => item.file_id !== result.file.file_id)]
+async function loadFile(offset: number, limit: number) {
+  const file = viewingFile.value!
+  const page = await fileApi.preview(file.file_id, file.sheets[0]?.sheet, offset, limit)
+  return { columns: page.columns, rows: page.rows, total: page.total }
+}
+
+              {{ customer ? '我会按这个客户的处理逻辑、流程和业务规则来处理。' : '直接说你的需求，我会自动判断处理方式。修改表格时保留原有格式，源文件始终保留。' }}
+              <UserMessage v-if="m.role === 'user'" :message="m" :files="messageFiles" @preview="(file) => (viewingFile = file)" />
+            placeholder="继续追问、提出修改要求，或上传新的表格…"
+          <p class="mt-2 text-center text-[11px] text-faint">AI 生成的结果可能存在错误，请核对重要数据后再使用。</p>
     <TableViewer v-if="viewingFile" :key="viewingFile.file_id" :title="viewingFile.filename" :subtitle="viewingFile.sheets[0] ? `工作表：${viewingFile.sheets[0].sheet}${viewingFile.sheets.length > 1 ? `（共 ${viewingFile.sheets.length} 个工作表）` : ''}` : ''" :loader="loadFile" @close="viewingFile = null" />
     <SaveToCustomerDialog v-if="saveOpen" :conversation-id="id" @close="saveOpen = false" @saved="onSaved" />
   </div>
