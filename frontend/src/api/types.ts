@@ -187,9 +187,19 @@ export interface CustomerDetail extends Omit<CustomerCard, 'recipes'> {
   recipes: (RecipeBrief & { flow: RecipeFlowData; recipe: RecipeJSON })[]
   memories: MemoryItem[]
   field_mapping: Record<string, string[]>
-  formulas: FormulaInfo[]
+  formulas: CustomerFormula[]
   runs: RunBrief[]
   conversations: { id: string; title: string; mode: string; updated_at: string }[]
+}
+
+export interface FormulaParam {
+  type: string
+  required: boolean
+  default: unknown
+  desc: string
+  values: unknown[] | null
+  of?: string | null // column / columns 属于哪个表参数
+  item_type?: string | null
 }
 
 export interface FormulaInfo {
@@ -201,9 +211,52 @@ export interface FormulaInfo {
   kind_label: string
   version: number
   status: string
-  params: Record<string, { type: string; required: boolean; default: unknown; desc: string; values: unknown[] | null }>
+  params: Record<string, FormulaParam>
   sql: string | null
   example: Record<string, unknown> | null
+  triggers?: string[]
+  overrides_builtin?: boolean
+}
+
+/** 公式被哪个流程的哪几步用到；problems 是这些步骤现在会遇到的问题（比如公式改了参数） */
+export interface FormulaUsage {
+  recipe_id: string
+  name: string
+  version: number
+  status: string
+  steps: { id: number; name: string }[]
+  problems: string[]
+}
+
+export interface CustomerFormula extends FormulaInfo {
+  status_label: string
+  overrides_name: string | null // 同 id 覆盖了哪个内置公式
+  used_by: FormulaUsage[]
+  created_by: string
+  updated_at: string | null
+}
+
+/** 试运行的结果：failed 不是接口出错，stage 说明在哪一步出的问题 */
+export interface FormulaTrialResult {
+  status: 'success' | 'failed'
+  stage?: 'definition' | 'data' | 'params' | 'run'
+  error?: string
+  sql?: string
+  rows?: number
+  columns?: { name: string; type: string }[]
+  preview?: { total: number; rows: unknown[][]; columns: { name: string; type: string }[] }
+  params?: Record<string, unknown>
+  warnings?: string[]
+  rows_in?: Record<string, number>
+  duration_ms?: number
+  inputs?: { table: string; source: 'file' | 'text'; filename: string; sheet: string; renamed: Record<string, string>; rows: number; columns: string[] }[]
+}
+
+export interface FormulaTrialInput {
+  table: string
+  file_id?: string
+  sheet?: string
+  text?: string
 }
 
 export interface TableBrief {

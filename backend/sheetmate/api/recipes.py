@@ -124,9 +124,11 @@ async def run_recipe(recipe_id: str, body: RunBody, user: User = Depends(current
 
 @router.get("/formulas")
 def list_formulas(customer_id: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """公式目录：内置公式 + 这个客户当前可用的独有公式（已停用的不列）。reserved_ids 是不能拿来当公式 id 的系统工具名。"""
     customer = []
     if customer_id:
         require_customer(db, user, customer_id)
-        customer = [recipe_service.formula_dict(f, "customer") for f in recipe_service.customer_formulas(db, customer_id)]
+        customer = [recipe_service.formula_dict(f, "customer") for f in recipe_service.customer_formulas(db, customer_id)
+                    if f.status != "deprecated"]
     builtin = [recipe_service.formula_dict(item.spec, "builtin") for item in BUILTIN_FORMULAS.values()]
-    return {"ok": True, "builtin": builtin, "customer": customer}
+    return {"ok": True, "builtin": builtin, "customer": customer, "reserved_ids": sorted(recipe_service.reserved_tool_names())}

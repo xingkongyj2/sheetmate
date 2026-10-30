@@ -37,6 +37,14 @@ def _candidates(records: list[FileRecord]) -> list[Candidate]:
     return items
 
 
+def _file_path(file_id: str) -> Path | None:
+    with session_scope() as db:
+        try:
+            return Path(file_service.get_file(db, file_id).stored_path)
+        except NotFound:
+            return None
+
+
 def _load_recipe_for_user(db, user: User, recipe_id: str) -> Recipe:
     recipe = recipe_service.get_recipe(db, recipe_id)
     if recipe.customer_id:
@@ -136,6 +144,7 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
         ws = run_service.run_workspaces.get(run_id)
         runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=None, run_id=run_id)
         runner.report["inputs"] = []
+        runner.restore_sources(kept_inputs, _file_path)  # 没重新读输入文件：用上次记下的位置恢复「按原样式输出」
         async for event in runner.run(None, start_step=step_id, output_path=out_path):
             await job.emit(event)
         if edited and runner.report["status"] not in {"failed", "escalated"}:

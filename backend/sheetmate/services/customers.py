@@ -14,6 +14,7 @@ from sheetmate.agent.summarizer import customer_summary, fallback_customer_summa
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import Conversation, Customer, FileRecord, RecipeRecord, Run, User, UserCustomer, now
 from sheetmate.services import files as file_service
+from sheetmate.services import formulas as formula_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import runs as run_service
@@ -116,7 +117,7 @@ def detail(db: Session, customer: Customer) -> dict[str, Any]:
         "recipes": recipes,
         "memories": memory_service.customer_memories(db, customer.id),
         "field_mapping": memory_service.field_mapping_for(db, customer.id),
-        "formulas": [recipe_service.formula_dict(f, "customer") for f in recipe_service.customer_formulas(db, customer.id)],
+        "formulas": formula_service.list_with_usage(db, customer.id),
         "runs": [run_service.run_dict(r, with_steps=False) for r in run_service.list_runs(db, customer_id=customer.id, limit=20)],
         "conversations": [{"id": c.id, "title": c.title, "mode": c.mode, "updated_at": c.updated_at.isoformat()} for c in conversations],
     }

@@ -22,6 +22,7 @@ import MarkdownView from '@/components/common/MarkdownView.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
+import CustomerFormulas from '@/components/customer/CustomerFormulas.vue'
 import FormulaLibraryDialog from '@/components/customer/FormulaLibraryDialog.vue'
 import MemoryPanel from '@/components/customer/MemoryPanel.vue'
 import RecipePanel from '@/components/customer/RecipePanel.vue'
@@ -271,6 +272,13 @@ async function loadPreview(offset: number, limit: number) {
         </div>
         <RecipePanel v-for="r in customer.recipes" :key="r.recipe_id" :recipe="r" @run="(id) => (runDialog = { recipeId: id })" @changed="load" />
         <div v-if="!customer.recipes.length" class="card-soft py-14 text-center text-sm text-faint">还没有流程</div>
+        <CustomerFormulas
+          :customer-id="customer.id"
+          :formulas="customer.formulas"
+          :files="customer.files"
+          :field-mapping="customer.field_mapping"
+          @changed="load"
+        />
       </section>
 
       <!-- 文件 -->

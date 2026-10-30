@@ -64,13 +64,13 @@ class FormulaLibrary:
     """某个上下文（某客户 / 无客户）下可用的全部公式。查找优先级：客户专属 > 内置。"""
 
     def __init__(self, customer_formulas: list[Formula] | None = None):
-        self._customer: dict[str, Formula] = {}
+        latest: dict[str, Formula] = {}
         for f in customer_formulas or []:
-            if f.status == "deprecated":
-                continue
-            current = self._customer.get(f.id)
+            current = latest.get(f.id)
             if current is None or f.version > current.version:
-                self._customer[f.id] = f
+                latest[f.id] = f
+        # 以最新版本为准：最新版本被停用，这个公式就整个不可用（不会退回旧版本继续生效）
+        self._customer: dict[str, Formula] = {fid: f for fid, f in latest.items() if f.status != "deprecated"}
 
     def resolve(self, formula_id: str) -> ResolvedFormula:
         fid = str(formula_id or "").strip()

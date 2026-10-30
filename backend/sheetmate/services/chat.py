@@ -36,7 +36,7 @@ from sheetmate.services.jobs import Job, jobs
 _registry = ToolRegistry()
 _background: set[asyncio.Task] = set()  # 持有后台任务的引用，防止被垃圾回收
 _KEEP_EVENTS = {
-    "tool_call", "tool_result", "table", "file", "clarify", "memory_saved", "field_mapping_saved", "step_start", "step_done",
+    "note", "tool_call", "tool_result", "table", "file", "clarify", "memory_saved", "field_mapping_saved", "step_start", "step_done",
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",

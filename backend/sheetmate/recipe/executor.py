@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -24,12 +24,15 @@ import pandas as pd
 
 from sheetmate.engine.field_mapping import apply_field_mapping, match_columns
 from sheetmate.engine.formulas import FormulaLibrary
+from sheetmate.engine.profile import dtype_label
 from sheetmate.engine.reader import ReadError, SheetData, read_sheet, read_workbook
 from sheetmate.engine.runner import StepOutcome, apply_formula
 from sheetmate.engine.sqlutil import frame_to_text, quote_ident
+from sheetmate.engine.template_writer import TemplateSource, write_like_original
 from sheetmate.engine.workspace import Workspace
 from sheetmate.engine.writer import SheetSpec, write_excel
 from sheetmate.recipe.schema import Recipe, RecipeInput, RecipeStep, step_table_refs
+from sheetmate.recipe.templating import plan_outputs
 from sheetmate.recipe.validator import validate_run
 
 
@@ -47,6 +50,7 @@ class InputSource:
     df: pd.DataFrame | None = None
     file_id: str | None = None
     filename: str = ""
+    header: dict[str, Any] | None = None  # 读取时识别出的表头位置；df 来源时用它重新定位原表
 
 
 @dataclass
@@ -95,6 +99,8 @@ class RecipeRunner:
         self.max_repair = max_repair
         self.recipe_changed = False
         self.input_frames: dict[str, pd.DataFrame] = {}
+        # 每个输入对应的原文件位置：输出时「复制原文件、在里面改写」要用它找样式
+        self.sources: dict[str, TemplateSource] = {}
         self.report: dict[str, Any] = {
             "run_id": run_id,
             "recipe_id": recipe.id,
@@ -107,6 +113,7 @@ class RecipeRunner:
             "validation": None,
             "error": "",
             "escalation": "",
+            "output_style": "",  # original 沿用原文件样式 / default 默认样式（原文件不是 xlsx 或打不开）
             "failed_stage": "",  # input 输入不符 / step 某步修不好 / validation 运行校验不通过 / error 其他错误
             "repaired_steps": [],
             "duration_ms": 0,
@@ -192,6 +199,7 @@ class RecipeRunner:
 
     def _load_input(self, inp: RecipeInput, src: InputSource) -> dict[str, Any]:
         warnings: list[str] = []
+        sheet: SheetData | None = None
         if src.df is not None:
             df, sheet_name = src.df.copy(), src.sheet or inp.sheet or ""
         else:
@@ -224,8 +232,42 @@ class RecipeRunner:
             source="uploaded", file_id=src.file_id, sheet=sheet_name, description=inp.description,
         )
         self.input_frames[inp.alias] = df
+        source = self._record_source(inp, src, sheet_name, df, sheet)
         return {"alias": inp.alias, "filename": src.filename, "sheet": sheet_name, "rows": int(len(df)),
-                "columns": [str(c) for c in df.columns], "renames": renames, "warnings": warnings}
+                "columns": [str(c) for c in df.columns], "renames": renames, "warnings": warnings,
+                "source": source.to_persist() if source else None}
+
+    def _record_source(self, inp: RecipeInput, src: InputSource, sheet_name: str, df: pd.DataFrame,
+                       sheet: SheetData | None) -> TemplateSource | None:
+        """记下这个输入在原文件里的位置（哪个 sheet、表头在哪、每一列在第几列），输出时用来沿用原样式。"""
+        if src.path is None or not Path(src.path).exists():
+            return None
+        try:
+            if sheet is None:  # DataFrame 来源（会话里已加载的表）：回原文件重新定位一次
+                sheet = read_sheet(Path(src.path), sheet_name or None, header_hint=src.header or inp.header)
+        except ReadError:
+            return None
+        col_index = sheet.header.col_index
+        if col_index is None or len(col_index) != len(df.columns):
+            return None
+        columns = [str(c) for c in df.columns]
+        tpl = TemplateSource(
+            alias=inp.alias, path=Path(src.path), sheet=sheet.name, header_row=sheet.header.header_row,
+            header_rows=sheet.header.header_rows, col_index=list(col_index), columns=columns,
+            dtypes={c: dtype_label(df[orig]) for c, orig in zip(columns, df.columns)}, file_id=src.file_id,
+        )
+        self.sources[inp.alias] = tpl
+        return tpl
+
+    def restore_sources(self, infos: list[dict[str, Any]], path_of: Callable[[str], Path | None]) -> None:
+        """从断点重跑时没有重新读输入文件：用上次运行记下的位置信息恢复（文件路径靠 file_id 再查）。"""
+        for info in infos:
+            data = info.get("source")
+            if not data or not data.get("file_id"):
+                continue
+            path = path_of(data["file_id"])
+            if path is not None:
+                self.sources[info["alias"]] = TemplateSource.from_persist(info["alias"], data, path)
 
     def _pick_sheet(self, inp: RecipeInput, src: InputSource) -> SheetData:
         """选 sheet：指定的 > Recipe 记录的同名 sheet > 列重合度最高的；表头位置自动识别，不理想时用 Recipe 记录的位置再试。"""
@@ -449,11 +491,25 @@ class RecipeRunner:
         return outputs
 
     def write_outputs(self, path: Path, outputs: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
-        """按 output_spec 写出 Excel（可以在调整 output_spec 后重新写一次）。"""
+        """写出 Excel（可以在调整 output_spec 后重新写一次）。
+
+        优先「复制原始文件，在里面改写」，输入什么样式输出就是什么样式；原文件不是 xlsx、打不开或者
+        结果里没有任何一个 sheet 能对应到原表时，退回默认样式。
+        """
+        if not outputs:
+            raise ValueError("没有可以输出的结果：所有步骤都失败了，或 output_spec 指向的表不存在")
+        if self.sources:
+            try:
+                plans = plan_outputs(self.recipe, self.library, self.sources, outputs)
+                written = write_like_original(path, plans)
+            except Exception:  # 样式处理出任何意外都不能让整次运行失败：退回默认样式
+                written = None
+            if written is not None:
+                self.report["output_style"] = "original"
+                return written
+        self.report["output_style"] = "default"
         split = {o.name: o.split_by for o in self.recipe.output_spec}
         sheets = [SheetSpec(name=name, df=df, split_by=split.get(name)) for name, df in outputs.items()]
-        if not sheets:
-            raise ValueError("没有可以输出的结果：所有步骤都失败了，或 output_spec 指向的表不存在")
         return write_excel(path, sheets)
 
     # ------------------------------------------------------------------

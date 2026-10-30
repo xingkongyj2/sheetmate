@@ -3,7 +3,7 @@
  * 输入框：文字 + 附件（要处理的表 / 人工做好的结果）+ 模式（分析/修改）+ 先出计划 + 发送/停止。
  * 中文输入法组字时按回车不会发送；支持把文件直接拖进来。
  */
-import { ArrowUp, FileCheck2, FileSpreadsheet, ListChecks, LoaderCircle, Paperclip, Square, X } from '@lucide/vue'
+import { ArrowUp, FileCheck2, FileSpreadsheet, ListChecks, LoaderCircle, Plus, Square, X } from '@lucide/vue'
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 export interface Attachment {
@@ -148,7 +148,7 @@ defineExpose({ focus: () => textarea.value?.focus() })
 
     <div class="flex items-center gap-1.5 px-3 pb-3 pt-1">
       <div class="relative">
-        <button class="icon-btn" title="上传表格" @click="menuOpen = !menuOpen"><Paperclip class="size-4" /></button>
+        <button class="icon-btn" title="上传表格" @click="menuOpen = !menuOpen"><Plus class="size-[18px]" /></button>
         <div v-if="menuOpen" class="absolute bottom-10 left-0 z-30 w-72 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl" @mouseleave="menuOpen = false">
           <button class="flex w-full items-start gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper" @click="pick('input')">
             <FileSpreadsheet class="mt-0.5 size-4 text-fun-green" />

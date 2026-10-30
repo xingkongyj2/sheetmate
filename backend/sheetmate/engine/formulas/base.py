@@ -46,6 +46,9 @@ ParamType = Literal[
 ]
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([A-Za-z_一-鿿][\w一-鿿]*)\s*\}\}")
+_PARAM_NAME = re.compile(r"[A-Za-z_一-鿿][\w一-鿿]*")  # 参数名的写法和模板里的 {{参数名}} 一致
+MAX_PARAM_NAME = 64
+RESERVED_PARAM_NAMES = {"result_name"}  # 公式工具自带的「结果表名」参数，客户公式不能再声明
 
 
 class FormulaError(ValueError):
@@ -96,15 +99,63 @@ class Formula(BaseModel):
         return value
 
     def check_definition(self) -> None:
-        """客户公式的定义检查：模板占位符都声明了、模板能渲染成单条 SELECT。"""
+        """客户公式的定义检查（保存、试运行之前都会调用），消息直接展示给用户：
+
+        1. 名称、参数声明合法（参数名、枚举的可选值、column 所属的表、默认值能转成声明的类型）
+        2. 模板里的占位符都声明了、没有写在引号里、没有用到对象类型的参数
+        3. 参数用示例值代入后是一条合法的 SELECT
+        """
         if self.type != "sql":
             return
+        if not self.name.strip():
+            raise FormulaError("公式名称不能为空")
+        self._check_params()
         if not self.sql or not self.sql.strip():
             raise FormulaError("SQL 公式必须填写 sql 模板")
         used = set(_PLACEHOLDER.findall(self.sql))
         undeclared = used - set(self.params)
         if undeclared:
             raise FormulaError(f"模板里用到了未声明的参数：{sorted(undeclared)}")
+        for name in sorted(used):
+            if self.params[name].type == "dict":
+                raise FormulaError(f"参数「{name}」是对象类型，不能直接放进 SQL 模板")
+        quoted = quoted_placeholders(self.sql)
+        if quoted:
+            token = "{{" + quoted[0] + "}}"
+            raise FormulaError(f"占位符 {token} 写在了引号里面。代入时会自动带上引号，请直接写 {token}，不要再包一层引号")
+        if "{{" in _PLACEHOLDER.sub("", self.sql):
+            raise FormulaError("模板里有写法不对的占位符，应该写成 {{参数名}}（参数名只能用中文、字母、数字和下划线）")
+        self._check_renders()
+
+    def _check_params(self) -> None:
+        for name, p in self.params.items():
+            if not _PARAM_NAME.fullmatch(name) or len(name) > MAX_PARAM_NAME:
+                raise FormulaError(f"参数名「{name}」不合法：只能用中文、字母、数字和下划线，不能以数字开头，最长 {MAX_PARAM_NAME} 个字符")
+            if name in RESERVED_PARAM_NAMES:
+                raise FormulaError(f"参数名「{name}」是系统保留的，请换一个")
+            if p.type == "enum" and not p.values:
+                raise FormulaError(f"参数「{name}」是选项类型，请填写可选值")
+            if p.type in {"column", "columns"} and p.of:
+                target = self.params.get(p.of)
+                if target is None or target.type != "table":
+                    raise FormulaError(f"参数「{name}」所属的表必须是一个「表」类型的参数，现在是「{p.of}」")
+            if not _is_missing(p.default):
+                try:
+                    _coerce(self, name, p, p.default)
+                except FormulaError as exc:
+                    detail = str(exc).removeprefix(f"参数「{name}」")
+                    raise FormulaError(f"参数「{name}」的默认值{detail}") from exc
+
+    def _check_renders(self) -> None:
+        """参数用示例值代入，检查模板是不是一条合法的 SELECT（只检查语法，表和列是否存在要到执行时才知道）。"""
+        samples = {name: _sample_value(p) for name, p in self.params.items()}
+        text = _substitute(self, samples)
+        try:
+            assert_single_select(text)
+        except UnsafeSQLError as exc:
+            reason = str(exc).split("\n\nLINE")[0].strip()
+            shown = text if len(text) <= 240 else text[:240] + "…"
+            raise FormulaError(f"模板检查没通过：{reason}。参数用示例值代入后是：{shown}") from exc
 
 
 @dataclass
@@ -245,8 +296,71 @@ def _coerce(spec: Formula, name: str, p: ParamSpec, raw: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def quoted_placeholders(sql: str) -> list[str]:
+    """找出写在引号里面的占位符（'%{{x}}%' 或 "{{x}}"）。
+
+    占位符代入时会按类型自己带上引号（文本 → 'abc'，列名 → "abc"），外面再包一层引号就错了，
+    这是写模板最常见的失误。注释里的引号不算；引号没配对时返回空（交给语法检查报错）。
+    """
+    found: list[str] = []
+    i, n, quote = 0, len(sql), ""
+    while i < n:
+        ch = sql[i]
+        if quote:
+            if ch == quote:
+                if sql[i + 1 : i + 2] == quote:  # 引号里的转义：'' 或 ""
+                    i += 2
+                    continue
+                quote = ""
+            else:
+                match = _PLACEHOLDER.match(sql, i)
+                if match:
+                    found.append(match.group(1))
+                    i = match.end()
+                    continue
+        elif ch in {"'", '"'}:
+            quote = ch
+        elif sql.startswith("--", i):
+            end = sql.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        elif sql.startswith("/*", i):
+            end = sql.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+            continue
+        i += 1
+    return [] if quote else found
+
+
+def _sample_value(p: ParamSpec) -> Any:
+    """检查模板语法时代入的示例值（按参数类型）。"""
+    if p.type in {"tables", "columns", "list"}:
+        return ["示例1", "示例2"]
+    if p.type == "int":
+        return 1
+    if p.type == "number":
+        return 1.5
+    if p.type == "bool":
+        return True
+    if p.type == "enum":
+        return (p.values or ["示例"])[0]
+    if p.type == "expr":
+        return "TRUE"
+    if p.type == "sql":
+        return "SELECT 1"
+    return "示例"
+
+
 def render_template(spec: Formula, params: dict[str, Any]) -> str:
     """把 {{param}} 替换成按类型转义后的 SQL 片段，最后整体再校验一次只能是单条 SELECT。"""
+    try:
+        return assert_single_select(_substitute(spec, params))
+    except UnsafeSQLError as exc:
+        raise FormulaError(f"公式「{spec.name}」渲染后的 SQL 不合法：{exc}") from exc
+
+
+def _substitute(spec: Formula, params: dict[str, Any]) -> str:
+    """只做占位符替换（还没做整体安全检查）。"""
     if not spec.sql:
         raise FormulaError(f"公式「{spec.name}」没有 SQL 模板")
 
@@ -270,10 +384,7 @@ def render_template(spec: Formula, params: dict[str, Any]) -> str:
             raise FormulaError(f"模板参数「{name}」是对象，不能直接放进 SQL")
         return quote_literal(value)
 
-    try:
-        return assert_single_select(_PLACEHOLDER.sub(replace, spec.sql))
-    except UnsafeSQLError as exc:
-        raise FormulaError(f"公式「{spec.name}」渲染后的 SQL 不合法：{exc}") from exc
+    return _PLACEHOLDER.sub(replace, spec.sql)
 
 
 def template_inputs(spec: Formula, params: dict[str, Any]) -> list[str]:

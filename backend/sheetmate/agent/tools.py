@@ -18,6 +18,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
@@ -62,6 +63,7 @@ class ToolHost(Protocol):
     """服务层提供给工具的能力。"""
 
     def list_files(self) -> list[dict[str, Any]]: ...
+    def file_path(self, file_id: str) -> Path | None: ...
     def load_file(self, file_id: str) -> list[TableInfo]: ...
     def export_excel(self, sheets: list[tuple[str, str]], filename: str) -> dict[str, Any]: ...
     def list_recipes(self) -> list[dict[str, Any]]: ...
@@ -316,8 +318,9 @@ def _tool_export_excel(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
 # ---------------------------------------------------------------------------
 
 
-def _table_meta(info: TableInfo) -> InputMeta:
-    return InputMeta(filename=info.filename or info.label, sheet=info.sheet, header=info.header, file_id=info.file_id)
+def _table_meta(info: TableInfo, ctx: AgentContext) -> InputMeta:
+    path = ctx.host.file_path(info.file_id) if info.file_id else None
+    return InputMeta(filename=info.filename or info.label, sheet=info.sheet, header=info.header, file_id=info.file_id, path=path)
 
 
 def _learn_context(ctx: AgentContext, requirement: str, inputs: dict[str, str], expected_tables: list[str],
@@ -326,7 +329,7 @@ def _learn_context(ctx: AgentContext, requirement: str, inputs: dict[str, str], 
     for alias, table in inputs.items():
         info = ctx.ws.require(table)
         frames[alias] = ctx.ws.df(table)
-        meta[alias] = _table_meta(info)
+        meta[alias] = _table_meta(info, ctx)
     expected, sources = {}, []
     for table in expected_tables:
         info = ctx.ws.require(table)
@@ -487,7 +490,8 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
     for alias, table in mapping.items():
         info = ctx.ws.require(table)
         sources[alias] = InputSource(alias=alias, df=ctx.ws.df(table), filename=info.filename or info.label,
-                                     sheet=info.sheet, file_id=info.file_id)
+                                     sheet=info.sheet, file_id=info.file_id, header=info.header,
+                                     path=ctx.host.file_path(info.file_id) if info.file_id else None)
     async for event in runner.run(sources, output_path=handle.output_path, history=host.history_metrics(recipe.id)):
         yield event
     file_info = host.finish_run(handle, runner.recipe, runner.report)
@@ -638,6 +642,11 @@ def _static_tools() -> list[Tool]:
              _obj({"question": _STR, "options": _STR_LIST}, ["question", "options"]), both, run=_tool_ask_user,
              label=lambda a: "向你提问"),
     ]
+
+
+def reserved_tool_names() -> set[str]:
+    """固定工具的名字。公式会被注册成同名工具，所以客户公式的 id 不能和它们重名（services/recipes.py 保存公式时检查）。"""
+    return {t.name for t in _static_tools()}
 
 
 class ToolRegistry:

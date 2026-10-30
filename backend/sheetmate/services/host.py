@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sheetmate.db.database import session_scope
@@ -51,6 +52,14 @@ class ConversationHost:
                 item["scope_label"] = "本会话" if r.conversation_id == self.conversation_id else "客户资料"
                 result.append(item)
             return result
+
+    def file_path(self, file_id: str) -> Path | None:
+        """上传文件在本机的路径（输出时复制它来保持原样式）；文件没了就返回 None。"""
+        with session_scope() as db:
+            try:
+                return Path(file_service.get_file(db, file_id).stored_path)
+            except NotFound:
+                return None
 
     def load_file(self, file_id: str) -> list[TableInfo]:
         with session_scope() as db:

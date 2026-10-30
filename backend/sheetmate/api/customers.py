@@ -14,6 +14,7 @@ from sheetmate.db.database import get_db
 from sheetmate.db.models import User
 from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
+from sheetmate.services import formulas as formula_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services.auth import require_customer
@@ -21,6 +22,25 @@ from sheetmate.services.errors import Forbidden
 
 router = APIRouter(prefix="/api/customers", tags=["customers"])
 memories_router = APIRouter(prefix="/api/memories", tags=["memories"])
+
+
+class TrialInput(BaseModel):
+    """试运行用的一张表：客户的文件（可选 sheet），或者粘贴的表格文本（第一行是表头）。"""
+
+    table: str  # 在试运行工作区里的表名，公式的「表」参数填这个名字
+    file_id: str | None = None
+    sheet: str | None = None
+    text: str | None = None
+
+
+class TrialBody(BaseModel):
+    formula: dict[str, Any]  # 完整的公式定义（可以是还没保存的）
+    params: dict[str, Any] = {}  # 各个参数的取值
+    inputs: list[TrialInput] = []
+
+
+class FormulaStatusBody(BaseModel):
+    status: str  # active / deprecated
 
 
 class CustomerBody(BaseModel):
@@ -117,16 +137,54 @@ def add_memory(customer_id: str, body: MemoryBody, db: Session = Depends(get_db)
 
 @router.get("/{customer_id}/formulas")
 def list_formulas(customer_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """客户独有公式：每个只有最新版本，带「被哪些流程用到」。"""
     require_customer(db, user, customer_id)
-    return {"ok": True, "formulas": [recipe_service.formula_dict(f, "customer") for f in recipe_service.customer_formulas(db, customer_id)]}
+    return {"ok": True, "formulas": formula_service.list_with_usage(db, customer_id)}
 
 
 @router.post("/{customer_id}/formulas")
 def save_formula(customer_id: str, body: dict[str, Any], db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
-    """新增 / 升级客户独有公式（SQL 模板，{{参数}} 占位）。"""
+    """新增 / 升级客户独有公式（SQL 模板，{{参数}} 占位；同一个 id 每保存一次升一个版本）。
+
+    返回保存后的公式；used_by 里的 problems 是「新版本保存后哪些流程的哪一步会出问题」，界面据此提醒。
+    """
     require_customer(db, user, customer_id)
     record = recipe_service.save_formula(db, customer_id, body, created_by="human")
-    return {"ok": True, "formula": {"id": record.formula_id, "version": record.version}}
+    return {"ok": True, "formula": formula_service.get_item(db, customer_id, record.formula_id)}
+
+
+@router.post("/{customer_id}/formulas/check")
+def check_formula(customer_id: str, body: dict[str, Any], db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """表单边写边检查：和保存时的检查完全一样，但不保存。"""
+    require_customer(db, user, customer_id)
+    return {"ok": True, "problems": formula_service.check_formula(customer_id, body)}
+
+
+@router.post("/{customer_id}/formulas/trial")
+def trial_formula(customer_id: str, body: TrialBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """试运行：在临时工作区里用客户的文件或粘贴的数据跑一遍公式（可以是还没保存的），返回结果预览。
+
+    试运行失败（公式有问题、参数不对、SQL 执行出错）也返回 200，result.status = failed，原因在 result.error。
+    """
+    require_customer(db, user, customer_id)
+    result = formula_service.trial_formula(db, customer_id, body.formula, body.params, [i.model_dump() for i in body.inputs])
+    return {"ok": True, "result": result}
+
+
+@router.put("/{customer_id}/formulas/{formula_id}/status")
+def set_formula_status(customer_id: str, formula_id: str, body: FormulaStatusBody, db: Session = Depends(get_db),
+                       user: User = Depends(current_user)) -> dict[str, Any]:
+    """启用 / 停用客户公式。被流程用到的公式不能停用。"""
+    require_customer(db, user, customer_id)
+    return {"ok": True, "formula": formula_service.set_status(db, customer_id, formula_id, body.status)}
+
+
+@router.delete("/{customer_id}/formulas/{formula_id}")
+def delete_formula(customer_id: str, formula_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """删除客户公式（所有版本）。被流程用到的公式不能删除。"""
+    require_customer(db, user, customer_id)
+    formula_service.delete_formula(db, customer_id, formula_id)
+    return {"ok": True}
 
 
 @memories_router.delete("/{memory_id}")

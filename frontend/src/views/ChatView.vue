@@ -40,13 +40,14 @@ const planMode = ref(false)
 const attachments = ref<Attachment[]>([])
 const plan = ref<{ title: string; steps: PlanStep[]; message: string } | null>(null)
 const planning = ref(false)
-const panelOpen = ref(typeof window !== 'undefined' ? window.innerWidth >= 1280 : true)
+const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角或消息下方的「查看执行明细」
 const selectedKey = ref<string | null>(null)
 const viewing = ref<string | null>(null)
 const saveOpen = ref(false)
 const editingTitle = ref(false)
 const titleDraft = ref('')
 const scroller = ref<HTMLElement | null>(null)
+const content = ref<HTMLElement | null>(null)
 let handle: StreamHandle | null = null
 let pollTimer = 0
 
@@ -63,7 +64,10 @@ async function load(silent = false) {
   try {
     const data = await conversationApi.get(props.id)
     detail.value = data
-    if (!streaming.value) messages.value = data.messages.map((m) => reactive(fromStored(m)) as UiMessage)
+    if (!streaming.value) {
+      messages.value = data.messages.map((m) => reactive(fromStored(m)) as UiMessage)
+      scrollToBottom(true) // 打开会话（包括后台任务跑完刷新）都停在最新一条
+    }
     mode.value = data.mode
     backgroundRunning.value = data.running && !streaming.value
     if (backgroundRunning.value) schedulePoll()
@@ -98,7 +102,14 @@ async function refreshSide() {
   }
 }
 
+let resizeObserver: ResizeObserver | null = null
+
 onMounted(async () => {
+  // 内容高度变化（逐字显示、表格渲染、图片加载）时，如果用户本来就在底部附近，就跟着滚到底
+  if (typeof ResizeObserver !== 'undefined' && content.value) {
+    resizeObserver = new ResizeObserver(() => scrollToBottom())
+    resizeObserver.observe(content.value)
+  }
   await load()
   const pending = pendingStarts.get(props.id)
   if (pending) {
@@ -109,6 +120,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  resizeObserver?.disconnect()
   clearTimeout(pollTimer)
   handle?.abort() // 只是断开连接，后台任务会继续执行并保存结果
 })
@@ -121,6 +133,8 @@ function scrollToBottom(force = false) {
     if (!el) return
     const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 240
     if (force || nearBottom) el.scrollTo({ top: el.scrollHeight, behavior: force ? 'auto' : 'smooth' })
+    // 强制滚动时 Markdown / 表格可能还没排完版，下一帧再贴底一次
+    if (force) requestAnimationFrame(() => el.scrollTo({ top: el.scrollHeight, behavior: 'auto' }))
   })
 }
 
@@ -319,7 +333,7 @@ function answer(option: string) {
 
       <!-- 消息 -->
       <div ref="scroller" class="min-h-0 flex-1 overflow-y-auto">
-        <div class="mx-auto w-full max-w-[820px] px-6 pb-6 pt-8">
+        <div ref="content" class="mx-auto w-full max-w-[820px] px-6 pb-6 pt-8">
           <div v-if="loading" class="flex justify-center py-20 text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
 
           <!-- 空对话 -->

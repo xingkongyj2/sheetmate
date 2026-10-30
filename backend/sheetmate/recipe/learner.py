@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -49,6 +50,7 @@ class InputMeta:
     sheet: str | None = None
     header: dict[str, Any] | None = None
     file_id: str | None = None
+    path: Path | None = None  # 原文件在本机的路径：输出时复制它来保持原样式
 
 
 @dataclass

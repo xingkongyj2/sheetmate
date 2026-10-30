@@ -266,6 +266,11 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     case 'text_chunk':
       msg.content += e.content
       break
+    case 'note':
+      // 后端判定：刚才这一轮文字后面跟着工具调用，是过程说明——撤回已经实时输出的部分，挪进「执行过程」
+      msg.content = ''
+      if (typeof e.content === 'string' && e.content.trim()) msg.timeline.push({ kind: 'note', key: uid('t'), text: e.content.trim() })
+      break
     case 'thinking': {
       const last = msg.timeline[msg.timeline.length - 1]
       if (last && last.kind === 'thinking') last.text += e.content

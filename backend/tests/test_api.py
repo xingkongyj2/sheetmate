@@ -138,6 +138,29 @@ def test_analyze_mode_tool_loop(client, samples, fake_llm):
     assert any(t["name"] == "店铺金额" and t["role"] == "derived" for t in detail["tables"])
 
 
+def test_text_before_tool_call_is_process_note_not_answer(client, samples, fake_llm):
+    """工具调用前模型说的话是「过程说明」：进执行过程，不能出现在回答里（短的、长的都一样）；最终回答只在最后出现一次。"""
+    conv = _new_conversation(client)
+    _upload(client, conv, samples["fees_sep"])
+    long_lead = "我先看一下这张表的结构，确认有哪些列、每列是什么类型，再决定怎么统计各个店铺的金额，" * 3
+    fake_llm(script=[
+        {"text": "先看一下表。", "tools": [("table_info", {"table": "运费明细"})]},
+        {"text": long_lead, "tools": [("table_info", {"table": "运费明细"})]},
+        {"text": "共 8 家店铺，合计 1.2 万元。\n## ✅ 最终结论\n- 星河最多"},
+    ])
+    events = _chat(client, conv, "按店铺统计金额")
+    answer = "".join(e["content"] for e in events if e["type"] == "text_chunk")
+    # 被撤回的实时输出之后，剩下的文字只能是最终回答
+    notes = [e["content"] for e in events if e["type"] == "note" and e["content"]]
+    assert "先看一下表。" in notes and any("我先看一下这张表" in n for n in notes)
+    last_note = max(i for i, e in enumerate(events) if e["type"] == "note")
+    final_answer = "".join(e["content"] for e in events[last_note + 1 :] if e["type"] == "text_chunk")
+    assert final_answer.startswith("共 8 家店铺") and "先看一下表" not in final_answer
+    assert answer.endswith(final_answer)
+    stored = client.get(f"/api/conversations/{conv}").json()["conversation"]["messages"][-1]
+    assert stored["content"].startswith("共 8 家店铺") and "我先看一下" not in stored["content"]
+
+
 def test_tool_error_is_returned_to_llm(client, samples, fake_llm):
     conv = _new_conversation(client)
     _upload(client, conv, samples["fees_sep"])

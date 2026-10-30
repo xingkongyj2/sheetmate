@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
 import math
 import re
@@ -44,6 +45,8 @@ class HeaderInfo:
     header_row: int = 1  # 表头最后一行的 Excel 行号（从 1 开始）
     header_rows: int = 1  # 表头占几行；多行表头时 > 1
     title: str = ""  # 表头上方的标题/说明文字
+    # DataFrame 的每一列在原 sheet 里的列位置（0 起）。输出时「复制原文件改写」要靠它找到每一列原来的样式
+    col_index: list[int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -118,6 +121,30 @@ def read_sheet(
             return item
     names = "、".join(s.name for s in sheets)
     raise ReadError(f"文件「{Path(path).name}」里没有工作表「{sheet}」，现有：{names}")
+
+
+MAX_PASTE_CHARS = 1_000_000
+
+
+def read_pasted_table(text: str) -> SheetData:
+    """读取从 Excel / 网页复制来的表格文本（客户公式试运行用）。
+
+    第一行是表头；列之间用 Tab（Excel 复制的默认格式）、逗号、分号或竖线分隔。
+    类型推断和读文件完全一致（数字、日期、编号保持文本）。
+    """
+    if len(text) > MAX_PASTE_CHARS:
+        raise ReadError("粘贴的内容太大了，请只粘贴几十行有代表性的数据")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    if not lines:
+        raise ReadError("没有读到数据，请粘贴带表头的表格（第一行是列名）")
+    delimiter = next((d for d in ("\t", ",", ";", "|") if d in lines[0]), ",")
+    grid = [[None if _is_blank(v) else v for v in row] for row in csv.reader(lines, delimiter=delimiter)]
+    sheet = _raw_to_sheet(_RawSheet("粘贴的数据", grid, set()), HeaderInfo(header_row=1, header_rows=1))
+    if sheet is None:
+        raise ReadError("没有读到数据，请粘贴带表头的表格（第一行是列名）")
+    return sheet
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +246,7 @@ def _raw_to_sheet(raw: _RawSheet, hint: HeaderInfo | None) -> SheetData | None:
     df = pd.DataFrame(data, columns=columns)
     df = df.reset_index(drop=True)
 
-    header = HeaderInfo(header_row=header_idx + 1, header_rows=header_rows, title=title)
+    header = HeaderInfo(header_row=header_idx + 1, header_rows=header_rows, title=title, col_index=list(keep))
     return SheetData(name=raw.name, df=df, header=header, hidden=raw.hidden)
 
 

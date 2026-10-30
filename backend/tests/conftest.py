@@ -54,6 +54,9 @@ class FakeLLM:
         if "tools" in turn and tool_choice == "none":
             turn = {"text": "（最后一轮，直接回答）"}
         if "tools" in turn:
+            lead = turn.get("text", "")  # 工具调用之前模型顺带说的话（「我先看一下表结构」）
+            for i in range(0, len(lead), 12):
+                yield _chunk(content=lead[i : i + 12])
             for i, (name, args) in enumerate(turn["tools"]):
                 raw = json.dumps(args, ensure_ascii=False)
                 # 模拟分片：名字一片，参数拆成两片

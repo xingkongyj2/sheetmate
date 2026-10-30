@@ -34,6 +34,7 @@ _ROLE_TAGS = {"input": "", "expected": "，⭐期望结果（人工做好的样�
 _EXPLORE_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "list_files", "get_recipe"}
 _RECIPE_TOOLS = {"build_recipe", "revise_recipe", "run_recipe"}
 _NUDGE_AFTER = 4  # 修改模式下查看数据超过这么多次还没生成流程，就提醒一次
+_LIVE_AFTER_CHARS = 140  # 一轮文字超过这么长、且还没出现工具调用，就当作最终回答开始实时输出
 
 
 class AgentExecutor:
@@ -68,15 +69,23 @@ class AgentExecutor:
             conversation.append({"role": "user", "content": step_message})
             # 把这一步真实的工具调用和结果都记进对话（TabClaw 原来只保留文字结论，模型会以为说了就等于做了）
             transcript: list[dict[str, Any]] = []
+            step_text = ""
             async for event in self.agent_stream(conversation, tools, ctx, transcript=transcript):
+                if event["type"] == "text_chunk":
+                    step_text += event["content"]  # 每一步的文字小结是过程，不是给用户的最终回答
+                    continue
+                if event["type"] == "note" and not event.get("content"):
+                    step_text = ""  # 已经攒着的文字被判定为过程说明，不算这一步的小结
+                    continue
                 if event["type"] == "final_text":
-                    continue  # 中间步骤的文本已经以 text_chunk 形式输出
+                    continue
                 yield event
                 if event["type"] == "error":
                     return
             conversation.extend(transcript)
+            if step_text.strip():
+                yield {"type": "note", "content": step_text.strip()}
             yield {"type": "step_done", "step_num": i}
-            yield {"type": "text_chunk", "content": "\n\n"}
         yield {"type": "reflect_start"}
         conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message)}
         reflect = REFLECT_MESSAGE.format(message=message, total=len(steps))
@@ -104,6 +113,7 @@ class AgentExecutor:
             content, reasoning = "", ""
             calls_acc: dict[int, dict[str, str]] = {}
             suppress = False
+            live = False  # 已经开始向用户实时输出这一轮的文字
             try:
                 async for chunk in self.llm.stream_chat(msgs, tools=definitions, tool_choice="none" if final_round else None):
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
@@ -118,7 +128,12 @@ class AgentExecutor:
                         content += delta.content
                         if _TOOL_MARKER in delta.content:
                             suppress = True
-                        if not suppress:
+                        # 先把文字攒着：后面跟着工具调用的话，这段只是「我先看一下表结构」之类的过程说明，不该出现在回答里。
+                        # 只有确定是最终回答（没出现工具调用、文字已经比较长）才开始实时输出
+                        if not live and not calls_acc and not suppress and len(content) >= _LIVE_AFTER_CHARS:
+                            live = True
+                            yield {"type": "text_chunk", "content": content}
+                        elif live and not suppress:
                             yield {"type": "text_chunk", "content": delta.content}
                     for tc in delta.tool_calls or []:
                         slot = calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
@@ -135,12 +150,17 @@ class AgentExecutor:
 
             display = _TOOL_RE.sub("", content).strip()
             if not calls_acc or final_round:
+                if display and not live:  # 短回答：攒到最后一次性给出，前端会做逐字显示的动画
+                    yield {"type": "text_chunk", "content": display}
                 if transcript is not None:
                     transcript.extend(m for m in msgs[start:] if m.get("content") != FINAL_ROUND_MESSAGE)
                     if display:
                         transcript.append({"role": "assistant", "content": display})
                 yield {"type": "final_text", "content": display}
                 return
+            if display or live:
+                # 这段文字后面跟着工具调用：是过程说明，归到「执行过程」里，并让前端把已经显示的部分撤回
+                yield {"type": "note", "content": display}
 
             calls = [
                 {"id": slot["id"] or f"call_{idx}", "type": "function",

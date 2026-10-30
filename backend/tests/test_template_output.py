@@ -1,0 +1,231 @@
+"""输出沿用原文件样式：复制原始 Excel，在里面修改 / 删除 / 新增。"""
+
+from __future__ import annotations
+
+import asyncio
+import io
+
+import openpyxl
+import pandas as pd
+import pytest
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+from sheetmate.demo.samples import demo_recipe_body
+from sheetmate.engine.formulas import FormulaLibrary
+from sheetmate.engine.reader import read_workbook
+from sheetmate.engine.workspace import Workspace
+from sheetmate.recipe.executor import InputSource, RecipeRunner
+from sheetmate.recipe.schema import Recipe
+from tests.conftest import read_sse
+
+HEADER_FILL = "FF1F4E78"
+ZEBRA_FILL = "FFEAF1FB"
+
+
+def _styled_workbook(path):
+    """一份有讲究的原始文件：合并标题行、深蓝表头、斑马纹、数字格式、列宽、冻结窗格、第二个 sheet。"""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "订单"
+    ws.append(["华东区 9 月订单明细"])
+    ws.merge_cells("A1:E1")
+    ws["A1"].font = Font(bold=True, size=16, color="FF1F4E78")
+    ws["A1"].alignment = Alignment(horizontal="center")
+    ws.append(["订单号", "客户", "状态", "金额", "日期"])
+    thin = Side(style="thin", color="FF999999")
+    for cell in ws[2]:
+        cell.font = Font(bold=True, color="FFFFFFFF")
+        cell.fill = PatternFill("solid", fgColor=HEADER_FILL)
+        cell.border = Border(bottom=thin)
+    rows = [("A001", "星河", "已完成", 100.5, "2026-09-01"), ("A002", "蓝海", "已取消", 80, "2026-09-02"),
+            ("A003", "星河", "已完成", 1200.25, "2026-09-03"), ("A004", "北辰", "已完成", 45, "2026-09-04"),
+            ("A005", "蓝海", "已完成", 300, "2026-09-05"), ("A006", "北辰", "已取消", 66, "2026-09-06")]
+    for i, (no, cust, status, amount, day) in enumerate(rows):
+        ws.append([no, cust, status, amount, pd.Timestamp(day).to_pydatetime()])
+        r = 3 + i
+        ws.cell(row=r, column=4).number_format = "#,##0.00"
+        ws.cell(row=r, column=5).number_format = "yyyy/mm/dd"
+        if i % 2 == 1:
+            for c in range(1, 6):
+                ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=ZEBRA_FILL)
+    for letter, width in zip("ABCDE", (12, 14, 10, 16, 14)):
+        ws.column_dimensions[letter].width = width
+    ws.freeze_panes = "A3"
+    note = wb.create_sheet("说明")
+    note["A1"] = "这个 sheet 不应该被动"
+    wb.save(path)
+
+
+def _run(recipe: Recipe, path, out):
+    runner = RecipeRunner(recipe, FormulaLibrary(), Workspace(None))
+    sources = {i.alias: InputSource(i.alias, path=path, filename=path.name) for i in recipe.inputs}
+
+    async def go():
+        return [e async for e in runner.run(sources, output_path=out)]
+
+    asyncio.run(go())
+    return runner
+
+
+def _recipe(steps: list[dict], output: str, name: str, has_expected: bool = False) -> Recipe:
+    return Recipe(
+        name="订单整理",
+        inputs=[{"alias": "订单", "sheet": "订单", "expected_columns": ["订单号", "客户", "状态", "金额", "日期"],
+                 "required_columns": ["订单号", "状态", "金额"], "header": {"header_row": 2, "header_rows": 1}}],
+        steps=steps,
+        output_spec=[{"name": name, "source": output}],
+        metadata={"has_expected": has_expected},
+    )
+
+
+def test_in_place_edit_keeps_original_look(tmp_path):
+    src = tmp_path / "订单_2026-09.xlsx"
+    _styled_workbook(src)
+    recipe = _recipe([
+        {"id": 1, "name": "去掉取消订单", "formula": "filter_rows", "params": {"table": "订单", "condition": "\"状态\" <> '已取消'"}, "output": "有效订单"},
+        {"id": 2, "name": "加含税金额", "formula": "compute_column",
+         "params": {"table": "有效订单", "column": "含税金额", "expression": "round(\"金额\" * 1.06, 2)"}, "output": "结果"},
+    ], output="结果", name="整理结果")
+    out = tmp_path / "out.xlsx"
+    runner = _run(recipe, src, out)
+    assert runner.report["status"] in {"success", "warning"} and runner.report["output_style"] == "original"
+
+    wb = openpyxl.load_workbook(out)
+    assert wb.sheetnames == ["订单", "说明"]  # 没有样例：保持原 sheet 名；没动过的 sheet 原样保留
+    assert wb["说明"]["A1"].value == "这个 sheet 不应该被动"
+    ws = wb["订单"]
+    # 标题行和合并单元格还在
+    assert ws["A1"].value == "华东区 9 月订单明细" and "A1:E1" in {str(r) for r in ws.merged_cells.ranges}
+    assert ws["A1"].font.size == 16
+    # 表头原样：文字、深蓝底、白色粗体
+    assert [c.value for c in ws[2]][:5] == ["订单号", "客户", "状态", "金额", "日期"]
+    assert ws["A2"].fill.fgColor.rgb == HEADER_FILL and ws["A2"].font.bold
+    # 数据：已取消的行被删掉了（4 行），沿用原数据行样式
+    assert ws.max_row == 2 + 4 and ws["A3"].value == "A001" and ws["A4"].value == "A003"
+    assert ws["D3"].number_format == "#,##0.00" and ws["E3"].number_format == "yyyy/mm/dd"
+    assert ws["D3"].value == 100.5 and ws["D4"].value == 1200.25
+    # 斑马纹照原样交替
+    assert ws["A3"].fill.fgColor.rgb != ZEBRA_FILL and ws["A4"].fill.fgColor.rgb == ZEBRA_FILL and ws["A5"].fill.fgColor.rgb != ZEBRA_FILL
+    # 新增列：表头样式照左边的列，数据照同类型（数字）的列
+    assert ws["F2"].value == "含税金额" and ws["F2"].fill.fgColor.rgb == HEADER_FILL and ws["F2"].font.bold
+    assert ws["F3"].value == 106.53 and ws["F3"].number_format == "#,##0.00"
+    # 列宽、冻结窗格
+    assert ws.column_dimensions["A"].width == 12 and ws.column_dimensions["D"].width == 16
+    assert ws.freeze_panes == "A3"
+
+
+def test_removed_and_reordered_columns_follow_their_styles(tmp_path):
+    src = tmp_path / "订单.xlsx"
+    _styled_workbook(src)
+    recipe = _recipe([
+        {"id": 1, "name": "调整列", "formula": "select_columns", "params": {"table": "订单", "columns": ["金额", "订单号", "客户"]}, "output": "结果"},
+    ], output="结果", name="订单")
+    out = tmp_path / "out.xlsx"
+    _run(recipe, src, out)
+    ws = openpyxl.load_workbook(out)["订单"]
+    assert [c.value for c in ws[2]][:3] == ["金额", "订单号", "客户"] and ws["D2"].value is None  # 状态、日期被删掉
+    assert ws["A3"].number_format == "#,##0.00" and ws["A3"].value == 100.5  # 金额的格式跟着金额走
+    assert ws.column_dimensions["A"].width == 16 and ws.column_dimensions["B"].width == 12  # 列宽跟着列走
+    assert ws["A2"].fill.fgColor.rgb == HEADER_FILL
+
+
+def test_summary_sheet_is_appended_with_original_header_style(tmp_path):
+    src = tmp_path / "订单.xlsx"
+    _styled_workbook(src)
+    recipe = Recipe(
+        name="订单汇总",
+        inputs=[{"alias": "订单", "sheet": "订单", "expected_columns": ["订单号", "客户", "状态", "金额", "日期"],
+                 "required_columns": ["客户", "金额"], "header": {"header_row": 2, "header_rows": 1}}],
+        steps=[
+            {"id": 1, "name": "筛选", "formula": "filter_rows", "params": {"table": "订单", "condition": "\"状态\" = '已完成'"}, "output": "已完成订单"},
+            {"id": 2, "name": "按客户汇总", "formula": "group_aggregate",
+             "params": {"table": "已完成订单", "group_by": ["客户"], "aggregations": [{"column": "金额", "func": "sum", "as": "金额合计"}]}, "output": "客户汇总"},
+        ],
+        output_spec=[{"name": "订单明细", "source": "已完成订单"}, {"name": "客户汇总", "source": "客户汇总"}],
+    )
+    out = tmp_path / "out.xlsx"
+    _run(recipe, src, out)
+    wb = openpyxl.load_workbook(out)
+    assert wb.sheetnames == ["订单", "说明", "客户汇总"]  # 明细改写原 sheet，汇总追加成新 sheet
+    assert wb["订单"]["A1"].value == "华东区 9 月订单明细"
+    summary = wb["客户汇总"]
+    assert [c.value for c in summary[1]] == ["客户", "金额合计"]
+    assert summary["A1"].fill.fgColor.rgb == HEADER_FILL and summary["A1"].font.bold  # 表头样式照原表
+    assert summary["B2"].number_format == "#,##0.00"  # 数字列照原表的金额列
+    assert {r[0].value: r[1].value for r in summary.iter_rows(min_row=2)} == {"星河": 1300.75, "北辰": 45.0, "蓝海": 300.0}
+
+
+def test_sheet_named_after_expected_result_when_learned_from_sample(tmp_path):
+    src = tmp_path / "订单.xlsx"
+    _styled_workbook(src)
+    recipe = _recipe([{"id": 1, "name": "筛选", "formula": "filter_rows", "params": {"table": "订单", "condition": "\"金额\" > 100"}, "output": "结果"}],
+                     output="结果", name="大额订单", has_expected=True)
+    out = tmp_path / "out.xlsx"
+    _run(recipe, src, out)
+    assert openpyxl.load_workbook(out).sheetnames == ["大额订单", "说明"]  # 有人工样例：按样例的 sheet 名
+
+
+def test_output_reads_back_to_the_same_data(tmp_path):
+    """写出来的文件再读回来，数据和结果一致（标题行不会干扰表头识别）。"""
+    src = tmp_path / "订单.xlsx"
+    _styled_workbook(src)
+    recipe = _recipe([
+        {"id": 1, "name": "去掉取消订单", "formula": "filter_rows", "params": {"table": "订单", "condition": "\"状态\" <> '已取消'"}, "output": "结果"},
+    ], output="结果", name="订单")
+    out = tmp_path / "out.xlsx"
+    runner = _run(recipe, src, out)
+    expected = runner.collect_outputs()["订单"]
+    back = next(s for s in read_workbook(out) if s.name == "订单")
+    assert back.header.header_row == 2
+    assert back.df["订单号"].tolist() == expected["订单号"].tolist()
+    assert back.df["金额"].tolist() == expected["金额"].tolist()
+
+
+def test_csv_input_falls_back_to_default_style(tmp_path):
+    src = tmp_path / "订单.csv"
+    src.write_text("订单号,客户,状态,金额,日期\nA001,星河,已完成,100.5,2026-09-01\nA002,蓝海,已取消,80,2026-09-02\n", encoding="utf-8")
+    recipe = Recipe(
+        name="x", inputs=[{"alias": "订单", "expected_columns": ["订单号", "客户", "状态", "金额", "日期"], "required_columns": ["订单号"]}],
+        steps=[{"id": 1, "name": "筛选", "formula": "filter_rows", "params": {"table": "订单", "condition": "\"状态\" = '已完成'"}, "output": "结果"}],
+        output_spec=[{"name": "结果", "source": "结果"}],
+    )
+    out = tmp_path / "out.xlsx"
+    runner = _run(recipe, src, out)
+    assert runner.report["output_style"] == "default"
+    assert openpyxl.load_workbook(out).sheetnames == ["结果"]
+
+
+def test_demo_bill_keeps_title_row_and_header_style(samples, tmp_path):
+    """示例账单：长转宽 + 匹配 + 汇总之后，输出仍然是原来运费明细那张表的样子（标题行、表头加粗、冻结…）。"""
+    recipe = Recipe(**demo_recipe_body())
+    runner = RecipeRunner(recipe, FormulaLibrary(), Workspace(None))
+    out = tmp_path / "bill.xlsx"
+
+    async def go():
+        sources = {"运费明细": InputSource("运费明细", path=samples["fees_sep"], filename="运费明细.xlsx"),
+                   "店铺归属": InputSource("店铺归属", path=samples["owners"], filename="店铺归属表.xlsx")}
+        return [e async for e in runner.run(sources, output_path=out)]
+
+    asyncio.run(go())
+    assert runner.report["output_style"] == "original"
+    wb = openpyxl.load_workbook(out)
+    assert wb.sheetnames == ["明细", "归属汇总"]
+    ws = wb["明细"]
+    assert ws["A1"].value == "顺达物流 · 2026 年 9 月运费明细"  # 原文件的标题行
+    assert [c.value for c in ws[2]][:9] == ["运单号", "下单日期", "店铺名称", "重量(kg)", "运费", "保价费", "包装费", "合计", "归属"]
+    assert ws["A2"].font.bold and ws["I2"].font.bold  # 新增的列表头也是加粗的
+    assert ws.max_row == 2 + 48
+    assert wb["归属汇总"]["A1"].font.bold
+
+
+def test_rerun_from_step_still_writes_in_original_style(client):
+    """断点重跑没有重新读输入文件：靠运行记录里记下的位置恢复，输出依然是原样式。"""
+    customers = client.get("/api/customers").json()["customers"]
+    demo = next(c for c in customers if c["name"].startswith("顺达物流"))
+    detail = client.get(f"/api/customers/{demo['id']}").json()["customer"]
+    run_id = [r["run_id"] for r in detail["runs"] if r["kind"] == "replay"][-1]  # 最早的一条是种子数据里的示例运行；其他测试可能在同一个客户下追加过运行
+    run = client.get(f"/api/runs/{run_id}").json()["run"]
+    events = read_sse(client.post(f"/api/runs/{run_id}/rerun/3", json={"params": run["steps"][2]["params"]}))
+    file_event = next(e for e in events if e["type"] == "file")
+    wb = openpyxl.load_workbook(io.BytesIO(client.get(file_event["download_url"]).content))
+    assert wb["明细"]["A1"].value == "顺达物流 · 2026 年 9 月运费明细"

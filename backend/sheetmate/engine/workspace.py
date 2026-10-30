@@ -131,6 +131,13 @@ class Workspace:
             except duckdb.Error:
                 pass
 
+    def interrupt(self) -> None:
+        """中断正在执行的查询（给「超时中止」用）。会从别的线程调用，所以这里不能拿锁——执行查询的线程正拿着它。"""
+        try:
+            self._con.interrupt()
+        except duckdb.Error:
+            pass
+
     def exists(self, name: str) -> bool:
         with self._lock:
             rows = self._run("SELECT count(*) FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main'", [name])

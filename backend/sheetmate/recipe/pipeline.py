@@ -209,7 +209,8 @@ class RecipePipeline:
         for alias, df in ctx.input_frames.items():
             meta = ctx.input_meta.get(alias)
             sources[alias] = InputSource(alias=alias, df=df, filename=meta.filename if meta else "",
-                                         sheet=meta.sheet if meta else None, file_id=meta.file_id if meta else None)
+                                         sheet=meta.sheet if meta else None, file_id=meta.file_id if meta else None,
+                                         path=meta.path if meta else None, header=meta.header if meta else None)
         return sources
 
 

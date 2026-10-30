@@ -1,26 +1,21 @@
 <script setup lang="ts">
 /**
- * 新对话：先选客户（相当于 Qoder 里选目录），再描述需求、拖入表格。
- * 发送时：建会话 → 上传附件 → 跳到对话页继续。
+ * 新对话（首页）：一句标题、一个输入框，IP 形象蹲在输入框的右上角，输入框下面挂着一个窄一点的抽屉「选择客户」。
+ * 选客户相当于 Qoder 里「选择目录」，可以不选。发送时：建会话 → 上传附件 → 跳到对话页继续。
  */
-import { Play } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
-import FloatingObjects from '@/components/brand/FloatingObjects.vue'
-import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import ChatComposer, { type Attachment } from '@/components/chat/ChatComposer.vue'
 import CustomerPicker from '@/components/chat/CustomerPicker.vue'
 import { uid } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
-import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
-import { pendingStarts, SUGGESTIONS } from '@/stores/pending'
+import { pendingStarts } from '@/stores/pending'
 
-const auth = useAuthStore()
 const store = useWorkspaceStore()
 const router = useRouter()
 const route = useRoute()
@@ -34,17 +29,12 @@ const files = ref<{ key: string; file: File; kind: 'input' | 'expected' }[]>([])
 const attachments = ref<Attachment[]>([])
 const busy = ref(false)
 
-const greeting = computed(() => {
-  const h = new Date().getHours()
-  const name = auth.user?.display_name ?? ''
-  if (h < 6) return `夜深了，${name}`
-  if (h < 11) return `早上好，${name}`
-  if (h < 14) return `中午好，${name}`
-  if (h < 18) return `下午好，${name}`
-  return `晚上好，${name}`
-})
-
 const customer = computed(() => store.customers.find((c) => c.id === customerId.value))
+
+// IP 形象蹲在输入框上沿：身体底部在 SVG 的 107/120 处，往下压 SIT_DEPTH 像素，看起来是坐在边上而不是飘着
+const MASCOT_SIZE = 72
+const SIT_DEPTH = 6
+const mascotTop = computed(() => `${-(MASCOT_SIZE * (107 / 120) - SIT_DEPTH)}px`)
 
 function attach(list: File[], kind: 'input' | 'expected') {
   for (const file of list) {
@@ -57,16 +47,6 @@ function attach(list: File[], kind: 'input' | 'expected') {
 function remove(key: string) {
   files.value = files.value.filter((f) => f.key !== key)
   attachments.value = attachments.value.filter((a) => a.key !== key)
-}
-
-function useSuggestion(s: (typeof SUGGESTIONS)[number]) {
-  text.value = s.text
-  mode.value = s.mode
-}
-
-function useRecipe(name: string) {
-  mode.value = 'modify'
-  text.value = `用流程「${name}」处理我上传的新文件`
 }
 
 async function send() {
@@ -101,64 +81,40 @@ async function send() {
 </script>
 
 <template>
-  <div class="relative flex h-full flex-col overflow-y-auto">
-    <!-- 漂浮物件只放在两侧留白里：窄屏时隐藏，避免压住输入框 -->
-    <FloatingObjects preset="hero" class="hidden opacity-80 xl:block" />
+  <div class="flex h-full flex-col overflow-y-auto">
+    <div class="mx-auto flex w-full max-w-[680px] flex-1 flex-col justify-center px-6 pb-[26vh] pt-10">
+      <h1 class="animate-rise text-center text-[30px] font-semibold leading-tight tracking-tight">你的专属表格 Agent 助手</h1>
 
-    <div class="relative mx-auto flex w-full max-w-[780px] flex-1 flex-col justify-center px-6 py-12">
-      <div class="flex animate-rise items-end gap-4">
-        <Mascot :variant="customer?.mascot ?? 'blob'" :size="84" :mood="busy ? 'working' : 'idle'" />
-        <div class="pb-2">
-          <p class="text-sm text-mute">{{ greeting }}</p>
-          <h1 class="mt-1 text-[30px] font-semibold leading-tight tracking-tight">今天想让表格变成什么样？</h1>
+      <div class="mt-[84px]">
+        <!-- 输入框：IP 形象蹲在右上角（装饰，不挡点击） -->
+        <div class="relative z-10">
+          <Mascot
+            :variant="customer?.mascot ?? 'blob'"
+            :size="MASCOT_SIZE"
+            :mood="busy ? 'working' : 'idle'"
+            :shadow="false"
+            class="pointer-events-none absolute right-11"
+            :style="{ top: mascotTop }"
+          />
+          <ChatComposer
+            v-model="text"
+            v-model:mode="mode"
+            v-model:plan="plan"
+            :attachments="attachments"
+            :busy="busy"
+            large
+            autofocus
+            :placeholder="mode === 'modify' ? '描述要怎么整理表格，可以附上人工做好的结果' : '问点什么，或把表格拖进来'"
+            @attach="attach"
+            @remove="remove"
+            @send="send"
+          />
         </div>
-      </div>
 
-      <div class="mt-8 flex flex-wrap items-center gap-3">
-        <CustomerPicker v-model="customerId" />
-        <span class="text-xs text-faint">
-          {{ customer ? `按「${customer.name}」的记忆和流程来处理` : '不绑定客户时，数据只属于这次对话，之后可以保存到客户' }}
-        </span>
-      </div>
-
-      <div class="mt-3">
-        <ChatComposer
-          v-model="text"
-          v-model:mode="mode"
-          v-model:plan="plan"
-          :attachments="attachments"
-          :busy="busy"
-          large
-          autofocus
-          :placeholder="mode === 'modify' ? '描述要怎么整理表格，例如：按运单号把费用拆成列，算合计，匹配归属…（可以附上人工做好的结果）' : '问点什么，例如：每个店铺的运费合计是多少？'"
-          @attach="attach"
-          @remove="remove"
-          @send="send"
-        />
-      </div>
-
-      <!-- 客户已有的流程：一键复用 -->
-      <div v-if="customer && customer.recipes.length" class="mt-5">
-        <div class="label-mini mb-2">「{{ customer.name }}」的处理流程</div>
-        <div class="flex flex-wrap gap-2">
-          <button v-for="r in customer.recipes" :key="r.recipe_id" class="btn-line" @click="useRecipe(r.name)">
-            <Play class="size-3.5" />用「{{ r.name }}」处理新文件
-            <span class="text-xs text-faint">{{ r.steps }} 步</span>
-          </button>
+        <!-- 抽屉：从输入框下面延伸出来，比输入框窄一点，边框和输入框连成一体 -->
+        <div class="animate-drawer relative mx-6 -mt-5 rounded-b-[18px] border border-t-0 border-line bg-paper/70 pt-5">
+          <CustomerPicker v-model="customerId" />
         </div>
-      </div>
-
-      <div class="mt-6 grid gap-2 sm:grid-cols-2">
-        <button
-          v-for="s in SUGGESTIONS"
-          :key="s.text"
-          class="flex items-center gap-3 rounded-2xl border border-line bg-white/80 px-3.5 py-3 text-left text-[13px] text-mute backdrop-blur transition hover:-translate-y-0.5 hover:border-ink/20 hover:text-ink"
-          @click="useSuggestion(s)"
-        >
-          <FunObject :kind="s.icon as FunKind" :size="30" />
-          <span class="leading-snug">{{ s.text }}</span>
-          <span class="tag ml-auto shrink-0">{{ s.mode === 'modify' ? '修改' : '分析' }}</span>
-        </button>
       </div>
     </div>
   </div>

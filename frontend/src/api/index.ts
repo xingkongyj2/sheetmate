@@ -9,8 +9,11 @@ import type {
   ConversationDetail,
   CustomerCard,
   CustomerDetail,
+  CustomerFormula,
   FileInfo,
   FormulaInfo,
+  FormulaTrialInput,
+  FormulaTrialResult,
   LLMConfig,
   MemoryItem,
   PlanStep,
@@ -67,6 +70,21 @@ export const customerApi = {
     (await http.put<{ mapping: Record<string, string[]> }>(`/customers/${id}/field-mapping`, { mapping })).data.mapping,
   addMemory: async (id: string, payload: { category: string; key: string; value: string }) =>
     (await http.post<{ memory: MemoryItem }>(`/customers/${id}/memories`, payload)).data.memory,
+
+  // ---- 客户独有公式（参数声明 + {{参数}} SQL 模板）
+  formulas: async (id: string) => (await http.get<{ formulas: CustomerFormula[] }>(`/customers/${id}/formulas`)).data.formulas,
+  /** 新增 / 升级：同一个 id 每保存一次升一个版本。返回保存后的公式，used_by[].problems 是它让哪些流程的哪一步出了问题 */
+  saveFormula: async (id: string, body: Record<string, unknown>) =>
+    (await http.post<{ formula: CustomerFormula }>(`/customers/${id}/formulas`, body)).data.formula,
+  /** 边写边检查：和保存时一样的检查，不保存。返回问题列表，空 = 通过 */
+  checkFormula: async (id: string, body: Record<string, unknown>) =>
+    (await http.post<{ problems: string[] }>(`/customers/${id}/formulas/check`, body)).data.problems,
+  /** 试运行：失败（公式有问题 / 参数不对 / SQL 出错）也是 200，看 result.status */
+  trialFormula: async (id: string, payload: { formula: Record<string, unknown>; params: Record<string, unknown>; inputs: FormulaTrialInput[] }) =>
+    (await http.post<{ result: FormulaTrialResult }>(`/customers/${id}/formulas/trial`, payload, { timeout: 60_000 })).data.result,
+  setFormulaStatus: async (id: string, formulaId: string, status: 'active' | 'deprecated') =>
+    (await http.put<{ formula: CustomerFormula }>(`/customers/${id}/formulas/${formulaId}/status`, { status })).data.formula,
+  removeFormula: async (id: string, formulaId: string) => http.delete(`/customers/${id}/formulas/${formulaId}`),
 }
 
 export const memoryApi = {
@@ -133,7 +151,7 @@ export const recipeApi = {
   run: (id: string, body: { file_ids: string[]; inputs?: Record<string, string>; allow_repair?: boolean }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/recipes/${id}/run`, body, onEvent),
   formulas: async (customerId?: string) =>
-    (await http.get<{ builtin: FormulaInfo[]; customer: FormulaInfo[] }>('/formulas', { params: { customer_id: customerId } })).data,
+    (await http.get<{ builtin: FormulaInfo[]; customer: FormulaInfo[]; reserved_ids: string[] }>('/formulas', { params: { customer_id: customerId } })).data,
 }
 
 export const runApi = {
