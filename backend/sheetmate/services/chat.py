@@ -21,6 +21,7 @@ from sheetmate.agent.llm import LLMError, get_llm
 from sheetmate.agent.memory import extract_memories
 from sheetmate.agent.multi_agent import execute_multi, should_activate
 from sheetmate.agent.planner import check_clarification, generate_plan
+from sheetmate.agent.persistence import infer_recipe_persistence
 from sheetmate.agent.recorder import WorkflowRecorder
 from sheetmate.agent.summarizer import COMPACT_THRESHOLD, compact_history, fallback_title, make_title
 from sheetmate.agent.tools import AgentContext, ToolRegistry
@@ -44,7 +45,7 @@ _KEEP_EVENTS = {
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
-    "recipe_verify", "recipe_refine", "recipe_diff", "recipe_saved", "recipe_failed",
+    "recipe_verify", "recipe_refine", "recipe_diff", "recipe_completed", "recipe_saved", "recipe_failed",
 }
 
 
@@ -119,7 +120,11 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         llm = get_llm()
         ctx, host = build_context(user_id, conversation_id, llm)
         history = await _history(conversation_id, llm, emit)
-        ctx.mode = await infer_mode(llm, ctx, message, history, plan_steps)
+        ctx.mode, ctx.save_recipe_requested = await asyncio.gather(
+            infer_mode(llm, ctx, message, history, plan_steps),
+            infer_recipe_persistence(llm, message, history),
+        )
+        host.save_recipe_requested = ctx.save_recipe_requested
     except asyncio.CancelledError:
         recorder.error = "用户停止了生成"
         _save_assistant(conversation_id, "（已停止，尚未处理文件）", stored, recorder, None)
@@ -139,6 +144,20 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             request.meta = {**(request.meta or {}), "mode": ctx.mode}
     executor = AgentExecutor(llm, _registry, max_iterations=settings.agent_max_iterations)
     run_id = None
+
+    async def guard_creation_delivery(*, interrupted: bool = False) -> str:
+        summary = (_creation_fallback(stored, interrupted=interrupted) if ctx.mode == "create" else "")
+        summary = summary or _script_fallback(stored, mode=ctx.mode, interrupted=interrupted)
+        if not summary:
+            return ""
+        previous = final_text or "".join(text_parts).strip()
+        if previous:
+            # 撤回模型尚未交付文件时的回答，避免界面和保存的最终结果宣称建表成功。
+            await emit({"type": "note", "content": previous})
+        await emit({"type": "text_chunk", "content": summary})
+        await emit({"type": "final_text", "content": summary})
+        return summary
+
     try:
         with ExitStack() as resources:
             analysis = resources.enter_context(analysis_workspace(ctx.ws))
@@ -163,17 +182,19 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                     await emit(event)
     except asyncio.CancelledError:
         recorder.error = "用户停止了生成"
-        summary = _recipe_fallback(stored, interrupted=True) or "（已停止）"
-        separator = "\n\n" if text_parts else ""
-        await emit({"type": "text_chunk", "content": separator + summary})
-        answer = "".join(text_parts).strip()
-        await emit({"type": "final_text", "content": answer})
+        answer = await guard_creation_delivery(interrupted=True)
+        if not answer:
+            summary = _recipe_fallback(stored, interrupted=True) or "（已停止）"
+            separator = "\n\n" if text_parts else ""
+            await emit({"type": "text_chunk", "content": separator + summary})
+            answer = "".join(text_parts).strip()
+            await emit({"type": "final_text", "content": answer})
         _save_assistant(conversation_id, answer, stored, recorder, run_id)
         raise
     except Exception as exc:
         await emit({"type": "error", "content": f"处理出错：{exc}"})
 
-    answer = final_text or "".join(text_parts).strip()
+    answer = await guard_creation_delivery() or final_text or "".join(text_parts).strip()
     if not answer or recorder.error:
         summary = _recipe_fallback(stored, interrupted=bool(recorder.error))
         if summary:
@@ -197,6 +218,73 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     task.add_done_callback(_background.discard)
 
 
+def _script_fallback(events: list[dict[str, Any]], *, mode: str, interrupted: bool = False) -> str:
+    """脚本失败或仅返回辅助数据时，不把最后一轮模型话术当成已交付修改。"""
+    calls = [(index, event) for index, event in enumerate(events)
+             if event.get("type") == "tool_call" and event.get("tool") == "run_python_script"]
+    if not calls or any(event.get("type") == "clarify" for event in events):
+        return ""
+    index, call = calls[-1]
+    following = events[index + 1:]
+    result = next((event for event in following if event.get("type") == "tool_result" and event.get("id") == call.get("id")), None)
+    files = [event for event in following if event.get("type") == "file" and event.get("file_id")]
+    # 修改/建表恢复必须有文件；查看日志、读取表信息等成功不能抵消脚本失败。
+    later_success = any(event.get("type") == "tool_result" and event.get("ok")
+                        and event is not result and event.get("tool") == "run_sql" for event in following)
+    successful_ids = {event.get("id") for event in following if event.get("type") == "tool_result"
+                      and event.get("ok") and event is not result and event.get("id")}
+    later_success = later_success or any(event.get("type") == "table" and event.get("tool_call_id") in successful_ids
+                                         for event in following)
+    if mode == "analyze" and later_success:
+        return ""
+    if result is not None and result.get("ok") and (mode == "analyze" or files):
+        return ""
+    if files:
+        return ""
+    if result is not None and result.get("ok"):
+        # 已交付文件后的后台核对不需要再交付一个测试文件。
+        if any(event.get("type") == "file" and event.get("file_id") for event in events[:index]):
+            return ""
+        return "脚本已执行并返回辅助结果，本轮尚未生成可下载的工作簿，文件交付仍需继续完成。"
+    message = "最近一次脚本调整尚未完成，本次尝试没有交付文件。"
+    if interrupted:
+        return message + "本次处理已停止。"
+    if result is not None:
+        details = str(result.get("summary") or result.get("text") or "").strip().splitlines()
+        reason = details[0][:200] if details else ""
+        if reason:
+            message += f"\n\n工具返回：{reason}"
+    if any(event.get("type") == "file" and event.get("file_id") for event in events[:index]):
+        message += "\n\n较早生成的文件仍可查看；最近一次调整尚未得到新文件。"
+    return message
+
+
+def _creation_fallback(events: list[dict[str, Any]], *, interrupted: bool = False) -> str:
+    """完整建表任务的交付事实；计划中的设计步骤不单独触发。"""
+    if any(event.get("type") == "file" and event.get("file_id") for event in events):
+        return ""
+    if any(event.get("type") == "clarify" for event in events):
+        return ""
+    blocks = ["本轮尚未生成可下载的 Excel 工作簿。"]
+    if interrupted:
+        blocks.append("本次处理已停止。")
+    failure = next((event for event in reversed(events)
+                    if event.get("type") == "tool_result" and event.get("ok") is False), None)
+    if failure is not None:
+        details = str(failure.get("summary") or failure.get("text") or "").strip().splitlines()
+        # 布局校验返回 Pydantic 文本时，展示实际原因而非英文校验标题或字段路径。
+        reason = next((line.split("Value error, ", 1)[1].split(" [type=", 1)[0].strip()
+                       for line in details if "Value error, " in line), details[0].strip() if details else "")
+        if reason:
+            blocks.append(f"最近一次处理未完成：{reason[:200]}")
+    elif not interrupted:
+        error = next((str(event.get("content") or "").strip().splitlines()[0]
+                      for event in reversed(events)
+                      if event.get("type") == "error" and str(event.get("content") or "").strip()), "")
+        blocks.append(f"处理未完成：{error[:200]}" if error else "建表和文件交付尚未完成。")
+    return "\n\n".join(blocks)
+
+
 def _recipe_fallback(events: list[dict[str, Any]], *, interrupted: bool = False) -> str:
     calls = [event for event in events if event.get("type") == "tool_call"
              and event.get("tool") in {"build_recipe", "revise_recipe", "run_recipe"}]
@@ -206,7 +294,7 @@ def _recipe_fallback(events: list[dict[str, Any]], *, interrupted: bool = False)
     failed = sum(results.get(call.get("id"), {}).get("ok") is False for call in calls)
     latest = results.get(calls[-1].get("id"))
     selected_run = next((event["selected_run"] for event in reversed(events)
-                         if event.get("type") == "recipe_saved" and event.get("tool_call_id") == calls[-1].get("id")
+                         if event.get("type") in {"recipe_completed", "recipe_saved"} and event.get("tool_call_id") == calls[-1].get("id")
                          and isinstance(event.get("selected_run"), dict)), {})
     files = {event.get("file_id") for event in events if event.get("type") == "file" and event.get("file_id")}
     waiting = any(event.get("type") == "clarify" for event in events)
@@ -272,7 +360,7 @@ def _slim(event: dict[str, Any]) -> dict[str, Any]:
         report = dict(item["report"])
         report["steps"] = [{k: v for k, v in s.items() if k not in {"preview", "sql"}} for s in report.get("steps", [])]
         item["report"] = report
-    if item.get("type") == "recipe_saved" and isinstance(item.get("selected_run"), dict):
+    if item.get("type") in {"recipe_completed", "recipe_saved"} and isinstance(item.get("selected_run"), dict):
         selected_run = dict(item["selected_run"])
         if isinstance(selected_run.get("report"), dict):
             report = dict(selected_run["report"])

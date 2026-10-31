@@ -3,7 +3,8 @@
 工具分组：
 - 只读分析：table_info / value_counts / column_stats / preview_table / run_sql
 - 公式工具：每个公式自动生成一个工具（内置公式 + 客户独有公式），两个模式均可生成辅助分析表
-- 文件：list_files / load_file / export_excel
+- 文件：list_files / load_file / export_excel；独立建表技能 create_workbook
+- 脚本：run_python_script / inspect_python_script，可与内置公式、SQL 配合使用
 - Recipe：build_recipe / revise_recipe / run_recipe（修改模式）、save_as_recipe / get_recipe
 - 记忆：remember / save_field_mapping
 - 澄清：ask_user（提问后结束本轮，等用户回答）
@@ -57,6 +58,8 @@ class ToolResult:
     tables: list[dict[str, Any]] = field(default_factory=list)  # 表格预览
     events: list[dict[str, Any]] = field(default_factory=list)  # 额外事件（文件、Recipe 保存、记忆…）
     end_turn: bool = False  # ask_user 之后结束本轮
+    public_text: str | None = None  # 与模型内部反馈分离；日志、调试数据无需发送到界面
+    public_summary: str | None = None
 
 
 class ToolHost(Protocol):
@@ -67,6 +70,10 @@ class ToolHost(Protocol):
     def original_file_path(self, file_id: str) -> Path | None: ...
     def load_file(self, file_id: str) -> list[TableInfo]: ...
     def export_excel(self, sheets: list[tuple[str, str]], filename: str) -> dict[str, Any]: ...
+    def create_workbook(self, spec: dict[str, Any], filename: str) -> dict[str, Any]: ...
+    def created_workbook_spec(self, file_id: str) -> dict[str, Any]: ...
+    def run_python_script(self, *, code: str, description: str, input_tables: list[str], input_files: dict[str, str], cancel_event: Any) -> dict[str, Any]: ...
+    def inspect_python_script(self, run_id: str) -> dict[str, Any]: ...
     def list_recipes(self) -> list[dict[str, Any]]: ...
     def get_recipe(self, recipe_id: str) -> Recipe | None: ...
     def latest_conversation_recipe(self) -> Recipe | None: ...
@@ -82,7 +89,7 @@ class ToolHost(Protocol):
 class AgentContext:
     """一次对话请求的上下文。"""
 
-    mode: str  # analyze / modify
+    mode: str  # analyze / modify / create（由后台 AI 判断）
     ws: Workspace
     library: FormulaLibrary
     host: ToolHost
@@ -92,6 +99,7 @@ class AgentContext:
     max_repair: int = 3
     verify_rounds: int = 2
     table_filter: set[str] | None = None  # 多表并行时，每个专员只看自己的表
+    save_recipe_requested: bool = False  # 仅来自用户明确的保存意图，模型工具参数不能授权
 
     def visible_tables(self) -> list[TableInfo]:
         tables = self.ws.list_tables()
@@ -109,11 +117,12 @@ class Tool:
     name: str
     description: str
     parameters: dict[str, Any]
-    modes: frozenset[str] = frozenset({"analyze", "modify"})
+    modes: frozenset[str] = frozenset({"analyze", "modify", "create"})
     run: RunFn | None = None  # 同步工具（在线程里执行）
     stream: StreamFn | None = None  # 流式工具：先产出事件，最后产出 ToolResult
     label: Callable[[dict[str, Any]], str] | None = None
     needs_customer: bool = False
+    public_params: Callable[[dict[str, Any]], dict[str, Any]] | None = None
 
     def definition(self) -> dict[str, Any]:
         return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": self.parameters}}
@@ -268,7 +277,7 @@ def formula_tool(spec: Formula, kind: str) -> Tool:
         table = args.get("table") or args.get("left") or ", ".join(args.get("tables") or [])
         return f"{spec.name} · {table}" if table else spec.name
 
-    return Tool(fid, description, _obj(properties, required), frozenset({"analyze", "modify"}), run=run, label=label)
+    return Tool(fid, description, _obj(properties, required), frozenset({"analyze", "modify", "create"}), run=run, label=label)
 
 
 # ---------------------------------------------------------------------------
@@ -384,7 +393,8 @@ def _recipe_result_text(result: dict[str, Any]) -> str:
     recipe: Recipe = result["recipe"]
     if result.get("error"):
         return f"流程生成失败：{result['error']}"
-    lines = [f"流程「{recipe.name}」v{recipe.version}（recipe_id={recipe.id}）：执行状态 {_status_label(result['report']['status'])}。"]
+    lines = [f"本次处理「{recipe.name}」（recipe_id={recipe.id}）：执行状态 {_status_label(result['report']['status'])}。"]
+    lines.append("已按用户要求保存为重复流程。" if result.get("saved") else "内部状态：本次没有保存或更新重复流程。无需向用户说明默认行为，也不要主动询问是否保存。")
     report_error = str(result.get("report", {}).get("error") or "").strip()
     if report_error:
         lines.append(f"处理未完成：{report_error}")
@@ -429,7 +439,7 @@ async def _stream_build_recipe(args: dict[str, Any], ctx: AgentContext) -> Async
         raise ValueError("没有输入表：请先上传要处理的文件")
     lctx = _learn_context(ctx, requirement, {t: t for t in input_tables}, expected_tables, args.get("recipe_name"))
     pipeline = RecipePipeline(ctx.llm, ctx.library, ctx.host.pipeline_host(), max_rounds=ctx.verify_rounds, max_repair=ctx.max_repair)
-    async for event in pipeline.build(lctx):
+    async for event in pipeline.build(lctx, save_recipe=ctx.save_recipe_requested):
         yield event
     yield _finish_recipe_tool(ctx, pipeline.result)
 
@@ -450,7 +460,7 @@ async def _stream_revise_recipe(args: dict[str, Any], ctx: AgentContext) -> Asyn
     )
     lctx = _learn_context(ctx, requirement, mapping, expected_tables, mode="revise")
     pipeline = RecipePipeline(ctx.llm, ctx.library, ctx.host.pipeline_host(), max_rounds=ctx.verify_rounds, max_repair=ctx.max_repair)
-    async for event in pipeline.build(lctx, base=recipe, instruction=instruction):
+    async for event in pipeline.build(lctx, base=recipe, instruction=instruction, save_recipe=ctx.save_recipe_requested):
         yield event
     yield _finish_recipe_tool(ctx, pipeline.result)
 
@@ -519,13 +529,16 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
         yield event
     handle.output_path = runner.output_path or handle.output_path
     file_info = host.finish_run(handle, runner.recipe, runner.report)
+    runner.recipe.metadata["last_run"] = {"run_id": handle.run_id, "status": runner.report["status"]}
     if file_info:
         yield {"type": "file", **file_info}
     note = ""
-    if runner.recipe_changed:
+    if runner.recipe_changed and ctx.save_recipe_requested and runner.report["status"] in {"success", "warning"}:
         saved = ctx.host.store_recipe(runner.recipe, note="执行时自动修复")
         yield {"type": "recipe_saved", **saved, "flow": runner.recipe.flow()}
         note = f"执行中自动修复了第 {runner.report['repaired_steps']} 步，已保存为 v{saved['version']}。"
+    elif runner.recipe_changed and ctx.save_recipe_requested:
+        note = "本次执行未通过，尚未保存修复后的流程。"
     ok = runner.report["status"] not in {"failed", "escalated"}
     # 只是运行校验没通过时，结果表也放回工作区，方便和用户一起核对差在哪里
     tables = _copy_results(ctx, runner.collect_outputs(), runner.recipe) if has_reviewable_output(runner.report) else []
@@ -537,12 +550,25 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
 
 
 def _tool_save_as_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    if not ctx.save_recipe_requested:
+        raise ValueError("用户没有要求保存重复流程；只完成本次处理，不要主动保存或追问保存。")
     targets = [str(t) for t in (args.get("output_tables") or [])]
-    recipe = compile_from_workspace(
-        ctx.ws, targets, ctx.library, name=str(args.get("name") or "分析流程"), description=str(args.get("description") or ""),
-        customer_id=(ctx.customer or {}).get("id"), conversation_id=ctx.conversation_id, field_mapping=ctx.host.field_mapping(),
-    )
-    saved = ctx.host.store_recipe(recipe, note="由分析过程沉淀")
+    if targets:
+        recipe = compile_from_workspace(
+            ctx.ws, targets, ctx.library, name=str(args.get("name") or "分析流程"), description=str(args.get("description") or ""),
+            customer_id=(ctx.customer or {}).get("id"), conversation_id=ctx.conversation_id, field_mapping=ctx.host.field_mapping(),
+        )
+        saved = ctx.host.store_recipe(recipe, note="按用户要求保存分析流程")
+    else:
+        recipe = ctx.host.get_recipe(str(args["recipe_id"])) if args.get("recipe_id") else ctx.host.latest_conversation_recipe()
+        if recipe is None:
+            raise ValueError("本会话没有可保存的已执行流程；脚本任务尚不支持保存为无需 AI 的重复流程。")
+        if args.get("name"):
+            recipe.name = str(args["name"])
+        if args.get("description"):
+            recipe.description = str(args["description"])
+        recipe.status = "active" if (recipe.metadata.get("last_run") or {}).get("status") in {"success", "warning"} else "draft"
+        saved = ctx.host.store_recipe(recipe, note="按用户要求保存本次处理流程")
     steps = "；".join(f"{s.id}. {s.name}（{s.formula}）" for s in recipe.ordered_steps())
     return ToolResult(f"已保存流程「{recipe.name}」v{saved['version']}（recipe_id={saved['recipe_id']}），共 {len(recipe.steps)} 步：{steps}",
                       summary=f"保存流程「{recipe.name}」", events=[{"type": "recipe_saved", **saved, "flow": recipe.flow()}])
@@ -603,9 +629,15 @@ _STR_LIST = {"type": "array", "items": {"type": "string"}}
 
 
 def _static_tools() -> list[Tool]:
-    both = frozenset({"analyze", "modify"})
+    from sheetmate.agent.creation import workbook_creation_tool, workbook_inspection_tool
+    from sheetmate.agent.scripting import python_script_tools
+
+    both = frozenset({"analyze", "modify", "create"})
     analyze, modify = frozenset({"analyze"}), frozenset({"modify"})
     return [
+        *python_script_tools(),
+        workbook_creation_tool(),
+        workbook_inspection_tool(),
         Tool("table_info", "查看一张表的结构：列名、类型、空值、不同值数量、样本、候选主键和前几行。处理任何表之前先调用它。",
              _obj({"table": {**_STR, "description": "表名"}}, ["table"]), both, run=_tool_table_info,
              label=lambda a: f"查看结构 · {a.get('table', '')}"),
@@ -633,13 +665,13 @@ def _static_tools() -> list[Tool]:
              analyze, run=_tool_export_excel, label=lambda a: f"导出 Excel · {a.get('filename', '')}"),
         Tool("build_recipe",
              "生成并执行一个可重复执行的处理流程（Recipe）：系统会比对输入和人工结果（如有）、规划步骤、用 DuckDB 执行、"
-             "出错自动修复、校验并验证能否复现人工结果，最后输出 Excel 并保存流程。",
+             "出错自动修复、校验并验证能否复现人工结果，最后输出 Excel。默认只完成本次处理；仅当用户明确要求长期重复执行时才保存流程。",
              _obj({"requirement": {**_STR, "description": "清楚的处理说明：要做哪些处理、业务规则、输出什么（相当于 SheetAgent 的 process.md）"},
                    "input_tables": {**_STR_LIST, "description": "原始上传的输入表名；不填自动使用。辅助分析结果用于完善 requirement，不代替原始输入"},
                    "expected_tables": {**_STR_LIST, "description": "人工做好的期望结果表（如有）；不填会自动使用标记为期望结果的表"},
                    "recipe_name": {**_STR, "description": "可选：流程名"}}, ["requirement"]),
              modify, stream=_stream_build_recipe, label=lambda a: "生成处理流程"),
-        Tool("revise_recipe", "按用户的修改意见修订已有流程（生成新版本，重新执行和验证）。",
+        Tool("revise_recipe", "按用户的修改意见调整本次处理，重新执行和验证；仅明确要求保存/更新重复流程时才持久保存新版本。",
              _obj({"instruction": {**_STR, "description": "修改要求"},
                    "recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
                    "inputs": {"type": "object", "description": "可选：{流程输入名: 表名}"},
@@ -649,10 +681,11 @@ def _static_tools() -> list[Tool]:
              _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名}，不填自动按列匹配"},
                    "allow_repair": {"type": "boolean", "description": "出错时是否允许 AI 自动修复，默认 true"}}, ["recipe_id"]),
              modify, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
-        Tool("save_as_recipe", "把分析过程中用公式生成的结果表沉淀成可重复执行的流程（不调用 AI，按依赖自动整理步骤）。",
-             _obj({"output_tables": {**_STR_LIST, "description": "最终要输出的结果表"}, "name": _STR,
-                   "description": {**_STR, "description": "流程说明"}}, ["output_tables", "name"]),
-             analyze, run=_tool_save_as_recipe, label=lambda a: f"保存流程 · {a.get('name', '')}"),
+        Tool("save_as_recipe", "仅用户明确要求保存为每月等重复流程时调用。可把公式结果表编为流程，或保存本会话最近已执行的处理；不需要重新处理文件。",
+             _obj({"output_tables": {**_STR_LIST, "description": "可选：分析过程中公式生成的最终结果表。不填则保存最近已执行流程"}, "name": _STR,
+                   "recipe_id": {**_STR, "description": "可选：指定本会话已执行的流程 ID，不填用最近的"},
+                   "description": {**_STR, "description": "流程说明"}}),
+             both, run=_tool_save_as_recipe, label=lambda a: f"保存流程 · {a.get('name', '')}"),
         Tool("get_recipe", "查看一个已保存流程的详细步骤和参数。", _obj({"recipe_id": _STR}, ["recipe_id"]), both,
              run=_tool_get_recipe, label=lambda a: "查看流程"),
         Tool("remember", "记住用户的偏好或业务规则（绑定客户时记到客户名下）。",
@@ -679,7 +712,7 @@ class ToolRegistry:
 
     def for_context(self, ctx: AgentContext) -> list[Tool]:
         tools = [t for t in self._static.values() if ctx.mode in t.modes and (not t.needs_customer or ctx.customer)]
-        if ctx.mode in {"analyze", "modify"}:
+        if ctx.mode in {"analyze", "modify", "create"}:
             for spec in ctx.library.customer_specs():
                 tools.append(formula_tool(spec, "customer"))
             for spec in ctx.library.builtin_specs():

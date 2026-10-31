@@ -57,7 +57,7 @@ export function recipeFailure(progress: RecipeProgress): { summary: string; next
 
 export function recipeAttempts(message: UiMessage): { key: string; progress: RecipeProgress; notes: string[]; label: string }[] {
   const artifacts = message.artifacts.flatMap((item) => item.kind === 'recipe' ? [item] : [])
-  const modes = { learn: '生成处理流程', revise: '修订处理流程', replay: '执行已有流程' }
+  const modes = { learn: '规划处理步骤', revise: '调整处理步骤', replay: '执行已有流程' }
   let cursor = 0
   return artifacts.map((artifact, index) => {
     const position = artifact.progress.toolCallId

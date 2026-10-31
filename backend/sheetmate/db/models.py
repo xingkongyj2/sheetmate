@@ -81,7 +81,7 @@ class Conversation(Base):
         ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
     )
     title: Mapped[str] = mapped_column(String(200), default="新对话")
-    mode: Mapped[str] = mapped_column(String(16), default="analyze")  # analyze / modify
+    mode: Mapped[str] = mapped_column(String(16), default="analyze")  # analyze / modify / create
     # 历史太长时压缩出的上下文摘要（TabClaw 的 auto-compact），以及它覆盖到的最后一条消息 id
     context_summary: Mapped[str] = mapped_column(Text, default="")
     summary_until: Mapped[int] = mapped_column(Integer, default=0)
@@ -177,7 +177,7 @@ class Run(Base):
     __tablename__ = "runs"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("run"))
-    kind: Mapped[str] = mapped_column(String(16))  # analysis / modify / replay
+    kind: Mapped[str] = mapped_column(String(16))  # analysis / modify / replay / create / script
     conversation_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     customer_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)

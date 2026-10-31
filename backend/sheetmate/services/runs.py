@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +24,7 @@ run_workspaces = WorkspaceManager(settings.runs_dir, max_open=12)
 STATUS_LABELS = {
     "running": "运行中", "success": "成功", "warning": "完成（有提示）", "failed": "失败", "escalated": "需要人工处理",
 }
-KIND_LABELS = {"analysis": "分析", "modify": "生成流程", "replay": "重复执行"}
+KIND_LABELS = {"analysis": "分析", "modify": "生成流程", "replay": "重复执行", "create": "建表", "script": "Python 脚本"}
 
 
 def create_run(db: Session, *, kind: str, user_id: int | None, customer_id: str | None, conversation_id: str | None,
@@ -31,7 +32,7 @@ def create_run(db: Session, *, kind: str, user_id: int | None, customer_id: str 
                input_file_ids: list[str] | None = None) -> Run:
     run = Run(id=new_id("run"), kind=kind, user_id=user_id, customer_id=customer_id, conversation_id=conversation_id,
               recipe_id=recipe_id, recipe_version=recipe_version, request_text=request_text[:2000],
-              input_file_ids=input_file_ids or [], status="running")
+              input_file_ids=input_file_ids or [], status="running", created_at=datetime.now())
     db.add(run)
     db.flush()
     return run
@@ -68,7 +69,8 @@ def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification
     run.output_file_id = output_file_id
     run.duration_ms = int(report.get("duration_ms", 0))
     run.recipe_version = report.get("recipe_version") or run.recipe_version
-    run.finished_at = now()
+    # 连续追问可能在同一秒内完成，保留微秒才能取到最后一次执行快照。
+    run.finished_at = datetime.now()
     return run
 
 

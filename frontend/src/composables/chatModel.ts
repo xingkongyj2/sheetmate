@@ -244,8 +244,9 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
     case 'recipe_diff':
       p.diff = e.diff?.cards
       return true
+    case 'recipe_completed':
     case 'recipe_saved':
-      p.saved = e as unknown as RecipeProgress['saved']
+      p.saved = e.type === 'recipe_saved' ? e as unknown as RecipeProgress['saved'] : undefined
       if (e.flow) p.flow = e.flow
       if (e.selected_run) {
         const selected = e.selected_run

@@ -197,7 +197,9 @@ def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None 
             name, sheet.df, label=f"{record.filename} · {sheet.name}", source="uploaded",
             role="expected" if record.kind == "expected" else "input", file_id=record.id, filename=record.filename,
             sheet=sheet.name, header=sheet.header.to_dict(),
-            description=("人工做好的期望结果" if record.kind == "expected" else "上传的原始数据") + (f"，标题：{sheet.header.title}" if sheet.header.title else ""),
+            description=("人工做好的期望结果" if record.kind == "expected" else
+                         "系统生成的工作簿，可继续作为输入处理" if record.kind == "output" else "上传的原始数据")
+                        + (f"，标题：{sheet.header.title}" if sheet.header.title else ""),
         )
         tables.append(info)
     return tables

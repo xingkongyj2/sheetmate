@@ -35,7 +35,7 @@ async def generate_plan(llm: Any, ctx: AgentContext, message: str) -> dict[str, 
         return {
             "title": "执行需求",
             "steps": [
-                {"id": 1, "description": "查看相关表的结构和数据"},
+                {"id": 1, "description": "理解需求并确定表格结构" if ctx.mode == "create" or not ctx.visible_tables() else "查看相关表的结构和数据"},
                 {"id": 2, "description": f"执行需求：{message}"},
                 {"id": 3, "description": "整理并说明结果"},
             ],

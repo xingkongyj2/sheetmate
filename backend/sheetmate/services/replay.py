@@ -71,7 +71,7 @@ def match(user: User, recipe_id: str, file_ids: list[str]) -> dict[str, Any]:
 
 
 def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dict[str, str] | None = None,
-                 allow_repair: bool = True, version: int | None = None) -> Job:
+                 allow_repair: bool = True, version: int | None = None, save_recipe: bool = False) -> Job:
     with session_scope() as db:
         recipe = recipe_service.get_recipe(db, recipe_id, version)
         if recipe.customer_id:
@@ -112,19 +112,20 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
                               max_repair=settings.repair_max_attempts, run_id=run_id)
         async for event in runner.run(sources, output_path=out_path, history=history):
             await job.emit(event)
-        await _finish(job, user.id, runner, runner.output_path or out_path, note="执行时自动修复")
+        await _finish(job, user.id, runner, runner.output_path or out_path, note="执行时自动修复", save_recipe=save_recipe)
 
     return jobs.start(f"run:{run_id}", work)
 
 
-def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, Any] | None = None) -> Job:
+def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, Any] | None = None, *, save_recipe: bool = False) -> Job:
     with session_scope() as db:
         run = run_service.get_run(db, run_id)
         if not run.recipe_id:
             raise ServiceError("这条运行记录没有关联流程")
         if run.customer_id:
             require_customer(db, user, run.customer_id)
-        recipe = recipe_service.get_recipe(db, run.recipe_id, run.recipe_version)
+        snapshot = (run.validation or {}).get("recipe_snapshot")
+        recipe = Recipe.model_validate(snapshot) if isinstance(snapshot, dict) else recipe_service.get_recipe(db, run.recipe_id, run.recipe_version)
         library = recipe_service.library_for(db, recipe.customer_id)
         mapping = memory_service.field_mapping_for(db, recipe.customer_id)
         if not (settings.runs_dir / f"{run_id}.duckdb").exists():
@@ -151,18 +152,19 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
             runner.recipe_changed = True
         runner.report["steps"] = kept_steps + runner.report["steps"]
         runner.report["inputs"] = kept_inputs
-        await _finish(job, user.id, runner, runner.output_path or out_path, note=f"手动调整第 {step_id} 步参数后重跑")
+        await _finish(job, user.id, runner, runner.output_path or out_path, note=f"手动调整第 {step_id} 步参数后重跑", save_recipe=save_recipe)
 
     return jobs.start(f"run:{run_id}", work)
 
 
-async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, note: str) -> None:
-    """登记输出文件、保存修改过的流程（新版本草稿）、记录运行结果。运行记录指向实际执行的那个版本。"""
+async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, note: str, *, save_recipe: bool = False) -> None:
+    """登记本次输出和执行快照；只有用户要求时才把变更存为重复流程。"""
     report = runner.report
     with session_scope() as db:
         run = run_service.get_run(db, report["run_id"])
+        runner.recipe.metadata["last_run"] = {"run_id": run.id, "status": report.get("status")}
         saved = None
-        if runner.recipe_changed:
+        if save_recipe and runner.recipe_changed and report["status"] in {"success", "warning"}:
             runner.recipe.metadata["version_note"] = note
             saved = recipe_service.recipe_brief(recipe_service.save_recipe(db, runner.recipe, status="draft"))
             report["recipe_version"] = saved["version"]
@@ -175,6 +177,9 @@ async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, 
                                                   run_id=run.id, user_id=user_id)
             metrics = run_service.metrics_of(runner.collect_outputs())
         run_service.finish_run(db, run.id, report, output_file_id=record.id if record else None, outputs_metrics=metrics)
+        snapshot = runner.recipe.model_copy(deep=True)
+        snapshot.metadata["last_run"] = {"run_id": run.id, "status": report.get("status")}
+        run.validation = {**(run.validation or {}), "recipe_snapshot": snapshot.to_dict()}
         file_info = file_service.file_dict(record) if record else None
     if file_info:
         await job.emit({"type": "file", **file_info, "run_id": report["run_id"]})

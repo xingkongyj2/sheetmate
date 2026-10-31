@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 对话里的「处理流程」卡片：实时展示 生成 → 执行（含自动修复）→ 校验 → 比对 → 保存 的全过程。
+ * 对话里的处理卡片：实时展示规划、执行（含自动修复）、校验和比对，按请求展示流程保存结果。
  * 执行已有流程（重复执行）也用这张卡片。
  */
 import { ChevronRight, CircleAlert, Download, ExternalLink, FileSpreadsheet, MessageCircleQuestion, ShieldCheck } from '@lucide/vue'
@@ -23,7 +23,7 @@ const selected = ref<StepState | null>(null)
 const showEvidence = ref(false)
 const showDetail = ref(false) // 流程图、校验、比对默认收起，财务只需要看到结果和下载
 
-const MODE_LABEL = { learn: '生成处理流程', revise: '修订处理流程', replay: '执行已有流程' }
+const MODE_LABEL = { learn: '规划处理步骤', revise: '调整处理步骤', replay: '执行已有流程' }
 const STATUS_LABEL: Record<string, string> = {
   thinking: '规划中', running: '执行中', verifying: '比对中', refining: '修正中', done: '完成', failed: '没有完成',
 }
@@ -70,7 +70,7 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
         <div class="flex items-center gap-2">
           <span class="truncate text-[14px] font-semibold">{{ progress.recipeName || progress.saved?.name || MODE_LABEL[progress.mode] }}</span>
           <span v-if="progress.saved" class="tag">v{{ progress.saved.version }}</span>
-          <span v-else-if="progress.recipeVersion" class="tag">v{{ progress.recipeVersion }}</span>
+          <span v-else-if="progress.mode === 'replay' && progress.recipeVersion" class="tag">v{{ progress.recipeVersion }}</span>
         </div>
         <div class="text-xs text-mute">
           {{ MODE_LABEL[progress.mode] }}<template v-if="progress.round > 1"> · 第 {{ progress.round }} 轮</template>

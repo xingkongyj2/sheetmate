@@ -347,7 +347,7 @@ function answer(option: string) {
           </span>
           <span class="max-w-[160px] truncate font-medium">{{ customer.name }}</span>
         </RouterLink>
-        <button v-else-if="detail" class="btn-line py-1.5" title="把这次对话的数据、流程和记忆保存到客户" @click="saveOpen = true">
+        <button v-else-if="detail" class="btn-line py-1.5" title="把这次对话的数据、已保存的流程和记忆保存到客户" @click="saveOpen = true">
           <Save class="size-4" />保存到客户
         </button>
 
@@ -366,7 +366,7 @@ function answer(option: string) {
             <Mascot :variant="customer?.mascot ?? 'blob'" :size="96" />
             <h2 class="mt-5 text-xl font-semibold">{{ customer ? `我已经了解「${customer.name}」了` : '把表格拖进来，告诉我要做什么' }}</h2>
             <p class="mt-2 max-w-md text-sm leading-relaxed text-mute">
-              {{ customer ? '我会按这个客户的处理逻辑、流程和业务规则来处理。' : '直接说你的需求，我会自动判断处理方式。修改表格时保留原有格式，源文件始终保留。' }}
+              {{ customer ? '我会按这个客户的处理逻辑、流程和业务规则来处理。' : '直接说你的需求，我会自动判断处理方式。' }}
             </p>
             <div class="mt-6 flex gap-6 opacity-90">
               <FunObject kind="sheet" :size="40" class="animate-float" />

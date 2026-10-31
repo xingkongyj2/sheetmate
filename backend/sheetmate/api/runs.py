@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/runs", tags=["runs"])
 
 class RerunBody(BaseModel):
     params: dict[str, Any] | None = None
+    save_recipe: bool = False
 
 
 def _check(db: Session, user: User, run) -> None:
@@ -71,4 +72,4 @@ def run_table(run_id: str, name: str, offset: int = 0, limit: int = 50,
 @router.post("/{run_id}/rerun/{step_id}")
 async def rerun_from(run_id: str, step_id: int, body: RerunBody, user: User = Depends(current_user)):
     """从第 step_id 步重跑（可以先改这一步的参数），复用前面已经算好的中间表。"""
-    return sse_response(replay_service.start_rerun_from(user, run_id, step_id, body.params))
+    return sse_response(replay_service.start_rerun_from(user, run_id, step_id, body.params, save_recipe=body.save_recipe))

@@ -152,7 +152,7 @@ const flow = computed(() => recipe.value?.flow as never)
       </div>
       <label class="flex items-center gap-2 text-sm">
         <input v-model="allowRepair" type="checkbox" class="toggle toggle-sm" />
-        出错时允许 AI 自动修复（只修技术问题，不改业务规则；修好的流程会存为新版本草稿）
+        出错时允许 AI 自动修复（修复用于本次执行，业务规则不变）
       </label>
     </div>
 
@@ -173,7 +173,7 @@ const flow = computed(() => recipe.value?.flow as never)
       <p v-if="progress.validation" class="text-xs text-mute">运行校验：{{ progress.validation.summary }}</p>
       <div v-if="progress.escalation || progress.failed" class="whitespace-pre-wrap rounded-xl bg-error/5 px-3 py-2.5 text-[13px] leading-relaxed text-error">{{ progress.escalation || progress.failed }}</div>
       <p v-else-if="progress.runSummary" class="text-sm text-mute">{{ progress.runSummary }}</p>
-      <div v-if="progress.saved" class="rounded-xl bg-fun-purple/10 px-3 py-2 text-xs text-fun-purple">执行中自动修复了流程，已保存为 v{{ progress.saved.version }}（草稿），确认没问题后可以在流程页启用。</div>
+      <div v-if="progress.saved" class="rounded-xl bg-fun-purple/10 px-3 py-2 text-xs text-fun-purple">流程已保存为 v{{ progress.saved.version }}（草稿）。</div>
     </div>
 
     <template #footer>

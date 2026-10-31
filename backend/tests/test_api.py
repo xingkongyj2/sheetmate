@@ -207,7 +207,7 @@ def test_plan_execution(client, samples, fake_llm):
 def test_save_analysis_as_recipe_then_bind_new_customer(client, samples, fake_llm):
     conv = _new_conversation(client)
     _upload(client, conv, samples["fees_sep"])
-    fake_llm(script=[
+    fake_llm(save_recipe_requested=True, script=[
         {"tools": [("filter_rows", {"table": "运费明细", "condition": "\"金额\" > 10", "result_name": "大额"})]},
         {"tools": [("group_aggregate", {"table": "大额", "group_by": ["店铺名称"],
                                         "aggregations": [{"column": "金额", "func": "sum"}], "result_name": "大额汇总"})]},
@@ -237,7 +237,7 @@ def test_save_analysis_as_recipe_then_bind_new_customer(client, samples, fake_ll
 
 
 # ---------------------------------------------------------------------------
-# 修改模式：生成 Recipe → 执行 → 修复 → 比对 → 保存
+# 修改模式：生成处理步骤 → 执行 → 修复 → 比对；只有明确要求才保存重复流程
 # ---------------------------------------------------------------------------
 
 
@@ -252,7 +252,7 @@ def _modify_conversation(client, samples) -> str:
 def test_modify_mode_builds_verified_recipe(client, samples, fake_llm):
     conv = _modify_conversation(client, samples)
     llm = fake_llm(
-        intent_mode="modify",
+        intent_mode="modify", save_recipe_requested=True,
         script=[{"tools": [("build_recipe", {"requirement": "费用拆列、算合计、匹配归属（匹配不到记新食研）、按归属汇总"})]},
                 {"text": "## ✅ 操作结果\n- 已生成流程"}],
         json_handlers=[("Recipe 生成器", _llm_recipe())],
@@ -284,8 +284,10 @@ def test_modify_mode_refines_until_verified(client, samples, fake_llm):
     assert verifies[0]["status"] != "pass" and verifies[0]["overall_match_rate"] < 0.98
     assert verifies[-1]["status"] == "pass" and len(verifies) == 2
     assert any(e["type"] == "recipe_refine" for e in events)
-    saved = next(e for e in events if e["type"] == "recipe_saved")
-    assert saved["status"] == "active"
+    completed = next(e for e in events if e["type"] == "recipe_completed")
+    assert completed["selected_run"]["verification"]["status"] == "pass"
+    assert not any(e["type"] == "recipe_saved" for e in events)
+    assert client.get(f"/api/conversations/{conv}").json()["conversation"]["recipes"] == []
 
 
 def test_modify_mode_publishes_selected_earlier_run_after_failed_refinement(client, samples, fake_llm):
@@ -305,18 +307,18 @@ def test_modify_mode_publishes_selected_earlier_run_after_failed_refinement(clie
     assert runs[1]["status"] in {"failed", "escalated"}
     verification = next(event["report"] for event in events if event["type"] == "recipe_verify")
     assert verification["status"] == "fail"
-    saved = next(event for event in events if event["type"] == "recipe_saved")
-    selected = saved["selected_run"]
+    completed = next(event for event in events if event["type"] == "recipe_completed")
+    selected = completed["selected_run"]
     assert selected["round"] == 1
     assert selected["run_id"] == runs[0]["run_id"]
     assert selected["report"] == runs[0]["report"]
     assert selected["summary"] == runs[0]["summary"]
     assert selected["verification"] == verification
-    assert selected["recipe"]["version"] == saved["version"]
+    assert selected["recipe"]["version"] == 1
     assert selected["recipe"]["steps"][2]["params"]["key"] == first_recipe["steps"][2]["params"]["key"]
     assert next(event for event in events if event["type"] == "file")["run_id"] == selected["run_id"]
     message = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"][-1]
-    stored = next(event["selected_run"] for event in message["events"] if event["type"] == "recipe_saved")
+    stored = next(event["selected_run"] for event in message["events"] if event["type"] == "recipe_completed")
     assert stored["run_id"] == selected["run_id"]
     assert stored["round"] == 1
     assert stored["verification"] == verification
@@ -327,6 +329,8 @@ def test_modify_mode_publishes_selected_earlier_run_after_failed_refinement(clie
     assert all("preview" not in step and "sql" not in step for step in stored["report"]["steps"])
     assert "最近一次流程已执行完成" in message["content"]
     assert "与提供的人工样例仍有差异" in message["content"]
+    assert not any(event["type"] == "recipe_saved" for event in events)
+    assert client.get(f"/api/conversations/{conversation}").json()["conversation"]["recipes"] == []
 
 
 def test_modify_mode_repairs_broken_step_with_llm(client, samples, fake_llm):
@@ -343,7 +347,8 @@ def test_modify_mode_repairs_broken_step_with_llm(client, samples, fake_llm):
     assert next(e for e in events if e["type"] == "recipe_verify")["report"]["status"] == "pass"
 
 
-def test_rerun_from_step_with_new_params(client):
+@pytest.mark.parametrize("save_recipe", [False, True])
+def test_rerun_from_step_with_new_params(client, save_recipe):
     customers = client.get("/api/customers").json()["customers"]
     demo = next(c for c in customers if c["name"].startswith("顺达物流"))
     detail = client.get(f"/api/customers/{demo['id']}").json()["customer"]
@@ -353,17 +358,29 @@ def test_rerun_from_step_with_new_params(client):
     page = client.get(f"/api/runs/{run_id}/tables/运单费用").json()["table"]
     assert page["total"] == 48
     params = copy.deepcopy(run["run"]["steps"][2]["params"])
-    params["missing_fill"] = {"归属": "其他"}
-    events = read_sse(client.post(f"/api/runs/{run_id}/rerun/3", json={"params": params}))
+    missing_fill = {"归属": "待确认" if save_recipe else "其他"}
+    params["missing_fill"] = missing_fill
+    body = {"params": params}
+    if save_recipe:
+        body["save_recipe"] = True
+    events = read_sse(client.post(f"/api/runs/{run_id}/rerun/3", json=body))
     done = next(e for e in events if e["type"] == "recipe_run_done")
     assert done["status"] in {"success", "warning"}
     assert [e["step_id"] for e in events if e["type"] == "recipe_step_done"] == [3, 4]
-    saved = next(e for e in events if e["type"] == "recipe_saved")
-    assert saved["status"] == "draft"
     after = client.get(f"/api/runs/{run_id}").json()["run"]
     assert [s["step_id"] for s in after["steps"]] == [1, 2, 3, 4]  # 前两步的明细沿用原记录
-    assert after["recipe_version"] == saved["version"]  # 记录的是实际执行的版本
-    assert after["steps"][2]["params"]["missing_fill"] == {"归属": "其他"}
+    assert after["steps"][2]["params"]["missing_fill"] == missing_fill
+    stored_recipe = client.get(f"/api/recipes/{after['recipe_id']}").json()["recipe"]
+    assert stored_recipe["version"] == after["recipe_version"]
+    if save_recipe:
+        saved = next(e for e in events if e["type"] == "recipe_saved")
+        assert saved["status"] == "draft"
+        assert saved["version"] == after["recipe_version"] == run["run"]["recipe_version"] + 1
+        assert stored_recipe["steps"][2]["params"]["missing_fill"] == missing_fill
+    else:
+        assert not any(e["type"] == "recipe_saved" for e in events)
+        assert after["recipe_version"] == run["run"]["recipe_version"]
+        assert stored_recipe["steps"][2]["params"]["missing_fill"] != missing_fill
 
 
 @pytest.mark.parametrize("bad_name", ["../../etc/passwd.xlsx", "a.exe"])
@@ -407,14 +424,14 @@ def test_revise_recipe_creates_new_version(client, samples, fake_llm):
     revised["steps"][3]["description"] = "按归属统计票数、金额合计和运费合计"
     revised["steps"][3]["explanation"] = "按用户要求：汇总里加上运费合计"
     fake_llm(
-        intent_mode="modify",
+        intent_mode="modify", save_recipe_requested=True,
         script=[{"tools": [("build_recipe", {"requirement": "整理账单"})]}, {"text": "完成"},
                 {"tools": [("revise_recipe", {"instruction": "归属汇总里再加一列运费合计"})]}, {"text": "已修改"}],
         json_handlers=[("用户要求修改已有的流程", revised), ("Recipe 生成器", _llm_recipe())],
     )
-    first = _chat(client, conv, "整理账单")
+    first = _chat(client, conv, "整理账单并保存成每月重复执行的流程")
     v1 = next(e for e in first if e["type"] == "recipe_saved")
-    second = _chat(client, conv, "归属汇总里再加一列运费合计")
+    second = _chat(client, conv, "归属汇总里再加一列运费合计，并保存更新后的重复流程")
     v2 = next(e for e in second if e["type"] == "recipe_saved")
     assert v2["recipe_id"] == v1["recipe_id"] and v2["version"] == v1["version"] + 1
     step4 = next(e for e in second if e["type"] == "recipe_step_done" and e["step_id"] == 4)
@@ -454,12 +471,11 @@ def test_revise_rule_change_is_not_reverted(client, samples, fake_llm):
     assert verify["informational"] is True and verify["report"]["status"] != "pass"
     assert not any(e["type"] == "recipe_refine" for e in events)
     assert not any("比对没有通过" in p for p in llm.json_prompts)
-    saved = next(e for e in events if e["type"] == "recipe_saved")
-    assert saved["status"] == "active"
-    assert saved["selected_run"]["verification"] == verify["report"]
-    assert saved["selected_run"]["verification"]["informational"] is True
+    completed = next(e for e in events if e["type"] == "recipe_completed")
+    assert completed["selected_run"]["verification"] == verify["report"]
+    assert completed["selected_run"]["verification"]["informational"] is True
     message = client.get(f"/api/conversations/{conv}").json()["conversation"]["messages"][-1]
-    stored = next(event for event in message["events"] if event["type"] == "recipe_saved")
+    stored = next(event for event in message["events"] if event["type"] == "recipe_completed")
     assert stored["selected_run"]["verification"] == verify["report"]
     tables = client.get(f"/api/conversations/{conv}").json()["conversation"]["tables"]
     results = [t for t in tables if t["role"] == "result" and "账单明细" in t["name"]]
@@ -468,6 +484,8 @@ def test_revise_rule_change_is_not_reverted(client, samples, fake_llm):
     page = client.get(f"/api/conversations/{conv}/tables/{detail['name']}", params={"limit": 100}).json()["table"]
     owners = {row[-1] for row in page["rows"]}
     assert "其他" in owners and "新食研" not in owners
+    assert not any(e["type"] == "recipe_saved" for e in events)
+    assert client.get(f"/api/conversations/{conv}").json()["conversation"]["recipes"] == []
 
 
 def test_human_edited_summary_is_not_overwritten(client, samples, fake_llm):

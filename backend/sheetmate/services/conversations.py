@@ -24,7 +24,7 @@ from sheetmate.services.errors import Forbidden, NotFound, ServiceError
 
 conversation_workspaces = WorkspaceManager(settings.workspaces_dir, max_open=24)
 
-MODES = {"analyze": "分析", "modify": "修改"}
+MODES = {"analyze": "分析", "modify": "修改", "create": "建表"}
 
 
 def workspace(conversation_id: str) -> Workspace:
@@ -97,7 +97,7 @@ def update_conversation(db: Session, conv: Conversation, user: User, data: dict[
         conv.title = str(data["title"]).strip()[:120]
     if data.get("mode"):
         if data["mode"] not in MODES:
-            raise ServiceError("模式只能是 analyze 或 modify")
+            raise ServiceError("模式只能是 analyze、modify 或 create")
         conv.mode = data["mode"]
     if "customer_id" in data:
         new_customer = data["customer_id"] or None

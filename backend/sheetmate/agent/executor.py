@@ -1,7 +1,7 @@
 """ReAct 工具循环（移植自 TabClaw agent/executor.py）。
 
 一轮循环：流式调用 LLM → 收集文本增量和 tool_call 分片 → 有工具调用就执行工具、把结果作为 role=tool 回传 → 再调 LLM；
-没有工具调用时，当前文本就是最终回答。最多 max_iterations 轮。
+没有工具调用时，当前文本就是最终回答。默认最多 max_iterations 轮；使用脚本时增加有界的修正轮数。
 
 保留了 TabClaw 的两个细节：
 - 工具调用参数是分片流式返回的，按 index 拼接完整后再 json.loads
@@ -24,7 +24,10 @@ from sheetmate.agent.prompts import (
     MODE_RULES,
     MODIFY_NUDGE,
     PLAN_STEP_MESSAGE,
+    REPEATED_FAILURE_MESSAGE,
     REFLECT_MESSAGE,
+    SCRIPT_RETRY_MESSAGE,
+    TOOL_FALLBACK_MESSAGE,
 )
 from sheetmate.agent.tools import AgentContext, Tool, ToolRegistry, ToolResult, execute_tool
 
@@ -33,6 +36,8 @@ _TOOL_RE = re.compile(r"<｜tool[\s\S]*?(?:<｜tool▁calls?▁end｜>|$)")
 _ROLE_TAGS = {"input": "", "expected": "，⭐期望结果（人工做好的样例）", "derived": "，分析结果", "result": "，流程产出"}
 _EXPLORE_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "list_files", "get_recipe"}
 _RECIPE_TOOLS = {"build_recipe", "revise_recipe", "run_recipe"}
+_SCRIPT_TOOL = "run_python_script"
+_SCRIPT_EXTRA_ITERATIONS = 12
 _NUDGE_AFTER = 4  # 修改模式下查看数据超过这么多次还没生成流程，就提醒一次
 _LIVE_AFTER_CHARS = 140  # 一轮文字超过这么长、且还没出现工具调用，就当作最终回答开始实时输出
 
@@ -122,9 +127,13 @@ class AgentExecutor:
         tool_map = {t.name: t for t in tools}
         definitions = [t.definition() for t in tools] or None
         explored, built, nudged = 0, False, False
-        for iteration in range(self.max_iterations):
+        iteration, iteration_limit = 0, max(1, self.max_iterations)
+        script_budget_added, fallback_suggested = False, False
+        failures: dict[tuple[str, str], int] = {}
+        while iteration < iteration_limit:
             # 最后一轮不再允许调用工具，保证一定有回答（TabClaw 原来是直接报「超过最大轮数」）
-            final_round = iteration == self.max_iterations - 1 and definitions is not None
+            final_round = iteration == iteration_limit - 1 and definitions is not None
+            iteration += 1
             if final_round:
                 msgs.append({"role": "user", "content": FINAL_ROUND_MESSAGE})
             content, reasoning = "", ""
@@ -190,13 +199,15 @@ class AgentExecutor:
             msgs.append(assistant)
 
             end_turn = False
+            guidance: list[str] = []
             for call in calls:
                 result: ToolResult | None = None
                 name = call["function"]["name"]
                 args = _parse_args(call["function"]["arguments"])
                 tool = tool_map.get(name)
                 yield {"type": "tool_call", "id": call["id"], "tool": name,
-                       "label": tool.display(args or {}) if tool else name, "params": args or {}}
+                       "label": tool.display(args or {}) if tool else name,
+                       "params": tool.public_params(args or {}) if tool and tool.public_params else args or {}}
                 started = time.perf_counter()
                 if tool is None:
                     result = ToolResult(f"没有工具 `{name}`。可用工具：{', '.join(tool_map)}", ok=False)
@@ -214,19 +225,39 @@ class AgentExecutor:
                 for extra in result.events:
                     yield {**extra, "tool_call_id": call["id"]}
                 yield {"type": "tool_result", "id": call["id"], "tool": name, "ok": result.ok,
-                       "summary": result.summary or result.text[:200], "text": result.text[:3000],
+                       "summary": result.public_summary if result.public_summary is not None else result.summary or result.text[:200],
+                       "text": (result.public_text if result.public_text is not None else result.text)[:3000],
                        "duration_ms": int((time.perf_counter() - started) * 1000)}
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})
                 end_turn = end_turn or result.end_turn
                 explored += name in _EXPLORE_TOOLS
                 built = built or name in _RECIPE_TOOLS
+                if name == _SCRIPT_TOOL and tool is not None:
+                    if not script_budget_added:
+                        iteration_limit += _SCRIPT_EXTRA_ITERATIONS
+                        script_budget_added = True
+                    # 脚本中间表或打印完成不算修改交付，实际文件可替代 Recipe 完成交付。
+                    built = built or (result.ok and any(event.get("type") == "file" and event.get("file_id")
+                                                       for event in result.events))
+                if not result.ok:
+                    failure_text = re.sub(r"\brun_id=[A-Za-z0-9_]+", "run_id=<本次运行>", result.summary or result.text)
+                    key = (name, failure_text[:1000])
+                    failures[key] = failures.get(key, 0) + 1
+                    if failures[key] == 2:
+                        guidance.append(REPEATED_FAILURE_MESSAGE)
+                    elif name == _SCRIPT_TOOL:
+                        guidance.append(SCRIPT_RETRY_MESSAGE)
+                    elif _SCRIPT_TOOL in tool_map and not fallback_suggested:
+                        guidance.append(TOOL_FALLBACK_MESSAGE)
+                        fallback_suggested = True
+            msgs.extend({"role": "user", "content": message} for message in guidance)
             if end_turn:
                 if transcript is not None:
                     transcript.extend(msgs[start:])
                 yield {"type": "final_text", "content": display}
                 return
             if ctx.mode == "modify" and not built and not nudged and explored >= _NUDGE_AFTER:
-                # 真实模型常会自己逐行核对人工结果把轮数耗光：提醒它把活交给 build_recipe
+                # 收束没有产出修改文件的探索；由模型选择 Recipe 或 Python 完成交付。
                 msgs.append({"role": "user", "content": MODIFY_NUDGE.format(count=explored)})
                 nudged = True
 
@@ -249,10 +280,23 @@ def build_system_prompt(ctx: AgentContext, message: str) -> str:
     table_lines = []
     for t in tables:
         cols = ", ".join(t.column_names[:14]) + (f" …（共 {len(t.columns)} 列）" if len(t.columns) > 14 else "")
+        tag = _ROLE_TAGS.get(t.role, "")
+        if t.created_by == "create_workbook":
+            tag += f"，建表生成，file_id={t.file_id}（可查看布局并另建新版）"
+        elif t.created_by == _SCRIPT_TOOL:
+            tag += f"，脚本生成，file_id={t.file_id}（可作为脚本输入副本继续处理）"
+            script_run_id = (t.header or {}).get("script_run_id")
+            if not script_run_id:
+                match = re.search(r"run_id=([A-Za-z0-9_]+)", t.description or "")
+                script_run_id = match.group(1) if match else None
+            if script_run_id:
+                tag += f"，run_id={script_run_id}"
         table_lines.append(AGENT_TABLE_LINE.format(name=t.name, label=t.label, rows=t.rows, cols=len(t.columns),
-                                                   tag=_ROLE_TAGS.get(t.role, ""), columns=cols))
+                                                   tag=tag, columns=cols))
     files = [f for f in ctx.host.list_files() if not f.get("tables")]
-    file_lines = [f"- file_id={f['file_id']}「{f['filename']}」（{f.get('scope_label', '')}）" for f in files[:15]]
+    file_lines = [f"- file_id={f['file_id']}「{f['filename']}」（{f.get('scope_label', '')}）"
+                  + (f"，脚本 run_id={f['script_run_id']}（可查看脚本后继续调整）" if f.get("script_run_id") else "")
+                  for f in files[:15]]
     if ctx.customer:
         summary = (ctx.customer.get("summary") or "").strip()
         excerpt = summary[:800] + ("…" if len(summary) > 800 else "")
@@ -269,10 +313,15 @@ def build_system_prompt(ctx: AgentContext, message: str) -> str:
                  for r in recipes[:10]]
         recipes_block = "\n## 已有的处理流程（Recipe，优先复用）\n" + "\n".join(lines) + "\n"
     return AGENT_SYSTEM.format(
-        mode_label="分析" if ctx.mode == "analyze" else "修改",
-        mode_rules=MODE_RULES.get(ctx.mode, MODE_RULES["analyze"]),
+        mode_label={"analyze": "分析", "modify": "修改", "create": "新建"}.get(ctx.mode, "分析"),
+        mode_rules=MODE_RULES.get(ctx.mode, MODE_RULES["analyze"]) + (
+            "\n本轮用户已明确要求保存或更新重复流程，可在处理完成后保存。"
+            if ctx.save_recipe_requested else
+            "\n本轮未授权保存重复流程：只完成本次处理，不调用 save_as_recipe，不保存或更新流程，也不主动询问是否保存。"
+        ),
         customer_block=customer_block,
-        tables_block="\n".join(table_lines) or "（还没有表，请用户先上传 Excel / CSV）",
+        tables_block="\n".join(table_lines) or ("（还没有表，可直接根据用户文字或资料新建工作簿）" if ctx.mode == "create"
+                                               else "（还没有表；可回答问题，需要处理现有数据时再加载 Excel / CSV）"),
         files_block="\n".join(file_lines) or "（没有）",
         memory_block=ctx.host.memory_text(message) or "（没有）",
         recipes_block=recipes_block,

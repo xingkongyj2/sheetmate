@@ -4,7 +4,7 @@
  * - 过程：选中那条回答的执行过程（流程每一步的状态、工具调用的参数和结果）
  * - 数据：会话工作区里的表（原始 / 期望结果 / 分析结果 / 流程产出），可以查看、标记为期望结果
  * - 文件：上传的和生成的文件
- * - 流程：这次对话生成的处理流程
+ * - 流程：这次对话已保存的可重复流程
  */
 import { Download, Eye, FileCheck2, FileSpreadsheet, PanelRightClose, Trash2, Workflow } from '@lucide/vue'
 import { computed, ref } from 'vue'
@@ -171,7 +171,7 @@ function stepFlow(r: ConversationDetail['recipes'][number]) {
       <!-- 流程 -->
       <template v-else>
         <div v-if="!detail?.recipes.length" class="py-14 text-center text-sm leading-relaxed text-faint">
-          这次对话还没有生成流程<br />直接告诉 AI 要怎么整理表格，<br />或在统计后说「保存成流程」
+          这次对话还没有已保存的流程<br />直接告诉 AI 想怎么整理表格即可
         </div>
         <div v-for="r in detail?.recipes ?? []" :key="r.recipe_id" class="mb-4 rounded-2xl border border-line p-3">
           <div class="flex items-center gap-2">

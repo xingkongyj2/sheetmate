@@ -153,7 +153,7 @@ export interface MemoryItem {
 
 export interface RunBrief {
   run_id: string
-  kind: 'analysis' | 'modify' | 'replay'
+  kind: 'analysis' | 'modify' | 'replay' | 'create' | 'script'
   kind_label: string
   status: string
   status_label: string
@@ -284,7 +284,7 @@ export interface TablePage {
 export interface ConversationBrief {
   id: string
   title: string
-  mode: 'analyze' | 'modify'
+  mode: 'analyze' | 'modify' | 'create'
   mode_label: string
   customer: { id: string; name: string; mascot: string } | null
   created_at: string

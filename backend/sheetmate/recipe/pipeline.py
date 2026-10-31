@@ -1,4 +1,4 @@
-"""Recipe 闭环：学习 → 结构检查 → 执行（出错自动修复）→ 校验 → 与人工结果比对（不通过就修正再跑）→ 前后对比 → 保存。
+"""Recipe 闭环：学习 → 检查 → 执行与修复 → 校验与比对 → 交付；按用户要求另存可复用流程。
 
 主流程按 SheetAgent：diff 作证据、LLM 生成 Recipe、用训练输入重跑并验证；
 执行层按 SheetMate：每一步是公式 + 参数，由 DuckDB 执行，断言 + 内层修复 + 超限上报。
@@ -79,8 +79,9 @@ class RecipePipeline:
         self.repairer = LLMStepRepairer(llm)
         self.result: dict[str, Any] = {}
 
-    async def build(self, ctx: LearnContext, *, base: Recipe | None = None, instruction: str | None = None) -> AsyncIterator[dict[str, Any]]:
-        """生成（或按 instruction 修订 base）Recipe，并跑完整闭环。最终结果在 self.result。"""
+    async def build(self, ctx: LearnContext, *, base: Recipe | None = None, instruction: str | None = None,
+                    save_recipe: bool = False) -> AsyncIterator[dict[str, Any]]:
+        """生成或修订本次处理步骤并执行；仅显式 save_recipe 时持久化可复用流程。"""
         mode = "revise" if base is not None else "learn"
         revising = base is not None and bool(instruction)
         yield {"type": "recipe_learn_start", "mode": mode, "inputs": list(ctx.input_frames), "expected": list(ctx.expected)}
@@ -173,16 +174,19 @@ class RecipePipeline:
         if before_after:
             yield {"type": "recipe_diff", "diff": before_after}
 
-        # ---- 4. 记录运行、登记输出文件、保存 Recipe ----
+        # ---- 4. 记录本次运行与交付；保存重复流程是独立的显式请求 ----
         file_info = self.host.finish_run(handle, recipe, report, verification=verification, diff=before_after)
         if file_info:
             yield {"type": "file", **file_info}
         recipe.metadata["verification"] = _verification_brief(verification)
         recipe.metadata["last_run"] = {"run_id": report["run_id"], "status": report["status"]}
-        # 修订时用户明确要求了改动，和原样例的差异不影响启用；学习时必须复现人工结果才启用
-        saved = self.host.save_recipe(recipe, verification=None if revising else verification, run_report=report)
-        recipe.version = saved.get("version", recipe.version)
-        yield {"type": "recipe_saved", **saved, "flow": recipe.flow(), "selected_run": {
+        saved = None
+        if save_recipe and ok:
+            # 修订时用户明确要求了改动，和原样例的差异不影响启用；学习时按比对结果决定状态。
+            saved = self.host.save_recipe(recipe, verification=None if revising else verification, run_report=report)
+            recipe.version = saved.get("version", recipe.version)
+        yield {"type": "recipe_saved" if saved else "recipe_completed", **(saved or {}),
+               "flow": recipe.flow(), "selected_run": {
             "run_id": handle.run_id,
             "round": attempts.index(best) + 1,
             "recipe": recipe.to_dict(),
