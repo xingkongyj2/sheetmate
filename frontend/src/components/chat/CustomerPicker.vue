@@ -2,11 +2,12 @@
 /**
  * 选择客户（相当于 Qoder 里「选择目录」）：绑定客户后按客户的记忆和流程来聊；也可以不绑定，作为临时对话。
  */
-import { Check, ChevronDown, CircleUserRound, Plus, Search } from '@lucide/vue'
+import { Check, ChevronDown, Plus, Search } from '@lucide/vue'
 import { computed, nextTick, ref } from 'vue'
 
 import type { CustomerCard } from '@/api/types'
 import Mascot from '@/components/brand/Mascot.vue'
+import UnboundCustomerIcon from '@/components/brand/UnboundCustomerIcon.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import { useWorkspaceStore } from '@/stores/conversations'
 
@@ -68,7 +69,7 @@ function onCreated(customer: CustomerCard) {
       @click="toggle"
     >
       <span class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-paper">
-        <CircleUserRound v-if="!current" class="size-4 text-mute" />
+        <UnboundCustomerIcon v-if="!current" class="size-5 shrink-0" />
         <Mascot v-else :variant="current.mascot" :size="26" :shadow="false" :track="false" />
       </span>
       <span class="min-w-0 truncate" :class="current ? 'font-medium text-ink' : ''">{{ current ? current.name : '选择客户' }}</span>
@@ -87,20 +88,17 @@ function onCreated(customer: CustomerCard) {
       </div>
       <div class="mt-1.5 max-h-72 overflow-y-auto">
         <button class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left hover:bg-paper" @click="choose(null)">
-          <span class="flex size-8 items-center justify-center rounded-full bg-paper">
-            <CircleUserRound class="size-5 text-mute" />
+          <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-paper">
+            <UnboundCustomerIcon class="size-6 shrink-0" />
           </span>
-          <span class="min-w-0 flex-1 text-sm">不绑定客户</span>
+          <span class="block min-w-0 flex-1 truncate text-sm font-medium">无客户</span>
           <Check v-if="!modelValue" class="size-4" />
         </button>
         <button v-for="c in filtered" :key="c.id" class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left hover:bg-paper" @click="choose(c.id)">
           <span class="flex size-8 items-center justify-center overflow-hidden rounded-full bg-paper">
             <Mascot :variant="c.mascot" :size="34" :shadow="false" :track="false" />
           </span>
-          <span class="min-w-0 flex-1">
-            <span class="block truncate text-sm font-medium">{{ c.name }}</span>
-            <span class="block truncate text-[11px] text-faint">{{ c.recipe_count }} 个流程 · {{ c.file_count }} 个文件</span>
-          </span>
+          <span class="block min-w-0 flex-1 truncate text-sm font-medium">{{ c.name }}</span>
           <Check v-if="modelValue === c.id" class="size-4" />
         </button>
       </div>

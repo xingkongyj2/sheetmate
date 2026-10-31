@@ -96,7 +96,7 @@ async function send() {
             large
             autofocus
             appearance="card"
-            placeholder="描述要统计什么或怎么修改表格，也可以先把文件拖进来"
+            placeholder="表格的一切，交给我"
             @attach="attach"
             @remove="remove"
             @send="send"

@@ -45,6 +45,10 @@
   --noise: 0;
 }
 
+:root {
+  --sheetmate-content-width: 700px;
+}
+
 @theme {
   --font-sans: "Outfit Variable", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
@@ -117,6 +121,10 @@ body {
 }
 
 @layer components {
+  .sheetmate-content-width {
+    max-width: var(--sheetmate-content-width);
+  }
+
   /* 黑色胶囊按钮（主操作） */
   .btn-ink {
     @apply inline-flex items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-sm font-medium text-white

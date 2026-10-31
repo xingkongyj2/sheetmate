@@ -92,6 +92,50 @@ def test_demo_customer_detail(client):
     assert detail["field_mapping"]["运单号"] == ["单号", "运单编号"]
 
 
+def test_customer_detail_counts_all_output_files(client):
+    from sheetmate.db.database import session_scope
+    from sheetmate.db.models import FileRecord
+
+    customer = client.post("/api/customers", json={"name": "输出文件计数客户"}).json()["customer"]
+    with session_scope() as db:
+        db.add_all([
+            FileRecord(customer_id=customer["id"], filename=f"result-{i}.xlsx", stored_path="unused", kind="output")
+            for i in range(25)
+        ])
+
+    response = client.get(f"/api/customers/{customer['id']}")
+    assert response.status_code == 200, response.text
+    detail = response.json()["customer"]
+    assert detail["output_count"] == 25
+    assert len(detail["outputs"]) == 20
+    assert len(detail["files"]) + detail["output_count"] == 25
+
+
+def test_customer_detail_lists_all_conversations_in_recent_order(client):
+    from datetime import datetime, timedelta
+
+    from sheetmate.db.database import session_scope
+    from sheetmate.db.models import Conversation
+
+    customer = client.post("/api/customers", json={"name": "完整会话列表客户"}).json()["customer"]
+    other = client.post("/api/customers", json={"name": "其他会话列表客户"}).json()["customer"]
+    conversation_ids = [_new_conversation(client, customer["id"]) for _ in range(25)]
+    _new_conversation(client, other["id"])
+    _new_conversation(client)
+    # 更新时间刻意打乱，确认按最近更新排序，而不是插入顺序。
+    updated_at = {cid: datetime(2026, 1, 1) + timedelta(minutes=(i * 7) % 25)
+                  for i, cid in enumerate(conversation_ids)}
+    with session_scope() as db:
+        for cid, timestamp in updated_at.items():
+            db.get(Conversation, cid).updated_at = timestamp
+
+    response = client.get(f"/api/customers/{customer['id']}")
+    assert response.status_code == 200, response.text
+    detail = response.json()["customer"]
+    assert detail["conversation_count"] == len(conversation_ids)
+    assert [c["id"] for c in detail["conversations"]] == sorted(updated_at, key=updated_at.get, reverse=True)
+
+
 def test_formulas_and_settings(client):
     data = client.get("/api/formulas").json()
     assert any(f["id"] == "lookup" for f in data["builtin"])

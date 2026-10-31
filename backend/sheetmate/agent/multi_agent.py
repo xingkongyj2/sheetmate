@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
@@ -25,12 +26,15 @@ from sheetmate.recipe.schema import file_pattern_from_name
 def should_activate(ctx: AgentContext, message: str) -> bool:
     """多表 + 对比类问题才并行；但结构相同的表（例如两个月的同一张明细）要跨表 JOIN/UNION 才能对比，
     每个专员只看一张表反而比不了，这种情况交给单个 Agent。"""
-    if ctx.mode != "analyze":
+    if ctx.mode != "analyze" or ctx.delete_recipe_ids:
+        return False
+    # 流程管理是一次会话级操作；拆到每张表会重复提问并覆盖待确认清单。
+    text = message.lower()
+    if re.search(r"流程|配方|\brecipes?\b", text) and re.search(r"删|清空|移除|查看|列出|delete|remove|list", text):
         return False
     uploaded = [t for t in ctx.ws.list_tables() if t.source == "uploaded"]
     if len(uploaded) < 2:
         return False
-    text = message.lower()
     if not any(k in text for k in MULTI_AGENT_KEYWORDS):
         return False
     return not _same_structure(uploaded)

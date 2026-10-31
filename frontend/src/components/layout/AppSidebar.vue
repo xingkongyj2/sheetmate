@@ -2,11 +2,12 @@
 /**
  * 侧边栏：新对话、客户、设置，下面是按时间分组的对话列表（显示绑定的客户），底部是账号菜单。
  */
-import { LoaderCircle, LogOut, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Settings, Trash2, Users } from '@lucide/vue'
+import { LoaderCircle, LogOut, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Settings, Trash2 } from '@lucide/vue'
 import { computed, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
+import CustomerLibraryIcon from '@/components/brand/CustomerLibraryIcon.vue'
 import LogoMark from '@/components/brand/LogoMark.vue'
 import { mascotStyle } from '@/components/brand/mascots'
 import { useConfirm } from '@/composables/useConfirm'
@@ -64,11 +65,11 @@ async function logout() {
     <nav class="mt-3 space-y-0.5 px-3">
       <RouterLink
         :to="{ name: 'customers' }"
-        class="flex items-center gap-2.5 rounded-xl px-3 py-2 text-sm transition hover:bg-black/[0.04]"
-        :class="String(route.name).startsWith('customer') ? 'bg-black/[0.05] font-medium text-ink' : 'text-mute'"
-        title="客户"
+        class="flex items-center gap-2.5 rounded-xl py-2 text-sm transition hover:bg-black/[0.04]"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', String(route.name).startsWith('customer') ? 'bg-black/[0.05] font-medium text-ink' : 'text-mute']"
+        title="客户库"
       >
-        <Users class="size-4" /><span v-if="!collapsed">客户</span>
+        <CustomerLibraryIcon class="shrink-0" /><span v-if="!collapsed">客户库</span>
         <span v-if="!collapsed && store.customers.length" class="ml-auto text-xs text-faint">{{ store.customers.length }}</span>
       </RouterLink>
     </nav>

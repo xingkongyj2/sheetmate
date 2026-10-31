@@ -17,7 +17,7 @@ import PlanProgress from './PlanProgress.vue'
 import TableCard from './TableCard.vue'
 import TimelineList from './TimelineList.vue'
 
-const props = defineProps<{ message: UiMessage; customerId?: string | null; mascot?: string | null }>()
+const props = defineProps<{ message: UiMessage; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean }>()
 const emit = defineEmits<{ answer: [text: string]; openTable: [name: string] }>()
 const toast = useToast()
 const copying = ref(false)
@@ -167,8 +167,8 @@ const typing = computed(() => props.message.streaming || shown.value.length < re
             </span>
             <div class="min-w-0 flex-1">
               <div class="text-[11px] font-semibold tracking-wide text-[#9a6b20]">需要你确认</div>
-              <h3 class="mt-1 break-words text-[15px] font-semibold leading-6 [overflow-wrap:anywhere]">{{ a.question }}</h3>
-              <p class="mt-1 text-xs leading-5 text-mute">请选择一项，点击后将继续处理</p>
+              <h3 class="mt-1 whitespace-pre-line break-words text-[15px] font-semibold leading-6 [overflow-wrap:anywhere]">{{ a.question }}</h3>
+              <p class="mt-1 text-xs leading-5 text-mute">{{ answersDisabled ? '该问题已结束，可在下方继续对话' : '请选择一项，点击后将继续处理' }}</p>
             </div>
           </div>
           <ol class="space-y-2 px-3 pb-3 sm:px-4 sm:pb-4" :aria-label="a.question">
@@ -176,7 +176,7 @@ const typing = computed(() => props.message.streaming || shown.value.length < re
               <button
                 type="button"
                 class="group/option flex min-h-12 w-full items-center gap-3 rounded-xl border border-[#eee9df] bg-white px-3.5 py-3 text-left text-[13px] leading-5 text-ink shadow-[0_1px_2px_rgba(28,25,17,0.03)] transition enabled:hover:border-[#d6bf8d] enabled:hover:bg-[#fffdf8] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d7a337] disabled:cursor-not-allowed disabled:opacity-50"
-                :disabled="message.streaming"
+                :disabled="message.streaming || answersDisabled"
                 @click="emit('answer', opt)"
               >
                 <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center rounded-lg bg-paper text-[11px] font-semibold text-mute transition group-hover/option:bg-[#fff1d2] group-hover/option:text-[#9a6b20]">{{ index + 1 }}</span>

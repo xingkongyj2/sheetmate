@@ -85,6 +85,8 @@ class Conversation(Base):
     # 历史太长时压缩出的上下文摘要（TabClaw 的 auto-compact），以及它覆盖到的最后一条消息 id
     context_summary: Mapped[str] = mapped_column(Text, default="")
     summary_until: Mapped[int] = mapped_column(Integer, default=0)
+    # 对话里待用户确认的流程删除目标；确认只作用于本次列出的 ID。
+    pending_recipe_deletion: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 

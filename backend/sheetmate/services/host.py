@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import FileRecord, Run
+from sheetmate.db.models import FileRecord, Run, User
 from sheetmate.engine.file_copies import FileCopies
 from sheetmate.engine.reader import ReadError
 from sheetmate.engine.workbook_builder import write_created_workbook
@@ -38,7 +38,9 @@ class ConversationHost:
         self.customer_id = customer_id
         self.ws = ws
         self.saved_recipes: list[dict[str, Any]] = []
+        self.deleted_recipes: list[dict[str, Any]] = []
         self.save_recipe_requested = False
+        self.delete_recipe_ids: set[str] = set()
         self._last_recipe: Recipe | None = None
         self.analysis: AnalysisWorkspace | None = None
         self.files: FileCopies | None = None
@@ -192,10 +194,10 @@ class ConversationHost:
     # Recipe
     # ------------------------------------------------------------------
 
-    def list_recipes(self) -> list[dict[str, Any]]:
+    def list_recipes(self, *, include_deprecated: bool = False) -> list[dict[str, Any]]:
         with session_scope() as db:
-            records = recipe_service.latest_records(db, customer_id=self.customer_id) if self.customer_id else []
-            records += [r for r in recipe_service.latest_records(db, conversation_id=self.conversation_id)
+            records = recipe_service.latest_records(db, customer_id=self.customer_id, include_deprecated=include_deprecated) if self.customer_id else []
+            records += [r for r in recipe_service.latest_records(db, conversation_id=self.conversation_id, include_deprecated=include_deprecated)
                         if r.recipe_id not in {x.recipe_id for x in records}]
             briefs = [recipe_service.recipe_brief(r) for r in records]
             recipes = [recipe_service.record_to_recipe(r) for r in records]
@@ -230,7 +232,13 @@ class ConversationHost:
 
     def _recent_recipe(self, recipe_id: str | None = None) -> Recipe | None:
         if self._last_recipe is not None and (recipe_id is None or self._last_recipe.id == recipe_id):
-            return self._last_recipe.model_copy(deep=True)
+            last_run_id = (self._last_recipe.metadata.get("last_run") or {}).get("run_id")
+            with session_scope() as db:
+                last_run = db.get(Run, last_run_id) if last_run_id else None
+                deleted = last_run is not None and (last_run.validation or {}).get("recipe_deleted")
+            if not deleted:
+                return self._last_recipe.model_copy(deep=True)
+            self._last_recipe = None
         # 执行快照只供本会话追问；不会进入客户的可重复流程目录。
         with session_scope() as db:
             query = select(Run).where(Run.conversation_id == self.conversation_id,
@@ -238,6 +246,8 @@ class ConversationHost:
             if recipe_id is not None:
                 query = query.where(Run.recipe_id == recipe_id)
             for run in db.scalars(query):
+                if (run.validation or {}).get("recipe_deleted"):
+                    continue
                 snapshot = (run.validation or {}).get("recipe_snapshot")
                 if isinstance(snapshot, dict):
                     return Recipe.model_validate(snapshot)
@@ -250,16 +260,52 @@ class ConversationHost:
             recipe.metadata["version_note"] = note
         recipe.customer_id = recipe.customer_id or self.customer_id
         with session_scope() as db:
-            record = recipe_service.save_recipe(db, recipe, conversation_id=self.conversation_id)
-            brief = recipe_service.recipe_brief(record)
             last_run_id = (recipe.metadata.get("last_run") or {}).get("run_id")
             last_run = db.get(Run, last_run_id) if last_run_id else None
+            if last_run is not None and (last_run.validation or {}).get("recipe_deleted"):
+                raise ServiceError("这个流程已删除，不能从历史快照重新保存。")
+            record = recipe_service.save_recipe(db, recipe, conversation_id=self.conversation_id)
+            brief = recipe_service.recipe_brief(record)
             if last_run is not None and last_run.conversation_id == self.conversation_id and last_run.recipe_id == recipe.id:
                 last_run.recipe_version = recipe.version
                 last_run.validation = {**(last_run.validation or {}), "recipe_snapshot": recipe.to_dict()}
         self._last_recipe = recipe.model_copy(deep=True)
         self.saved_recipes.append(brief)
         return brief
+
+    def request_recipe_deletion(self, recipe_ids: list[str]) -> dict[str, Any]:
+        from sheetmate.services.recipe_deletion import prepare_confirmation
+
+        with session_scope() as db:
+            user = db.get(User, self.user_id)
+            if user is None:
+                raise ServiceError("当前用户不存在")
+            return prepare_confirmation(db, user, self.conversation_id, recipe_ids)
+
+    def delete_recipe(self, recipe_id: str) -> dict[str, Any]:
+        return self.delete_recipes_confirmed([recipe_id])[0]
+
+    def delete_recipes_confirmed(self, recipe_ids: list[str]) -> list[dict[str, Any]]:
+        targets = list(dict.fromkeys(recipe_ids))
+        if not targets:
+            return []
+        if not set(targets) <= self.delete_recipe_ids:
+            raise ServiceError("请先确认要删除的流程清单，确认后即可执行。")
+        with session_scope() as db:
+            user = db.get(User, self.user_id)
+            if user is None:
+                raise ServiceError("当前用户不存在")
+            for recipe_id in targets:
+                record = recipe_service.get_record(db, recipe_id)
+                if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
+                    raise ServiceError("这个流程不属于当前客户或会话")
+            deleted = [recipe_service.delete_recipe(db, recipe_id, user=user) for recipe_id in targets]
+        if self._last_recipe is not None and self._last_recipe.id in targets:
+            self._last_recipe = None
+        self.saved_recipes[:] = [recipe for recipe in self.saved_recipes if recipe["recipe_id"] not in targets]
+        self.delete_recipe_ids.difference_update(targets)
+        self.deleted_recipes.extend(deleted)
+        return deleted
 
     # ---- PipelineHost ----
 
@@ -302,7 +348,10 @@ class ConversationHost:
                 run = db.get(Run, handle.run_id)
                 assert run is not None
                 run.validation = {**(run.validation or {}), "recipe_snapshot": snapshot.to_dict()}
-                self._last_recipe = snapshot
+                if not run.validation.get("recipe_deleted"):
+                    self._last_recipe = snapshot
+                elif self._last_recipe is not None and self._last_recipe.id == recipe.id:
+                    self._last_recipe = None
             return {**file_service.file_dict(record), "run_id": handle.run_id} if record else None
 
     def save_recipe(self, recipe: Recipe, *, verification: dict[str, Any] | None, run_report: dict[str, Any]) -> dict[str, Any]:

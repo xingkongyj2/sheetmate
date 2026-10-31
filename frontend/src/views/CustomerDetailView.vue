@@ -1,14 +1,14 @@
 <script setup lang="ts">
 /**
  * 客户详情：
- * - 处理逻辑：AI 写的「Excel 整体处理逻辑」说明 + 主流程图
+ * - 处理逻辑：AI 写的「Excel 整体处理逻辑」说明
  * - 流程：每个 Recipe 的流程图、输入要求、校验规则、版本，可用新文件执行
  * - 文件：客户上传过的 Excel（含人工结果样例）和生成的结果
  * - 运行记录：每次执行的明细（可单步查看、断点重跑）
  * - 记忆：业务规则、偏好、字段映射
  */
 import {
-  ArrowLeft, BookOpen, Download, Eye, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquarePlus, Pencil, Play, Sparkles,
+  ArrowLeft, ArrowRight, BookOpen, Download, Eye, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Play, Sparkles,
   Trash2, Upload,
 } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
@@ -17,7 +17,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { conversationApi, customerApi, fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerDetail, FileInfo } from '@/api/types'
+import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
+import BaseModal from '@/components/common/BaseModal.vue'
 import MarkdownView from '@/components/common/MarkdownView.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
@@ -28,7 +30,6 @@ import MemoryPanel from '@/components/customer/MemoryPanel.vue'
 import RecipePanel from '@/components/customer/RecipePanel.vue'
 import RunDetailDialog from '@/components/customer/RunDetailDialog.vue'
 import RunRecipeDialog from '@/components/customer/RunRecipeDialog.vue'
-import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { duration, percent, timeAgo } from '@/composables/chatModel'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
@@ -44,7 +45,13 @@ const store = useWorkspaceStore()
 const auth = useAuthStore()
 
 type Tab = 'logic' | 'recipes' | 'files' | 'runs' | 'memory'
-const TABS: [Tab, string][] = [['logic', '处理逻辑'], ['recipes', '流程'], ['files', '文件'], ['runs', '运行记录'], ['memory', '记忆与字段']]
+const TABS: { key: Tab; label: string }[] = [
+  { key: 'logic', label: '处理逻辑' },
+  { key: 'recipes', label: '流程' },
+  { key: 'files', label: '文件' },
+  { key: 'runs', label: '运行记录' },
+  { key: 'memory', label: '记忆与字段' },
+]
 const tab = ref<Tab>((route.query.tab as Tab) || 'logic')
 const customer = ref<CustomerDetail | null>(null)
 const loading = ref(true)
@@ -56,6 +63,7 @@ const runDialog = ref<{ recipeId: string | null } | null>(null)
 const runDetail = ref<string | null>(null)
 const preview = ref<FileInfo | null>(null)
 const formulas = ref(false)
+const conversationsOpen = ref(false)
 const uploadKind = ref<'input' | 'expected'>('input')
 const uploading = ref(false)
 
@@ -71,7 +79,6 @@ async function load() {
 }
 onMounted(load)
 
-const mainRecipe = computed(() => customer.value?.recipes.find((r) => r.status === 'active') ?? customer.value?.recipes[0])
 const inputFiles = computed(() => customer.value?.files ?? [])
 
 async function newChat() {
@@ -172,13 +179,13 @@ async function loadPreview(offset: number, limit: number) {
 <template>
   <div class="h-full overflow-y-auto">
     <div v-if="loading" class="flex h-full items-center justify-center"><LoaderCircle class="size-6 animate-spin text-mute" /></div>
-    <div v-else-if="customer" class="mx-auto max-w-[1200px] px-8 pb-16 pt-6">
+    <div v-else-if="customer" class="sheetmate-content-width mx-auto w-full px-6 pb-16 pt-6">
       <RouterLink :to="{ name: 'customers' }" class="btn-text -ml-2"><ArrowLeft class="size-4" />全部客户</RouterLink>
 
       <!-- 头部 -->
       <header class="mt-4 flex flex-wrap items-center gap-6">
-        <div class="relative flex size-[132px] shrink-0 items-end justify-center overflow-hidden rounded-[36px] bg-paper">
-          <div class="translate-y-5"><Mascot :variant="customer.mascot" :size="140" :shadow="false" /></div>
+        <div class="relative flex size-[132px] shrink-0 items-center justify-center overflow-hidden rounded-[36px] bg-paper">
+          <Mascot :variant="customer.mascot" :size="140" :shadow="false" />
         </div>
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-baseline gap-3">
@@ -188,9 +195,14 @@ async function loadPreview(offset: number, limit: number) {
           </div>
           <p class="mt-1 max-w-2xl text-sm text-mute">{{ customer.description || '还没有介绍' }}</p>
           <div class="mt-3 flex flex-wrap gap-4 text-sm text-mute">
-            <span><b class="text-ink">{{ customer.recipe_count }}</b> 个流程</span>
-            <span><b class="text-ink">{{ customer.file_count }}</b> 个文件</span>
-            <span><b class="text-ink">{{ customer.conversation_count }}</b> 个对话</span>
+            <button
+              type="button"
+              class="rounded transition hover:text-ink hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink"
+              title="查看客户对话"
+              aria-haspopup="dialog"
+              :aria-expanded="conversationsOpen"
+              @click="conversationsOpen = true"
+            ><b class="text-ink">{{ customer.conversation_count }}</b> 个对话</button>
             <span>最近活动 {{ timeAgo(customer.last_activity) }}</span>
           </div>
         </div>
@@ -201,20 +213,23 @@ async function loadPreview(offset: number, limit: number) {
       </header>
 
       <!-- 标签 -->
-      <nav class="mt-8 flex gap-1 border-b border-line">
+      <nav class="mt-8 flex gap-0.5 overflow-x-auto border-b border-line [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label="客户详情">
         <button
-          v-for="[key, label] in TABS"
+          v-for="{ key, label } in TABS"
           :key="key"
-          class="-mb-px border-b-2 px-4 py-2.5 text-sm transition"
+          class="-mb-px inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 py-2.5 text-sm transition"
           :class="tab === key ? 'border-ink font-medium text-ink' : 'border-transparent text-mute hover:text-ink'"
           @click="tab = key; router.replace({ query: { tab: key } })"
         >
-          {{ label }}
+          <CustomerDetailTabIcon :name="key" class="size-5 shrink-0" />
+          <span>{{ label }}</span>
+          <span v-if="key === 'recipes'" class="rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[11px] leading-none tabular-nums text-mute">{{ customer.recipes.length }}</span>
+          <span v-else-if="key === 'files'" class="rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[11px] leading-none tabular-nums text-mute">{{ customer.files.length + (customer.output_count ?? customer.outputs.length) }}</span>
         </button>
       </nav>
 
       <!-- 处理逻辑 -->
-      <section v-if="tab === 'logic'" class="mt-6 grid gap-6 lg:grid-cols-[1.1fr_1fr]">
+      <section v-if="tab === 'logic'" class="mt-6">
         <div class="card-soft p-6">
           <div class="mb-3 flex items-center gap-2">
             <BookOpen class="size-4" />
@@ -247,34 +262,6 @@ async function loadPreview(offset: number, limit: number) {
           </div>
         </div>
 
-        <div class="space-y-6">
-          <div v-if="mainRecipe" class="card-soft p-5">
-            <div class="mb-3 flex items-center gap-2">
-              <h2 class="text-[15px] font-semibold">主流程：{{ mainRecipe.name }}</h2>
-              <StatusPill :status="mainRecipe.status" />
-              <button class="btn-text ml-auto" @click="tab = 'recipes'">详情 →</button>
-            </div>
-            <RecipeFlow :flow="mainRecipe.flow" direction="vertical" />
-            <div v-if="mainRecipe.verification" class="mt-3 text-xs text-mute">
-              与人工结果比对：{{ mainRecipe.verification.summary }}
-            </div>
-          </div>
-          <div v-else class="card-soft flex flex-col items-center p-8 text-center">
-            <Mascot :variant="customer.mascot" :size="72" mood="thinking" />
-            <p class="mt-3 text-sm text-mute">还没有处理流程。<br />新建对话、上传表格，告诉 AI 要怎么整理，<br />就会沉淀成可以每月重复执行的流程。</p>
-            <button class="btn-ink mt-4" @click="newChat"><MessageSquarePlus class="size-4" />新建对话</button>
-          </div>
-          <div class="card-soft p-5">
-            <div class="mb-2 flex items-center justify-between">
-              <h2 class="text-[15px] font-semibold">最近对话</h2>
-            </div>
-            <RouterLink v-for="c in customer.conversations.slice(0, 6)" :key="c.id" :to="{ name: 'chat', params: { id: c.id } }" class="flex items-center gap-2 rounded-xl px-2 py-2 text-sm hover:bg-paper">
-              <span class="min-w-0 flex-1 truncate">{{ c.title }}</span>
-              <span class="text-xs text-faint">{{ timeAgo(c.updated_at) }}</span>
-            </RouterLink>
-            <p v-if="!customer.conversations.length" class="py-3 text-center text-sm text-faint">还没有对话</p>
-          </div>
-        </div>
       </section>
 
       <!-- 流程 -->
@@ -383,6 +370,23 @@ async function loadPreview(offset: number, limit: number) {
       </section>
     </div>
 
+    <BaseModal v-if="conversationsOpen && customer" :title="`${customer.name}的对话`" width="max-w-xl" @close="conversationsOpen = false">
+      <div v-if="customer.conversations.length" class="space-y-1">
+        <RouterLink
+          v-for="c in customer.conversations"
+          :key="c.id"
+          :to="{ name: 'chat', params: { id: c.id } }"
+          class="group flex items-center gap-3 rounded-xl px-3 py-3 text-sm transition hover:bg-paper focus-visible:outline-2 focus-visible:outline-ink"
+          @click="conversationsOpen = false"
+        >
+          <MessageSquare class="size-4 shrink-0 text-mute" />
+          <span class="min-w-0 flex-1 truncate">{{ c.title || '新对话' }}</span>
+          <span class="shrink-0 text-xs text-faint">{{ timeAgo(c.updated_at) }}</span>
+          <ArrowRight class="size-4 shrink-0 text-faint transition group-hover:text-ink" />
+        </RouterLink>
+      </div>
+      <p v-else class="py-10 text-center text-sm text-faint">还没有对话</p>
+    </BaseModal>
     <CustomerFormDialog v-if="editing && customer" :customer="customer" @close="editing = false" @saved="onEdited" />
     <RunRecipeDialog
       v-if="runDialog && customer"

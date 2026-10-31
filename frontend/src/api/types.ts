@@ -182,6 +182,7 @@ export interface CustomerDetail extends Omit<CustomerCard, 'recipes'> {
   summary: string
   summary_by: 'ai' | 'human' // ai：流程变化时自动更新；human：手动编辑过，不再自动覆盖
   summary_updated_at: string | null
+  output_count: number
   files: FileInfo[]
   outputs: FileInfo[]
   recipes: (RecipeBrief & { flow: RecipeFlowData; recipe: RecipeJSON })[]

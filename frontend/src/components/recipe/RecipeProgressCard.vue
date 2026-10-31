@@ -69,7 +69,8 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
       <div class="min-w-0 flex-1">
         <div class="flex items-center gap-2">
           <span class="truncate text-[14px] font-semibold">{{ progress.recipeName || progress.saved?.name || MODE_LABEL[progress.mode] }}</span>
-          <span v-if="progress.saved" class="tag">v{{ progress.saved.version }}</span>
+          <span v-if="progress.deleted" class="tag">流程已删除</span>
+          <span v-else-if="progress.saved" class="tag">v{{ progress.saved.version }}</span>
           <span v-else-if="progress.mode === 'replay' && progress.recipeVersion" class="tag">v{{ progress.recipeVersion }}</span>
         </div>
         <div class="text-xs text-mute">

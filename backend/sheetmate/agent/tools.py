@@ -5,7 +5,7 @@
 - 公式工具：每个公式自动生成一个工具（内置公式 + 客户独有公式），两个模式均可生成辅助分析表
 - 文件：list_files / load_file / export_excel；独立建表技能 create_workbook
 - 脚本：run_python_script / inspect_python_script，可与内置公式、SQL 配合使用
-- Recipe：build_recipe / revise_recipe / run_recipe（修改模式）、save_as_recipe / get_recipe
+- Recipe：build_recipe / revise_recipe / run_recipe（修改模式）、save_as_recipe / list_recipes / get_recipe / delete_recipe / delete_recipes
 - 记忆：remember / save_field_mapping
 - 澄清：ask_user（提问后结束本轮，等用户回答）
 
@@ -74,10 +74,13 @@ class ToolHost(Protocol):
     def created_workbook_spec(self, file_id: str) -> dict[str, Any]: ...
     def run_python_script(self, *, code: str, description: str, input_tables: list[str], input_files: dict[str, str], cancel_event: Any) -> dict[str, Any]: ...
     def inspect_python_script(self, run_id: str) -> dict[str, Any]: ...
-    def list_recipes(self) -> list[dict[str, Any]]: ...
+    def list_recipes(self, *, include_deprecated: bool = False) -> list[dict[str, Any]]: ...
     def get_recipe(self, recipe_id: str) -> Recipe | None: ...
     def latest_conversation_recipe(self) -> Recipe | None: ...
     def store_recipe(self, recipe: Recipe, *, note: str = "") -> dict[str, Any]: ...
+    def request_recipe_deletion(self, recipe_ids: list[str]) -> dict[str, Any]: ...
+    def delete_recipe(self, recipe_id: str) -> dict[str, Any]: ...
+    def delete_recipes_confirmed(self, recipe_ids: list[str]) -> list[dict[str, Any]]: ...
     def pipeline_host(self) -> PipelineHost: ...
     def field_mapping(self) -> dict[str, list[str]]: ...
     def memory_text(self, query: str) -> str: ...
@@ -100,6 +103,7 @@ class AgentContext:
     verify_rounds: int = 2
     table_filter: set[str] | None = None  # 多表并行时，每个专员只看自己的表
     save_recipe_requested: bool = False  # 仅来自用户明确的保存意图，模型工具参数不能授权
+    delete_recipe_ids: set[str] = field(default_factory=set)  # 用户对持久化待删除清单确认后，允许本轮删除的流程
 
     def visible_tables(self) -> list[TableInfo]:
         tables = self.ws.list_tables()
@@ -574,6 +578,50 @@ def _tool_save_as_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
                       summary=f"保存流程「{recipe.name}」", events=[{"type": "recipe_saved", **saved, "flow": recipe.flow()}])
 
 
+def _tool_list_recipes(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    recipes = ctx.host.list_recipes(include_deprecated=True)
+    if not recipes:
+        return ToolResult("当前客户或会话没有已保存的流程。", summary="没有已保存的流程")
+    lines = [f"- recipe_id={item['recipe_id']}「{item['name']}」v{item['version']}（{item['status_label']}）"
+             for item in recipes]
+    return ToolResult("当前可访问的已保存流程（含已停用）：\n" + "\n".join(lines), summary=f"找到 {len(recipes)} 个已保存流程")
+
+
+def _tool_delete_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    recipe_id = str(args.get("recipe_id") or "")
+    if not recipe_id:
+        raise ValueError("请先用 list_recipes 找到要删除的流程 ID。")
+    return _delete_recipes([recipe_id], ctx)
+
+
+def _tool_delete_recipes(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    if args.get("all") is True:
+        targets = [item["recipe_id"] for item in ctx.host.list_recipes(include_deprecated=True)]
+        if not targets:
+            return ToolResult("当前客户或会话没有已保存的流程，无需删除。", summary="没有需要删除的流程")
+    else:
+        raw = args.get("recipe_ids")
+        if not isinstance(raw, list) or not all(isinstance(item, str) and item for item in raw):
+            raise ValueError("请提供要删除的 recipe_ids；删除全部流程时使用 all=true。")
+        targets = list(dict.fromkeys(raw))
+        if not targets:
+            raise ValueError("请选择要删除的流程；删除全部流程时使用 all=true。")
+    return _delete_recipes(targets, ctx)
+
+
+def _delete_recipes(recipe_ids: list[str], ctx: AgentContext) -> ToolResult:
+    if not set(recipe_ids) <= ctx.delete_recipe_ids:
+        confirmation = ctx.host.request_recipe_deletion(recipe_ids)
+        question = str(confirmation["question"])
+        return ToolResult(question, summary=f"等待确认删除 {len(recipe_ids)} 个流程", end_turn=True,
+                          events=[{"type": "clarify", **confirmation}])
+    deleted = ctx.host.delete_recipes_confirmed(recipe_ids)
+    ctx.delete_recipe_ids.difference_update(recipe_ids)
+    names = "、".join(f"「{item['name']}」" for item in deleted)
+    return ToolResult(f"已删除流程{names}的全部版本。", summary=f"已删除 {len(deleted)} 个流程",
+                      events=[{"type": "recipe_deleted", **item} for item in deleted])
+
+
 def _tool_get_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     recipe = ctx.host.get_recipe(str(args.get("recipe_id") or ""))
     if recipe is None:
@@ -688,6 +736,15 @@ def _static_tools() -> list[Tool]:
              both, run=_tool_save_as_recipe, label=lambda a: f"保存流程 · {a.get('name', '')}"),
         Tool("get_recipe", "查看一个已保存流程的详细步骤和参数。", _obj({"recipe_id": _STR}, ["recipe_id"]), both,
              run=_tool_get_recipe, label=lambda a: "查看流程"),
+        Tool("list_recipes", "查看当前客户或会话已保存的流程，包含已停用流程及准确 ID。查找待删除流程或区分同名流程时使用。",
+             _obj({}), both, run=_tool_list_recipes, label=lambda a: "查看已保存流程"),
+        Tool("delete_recipe", "删除指定的已保存流程及全部版本。调用后由系统列出目标，请用户确认一次；确认后系统直接删除，无需额外授权。删除表格行或文件不等于删除流程。",
+             _obj({"recipe_id": {**_STR, "description": "要删除的已保存流程 ID"}}, ["recipe_id"]),
+             both, run=_tool_delete_recipe, label=lambda a: "删除已保存流程"),
+        Tool("delete_recipes", "批量删除已保存流程及全部版本。用户说删除全部流程时使用 all=true；指定多条时提供 recipe_ids。系统列出清单并请用户确认一次，确认后直接执行。",
+             _obj({"all": {"type": "boolean", "description": "true表示当前客户或会话的全部已保存流程，含已停用流程"},
+                   "recipe_ids": {**_STR_LIST, "description": "指定要删除的流程 ID 列表；all=true时无需提供"}}),
+             both, run=_tool_delete_recipes, label=lambda a: "删除全部流程" if a.get("all") is True else "批量删除流程"),
         Tool("remember", "记住用户的偏好或业务规则（绑定客户时记到客户名下）。",
              _obj({"category": {"type": "string", "enum": ["preferences", "domain_knowledge", "user_context", "history_insights"]},
                    "key": _STR, "value": _STR}, ["category", "key", "value"]), both, run=_tool_remember,

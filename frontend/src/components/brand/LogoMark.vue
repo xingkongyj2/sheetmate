@@ -15,7 +15,7 @@ withDefaults(defineProps<{ size?: number; withText?: boolean }>(), { size: 28, w
       <path
         class="origin-[23px_23px] animate-[spin_9s_linear_infinite]"
         d="M23 16.4l1.7 4.1 4.1 1.7-4.1 1.7-1.7 4.1-1.7-4.1-4.1-1.7 4.1-1.7z"
-        fill="#0b0b0c"
+        fill="#6265DC"
       />
     </svg>
     <span v-if="withText" class="text-[17px] font-semibold tracking-tight">SheetMate</span>

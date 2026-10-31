@@ -193,6 +193,8 @@ class AgentExecutor:
                  "function": {"name": slot["name"], "arguments": slot["arguments"]}}
                 for idx, slot in sorted(calls_acc.items())
             ]
+            if "delete_recipes" in tool_map:
+                calls = _coalesce_recipe_delete_calls(calls)
             assistant: dict[str, Any] = {"role": "assistant", "content": display or None, "tool_calls": calls}
             if reasoning:
                 assistant["reasoning_content"] = reasoning
@@ -200,7 +202,7 @@ class AgentExecutor:
 
             end_turn = False
             guidance: list[str] = []
-            for call in calls:
+            for call_index, call in enumerate(calls):
                 result: ToolResult | None = None
                 name = call["function"]["name"]
                 args = _parse_args(call["function"]["arguments"])
@@ -250,6 +252,11 @@ class AgentExecutor:
                     elif _SCRIPT_TOOL in tool_map and not fallback_suggested:
                         guidance.append(TOOL_FALLBACK_MESSAGE)
                         fallback_suggested = True
+                if result.end_turn:
+                    # 等待用户回答时立即停止，后续调用不能覆盖确认或产生额外副作用。
+                    # 只保留实际执行过的调用，保证计划模式接续时工具消息成对。
+                    assistant["tool_calls"] = calls[:call_index + 1]
+                    break
             msgs.extend({"role": "user", "content": message} for message in guidance)
             if end_turn:
                 if transcript is not None:
@@ -268,6 +275,60 @@ def _parse_args(raw: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, dict) else None
+
+
+def _coalesce_recipe_delete_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """同一次模型响应的删除目标共用一份待确认清单，避免后一次覆盖前一次。"""
+    deletion_indexes: list[int] = []
+    recipe_ids: list[str] = []
+    delete_all = False
+    for index, call in enumerate(calls):
+        name = call["function"]["name"]
+        if name not in {"delete_recipe", "delete_recipes"}:
+            continue
+        args = _parse_args(call["function"]["arguments"])
+        if args is None:
+            continue
+        if name == "delete_recipe":
+            recipe_id = str(args.get("recipe_id") or "")
+            if not recipe_id:
+                continue
+            recipe_ids.append(recipe_id)
+        elif args.get("all") is True:
+            delete_all = True
+        else:
+            targets = args.get("recipe_ids")
+            if not isinstance(targets, list) or not targets or not all(isinstance(item, str) and item for item in targets):
+                continue
+            recipe_ids.extend(targets)
+        deletion_indexes.append(index)
+    if not deletion_indexes:
+        return calls
+
+    first_index = deletion_indexes[0]
+    deletion_set = set(deletion_indexes)
+    merged = calls[first_index]
+    if len(deletion_indexes) > 1:
+        args = {"all": True} if delete_all else {"recipe_ids": list(dict.fromkeys(recipe_ids))}
+        merged = {**merged, "function": {"name": "delete_recipes", "arguments": json.dumps(args, ensure_ascii=False)}}
+
+    result = []
+    for index, call in enumerate(calls):
+        if index == first_index:
+            result.append(merged)
+        elif index in deletion_set:
+            continue
+        else:
+            # 删除工具已经负责确认；仅移除模型同时提出的同一个删除确认问题。
+            if call["function"]["name"] == "ask_user":
+                args = _parse_args(call["function"]["arguments"]) or {}
+                question = str(args.get("question") or "")
+                options = args.get("options")
+                if ("删除" in question and ("流程" in question or "recipe" in question.lower())
+                        and isinstance(options, list) and "确认删除" in options and "取消" in options):
+                    continue
+            result.append(call)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -318,6 +379,10 @@ def build_system_prompt(ctx: AgentContext, message: str) -> str:
             "\n本轮用户已明确要求保存或更新重复流程，可在处理完成后保存。"
             if ctx.save_recipe_requested else
             "\n本轮未授权保存重复流程：只完成本次处理，不调用 save_as_recipe，不保存或更新流程，也不主动询问是否保存。"
+        ) + (
+            "\n用户已经确认删除这些流程 ID：" + "、".join(sorted(ctx.delete_recipe_ids)) + "。直接执行，不重复询问。"
+            if ctx.delete_recipe_ids else
+            "\n用户要求删除流程时，直接调用 delete_recipe 或 delete_recipes，由工具列出目标并请求一次确认。删除全部流程用 delete_recipes(all=true)。不需要开启额外授权，确认后系统直接执行。"
         ),
         customer_block=customer_block,
         tables_block="\n".join(table_lines) or ("（还没有表，可直接根据用户文字或资料新建工作簿）" if ctx.mode == "create"

@@ -58,8 +58,10 @@ export interface RecipeProgress {
   flow?: RecipeFlowData
   questions?: { question: string; options?: string[] }[]
   runId?: string
+  recipeId?: string
   recipeName?: string
   recipeVersion?: number
+  deleted?: boolean
   steps: StepState[]
   inputs: { alias: string; filename: string; sheet: string; rows: number; renames: Record<string, string>; warnings: string[] }[]
   outputs?: { sheet: string; rows: number }[]
@@ -152,6 +154,7 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       return true
     case 'recipe_generated':
       p.recipe = e.recipe
+      p.recipeId = e.recipe?.id
       p.flow = e.flow
       p.questions = e.questions
       p.round = e.round ?? p.round
@@ -160,6 +163,7 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       return true
     case 'recipe_run_start':
       p.runId = e.run_id
+      p.recipeId = e.recipe?.id ?? e.recipe_id ?? p.recipeId
       p.recipeName = e.recipe?.name ?? p.recipeName
       p.recipeVersion = e.recipe?.version
       p.round = e.round ?? p.round
@@ -247,6 +251,8 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
     case 'recipe_completed':
     case 'recipe_saved':
       p.saved = e.type === 'recipe_saved' ? e as unknown as RecipeProgress['saved'] : undefined
+      if (e.type === 'recipe_saved') p.deleted = false
+      p.recipeId = e.recipe_id ?? p.recipeId
       if (e.flow) p.flow = e.flow
       if (e.selected_run) {
         const selected = e.selected_run
@@ -255,6 +261,7 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
         p.runId = selected.run_id
         p.round = selected.round
         p.recipe = selected.recipe
+        p.recipeId = selected.recipe?.id ?? p.recipeId
         p.recipeName = selected.recipe?.name ?? p.recipeName
         p.recipeVersion = selected.recipe?.version ?? e.version
         p.runStatus = report.status
@@ -298,6 +305,13 @@ const RECIPE_TOOLS = new Set(['build_recipe', 'revise_recipe', 'run_recipe'])
 
 /** 把一个事件归并进助手消息（recipe_* 事件交给流程进度对象处理）。 */
 export function applyEvent(msg: UiMessage, e: AgentEvent): void {
+  if (e.type === 'recipe_deleted') {
+    if (typeof e.recipe_id === 'string' && e.recipe_id) {
+      markRecipeDeleted([msg], e.recipe_id)
+      msg.timeline.push({ kind: 'info', key: uid('t'), text: `已删除流程「${e.name || e.recipe_id}」` })
+    }
+    return
+  }
   if (e.type.startsWith('recipe_')) {
     applyRecipeEvent(progressFor(msg, e), e)
     return
@@ -417,6 +431,19 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
   }
 }
 
+/** 删除流程后保留历史执行和文件，撤下已保存标记与流程入口。 */
+export function markRecipeDeleted(messages: UiMessage[], recipeId: string): void {
+  for (const message of messages) {
+    for (const artifact of message.artifacts) {
+      if (artifact.kind !== 'recipe') continue
+      const progress = artifact.progress
+      if ((progress.recipeId ?? progress.saved?.recipe_id ?? progress.recipe?.id) !== recipeId) continue
+      progress.deleted = true
+      progress.saved = undefined
+    }
+  }
+}
+
 /** 工具调用前已经输出的文字，挪到过程里作为「中间说明」 */
 function flushNote(msg: UiMessage) {
   const text = msg.content.trim()
@@ -462,8 +489,10 @@ function progressFor(msg: UiMessage, e: AgentEvent): RecipeProgress {
   return progress
 }
 
+type StoredMessage = { id: number; role: 'user' | 'assistant'; content: string; events: AgentEvent[]; meta: Record<string, unknown>; created_at: string }
+
 /** 用数据库里的消息重建界面消息 */
-export function fromStored(stored: { id: number; role: 'user' | 'assistant'; content: string; events: AgentEvent[]; meta: Record<string, unknown>; created_at: string }): UiMessage {
+export function fromStored(stored: StoredMessage): UiMessage {
   const msg: UiMessage = {
     key: `db_${stored.id}`, id: stored.id, role: stored.role, content: '', meta: stored.meta ?? {}, streaming: false,
     timeline: [], artifacts: [], createdAt: stored.created_at,
@@ -474,6 +503,21 @@ export function fromStored(stored: { id: number; role: 'user' | 'assistant'; con
   msg.content = stored.content
   finishMessage(msg)
   return msg
+}
+
+/** 按消息顺序还原删除状态；之后重新保存的流程保持可用。 */
+export function fromStoredMessages(stored: StoredMessage[]): UiMessage[] {
+  const messages: UiMessage[] = []
+  for (const item of stored) {
+    const message = fromStored(item)
+    for (const event of item.role === 'assistant' ? item.events ?? [] : []) {
+      if (event.type === 'recipe_deleted' && typeof event.recipe_id === 'string') {
+        markRecipeDeleted(messages, event.recipe_id)
+      }
+    }
+    messages.push(message)
+  }
+  return messages
 }
 
 // ---------------------------------------------------------------------------

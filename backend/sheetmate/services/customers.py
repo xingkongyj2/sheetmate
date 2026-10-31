@@ -100,18 +100,21 @@ def _first_paragraph(markdown: str) -> str:
 
 def detail(db: Session, customer: Customer) -> dict[str, Any]:
     files = file_service.list_files(db, customer_id=customer.id)
+    output_count = db.scalar(select(func.count()).select_from(FileRecord).where(
+        FileRecord.customer_id == customer.id, FileRecord.kind == "output")) or 0
     records = recipe_service.latest_records(db, customer_id=customer.id, include_deprecated=True)
     recipes = []
     for record in records:
         recipe = recipe_service.record_to_recipe(record)
         recipes.append({**recipe_service.recipe_brief(record), "flow": recipe.flow(), "recipe": recipe.to_dict()})
     conversations = db.scalars(select(Conversation).where(Conversation.customer_id == customer.id)
-                               .order_by(Conversation.updated_at.desc()).limit(20))
+                               .order_by(Conversation.updated_at.desc()))
     return {
         **card(db, customer),
         "summary": customer.summary,
         "summary_by": customer.summary_by,
         "summary_updated_at": customer.summary_updated_at.isoformat() if customer.summary_updated_at else None,
+        "output_count": int(output_count),
         "files": [file_service.file_dict(f) for f in files if f.kind != "output"],
         "outputs": [file_service.file_dict(f) for f in files if f.kind == "output"][:20],
         "recipes": recipes,

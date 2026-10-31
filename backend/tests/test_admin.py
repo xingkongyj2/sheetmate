@@ -17,7 +17,7 @@ from sheetmate.db.models import UserCustomer
 from sheetmate.engine.formulas import Formula, FormulaLibrary
 from sheetmate.engine.formulas.base import quoted_placeholders
 from sheetmate.engine.reader import ReadError, read_pasted_table
-from sheetmate.recipe.schema import OutputSheet, Recipe, RecipeInput, RecipeStep
+from sheetmate.recipe.schema import OutputSheet, Recipe, RecipeInput, RecipeStep, check_recipe
 from sheetmate.services import formulas as formula_service
 from sheetmate.services import recipes as recipe_service
 
@@ -207,7 +207,7 @@ def test_formula_with_builtin_id_is_flagged_as_override(client):
     assert "run_sql" in catalog["reserved_ids"] and "top_n" not in catalog["reserved_ids"]
 
 
-def test_formula_in_use_cannot_be_disabled_or_deleted(client):
+def test_formula_in_use_cannot_be_disabled(client):
     cid = _new_customer(client)["id"]
     url = f"/api/customers/{cid}/formulas"
     client.post(url, json=GOOD)
@@ -223,9 +223,9 @@ def test_formula_in_use_cannot_be_disabled_or_deleted(client):
     used = client.get(url).json()["formulas"][0]["used_by"]
     assert [(u["name"], [s["id"] for s in u["steps"]], u["problems"]) for u in used] == [("大额费用流程", [1], [])]
 
-    # 被流程用着的公式不能停用、不能删除（否则流程会直接无法执行）
-    for denied in (client.put(f"{url}/big_fee/status", json={"status": "deprecated"}), client.delete(f"{url}/big_fee")):
-        assert denied.status_code == 409 and "大额费用流程" in denied.json()["error"]["message"]
+    # 停用规则不变；删除由单独的一次确认入口决定。
+    denied = client.put(f"{url}/big_fee/status", json={"status": "deprecated"})
+    assert denied.status_code == 409 and "大额费用流程" in denied.json()["error"]["message"]
 
     # 新版本多了一个必填参数：保存会成功，但会指出「流程的第 1 步会出问题」
     v2 = _variant(params={**GOOD["params"], "region": {"type": "str", "required": True, "desc": "区域"}})
@@ -236,6 +236,65 @@ def test_formula_in_use_cannot_be_disabled_or_deleted(client):
     assert client.post(f"/api/recipes/{recipe.id}/status", json={"status": "deprecated"}).status_code == 200
     assert client.put(f"{url}/big_fee/status", json={"status": "deprecated"}).status_code == 200
     assert client.delete(f"{url}/big_fee").status_code == 200
+
+
+def test_delete_formula_in_use_clears_all_versions_and_keeps_recipe_and_other_customers(client):
+    cid = _new_customer(client)["id"]
+    other_cid = _new_customer(client)["id"]
+    url = f"/api/customers/{cid}/formulas"
+    for customer_id in (cid, other_cid):
+        assert client.post(f"/api/customers/{customer_id}/formulas", json=GOOD).status_code == 200
+    assert client.post(url, json=_variant(intent="大额费用第二版")).json()["formula"]["version"] == 2
+    recipe = Recipe(
+        name="仍要保留的大额费用流程", customer_id=cid, status="active",
+        inputs=[RecipeInput(alias="明细")],
+        steps=[RecipeStep(id=1, name="筛大额", formula="big_fee", formula_kind="customer", output="大额",
+                          params={"table": "明细", "amount_col": "金额", "threshold": 20})],
+        output_spec=[OutputSheet(name="大额", source="大额")],
+    )
+    with session_scope() as db:
+        recipe_service.save_recipe(db, recipe, status="active")
+    before = client.get(f"/api/recipes/{recipe.id}").json()["recipe"]
+    used = client.get(url).json()["formulas"][0]["used_by"]
+    assert [item["name"] for item in used] == [recipe.name]
+
+    deleted = client.delete(f"{url}/big_fee")
+    assert deleted.status_code == 200, deleted.text
+    assert client.get(url).json()["formulas"] == []
+    assert client.get(f"/api/recipes/{recipe.id}").json()["recipe"] == before
+    with session_scope() as db:
+        assert recipe_service.latest_formula_records(db, cid) == []
+        assert not recipe_service.library_for(db, cid).has("big_fee")
+        assert recipe_service.library_for(db, other_cid).resolve("big_fee").spec.version == 1
+        problems = check_recipe(recipe_service.get_recipe(db, recipe.id), recipe_service.library_for(db, cid))
+        assert any("公式「big_fee」不存在" in problem for problem in problems)
+
+
+def test_delete_formula_override_restores_builtin_without_changing_recipe(client):
+    cid = _new_customer(client)["id"]
+    url = f"/api/customers/{cid}/formulas"
+    assert client.post(url, json=_variant(id="top_n")).json()["formula"]["overrides_builtin"] is True
+    recipe = Recipe(name="使用客户覆盖公式", customer_id=cid, status="active",
+                    inputs=[RecipeInput(alias="明细")],
+                    steps=[RecipeStep(id=1, name="客户筛选", formula="top_n", formula_kind="customer", output="筛选",
+                                      params={"table": "明细", "amount_col": "金额", "threshold": 20})])
+    with session_scope() as db:
+        recipe_service.save_recipe(db, recipe, status="active")
+        assert recipe_service.library_for(db, cid).resolve("top_n").kind == "customer"
+    assert client.delete(f"{url}/top_n").status_code == 200
+    with session_scope() as db:
+        assert recipe_service.library_for(db, cid).resolve("top_n").kind == "builtin"
+        assert recipe_service.get_recipe(db, recipe.id).steps == recipe.steps
+
+
+def test_delete_formula_keeps_customer_access_checks(client):
+    cid = _new_customer(client)["id"]
+    url = f"/api/customers/{cid}/formulas"
+    assert client.post(url, json=GOOD).status_code == 200
+    member, _ = _register_member()
+    denied = member.delete(f"{url}/big_fee")
+    assert denied.status_code == 403
+    assert [item["id"] for item in client.get(url).json()["formulas"]] == ["big_fee"]
 
 
 # ---------------------------------------------------------------------------

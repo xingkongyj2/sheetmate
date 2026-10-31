@@ -43,13 +43,14 @@ class FakeLLM:
     json_handlers：complete_json 时依次匹配 (关键词, 返回值或函数)。"""
 
     def __init__(self, script: list[dict[str, Any]] | None = None, json_handlers: list[tuple[str, Any]] | None = None,
-                 intent_mode: str = "analyze", save_recipe_requested: bool = False):
+                 intent_mode: str = "analyze", save_recipe_requested: bool = False, delete_recipe_ids: list[str] | None = None):
         self.script = list(script or [])
         self.json_handlers = list(json_handlers or [])
         self.calls: list[list[dict[str, Any]]] = []
         self.json_prompts: list[str] = []
         self.intent_mode = intent_mode
         self.save_recipe_requested = save_recipe_requested
+        self.delete_recipe_ids = list(delete_recipe_ids or [])
 
     async def stream_chat(self, messages, tools=None, tool_choice=None):
         self.calls.append(messages)
@@ -85,6 +86,8 @@ class FakeLLM:
                 return result(blob) if callable(result) else result
         if "重复流程保存授权判断助手" in blob:
             return {"save_recipe": self.save_recipe_requested}
+        if "重复流程删除授权判断助手" in blob:
+            return {"delete_recipe_ids": self.delete_recipe_ids}
         if "处理意图判断助手" in blob:
             return {"mode": self.intent_mode}
         if "长期记住" in blob:

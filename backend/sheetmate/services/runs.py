@@ -56,6 +56,8 @@ def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification
     run.steps = [_slim_step(s) for s in report.get("steps", [])]
     run.tool_sequence = " → ".join(str(s.get("formula")) for s in report.get("steps", []))
     validation = dict(report.get("validation") or {})
+    if (run.validation or {}).get("recipe_deleted"):
+        validation["recipe_deleted"] = True
     if outputs_metrics:
         validation["metrics"] = outputs_metrics
     if diff:

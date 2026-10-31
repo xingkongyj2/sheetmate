@@ -54,16 +54,16 @@ async function save() {
         </button>
       </div>
       <label class="block">
-        <span class="mb-1.5 block text-xs font-medium text-mute">客户名称</span>
-        <input v-model="name" class="field" placeholder="例如：顺达物流" />
+        <span class="mb-1.5 block text-xs font-medium text-mute">客户名称 <span class="text-error" aria-hidden="true">*</span></span>
+        <input v-model="name" class="field" required />
       </label>
       <label class="block">
-        <span class="mb-1.5 block text-xs font-medium text-mute">客户编码（可选）</span>
-        <input v-model="code" class="field" placeholder="例如：SD-001" />
+        <span class="mb-1.5 block text-xs font-medium text-mute">客户编码</span>
+        <input v-model="code" class="field" />
       </label>
       <label class="block">
-        <span class="mb-1.5 block text-xs font-medium text-mute">介绍（可选）</span>
-        <textarea v-model="description" class="field h-20 resize-none" placeholder="这个客户的业务、每月要交付什么…" />
+        <span class="mb-1.5 block text-xs font-medium text-mute">介绍</span>
+        <textarea v-model="description" class="field h-20 resize-none" />
       </label>
     </div>
     <template #footer>

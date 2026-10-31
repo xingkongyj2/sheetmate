@@ -66,9 +66,18 @@ async function save() {
       <p v-if="!store.customers.length" class="py-6 text-center text-sm text-faint">还没有客户，切换到「新建客户」</p>
     </div>
     <div v-else class="space-y-3">
-      <input v-model="name" class="field" placeholder="客户名称（必填）" />
-      <input v-model="code" class="field" placeholder="客户编码（可选）" />
-      <textarea v-model="description" class="field h-20 resize-none" placeholder="一句话介绍（可选），例如：快递月结客户，每月出账单" />
+      <label class="block">
+        <span class="mb-1.5 block text-xs font-medium text-mute">客户名称 <span class="text-error" aria-hidden="true">*</span></span>
+        <input v-model="name" class="field" required />
+      </label>
+      <label class="block">
+        <span class="mb-1.5 block text-xs font-medium text-mute">客户编码</span>
+        <input v-model="code" class="field" />
+      </label>
+      <label class="block">
+        <span class="mb-1.5 block text-xs font-medium text-mute">介绍</span>
+        <textarea v-model="description" class="field h-20 resize-none" />
+      </label>
     </div>
 
     <template #footer>

@@ -10,13 +10,14 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from sheetmate.db.models import FormulaRecord, RecipeRecord, now
+from sheetmate.db.models import Conversation, FormulaRecord, RecipeRecord, Run, User, now
 from sheetmate.engine.formulas import BUILTIN_FORMULAS, Formula, FormulaError, FormulaLibrary
 from sheetmate.recipe.schema import Recipe
-from sheetmate.services.errors import NotFound, ServiceError
+from sheetmate.services.auth import require_customer
+from sheetmate.services.errors import Forbidden, NotFound, ServiceError
 
 STATUS_LABELS = {"draft": "草稿", "active": "已启用", "deprecated": "已停用"}
 
@@ -99,6 +100,23 @@ def set_status(db: Session, recipe_id: str, status: str) -> RecipeRecord:
     body["status"] = status
     record.body = body
     return record
+
+
+def delete_recipe(db: Session, recipe_id: str, *, user: User) -> dict[str, Any]:
+    """删除可复用流程全部版本；保留结果文件和可审计的历史运行。"""
+    record = get_record(db, recipe_id)
+    if record.customer_id:
+        require_customer(db, user, record.customer_id)
+    elif user.role != "admin":
+        conversation_id = record.conversation_id or (record.body or {}).get("learned_from", {}).get("conversation_id")
+        conversation = db.get(Conversation, conversation_id) if conversation_id else None
+        if conversation is None or conversation.user_id != user.id:
+            raise Forbidden("你没有权限删除这个流程")
+    deleted = recipe_brief(record)
+    for run in db.scalars(select(Run).where(Run.recipe_id == recipe_id)):
+        run.validation = {**(run.validation or {}), "recipe_deleted": True}
+    db.execute(delete(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id))
+    return deleted
 
 
 def assign_customer(db: Session, *, conversation_id: str, customer_id: str) -> int:

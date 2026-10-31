@@ -20,7 +20,7 @@ import PlanEditor from '@/components/chat/PlanEditor.vue'
 import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
 import UserMessage from '@/components/chat/UserMessage.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
-import { applyEvent, finishMessage, fromStored, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
+import { applyEvent, finishMessage, fromStoredMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { pendingStarts } from '@/stores/pending'
@@ -81,7 +81,7 @@ async function load(silent = false) {
     detail.value = data
     acknowledgeUploads(data.files)
     if (!streaming.value) {
-      messages.value = data.messages.map((m) => reactive(fromStored(m)) as UiMessage)
+      messages.value = fromStoredMessages(data.messages).map((m) => reactive(m) as UiMessage)
       scrollToBottom(true) // 打开会话（包括后台任务跑完刷新）都停在最新一条
     }
     backgroundRunning.value = data.running && !streaming.value
@@ -231,11 +231,12 @@ async function send(message: string, opts: { attachments?: string[]; planSteps?:
     { message, plan_steps: opts.planSteps, attachments: opts.attachments },
     (event) => {
       applyEvent(assistant, event)
+      if (event.type === 'recipe_deleted') markRecipeDeleted(messages.value, event.recipe_id)
       if (event.type === 'title' && detail.value) {
         detail.value.title = event.title
         store.patchConversation(props.id, { title: event.title })
       }
-      if (event.type === 'table' || event.type === 'file' || event.type === 'recipes_changed') refreshSide()
+      if (event.type === 'table' || event.type === 'file' || event.type === 'recipes_changed' || event.type === 'recipe_deleted') refreshSide()
     },
   )
   try {
@@ -358,7 +359,7 @@ function answer(option: string) {
 
       <!-- 消息 -->
       <div ref="scroller" class="min-h-0 flex-1 overflow-y-auto">
-        <div ref="content" class="mx-auto w-full max-w-[820px] px-6 pb-6 pt-8">
+        <div ref="content" class="sheetmate-content-width mx-auto w-full px-6 pb-6 pt-8">
           <div v-if="loading" class="flex justify-center py-20 text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
 
           <!-- 空对话 -->
@@ -381,6 +382,7 @@ function answer(option: string) {
               <AssistantMessage
                 v-else
                 :message="m"
+                :answers-disabled="streaming || messages.at(-1)?.key !== m.key"
                 :customer-id="customer?.id"
                 :mascot="customer?.mascot"
                 @answer="answer"
@@ -402,7 +404,7 @@ function answer(option: string) {
 
       <!-- 输入框 -->
       <div class="shrink-0 px-6 pb-5">
-        <div class="mx-auto w-full max-w-[820px]">
+        <div class="sheetmate-content-width mx-auto w-full">
           <ChatComposer
             v-model="text"
             v-model:plan="planMode"

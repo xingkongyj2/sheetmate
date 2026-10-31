@@ -6,12 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends
 from pydantic import BaseModel
-from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from sheetmate.api.deps import current_user, sse_response
 from sheetmate.db.database import get_db
-from sheetmate.db.models import RecipeRecord, User
+from sheetmate.db.models import User
 from sheetmate.engine.formulas import BUILTIN_FORMULAS
 from sheetmate.recipe.schema import Recipe, check_recipe
 from sheetmate.services import customers as customer_service
@@ -96,10 +95,8 @@ def set_status(recipe_id: str, body: StatusBody, background: BackgroundTasks, db
 @router.delete("/recipes/{recipe_id}")
 def delete_recipe(recipe_id: str, background: BackgroundTasks, db: Session = Depends(get_db),
                   user: User = Depends(current_user)) -> dict[str, Any]:
-    recipe = recipe_service.get_recipe(db, recipe_id)
-    _check(db, user, recipe)
-    db.execute(delete(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id))
-    _refresh_later(db, background, recipe.customer_id)
+    deleted = recipe_service.delete_recipe(db, recipe_id, user=user)
+    _refresh_later(db, background, deleted["customer_id"])
     return {"ok": True}
 
 

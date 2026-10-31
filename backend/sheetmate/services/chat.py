@@ -32,6 +32,7 @@ from sheetmate.services import conversations as conv_service
 from sheetmate.services import customers as customer_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
+from sheetmate.services import recipe_deletion
 from sheetmate.services import runs as run_service
 from sheetmate.services.analysis import AnalysisWorkspace, analysis_workspace
 from sheetmate.services.errors import Conflict
@@ -45,7 +46,7 @@ _KEEP_EVENTS = {
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
-    "recipe_verify", "recipe_refine", "recipe_diff", "recipe_completed", "recipe_saved", "recipe_failed",
+    "recipe_verify", "recipe_refine", "recipe_diff", "recipe_completed", "recipe_saved", "recipe_deleted", "recipe_failed",
 }
 
 
@@ -117,6 +118,41 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         await job.emit(event)
 
     try:
+        # 用户已看到具体目标并确认后直接执行，不再通过模型判断第二次授权。
+        with session_scope() as db:
+            user = db.get(User, user_id)
+            assert user is not None
+            confirmed_ids = recipe_deletion.resolve_confirmation(db, user, conversation_id, message)
+            if confirmed_ids is not None:
+                conv = db.get(Conversation, conversation_id)
+                assert conv is not None
+                conv.mode = "analyze"
+        if confirmed_ids is not None:
+            ctx, host = build_context(user_id, conversation_id, None)
+            await job.emit({"type": "start", "mode": "analyze", "customer": ctx.customer["name"] if ctx.customer else None})
+            deleted: list[dict[str, Any]] = []
+            if confirmed_ids:
+                host.delete_recipe_ids = set(confirmed_ids)
+                call_id = "confirmed_recipe_deletion"
+                await emit({"type": "tool_call", "id": call_id, "tool": "delete_recipes",
+                            "label": "删除已确认的流程", "params": {"recipe_ids": sorted(confirmed_ids)}})
+                deleted = host.delete_recipes_confirmed(sorted(confirmed_ids))
+                for item in deleted:
+                    await emit({"type": "recipe_deleted", **item, "tool_call_id": call_id})
+                answer = f"已删除 {len(deleted)} 个流程。"
+                await emit({"type": "tool_result", "id": call_id, "tool": "delete_recipes", "ok": True,
+                            "summary": answer, "text": answer})
+            else:
+                answer = "本次没有删除流程。"
+            await emit({"type": "text_chunk", "content": answer})
+            await emit({"type": "final_text", "content": answer})
+            _save_assistant(conversation_id, answer, stored, recorder, None)
+            if deleted:
+                await job.emit({"type": "recipes_changed", "recipes": [],
+                                "deleted_recipe_ids": [item["recipe_id"] for item in deleted]})
+                customer_service.schedule_summary_refresh(host.customer_id)
+            await job.emit({"type": "done"})
+            return
         llm = get_llm()
         ctx, host = build_context(user_id, conversation_id, llm)
         history = await _history(conversation_id, llm, emit)
@@ -190,6 +226,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             answer = "".join(text_parts).strip()
             await emit({"type": "final_text", "content": answer})
         _save_assistant(conversation_id, answer, stored, recorder, run_id)
+        if host.deleted_recipes:
+            customer_service.schedule_summary_refresh(host.customer_id)
         raise
     except Exception as exc:
         await emit({"type": "error", "content": f"处理出错：{exc}"})
@@ -208,8 +246,9 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     title = await _maybe_title(conversation_id, llm, message, answer)
     if title:
         await job.emit({"type": "title", "title": title})
-    if host.saved_recipes:
-        await job.emit({"type": "recipes_changed", "recipes": host.saved_recipes})
+    if host.saved_recipes or host.deleted_recipes:
+        await job.emit({"type": "recipes_changed", "recipes": host.saved_recipes,
+                        "deleted_recipe_ids": [item["recipe_id"] for item in host.deleted_recipes]})
         customer_service.schedule_summary_refresh(ctx.host.customer_id)  # 流程变了：后台更新客户的整体处理逻辑
     await job.emit({"type": "done"})
     # 记忆抽取放到独立的后台任务里，不占用这次请求的连接

@@ -181,7 +181,7 @@ def set_formula_status(customer_id: str, formula_id: str, body: FormulaStatusBod
 
 @router.delete("/{customer_id}/formulas/{formula_id}")
 def delete_formula(customer_id: str, formula_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
-    """删除客户公式（所有版本）。被流程用到的公式不能删除。"""
+    """删除客户公式（所有版本）；引用它的流程保留。"""
     require_customer(db, user, customer_id)
     formula_service.delete_formula(db, customer_id, formula_id)
     return {"ok": True}

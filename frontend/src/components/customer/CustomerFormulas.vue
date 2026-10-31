@@ -39,10 +39,14 @@ async function toggle(f: CustomerFormula) {
 
 async function remove(f: CustomerFormula) {
   const customerId = props.customerId
+  const affected = [...new Set(f.used_by.map((u) => `「${u.name}」`))].join('、')
+  const impact = !affected ? '' : f.overrides_builtin
+    ? `\n流程${affected}正在使用它。删除后这些流程将改用内置「${f.overrides_name || f.id}」公式。`
+    : `\n流程${affected}正在使用它。删除后需要调整这些流程使用的公式，才能继续执行。`
   if (!await confirmDelete({
     title: '删除这个公式？',
     target: `${f.name}（${f.id}）`,
-    description: '这个公式的所有版本都会删除，删除后无法恢复。',
+    description: `这个公式的所有版本都会删除，删除后无法恢复。${impact}`,
     confirmText: '删除公式',
     action: () => customerApi.removeFormula(customerId, f.id),
   })) return
@@ -111,9 +115,8 @@ function onSaved(saved: CustomerFormula) {
               <Power class="size-4" />
             </button>
             <button
-              class="icon-btn hover:text-error disabled:cursor-not-allowed disabled:opacity-40"
-              :title="f.used_by.length ? '被流程用到，不能删除' : '删除'"
-              :disabled="f.used_by.length > 0"
+              class="icon-btn hover:text-error"
+              title="删除"
               @click="remove(f)"
             >
               <Trash2 class="size-4" />

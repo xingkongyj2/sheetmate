@@ -3,7 +3,7 @@
 保存公式在 services/recipes.py（save_formula）；这里是它的管理界面要用的那一层。
 
 - 一个公式 = 参数声明 + {{参数}} SQL 模板；同 id 每保存一次升一个版本，流程总是用最新版本
-- 被流程用到的公式不能停用 / 删除（否则那些流程会直接无法执行）
+- 被流程用到的公式不能停用；删除时由界面列出受影响流程，用户确认后删除
 - 试运行：在临时 DuckDB 工作区（Workspace(None)，用完即丢）里，用客户的文件或粘贴的几行数据执行公式，返回结果预览
 """
 
@@ -126,7 +126,6 @@ def set_status(db: Session, customer_id: str, formula_id: str, status: str) -> d
 def delete_formula(db: Session, customer_id: str, formula_id: str) -> None:
     """删除公式（所有版本）。"""
     _latest_record(db, customer_id, formula_id)
-    _ensure_unused(db, customer_id, formula_id, "删除")
     db.execute(delete(FormulaRecord).where(FormulaRecord.customer_id == customer_id, FormulaRecord.formula_id == formula_id))
 
 
