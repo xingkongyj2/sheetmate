@@ -186,18 +186,20 @@ async function loadPreview(offset: number, limit: number) {
       <RouterLink :to="{ name: 'customers' }" class="btn-text -ml-2"><ArrowLeft class="size-4" />全部客户</RouterLink>
 
       <!-- 头部 -->
-      <header class="mt-4 flex flex-wrap items-center gap-6">
-        <div class="relative flex size-[132px] shrink-0 items-center justify-center overflow-hidden rounded-[36px] bg-paper">
-          <Mascot :variant="customer.mascot" :size="140" :shadow="false" />
+      <header class="mt-5 grid grid-cols-[72px_minmax(0,1fr)] items-center gap-x-4 gap-y-4 sm:grid-cols-[96px_minmax(0,1fr)] sm:gap-x-5">
+        <div class="relative flex size-[72px] items-center justify-center overflow-hidden rounded-[22px] bg-paper sm:size-24 sm:rounded-[28px]">
+          <Mascot :variant="customer.mascot" :size="100" :shadow="false" class="size-[76px] shrink-0 sm:size-[100px]" />
         </div>
-        <div class="min-w-0 flex-1">
-          <div class="flex flex-wrap items-baseline gap-3">
-            <h1 class="text-[30px] font-semibold tracking-tight">{{ customer.name }}</h1>
-            <span v-if="customer.code" class="font-mono text-sm text-faint">{{ customer.code }}</span>
-            <button class="icon-btn" title="编辑" @click="editing = true"><Pencil class="size-4" /></button>
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            <div class="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
+              <h1 class="min-w-0 break-words text-2xl font-semibold leading-snug tracking-tight sm:text-[26px]">{{ customer.name }}</h1>
+              <span v-if="customer.code" class="shrink-0 font-mono text-xs text-faint">{{ customer.code }}</span>
+            </div>
+            <button class="icon-btn size-7 shrink-0" title="编辑客户" @click="editing = true"><Pencil class="size-3.5" /></button>
           </div>
-          <p class="mt-1 max-w-2xl text-sm text-mute">{{ customer.description || '还没有介绍' }}</p>
-          <div class="mt-3 flex flex-wrap gap-4 text-sm text-mute">
+          <p class="mt-2 text-sm leading-relaxed text-mute">{{ customer.description || '还没有介绍' }}</p>
+          <div class="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-mute">
             <button
               type="button"
               class="rounded transition hover:text-ink hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink"
@@ -205,26 +207,28 @@ async function loadPreview(offset: number, limit: number) {
               aria-haspopup="dialog"
               :aria-expanded="conversationsOpen"
               @click="conversationsOpen = true"
-            ><b class="text-ink">{{ customer.conversation_count }}</b> 个对话</button>
+            ><b class="font-medium text-ink">{{ customer.conversation_count }}</b> 个对话</button>
             <span>最近活动 {{ timeAgo(customer.last_activity) }}</span>
           </div>
         </div>
-        <div class="flex flex-wrap gap-2">
-          <button class="btn-ink" @click="newChat"><MessageSquarePlus class="size-4" />新建对话</button>
-          <button v-if="customer.recipes.length" class="btn-line" @click="runDialog = { recipeId: null }"><Play class="size-4" />用新文件执行</button>
+        <div class="col-span-2 flex flex-wrap items-center gap-2 sm:col-span-1 sm:col-start-2">
+          <button class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="newChat"><MessageSquarePlus class="size-3.5" />新建对话</button>
+          <button v-if="customer.recipes.length" class="btn-line h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="runDialog = { recipeId: null }"><Play class="size-3.5" />用新文件执行</button>
         </div>
       </header>
 
       <!-- 标签 -->
-      <nav class="mt-8 flex gap-0.5 overflow-x-auto border-b border-line [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label="客户详情">
+      <nav class="mt-8 flex w-fit max-w-full items-center gap-1 overflow-x-auto rounded-full bg-paper/80 p-1.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label="客户详情">
         <button
           v-for="{ key, label } in TABS"
           :key="key"
-          class="-mb-px inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap border-b-2 px-2.5 py-2.5 text-sm transition"
-          :class="tab === key ? 'border-ink font-medium text-ink' : 'border-transparent text-mute hover:text-ink'"
+          type="button"
+          :aria-pressed="tab === key"
+          class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-2 text-sm transition-[background-color,color,box-shadow] duration-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ink/40 motion-reduce:transition-none"
+          :class="tab === key ? 'bg-white font-medium text-ink shadow-[0_2px_8px_rgba(34,34,66,0.08)]' : 'text-mute hover:bg-white/60 hover:text-ink'"
           @click="tab = key; router.replace({ query: { tab: key } })"
         >
-          <CustomerDetailTabIcon :name="key" class="size-5 shrink-0" />
+          <CustomerDetailTabIcon :name="key" class="size-5 shrink-0 transition-opacity duration-200 motion-reduce:transition-none" :class="tab === key ? 'opacity-100' : 'opacity-70'" />
           <span>{{ label }}</span>
           <span v-if="key === 'recipes'" class="rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[11px] leading-none tabular-nums text-mute">{{ customer.recipes.length }}</span>
           <span v-else-if="key === 'files'" class="rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[11px] leading-none tabular-nums text-mute">{{ customer.files.length + (customer.output_count ?? customer.outputs.length) }}</span>

@@ -3,7 +3,7 @@
  * 客户页里的一个流程：说明、输入要求、流程图、输出、校验规则、版本历史、启用/停用、查看 JSON、用新文件执行。
  */
 import { Braces, ChevronDown, History, Info, Play, Power, ShieldCheck } from '@lucide/vue'
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { recipeApi } from '@/api'
 import { errorText } from '@/api/http'
@@ -24,15 +24,32 @@ const step = ref<RecipeStepJSON | null>(null)
 const showJson = ref(false)
 const showDetails = ref(false)
 const versions = ref<Awaited<ReturnType<typeof recipeApi.get>>['versions'] | null>(null)
+const displayedStatus = ref(props.recipe.status)
+const toggling = ref(false)
+const toggleFeedback = ref(0)
+const isActive = computed(() => displayedStatus.value === 'active')
+
+watch(() => props.recipe.status, (status) => {
+  if (!toggling.value) displayedStatus.value = status
+})
 
 async function toggleStatus() {
-  const next = props.recipe.status === 'active' ? 'deprecated' : 'active'
+  if (toggling.value) return
+  const previous = displayedStatus.value
+  const next = isActive.value ? 'deprecated' : 'active'
+  toggling.value = true
+  displayedStatus.value = next
+  toggleFeedback.value += 1
   try {
-    await recipeApi.setStatus(props.recipe.recipe_id, next)
+    const updated = await recipeApi.setStatus(props.recipe.recipe_id, next)
+    displayedStatus.value = updated.status
     toast.success(next === 'active' ? '已启用' : '已停用')
     emit('changed')
   } catch (err) {
+    displayedStatus.value = previous
     toast.error(errorText(err))
+  } finally {
+    toggling.value = false
   }
 }
 
@@ -54,13 +71,27 @@ function openStep(id: number) {
     <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
       <div class="recipe-panel-title flex min-w-0 flex-1 items-center gap-2">
         <h3 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h3>
-        <StatusPill :status="recipe.status" />
+        <StatusPill :status="displayedStatus" />
       </div>
       <div class="recipe-panel-actions ml-auto flex shrink-0 items-center gap-1">
         <button class="btn-ink mr-1 py-2 text-[13px]" @click="emit('run', recipe.recipe_id)"><Play class="size-3.5" />用新文件执行</button>
         <button class="icon-btn" title="处理详情" @click="showDetails = true"><Info class="size-4" /></button>
         <button class="icon-btn" title="版本历史" @click="showVersions"><History class="size-4" /></button>
-        <button class="icon-btn" :title="recipe.status === 'active' ? '停用' : '启用'" @click="toggleStatus"><Power class="size-4" /></button>
+        <button
+          type="button"
+          role="switch"
+          class="recipe-power-toggle relative inline-flex size-8 shrink-0 items-center justify-center rounded-full focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-success/50 disabled:cursor-wait"
+          :class="isActive ? 'bg-transparent text-success hover:bg-success/10' : 'bg-transparent text-mute hover:bg-black/[0.07] hover:text-ink'"
+          :aria-checked="isActive"
+          :aria-busy="toggling"
+          :aria-label="isActive ? '停用流程' : '启用流程'"
+          :title="toggling ? (isActive ? '正在启用…' : '正在停用…') : (isActive ? '停用流程' : '启用流程')"
+          :disabled="toggling"
+          @click="toggleStatus"
+        >
+          <span v-if="toggleFeedback" :key="toggleFeedback" class="recipe-power-feedback pointer-events-none absolute inset-0 rounded-full" aria-hidden="true" />
+          <Power :key="toggleFeedback" class="recipe-power-icon relative size-4" :class="{ 'recipe-power-icon-feedback': toggleFeedback > 0 }" />
+        </button>
       </div>
     </header>
 
@@ -152,6 +183,25 @@ function openStep(id: number) {
 
 <style scoped>
 .recipe-panel { container-type: inline-size; }
+.recipe-power-toggle { transition: color .24s ease, background-color .24s ease, transform .18s ease; }
+.recipe-power-toggle:active { transform: scale(.9); }
+.recipe-power-feedback { box-shadow: 0 0 0 2px currentColor; animation: recipe-power-ripple .55s ease-out both; }
+.recipe-power-icon-feedback { animation: recipe-power-pop .38s ease-out; }
+@keyframes recipe-power-ripple {
+  from { opacity: .32; transform: scale(.8); }
+  to { opacity: 0; transform: scale(1.5); }
+}
+@keyframes recipe-power-pop {
+  0% { transform: scale(.8); }
+  55% { transform: scale(1.15); }
+  100% { transform: scale(1); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .recipe-power-toggle { transition: none; }
+  .recipe-power-toggle:active { transform: none; }
+  .recipe-power-feedback { animation: none; opacity: 0; }
+  .recipe-power-icon-feedback { animation: none; }
+}
 @container (max-width: 540px) {
   .recipe-panel-title { flex-basis: 100%; }
   .recipe-panel-actions { margin-left: 0; }

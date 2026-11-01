@@ -1,4 +1,4 @@
-/** 轻提示（右下角），对应 daisyUI toast */
+/** 轻提示（顶部居中），对应 daisyUI toast */
 import { reactive } from 'vue'
 
 export interface Toast {

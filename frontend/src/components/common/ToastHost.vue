@@ -5,7 +5,7 @@ import { toasts } from '@/composables/useToast'
 </script>
 
 <template>
-  <div class="toast toast-end toast-bottom z-[100]">
+  <div class="toast toast-center toast-top z-[100]">
     <TransitionGroup name="fade">
       <div
         v-for="t in toasts"
