@@ -175,7 +175,7 @@ def test_stopping_during_intent_inference_records_stop(client, fake_llm, monkeyp
     async def cancelled(*args, **kwargs):
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(chat_service, "infer_mode", cancelled)
+    monkeypatch.setattr(chat_service, "infer_request", cancelled)
     events = _chat(client, conversation, "统计总额")
     assert not any(event["type"] == "start" for event in events)
     messages = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"]

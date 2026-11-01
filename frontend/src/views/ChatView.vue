@@ -4,7 +4,7 @@
  * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、执行明细开关。
  */
 import { LoaderCircle, PanelRight, Pencil, Save } from '@lucide/vue'
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { conversationApi, fileApi } from '@/api'
@@ -21,9 +21,12 @@ import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
 import UserMessage from '@/components/chat/UserMessage.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
 import { applyEvent, finishMessage, fromStoredMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
+import { fileIdForTable } from '@/composables/filePresentation'
 import { useToast } from '@/composables/useToast'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { pendingStarts } from '@/stores/pending'
+
+const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
@@ -306,10 +309,28 @@ async function loadTable(offset: number, limit: number) {
   return { columns: page.columns.map((c) => c.name), rows: page.rows, total: page.total }
 }
 
-async function loadFile(offset: number, limit: number) {
-  const file = viewingFile.value!
-  const page = await fileApi.preview(file.file_id, file.sheets[0]?.sheet, offset, limit)
-  return { columns: page.columns, rows: page.rows, total: page.total }
+async function openTable(name: string) {
+  let table = detail.value?.tables.find((item) => item.name === name)
+  let fileId = fileIdForTable(name, detail.value?.tables ?? [], messages.value)
+  const formal = () => table && (table.source === 'uploaded' || ['input', 'expected', 'result'].includes(table.role))
+  if (!fileId && formal()) {
+    await refreshSide()
+    table = detail.value?.tables.find((item) => item.name === name)
+    fileId = fileIdForTable(name, detail.value?.tables ?? [], messages.value)
+  }
+  if (fileId) {
+    try {
+      const file = messageFiles.value.find((item) => item.file_id === fileId) ?? await fileApi.get(fileId)
+      viewing.value = null
+      viewingFile.value = file
+    } catch (err) {
+      toast.error(errorText(err))
+    }
+  } else if (formal()) {
+    toast.error('未找到这张表关联的原始文件，请从文件列表打开对应文件。')
+  } else {
+    viewing.value = name
+  }
 }
 
 function answer(option: string) {
@@ -382,11 +403,13 @@ function answer(option: string) {
               <AssistantMessage
                 v-else
                 :message="m"
+                :files="messageFiles"
+                :tables="detail?.tables"
                 :answers-disabled="streaming || messages.at(-1)?.key !== m.key"
                 :customer-id="customer?.id"
                 :mascot="customer?.mascot"
                 @answer="answer"
-                @open-table="(name) => (viewing = name)"
+                @preview-file="(file) => (viewingFile = file)"
               />
             </template>
 
@@ -426,17 +449,16 @@ function answer(option: string) {
       :detail="detail"
       :message="selectedMessage"
       @close="panelOpen = false"
-      @open-table="(name) => (viewing = name)"
+      @open-table="openTable"
+      @open-file="(file) => (viewingFile = file)"
       @refresh="refreshSide"
     />
 
     <TableViewer v-if="viewing" :key="viewing" :title="viewing" :loader="loadTable" @close="viewing = null" />
-    <TableViewer
+    <WorkbookPreview
       v-if="viewingFile"
       :key="viewingFile.file_id"
-      :title="viewingFile.filename"
-      :subtitle="viewingFile.sheets[0] ? `工作表：${viewingFile.sheets[0].sheet}${viewingFile.sheets.length > 1 ? `（共 ${viewingFile.sheets.length} 个工作表）` : ''}` : ''"
-      :loader="loadFile"
+      :file="viewingFile"
       @close="viewingFile = null"
     />
     <SaveToCustomerDialog v-if="saveOpen" :conversation-id="id" @close="saveOpen = false" @saved="onSaved" />

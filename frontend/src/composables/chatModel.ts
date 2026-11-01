@@ -14,7 +14,7 @@ export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' 
 
 export type TimelineItem =
   | { kind: 'note'; key: string; text: string; step?: number }
-  | { kind: 'thinking'; key: string; text: string }
+  | { kind: 'thinking'; key: string; text: string; step?: number }
   | {
       kind: 'tool'
       key: string
@@ -30,7 +30,7 @@ export type TimelineItem =
     }
   | { kind: 'plan'; key: string; num: number; total: number; description: string; status: PlanStatus; summary?: string }
   | { kind: 'agent'; key: string; id: string; table: string; status: 'running' | 'done' | 'error'; conclusion?: string }
-  | { kind: 'info'; key: string; text: string; tone?: 'memory' | 'mapping' | 'compact' | 'reflect' | 'aggregate' }
+  | { kind: 'info'; key: string; text: string; tone?: 'memory' | 'mapping' | 'compact' | 'reflect' | 'aggregate'; step?: number }
 
 export interface StepState {
   step_id: number
@@ -79,16 +79,33 @@ export interface RecipeProgress {
 
 export interface FileArtifact {
   file_id: string
+  toolCallId?: string
   filename: string
+  kind?: 'input' | 'expected' | 'output' | 'doc'
+  kind_label?: string
   download_url: string
   sheets?: { sheet: string; rows: number }[]
   run_id?: string
+}
+
+/** 查看流程时保存的只读快照，与执行/修订进度分开。 */
+export interface RecipeViewArtifact {
+  recipe_id: string
+  name: string
+  description: string
+  version: number
+  status: string
+  status_label: string
+  flow: RecipeFlowData
+  toolCallId?: string
+  deleted?: boolean
 }
 
 export type Artifact =
   | { kind: 'table'; key: string; table: TableArtifact }
   | { kind: 'file'; key: string; file: FileArtifact }
   | { kind: 'recipe'; key: string; progress: RecipeProgress }
+  | { kind: 'recipe_view'; key: string; view: RecipeViewArtifact }
   | { kind: 'clarify'; key: string; question: string; options: string[] }
 
 export interface TableArtifact {
@@ -98,6 +115,11 @@ export interface TableArtifact {
   cols: number
   columns: string[]
   preview: unknown[][]
+  source?: string
+  file_id?: string | null
+  filename?: string | null
+  sheet?: string | null
+  toolCallId?: string
   role?: string
   ephemeral?: boolean
   description?: string
@@ -305,10 +327,38 @@ const RECIPE_TOOLS = new Set(['build_recipe', 'revise_recipe', 'run_recipe'])
 
 /** 把一个事件归并进助手消息（recipe_* 事件交给流程进度对象处理）。 */
 export function applyEvent(msg: UiMessage, e: AgentEvent): void {
+  if (e.type === 'recipe_view') {
+    // 查看事件不能落进下方 recipe_* 的执行进度分派，否则会产生一次虚假的失败尝试。
+    if (typeof e.recipe_id !== 'string' || !e.recipe_id || !e.flow ||
+        !Array.isArray(e.flow.inputs) || !Array.isArray(e.flow.steps) || !Array.isArray(e.flow.outputs)) return
+    const view: RecipeViewArtifact = {
+      recipe_id: e.recipe_id, name: e.name ?? '处理流程', description: e.description ?? '',
+      version: e.version ?? 1, status: e.status ?? 'draft', status_label: e.status_label ?? '',
+      toolCallId: e.tool_call_id,
+      // 只接收流程图公开字段，快照不依赖后续 API 请求，也不携带执行参数或 SQL。
+      flow: {
+        inputs: e.flow.inputs.map((input: RecipeFlowData['inputs'][number]) => ({
+          alias: input.alias, description: input.description, file_pattern: input.file_pattern,
+        })),
+        steps: e.flow.steps.map((step: RecipeFlowData['steps'][number]) => ({
+          id: step.id, name: step.name, action: step.action, formula: step.formula,
+          formula_kind: step.formula_kind, description: step.description, output: step.output,
+          inputs: [...(step.inputs ?? [])],
+        })),
+        outputs: e.flow.outputs.map((output: RecipeFlowData['outputs'][number]) => ({ name: output.name, source: output.source })),
+      },
+    }
+    const previous = msg.artifacts.find((artifact) => artifact.kind === 'recipe_view' &&
+      artifact.view.recipe_id === view.recipe_id && artifact.view.version === view.version)
+    if (previous?.kind === 'recipe_view') {
+      previous.view = { ...view, toolCallId: previous.view.toolCallId ?? view.toolCallId, deleted: previous.view.deleted }
+    } else msg.artifacts.push({ kind: 'recipe_view', key: uid('view'), view })
+    return
+  }
   if (e.type === 'recipe_deleted') {
     if (typeof e.recipe_id === 'string' && e.recipe_id) {
       markRecipeDeleted([msg], e.recipe_id)
-      msg.timeline.push({ kind: 'info', key: uid('t'), text: `已删除流程「${e.name || e.recipe_id}」` })
+      msg.timeline.push({ kind: 'info', key: uid('t'), text: `已删除流程「${e.name || e.recipe_id}」`, step: activePlan(msg)?.num })
     }
     return
   }
@@ -329,8 +379,9 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       break
     case 'thinking': {
       const last = msg.timeline[msg.timeline.length - 1]
-      if (last && last.kind === 'thinking') last.text += e.content
-      else msg.timeline.push({ kind: 'thinking', key: uid('t'), text: e.content })
+      const step = activePlan(msg)?.num
+      if (last?.kind === 'thinking' && last.step === step) last.text += e.content
+      else msg.timeline.push({ kind: 'thinking', key: uid('t'), text: e.content, step })
       break
     }
     case 'tool_call':
@@ -357,10 +408,10 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'table':
-      msg.artifacts.push({ kind: 'table', key: uid('a'), table: e.table })
+      msg.artifacts.push({ kind: 'table', key: uid('a'), table: { ...e.table, toolCallId: e.tool_call_id } })
       break
     case 'file': {
-      const file: FileArtifact = { file_id: e.file_id, filename: e.filename, download_url: e.download_url, sheets: e.sheets, run_id: e.run_id }
+      const file: FileArtifact = { file_id: e.file_id, toolCallId: e.tool_call_id, filename: e.filename, kind: e.kind, kind_label: e.kind_label, download_url: e.download_url, sheets: e.sheets, run_id: e.run_id }
       const progress = e.tool_call_id ? findProgress(msg, e.tool_call_id) : undefined
       if (progress) progress.file = file
       else msg.artifacts.push({ kind: 'file', key: uid('a'), file })
@@ -370,13 +421,13 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       msg.artifacts.push({ kind: 'clarify', key: uid('a'), question: e.question, options: e.options ?? [] })
       break
     case 'memory_saved':
-      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'memory', text: `记住了：${(e.items ?? []).map((i: { key: string; value: string }) => `${i.key}（${i.value}）`).join('；')}` })
+      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'memory', text: `记住了：${(e.items ?? []).map((i: { key: string; value: string }) => `${i.key}（${i.value}）`).join('；')}`, step: activePlan(msg)?.num })
       break
     case 'field_mapping_saved':
-      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'mapping', text: `字段映射：${e.standard} ← ${(e.aliases ?? []).join('、')}` })
+      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'mapping', text: `字段映射：${e.standard} ← ${(e.aliases ?? []).join('、')}`, step: activePlan(msg)?.num })
       break
     case 'compacted':
-      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'compact', text: `对话较长，已把前 ${e.old_count} 条消息压缩成摘要` })
+      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'compact', text: `对话较长，已把前 ${e.old_count} 条消息压缩成摘要`, step: activePlan(msg)?.num })
       break
     case 'plan_start':
       for (const step of e.steps ?? []) {
@@ -400,10 +451,10 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'reflect_start':
-      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'reflect', text: '自检：检查需求是否都完成了' })
+      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'reflect', text: '自检：检查需求是否都完成了', step: activePlan(msg)?.num })
       break
     case 'agent_pool_start':
-      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'aggregate', text: `多表并行分析：${(e.agents ?? []).length} 位专员同时工作` })
+      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'aggregate', text: `多表并行分析：${(e.agents ?? []).length} 位专员同时工作`, step: activePlan(msg)?.num })
       break
     case 'agent_start':
       msg.timeline.push({ kind: 'agent', key: uid('t'), id: e.agent_id, table: e.table_name, status: 'running' })
@@ -417,7 +468,7 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'aggregate_start':
-      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'aggregate', text: '汇总各专员的结论，做跨表对比' })
+      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'aggregate', text: '汇总各专员的结论，做跨表对比', step: activePlan(msg)?.num })
       break
     case 'error': {
       msg.error = e.content
@@ -435,6 +486,10 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
 export function markRecipeDeleted(messages: UiMessage[], recipeId: string): void {
   for (const message of messages) {
     for (const artifact of message.artifacts) {
+      if (artifact.kind === 'recipe_view') {
+        if (artifact.view.recipe_id === recipeId) artifact.view.deleted = true
+        continue
+      }
       if (artifact.kind !== 'recipe') continue
       const progress = artifact.progress
       if ((progress.recipeId ?? progress.saved?.recipe_id ?? progress.recipe?.id) !== recipeId) continue

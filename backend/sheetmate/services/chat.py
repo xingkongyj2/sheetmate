@@ -16,7 +16,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sheetmate.agent.executor import AgentExecutor
-from sheetmate.agent.intent import infer_mode
+from sheetmate.agent.intent import infer_request
 from sheetmate.agent.llm import LLMError, get_llm
 from sheetmate.agent.memory import extract_memories
 from sheetmate.agent.multi_agent import execute_multi, should_activate
@@ -34,6 +34,7 @@ from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import recipe_deletion
 from sheetmate.services import runs as run_service
+from sheetmate.services.file_view import file_references, file_view_answer, select_files
 from sheetmate.services.analysis import AnalysisWorkspace, analysis_workspace
 from sheetmate.services.errors import Conflict
 from sheetmate.services.host import ConversationHost
@@ -46,7 +47,7 @@ _KEEP_EVENTS = {
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
-    "recipe_verify", "recipe_refine", "recipe_diff", "recipe_completed", "recipe_saved", "recipe_deleted", "recipe_failed",
+    "recipe_verify", "recipe_refine", "recipe_diff", "recipe_completed", "recipe_saved", "recipe_deleted", "recipe_failed", "recipe_view",
 }
 
 
@@ -156,10 +157,32 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         llm = get_llm()
         ctx, host = build_context(user_id, conversation_id, llm)
         history = await _history(conversation_id, llm, emit)
-        ctx.mode, ctx.save_recipe_requested = await asyncio.gather(
-            infer_mode(llm, ctx, message, history, plan_steps),
-            infer_recipe_persistence(llm, message, history),
-        )
+        files = host.list_files()
+        references = file_references(conversation_id, message_id, files)
+        intent = await infer_request(llm, ctx, message, history, plan_steps, files=files, file_references=references)
+        ctx.mode = intent.mode
+        if intent.files is not None:
+            selected_files = select_files(intent.files, files, references)
+            with session_scope() as db:
+                conv = db.get(Conversation, conversation_id)
+                if conv is not None:
+                    conv.mode = "analyze"
+                request = db.get(Message, message_id)
+                if request is not None:
+                    request.meta = {**(request.meta or {}), "mode": "analyze", "action": "show_files"}
+            await job.emit({"type": "start", "mode": "analyze", "customer": ctx.customer["name"] if ctx.customer else None})
+            for file in selected_files:
+                await emit({"type": "file", **{key: file[key] for key in (
+                    "file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets", "download_url",
+                ) if key in file}})
+            answer = await file_view_answer(llm, message, intent.files, selected_files)
+            if answer:
+                await emit({"type": "text_chunk", "content": answer})
+            await emit({"type": "final_text", "content": answer})
+            _save_assistant(conversation_id, answer, stored, recorder, None)
+            await job.emit({"type": "done"})
+            return
+        ctx.save_recipe_requested = await infer_recipe_persistence(llm, message, history)
         host.save_recipe_requested = ctx.save_recipe_requested
     except asyncio.CancelledError:
         recorder.error = "用户停止了生成"

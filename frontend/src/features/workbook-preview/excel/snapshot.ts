@@ -1,0 +1,203 @@
+import type { ICellData, IColumnData, IRange, IRowData, IStyleData, IWorkbookData, IWorksheetData } from '@univerjs/core'
+import type { Cell, CellValue, Workbook, Worksheet } from 'exceljs'
+
+import { colorToHex, columnWidthToPixels, convertStyle, readThemeColors } from './style.ts'
+import { PREVIEW_LIMITS, WorkbookPreviewError } from './types.ts'
+import type { ParsedWorkbook } from './types.ts'
+
+function tooLarge(message: string): never {
+  throw new WorkbookPreviewError(`${message}，请下载原始文件查看。`)
+}
+
+function decodeAddress(address: string): { row: number; column: number } | undefined {
+  const match = /^\$?([A-Z]+)\$?(\d+)$/i.exec(address)
+  if (!match) return undefined
+  let column = 0
+  for (const letter of match[1]!.toUpperCase()) column = column * 26 + letter.charCodeAt(0) - 64
+  return { row: Number(match[2]), column }
+}
+
+function convertRange(address: string): IRange | undefined {
+  const [startAddress, endAddress = startAddress] = address.split(':')
+  const start = decodeAddress(startAddress!), end = decodeAddress(endAddress!)
+  if (!start || !end) return undefined
+  return { startRow: start.row - 1, startColumn: start.column - 1, endRow: end.row - 1, endColumn: end.column - 1 }
+}
+
+function storedValue(value: CellValue | undefined, date1904: boolean, warnings: Set<string>): Pick<ICellData, 'v' | 't'> {
+  if (value === null || value === undefined) return {}
+  if (typeof value === 'number') return Number.isFinite(value) ? { v: value, t: 2 } : { v: String(value), t: 1 }
+  if (typeof value === 'boolean') return { v: value, t: 3 }
+  if (typeof value === 'string') return { v: value, t: 1 }
+  if (value instanceof Date) return { v: 25569 + value.getTime() / 86_400_000 - (date1904 ? 1462 : 0), t: 2 }
+  if ('richText' in value) {
+    warnings.add('部分单元格含有富文本，预览使用整格字体显示。')
+    return { v: value.richText.map((part) => part.text).join(''), t: 1 }
+  }
+  if ('error' in value) return { v: value.error, t: 1 }
+  if ('text' in value) return { v: value.text, t: 1 }
+  return {}
+}
+
+function cellValue(cell: Cell, date1904: boolean, warnings: Set<string>, formulaStats: { count: number; missing: number; examples: string[] }): Pick<ICellData, 'v' | 't' | 'custom'> {
+  // ExcelJS exposes a merged slave's master's value; keep that value only once.
+  if (cell.isMerged && cell.master.address !== cell.address) return {}
+  const value = cell.value
+  if (value && typeof value === 'object' && !(value instanceof Date) && ('formula' in value || 'sharedFormula' in value)) {
+    formulaStats.count++
+    const formula = cell.formula || ('formula' in value ? value.formula : '')
+    const custom = formula ? { excelFormula: `=${formula.replace(/^=/, '')}` } : undefined
+    // ExcelJS 4.4's value getter omits falsy formula results (0, false, '').
+    // Its public cell model retains the exact cached value.
+    const result = cell.model.result as CellValue | undefined
+    if (result === undefined || result === null) {
+      formulaStats.missing++
+      if (formulaStats.examples.length < 3) formulaStats.examples.push(`${cell.worksheet.name}!${cell.address}`)
+      return { v: '（公式结果未缓存）', t: 1, custom }
+    }
+    // Do not emit f: a read-only preview must show the saved result rather than
+    // recalculate it with a potentially different formula engine.
+    return { ...storedValue(result, date1904, warnings), custom }
+  }
+  return storedValue(value, date1904, warnings)
+}
+
+function checkDimensions(sheet: Worksheet): void {
+  if (sheet.rowCount > PREVIEW_LIMITS.rows) tooLarge(`「${sheet.name}」行数超过 ${PREVIEW_LIMITS.rows.toLocaleString()} 行的预览范围`)
+  if (sheet.columnCount > PREVIEW_LIMITS.columns) tooLarge(`「${sheet.name}」列数超过 ${PREVIEW_LIMITS.columns} 列的预览范围`)
+}
+
+/** Map a loaded ExcelJS workbook into a sparse, read-only Univer snapshot. */
+export function buildWorkbookSnapshot(source: Workbook, filename: string): ParsedWorkbook {
+  const worksheets = source.worksheets
+  if (!worksheets.length) throw new WorkbookPreviewError('这个文件没有可预览的工作表。')
+  if (worksheets.length > PREVIEW_LIMITS.sheets) tooLarge(`工作表超过 ${PREVIEW_LIMITS.sheets} 张的预览范围`)
+  worksheets.forEach(checkDimensions)
+  const warnings = new Set<string>()
+  const sourceModel = source.model
+  const theme = readThemeColors(sourceModel.themes)
+  const date1904 = !!source.properties.date1904
+  const workbook: IWorkbookData = {
+    id: `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    name: filename,
+    appVersion: '1.3.1',
+    locale: 'zhCN' as IWorkbookData['locale'],
+    dateSystem: (date1904 ? 'date1904' : 'date1900') as IWorkbookData['dateSystem'],
+    defaultStyle: { ff: 'Arial', fs: 11, vt: 3 },
+    styles: {},
+    sheetOrder: [],
+    sheets: {},
+  }
+  const styleIds = new Map<string, string>()
+  const sourceStyles = new WeakMap<object, string | undefined>()
+  function styleId(sourceStyle: Cell['style']): string | undefined {
+    if (sourceStyles.has(sourceStyle)) return sourceStyles.get(sourceStyle)
+    const style: IStyleData = convertStyle(sourceStyle, theme, warnings)
+    if (!Object.keys(style).length) {
+      sourceStyles.set(sourceStyle, undefined)
+      return undefined
+    }
+    const key = JSON.stringify(style)
+    let id = styleIds.get(key)
+    if (!id) {
+      id = `s${styleIds.size}`
+      styleIds.set(key, id)
+      workbook.styles[id] = style
+    }
+    sourceStyles.set(sourceStyle, id)
+    return id
+  }
+  let cellCount = 0
+  const formulas = { count: 0, missing: 0, examples: [] as string[] }
+  for (const worksheet of worksheets) {
+    const id = `sheet-${worksheet.id}`
+    const sheetModel = worksheet.model
+    const cellData: IWorksheetData['cellData'] = {}
+    const rowData: IWorksheetData['rowData'] = {}
+    const columnData: IWorksheetData['columnData'] = {}
+    let maxRow = worksheet.rowCount, maxColumn = worksheet.columnCount
+
+    // findRows preserves sparse slots and style-only rows without creating the
+    // blank rows/cells that eachRow/eachCell(includeEmpty) would allocate.
+    worksheet.findRows(1, worksheet.rowCount)?.forEach((row) => {
+      const rowStyle = styleId({ numFmt: row.numFmt, font: row.font, fill: row.fill, border: row.border, alignment: row.alignment })
+      const rowInfo: Partial<IRowData> = {}
+      if (row.height !== undefined) rowInfo.h = Math.max(1, row.height * 4 / 3)
+      if (row.hidden) rowInfo.hd = 1
+      if (rowStyle) rowInfo.s = rowStyle
+      if (Object.keys(rowInfo).length) rowData[row.number - 1] = rowInfo
+      for (let column = 1; column <= row.cellCount; column++) {
+        const cell = row.findCell(column)
+        if (!cell) continue
+        const value = cellValue(cell, date1904, warnings, formulas)
+        let cellStyle = styleId(cell.style)
+        const raw = cell.value
+        const date = raw instanceof Date || (raw && typeof raw === 'object' && 'result' in raw && raw.result instanceof Date)
+        if (date && !cell.numFmt) {
+          const defaultDateStyle = { ...(cellStyle ? workbook.styles[cellStyle] : {}), n: { pattern: 'yyyy-mm-dd' } }
+          const key = JSON.stringify(defaultDateStyle)
+          cellStyle = styleIds.get(key)
+          if (!cellStyle) {
+            cellStyle = `s${styleIds.size}`
+            styleIds.set(key, cellStyle)
+            workbook.styles[cellStyle] = defaultDateStyle
+          }
+        }
+        if (value.v === undefined && !cellStyle) continue
+        if (++cellCount > PREVIEW_LIMITS.cells) tooLarge(`工作簿有效单元格超过 ${PREVIEW_LIMITS.cells.toLocaleString()} 个的预览范围`)
+        const cells = cellData[row.number - 1] ??= {}
+        cells[column - 1] = { ...value, ...(cellStyle ? { s: cellStyle } : {}) }
+      }
+    })
+    worksheet.columns?.forEach((column, index) => {
+      const columnStyle = column.style && styleId(column.style)
+      const columnInfo: Partial<IColumnData> = {}
+      if (column.width !== undefined) columnInfo.w = columnWidthToPixels(column.width)
+      if (column.hidden) columnInfo.hd = 1
+      if (columnStyle) columnInfo.s = columnStyle
+      if (Object.keys(columnInfo).length) {
+        if (index >= PREVIEW_LIMITS.columns) tooLarge(`「${worksheet.name}」列格式超过 ${PREVIEW_LIMITS.columns} 列的预览范围`)
+        columnData[index] = columnInfo
+        maxColumn = Math.max(maxColumn, index + 1)
+      }
+    })
+    const mergeData = sheetModel.merges.map((range) => convertRange(String(range))).filter((range): range is IRange => !!range)
+    for (const range of mergeData) {
+      if (range.endRow >= PREVIEW_LIMITS.rows || range.endColumn >= PREVIEW_LIMITS.columns) tooLarge(`「${worksheet.name}」合并区域超出预览范围`)
+      maxRow = Math.max(maxRow, range.endRow + 1)
+      maxColumn = Math.max(maxColumn, range.endColumn + 1)
+    }
+    const view = worksheet.views?.[0]
+    const xSplit = view?.state === 'frozen' ? view.xSplit ?? 0 : 0
+    const ySplit = view?.state === 'frozen' ? view.ySplit ?? 0 : 0
+    const firstScrollable = view?.state === 'frozen' && view.topLeftCell ? decodeAddress(view.topLeftCell) : undefined
+    const defaultColumnWidth = worksheet.properties.defaultColWidth
+    const sheet: Partial<IWorksheetData> = {
+      id, name: worksheet.name,
+      tabColor: colorToHex(worksheet.properties.tabColor, theme) ?? '',
+      hidden: worksheet.state === 'veryHidden' ? 2 : worksheet.state === 'hidden' ? 1 : 0,
+      rowCount: Math.max(50, maxRow),
+      columnCount: Math.max(20, maxColumn),
+      defaultRowHeight: (worksheet.properties.defaultRowHeight ?? 15) * 4 / 3,
+      defaultColumnWidth: defaultColumnWidth ? columnWidthToPixels(defaultColumnWidth) : 64,
+      zoomRatio: Math.max(0.1, Math.min(4, (view?.zoomScale ?? 100) / 100)),
+      scrollTop: 0, scrollLeft: 0,
+      freeze: { xSplit, ySplit, startRow: ySplit ? (firstScrollable?.row ?? ySplit + 1) - 1 : -1, startColumn: xSplit ? (firstScrollable?.column ?? xSplit + 1) - 1 : -1 },
+      rowHeader: { width: 48, hidden: view?.showRowColHeaders === false ? 1 : 0 },
+      columnHeader: { height: 24, hidden: view?.showRowColHeaders === false ? 1 : 0 },
+      showGridlines: view?.showGridLines === false ? 0 : 1,
+      rightToLeft: view?.rightToLeft ? 1 : 0,
+      cellData, rowData, columnData, mergeData,
+    }
+    workbook.sheetOrder.push(id)
+    workbook.sheets[id] = sheet
+    if (worksheet.getImages().length) warnings.add('文件中的图片暂不在表格预览中显示，请下载原文件查看。')
+    if ((sheetModel as typeof sheetModel & { conditionalFormattings?: unknown[] }).conditionalFormattings?.length) warnings.add('条件格式暂未应用，预览显示单元格的基础样式。')
+  }
+  if (formulas.missing) warnings.add(`${formulas.missing} 个公式单元格没有已保存的计算结果（如 ${formulas.examples.join('、')}），预览已作标记。`)
+  if (!worksheets.some((sheet) => sheet.state === 'visible')) {
+    workbook.sheets[workbook.sheetOrder[0]!]!.hidden = 0
+    warnings.add('所有工作表均为隐藏状态，预览临时显示第一张工作表。')
+  }
+  return { workbook, warnings: [...warnings], stats: { sheetCount: worksheets.length, cellCount, formulaCount: formulas.count } }
+}

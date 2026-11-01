@@ -134,6 +134,9 @@ export const conversationApi = {
 
 // ---------------------------------------------------------------- 文件
 export const fileApi = {
+  get: async (id: string) => (await http.get<{ file: FileInfo }>(`/files/${id}`)).data.file,
+  content: async (id: string, signal?: AbortSignal) =>
+    (await http.get<ArrayBuffer>(`/files/${id}/download`, { responseType: 'arraybuffer', signal })).data,
   preview: async (id: string, sheet?: string, offset = 0, limit = 50) =>
     (await http.get<{ preview: { filename: string; sheet: string; sheets: string[]; total: number; columns: string[]; rows: unknown[][] } }>(
       `/files/${id}/preview`, { params: { sheet, offset, limit } })).data.preview,

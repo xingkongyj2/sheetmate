@@ -80,7 +80,7 @@ async function send() {
     <div class="mx-auto flex w-full max-w-[680px] flex-1 flex-col justify-center px-6 pb-[26vh] pt-10">
       <h1 class="animate-rise flex items-center justify-center gap-3 text-center text-[30px] font-semibold leading-tight tracking-tight">
         <LogoMark :size="32" class="shrink-0" aria-hidden="true" />
-        <span class="min-w-0">SheetMate · 表格 Agent 助手</span>
+        <span class="min-w-0">你的专属表格Agent助手</span>
       </h1>
 
       <div class="mt-[112px]">

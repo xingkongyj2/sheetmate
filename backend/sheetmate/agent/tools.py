@@ -3,7 +3,7 @@
 工具分组：
 - 只读分析：table_info / value_counts / column_stats / preview_table / run_sql
 - 公式工具：每个公式自动生成一个工具（内置公式 + 客户独有公式），两个模式均可生成辅助分析表
-- 文件：list_files / load_file / export_excel；独立建表技能 create_workbook
+- 文件：list_files / show_files / load_file / export_excel；独立建表技能 create_workbook
 - 脚本：run_python_script / inspect_python_script，可与内置公式、SQL 配合使用
 - Recipe：build_recipe / revise_recipe / run_recipe（修改模式）、save_as_recipe / list_recipes / get_recipe / delete_recipe / delete_recipes
 - 记忆：remember / save_field_mapping
@@ -39,6 +39,7 @@ from sheetmate.recipe.schema import Recipe
 MAX_TOOL_TEXT = 6000
 PREVIEW_ROWS = 50
 RUN_STATUS_LABELS = {"success": "成功", "warning": "完成（有提示）", "failed": "失败", "escalated": "需要人工处理", "running": "运行中"}
+RECIPE_STATUS_LABELS = {"draft": "草稿", "active": "已启用", "deprecated": "已停用"}
 
 
 def _status_label(status: str) -> str:
@@ -153,6 +154,7 @@ def table_payload(ws: Workspace, name: str) -> dict[str, Any]:
     return {
         "name": info.name, "label": info.label, "rows": info.rows, "cols": len(info.columns),
         "columns": info.column_names, "preview": page["rows"], "source": info.source, "role": info.role,
+        "file_id": info.file_id, "filename": info.filename, "sheet": info.sheet,
         "description": info.description,
     }
 
@@ -299,6 +301,63 @@ def _tool_list_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         for f in files
     ]
     return ToolResult("\n".join(lines), summary=f"{len(files)} 个文件")
+
+
+def _tool_show_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    """Publish existing, accessible files without reading or re-exporting their contents."""
+    if set(args) - {"file_id", "file_ids", "all", "kind", "kinds"}:
+        raise ValueError("查看文件只接受已有文件 ID 或类型，不接受路径、网址或其他参数。")
+    if "all" in args and not isinstance(args["all"], bool):
+        raise ValueError("all 必须为 true 或 false。")
+    kind = args.get("kind")
+    kinds = args.get("kinds")
+    if "kind" in args and "kinds" in args:
+        raise ValueError("kind 与 kinds 请选择一种；查看多种文件类型使用 kinds。")
+    if kind is not None and (not isinstance(kind, str) or kind not in {"input", "expected", "output"}):
+        raise ValueError("文件类型只能是 input、expected 或 output。")
+    if "kinds" in args and (not isinstance(kinds, list) or not kinds or
+                            any(not isinstance(value, str) or value not in {"input", "expected", "output"} for value in kinds)):
+        raise ValueError("kinds 必须为非空的文件类型列表，只能包含 input、expected 或 output。")
+    selected_kinds = set(kinds) if kinds is not None else ({kind} if kind is not None else None)
+    single = "file_id" in args
+    multiple = "file_ids" in args
+    all_files = args.get("all") is True
+    if sum((single, multiple, all_files)) > 1:
+        raise ValueError("请选择一种查看范围：file_id、file_ids 或 all=true。kind 或 kinds 可用于筛选文件类型。")
+    requested: list[str] | None = None
+    if single:
+        value = args["file_id"]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("请提供要查看的文件 ID。")
+        requested = [value.strip()]
+    elif multiple:
+        values = args["file_ids"]
+        if not isinstance(values, list) or not values or any(not isinstance(value, str) or not value.strip() for value in values):
+            raise ValueError("file_ids 必须为非空的文件 ID 列表。")
+        requested = list(dict.fromkeys(value.strip() for value in values))
+    elif not all_files and selected_kinds is None:
+        raise ValueError("请提供 file_id、file_ids、all=true 或文件类型 kind / kinds。")
+
+    # list_files is scoped by the current conversation/customer; do not resolve arbitrary IDs or paths.
+    available = {item["file_id"]: item for item in ctx.host.list_files() if item.get("kind") in {"input", "expected", "output"}}
+    if requested is not None:
+        if any(file_id not in available or (selected_kinds is not None and available[file_id].get("kind") not in selected_kinds) for file_id in requested):
+            raise ValueError("部分文件不存在、不属于当前客户或会话，或不符合指定类型，请重新查看文件列表。")
+        files = [available[file_id] for file_id in requested]
+    else:
+        files = [item for item in available.values() if selected_kinds is None or item.get("kind") in selected_kinds]
+    if not files:
+        return ToolResult("没有找到符合范围的文件。", summary="没有可查看的文件")
+
+    public_fields = {"file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets"}
+    events = [{"type": "file", **{key: value for key, value in item.items() if key in public_fields},
+               "download_url": f"/api/files/{item['file_id']}/download"} for item in files]
+    summary = f"可查看和下载 {len(files)} 个文件。"
+    return ToolResult(
+        summary + "界面已提供原文件的查看和下载卡片；只需简短说明，不要读取或转写原表、重新导出副本或编造下载链接。"
+        "若本轮还明确要求分析或修改，可继续完成那些要求。",
+        summary=summary, public_text=summary, events=events,
+    )
 
 
 def _tool_load_file(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -623,17 +682,55 @@ def _delete_recipes(recipe_ids: list[str], ctx: AgentContext) -> ToolResult:
 
 
 def _tool_get_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
-    recipe = ctx.host.get_recipe(str(args.get("recipe_id") or ""))
-    if recipe is None:
-        raise ValueError("没有找到这个流程")
-    lines = [f"流程「{recipe.name}」v{recipe.version}（{recipe.status}）：{recipe.description}", "输入："]
-    for inp in recipe.inputs:
-        lines.append(f"- {inp.alias}：{inp.description}；文件规则 {inp.file_pattern or '无'}；必需列 {inp.required_columns}")
-    lines.append("步骤：")
-    for step in recipe.ordered_steps():
-        lines.append(f"{step.id}. {step.name}［{step.formula}］{step.description} 参数={json.dumps(step.params, ensure_ascii=False)} → {step.output}")
-    lines.append("输出：" + "、".join(f"{o.name}←{o.source}" for o in recipe.output_spec))
-    return ToolResult(_clip("\n".join(lines)), summary=f"查看流程「{recipe.name}」")
+    show_all = args.get("all") is True
+    recipe_id = args.get("recipe_id")
+    recipe_ids = args.get("recipe_ids")
+    if sum((show_all, recipe_id is not None, recipe_ids is not None)) != 1:
+        raise ValueError("请选择一种查看范围：单个 recipe_id、多个 recipe_ids，或全部流程 all=true。")
+    if show_all:
+        targets = [item["recipe_id"] for item in ctx.host.list_recipes(include_deprecated=True)]
+    elif recipe_ids is not None:
+        if not isinstance(recipe_ids, list) or not recipe_ids or not all(isinstance(item, str) and item.strip() for item in recipe_ids):
+            raise ValueError("recipe_ids 必须是非空的流程 ID 列表。")
+        targets = list(dict.fromkeys(item.strip() for item in recipe_ids))
+    else:
+        if not isinstance(recipe_id, str) or not recipe_id.strip():
+            raise ValueError("请提供要查看的流程 ID。")
+        targets = [recipe_id.strip()]
+    if not targets:
+        return ToolResult("当前客户或会话没有已保存的流程，没有可展示的流程图。", summary="没有已保存的流程")
+
+    recipes = []
+    for target in targets:
+        recipe = ctx.host.get_recipe(target)
+        if recipe is None:
+            raise ValueError("没有找到这个流程" if len(targets) == 1 else "部分流程不存在或不属于当前客户或会话，请重新查看流程列表。")
+        recipes.append(recipe)
+    lines = [
+        f"已向本轮对话界面发送 {len(recipes)} 个流程的原生流程图数据；界面会在正文显示完成后自动渲染客户页同款流程图组件。",
+        "回复只需简短说明查看范围或用户关心的结论；不要再画 ASCII/字符框图、Mermaid 或代码块流程图，也不要重复列出完整输入、步骤和输出。",
+        "以下详细设置仅供你理解和回答具体问题，不是需要重画的流程图：",
+    ]
+    events = []
+    for recipe in recipes:
+        lines.extend([f"流程「{recipe.name}」v{recipe.version}（{recipe.status}）：{recipe.description}", "输入："])
+        for inp in recipe.inputs:
+            lines.append(f"- {inp.alias}：{inp.description}；文件规则 {inp.file_pattern or '无'}；必需列 {inp.required_columns}")
+        lines.append("步骤：")
+        for step in recipe.ordered_steps():
+            lines.append(f"{step.id}. {step.name}［{step.formula}］{step.description} 参数={json.dumps(step.params, ensure_ascii=False)} → {step.output}")
+        lines.append("输出：" + "、".join(f"{o.name}←{o.source}" for o in recipe.output_spec))
+        events.append({
+            "type": "recipe_view", "recipe_id": recipe.id, "name": recipe.name,
+            "description": recipe.description, "version": recipe.version,
+            "status": recipe.status, "status_label": RECIPE_STATUS_LABELS.get(recipe.status, recipe.status),
+            "flow": recipe.flow(),
+        })
+    summary = f"查看流程「{recipes[0].name}」" if len(recipes) == 1 else f"查看 {len(recipes)} 个流程的流程图"
+    return ToolResult(
+        _clip("\n".join(lines)), summary=summary, public_text=summary,
+        events=events,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -703,8 +800,16 @@ def _static_tools() -> list[Tool]:
                    "result_name": {**_STR, "description": "可选：辅助分析结果表名，两种模式均可使用"},
                    "description": {**_STR, "description": "可选：这条查询做什么"}}, ["sql"]),
              both, run=_tool_run_sql, label=lambda a: "SQL 查询" + (f" → {a['result_name']}" if a.get("result_name") else "")),
-        Tool("list_files", "列出可以加载的文件（本会话上传的、客户资料库里的），以及是否已加载。", _obj({}), both,
+        Tool("list_files", "查找当前会话或客户可访问的输入、期望结果、输出文件及准确 ID；只返回清单，不会向用户展示文件卡片。", _obj({}), both,
              run=_tool_list_files, label=lambda a: "查看文件"),
+        Tool("show_files", "向用户展示任意已有输入、期望结果或输出文件的原生查看和下载卡片；保留原文件，不读取数据、不重新导出。查看单个用 file_id，多个用 file_ids，全部用 all=true，按单种类型用 kind，多种类型用 kinds；原始文件对应 input，不按文件名判断。用户只是要看文件时必须调用本工具，不能用 preview_table 或 Markdown 数据表代替。",
+             _obj({"file_id": {**_STR, "description": "单个已有文件的 ID；与 file_ids、all=true 三选一"},
+                   "file_ids": {**_STR_LIST, "description": "多个已有文件的 ID；按提供顺序展示并去重"},
+                   "all": {"type": "boolean", "description": "true 展示当前客户或会话全部可访问文件；可结合 kind 筛选"},
+                   "kind": {"type": "string", "enum": ["input", "expected", "output"], "description": "筛选单种文件类型；input为原始输入、expected为期望结果、output为已有输出。单独提供时展示该类型全部文件"},
+                   "kinds": {"type": "array", "items": {"type": "string", "enum": ["input", "expected", "output"]},
+                             "description": "筛选多种文件类型；例如查看所有输入输出用 [input,output]，与 kind 互斥；单独提供时展示这些类型全部文件"}}),
+             both, run=_tool_show_files, label=lambda a: "展示文件"),
         Tool("load_file", "把一个文件加载到工作区（每个 sheet 一张表）。",
              _obj({"file_id": _STR}, ["file_id"]), both, run=_tool_load_file, label=lambda a: "加载文件"),
         Tool("export_excel", "把一张或多张表导出成 Excel 文件供用户下载。",
@@ -734,8 +839,11 @@ def _static_tools() -> list[Tool]:
                    "recipe_id": {**_STR, "description": "可选：指定本会话已执行的流程 ID，不填用最近的"},
                    "description": {**_STR, "description": "流程说明"}}),
              both, run=_tool_save_as_recipe, label=lambda a: f"保存流程 · {a.get('name', '')}"),
-        Tool("get_recipe", "查看一个已保存流程的详细步骤和参数。", _obj({"recipe_id": _STR}, ["recipe_id"]), both,
-             run=_tool_get_recipe, label=lambda a: "查看流程"),
+        Tool("get_recipe", "在本轮对话中展示客户页同款原生流程图：单个用 recipe_id，多个用 recipe_ids，查看所有流程图直接用 all=true（含已停用流程）。界面自动绘制输入、步骤和输出，模型只需简短说明，不要画字符图或 Mermaid。只读，不执行、修改或保存流程。",
+             _obj({"recipe_id": {**_STR, "description": "查看单个流程时指定 ID，与 recipe_ids、all=true 三选一"},
+                   "recipe_ids": {**_STR_LIST, "description": "查看指定多个流程的 ID 列表"},
+                   "all": {"type": "boolean", "description": "true 表示展示当前客户或会话全部已保存流程的原生流程图，包含已停用流程，无需先查 ID"}}),
+             both, run=_tool_get_recipe, label=lambda a: "查看全部流程图" if a.get("all") is True else "查看流程"),
         Tool("list_recipes", "查看当前客户或会话已保存的流程，包含已停用流程及准确 ID。查找待删除流程或区分同名流程时使用。",
              _obj({}), both, run=_tool_list_recipes, label=lambda a: "查看已保存流程"),
         Tool("delete_recipe", "删除指定的已保存流程及全部版本。调用后由系统列出目标，请用户确认一次；确认后系统直接删除，无需额外授权。删除表格行或文件不等于删除流程。",

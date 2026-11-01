@@ -1,4 +1,8 @@
-import type { PlanStatus, RecipeProgress, TableArtifact, TimelineItem, UiMessage } from './chatModel'
+import type { PlanStatus, RecipeProgress, RecipeViewArtifact, TableArtifact, TimelineItem, UiMessage } from './chatModel'
+import { deliveredFiles, standaloneFiles, type FilePresentationContext } from './filePresentation'
+import { lastInlineTable } from './tablePresentation'
+import { recipeViewReply } from './recipeViewPresentation'
+import { userFacingSummary, userFacingText } from './timelinePresentation'
 
 export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
   pending: '待执行', running: '执行中', done: '已完成', warning: '需核对', waiting: '待确认', error: '失败', stopped: '已停止',
@@ -17,7 +21,7 @@ export function planSteps(message: UiMessage) {
 }
 
 export function lastResultTable(message: UiMessage): TableArtifact | undefined {
-  return message.artifacts.flatMap((item) => item.kind === 'table' && item.table.role !== 'query' ? [item.table] : []).at(-1)
+  return lastInlineTable(message)
 }
 
 export function recipeFailure(progress: RecipeProgress): { summary: string; nextStep: string; detail: string } | null {
@@ -47,7 +51,7 @@ export function recipeFailure(progress: RecipeProgress): { summary: string; next
   }
   const reason = (detail.split('\n').find((line) => line.trim() && !/^\s*(?:Traceback|File ")/.test(line)) ?? '')
     .replace(/^[\w.]+(?:Error|Exception):\s*/, '').replace(/\s+/g, ' ').trim()
-  const brief = reason.length > 150 ? `${reason.slice(0, 150)}…` : reason
+  const brief = userFacingText(reason, '', 150)
   return {
     summary: `${failedStep?.name ? `“${failedStep.name}”这一步` : '本次处理'}未完成${brief ? `：${brief}` : '，尚未收到具体原因。'}`,
     nextStep: '可先查看失败步骤和错误详情，调整对应处理方式后重试。',
@@ -82,7 +86,7 @@ function recipeResultSummary(progress: RecipeProgress): string {
   if (progress.status !== 'done') return '尚未记录到这次处理的完成结果。'
   if (progress.validation?.status === 'fail' || (progress.verify?.status === 'fail' && !progress.verify.informational)) return '处理已结束，但结果未通过校验，需要核对。'
   if (progress.runStatus === 'warning' || progress.validation?.status === 'warn' || (progress.verify?.status === 'warn' && !progress.verify.informational)) return '流程已执行完成，仍有待核对项。'
-  return progress.runSummary || '该次流程已执行完成。'
+  return userFacingSummary(progress.runSummary, '该次流程已执行完成。')
 }
 
 export function recipeOutcomeSummary(message: UiMessage): string {
@@ -113,24 +117,48 @@ function inline(value: unknown): string {
     .replace(/([\\`*_{}[\]()#+.!|~-])/g, '\\$1').replace(/\r?\n/g, '<br>')
 }
 
-export function messageMarkdown(message: UiMessage): string {
+function recipeViewMarkdown(view: RecipeViewArtifact): string {
+  const blocks = [`### ${inline(userFacingText(view.name, '处理流程'))} · v${view.version}`]
+  if (view.deleted) blocks.push('流程已删除，以下为查看时的记录。')
+  else if (view.status_label) blocks.push(`状态：${inline(userFacingText(view.status_label))}`)
+  const description = userFacingSummary(view.description)
+  if (description) blocks.push(description)
+  if (view.flow.inputs.length) blocks.push(`输入：${view.flow.inputs.map((input) => inline(userFacingText(input.alias, '输入表'))).join('、')}`)
+  if (view.flow.steps.length) blocks.push(view.flow.steps.map((step, index) => {
+    const name = inline(userFacingText(step.name, '处理数据'))
+    const detail = userFacingText(step.description)
+    return `${index + 1}. ${name}${detail ? `：${inline(detail)}` : ''}`
+  }).join('\n'))
+  if (view.flow.outputs.length) blocks.push(`输出：${view.flow.outputs.map((output) => inline(userFacingText(output.name, '结果表'))).join('、')}`)
+  return blocks.join('\n\n')
+}
+
+export function messageMarkdown(message: UiMessage, stages?: { title: string; summary: string }[], context: FilePresentationContext = {}): string {
   const blocks: string[] = []
   const steps = planSteps(message)
-  if (steps.length) {
+  if (stages?.length) {
+    blocks.push('## 处理经过', ...stages.map((stage) =>
+      `### ${inline(stage.title)}${stage.summary ? `\n\n${stage.summary}` : ''}`))
+  } else if (!stages && steps.length) {
     blocks.push('## 执行计划', ...steps.map((step) =>
       `### ${step.num}. ${inline(step.description)}\n\n**状态：${step.statusLabel}**${step.summary ? `\n\n${step.summary}` : ''}`))
   }
-  const answer = message.content.trim() || recipeOutcomeSummary(message)
-  if (answer) blocks.push(answer)
+  const answer = recipeViewReply(message).trim() || recipeOutcomeSummary(message)
   const attempts = recipeAttempts(message)
-  if (attempts.length) {
-    blocks.push('## 处理经过', ...attempts.map((attempt) => {
+  const attemptsByKey = new Map(attempts.map((attempt) => [attempt.key, attempt]))
+  const recipeBlocks = message.artifacts.flatMap((artifact) => {
+    if (artifact.kind === 'recipe_view') return [recipeViewMarkdown(artifact.view)]
+    const attempt = !stages && artifact.kind === 'recipe' ? attemptsByKey.get(artifact.key) : undefined
+    if (attempt) {
       const failure = recipeFailure(attempt.progress)
       const name = attempt.progress.recipeName || attempt.progress.saved?.name
-      return [`### ${inline(attempt.label)}${name ? `：${inline(name)}` : ''}`, ...attempt.notes,
-        recipeResultSummary(attempt.progress), ...(failure ? [`下一步：${failure.nextStep}`] : [])].join('\n\n')
-    }))
-  }
+      return [[`### ${inline(attempt.label)}${name ? `：${inline(name)}` : ''}`, ...attempt.notes,
+        recipeResultSummary(attempt.progress), ...(failure ? [`下一步：${failure.nextStep}`] : [])].join('\n\n')]
+    }
+    return []
+  })
+  if (recipeBlocks.length) blocks.push(...(!stages && attempts.length ? ['## 处理经过', ...recipeBlocks] : recipeBlocks))
+  if (answer) blocks.push(answer)
   const table = lastResultTable(message)
   if (table?.columns.length) {
     const row = (values: unknown[]) => `| ${values.map(inline).join(' | ')} |`
@@ -139,7 +167,7 @@ export function messageMarkdown(message: UiMessage): string {
         ...table.preview.map((values) => row(table.columns.map((_, index) => values[index])))].join('\n') +
       (table.rows > table.preview.length ? `\n\n仅复制当前预览 ${table.preview.length} 行，共 ${table.rows} 行。` : ''))
   }
-  const files = message.artifacts.flatMap((item) => item.kind === 'file' ? [item.file] : item.kind === 'recipe' && item.progress.file ? [item.progress.file] : [])
+  const files = [...deliveredFiles(message), ...standaloneFiles(message, context)]
   const uniqueFiles = [...new Map(files.map((file) => [file.file_id, file])).values()]
   if (uniqueFiles.length) {
     blocks.push('## 交付文件\n\n' + uniqueFiles.map((file) =>

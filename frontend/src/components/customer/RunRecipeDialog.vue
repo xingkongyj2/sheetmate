@@ -5,10 +5,10 @@
  * 2) 自动匹配「哪个文件对应哪个输入」，可以手动改
  * 3) 执行：每一步实时显示，正常情况下不调用 AI；出错时可选让 AI 自动修复
  */
-import { Download, FileSpreadsheet, LoaderCircle, Play, Upload } from '@lucide/vue'
-import { computed, reactive, ref } from 'vue'
+import { Download, Eye, FileSpreadsheet, LoaderCircle, Play, Upload } from '@lucide/vue'
+import { computed, defineAsyncComponent, reactive, ref } from 'vue'
 
-import { customerApi, recipeApi } from '@/api'
+import { customerApi, fileApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo, RecipeBrief } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -17,6 +17,8 @@ import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
 import { applyRecipeEvent, newProgress, type FileArtifact, type RecipeProgress, type StepState } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
+
+const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const props = defineProps<{ customerId: string; recipes: (RecipeBrief & { flow?: unknown })[]; files: FileInfo[]; initialRecipeId?: string | null }>()
 const emit = defineEmits<{ close: []; done: [] }>()
@@ -35,6 +37,20 @@ const progress = reactive<RecipeProgress>(newProgress('replay'))
 const file = ref<FileArtifact | null>(null)
 const running = ref(false)
 const selected = ref<StepState | null>(null)
+const preview = ref<FileInfo | null>(null)
+const loadingPreview = ref(false)
+
+async function previewOutput() {
+  if (!file.value || loadingPreview.value) return
+  loadingPreview.value = true
+  try {
+    preview.value = await fileApi.get(file.value.file_id)
+  } catch (err) {
+    toast.error(errorText(err))
+  } finally {
+    loadingPreview.value = false
+  }
+}
 
 const recipe = computed(() => props.recipes.find((r) => r.recipe_id === recipeId.value))
 
@@ -128,6 +144,7 @@ const flow = computed(() => recipe.value?.flow as never)
             <FileSpreadsheet class="size-4 text-fun-green" />
             <span class="min-w-0 flex-1 truncate text-sm">{{ f.filename }}</span>
             <span class="text-[11px] text-faint">{{ f.sheets.map((s) => `${s.sheet} ${s.rows} 行`).join(' / ') }}</span>
+            <button type="button" class="icon-btn shrink-0" :aria-label="`查看文件 ${f.filename}`" title="查看文件" @click.prevent.stop="preview = f"><Eye class="size-4" /></button>
           </label>
           <p v-if="!localFiles.length" class="py-6 text-center text-sm text-faint">上传这个月的新文件</p>
         </div>
@@ -188,6 +205,9 @@ const flow = computed(() => recipe.value?.flow as never)
         <button class="btn-ink" :disabled="Object.values(mapping).some((v) => !v)" @click="run"><Play class="size-4" />开始执行</button>
       </template>
       <template v-else>
+        <button v-if="file" class="btn-line" :disabled="loadingPreview" @click="previewOutput">
+          <LoaderCircle v-if="loadingPreview" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果
+        </button>
         <a v-if="file" :href="file.download_url" class="btn-ink"><Download class="size-4" />下载 {{ file.filename }}</a>
         <button class="btn-line" :disabled="running" @click="emit('close')">{{ running ? '执行中…' : '完成' }}</button>
       </template>
@@ -207,5 +227,6 @@ const flow = computed(() => recipe.value?.flow as never)
       :repairs="selected.repairs"
       @close="selected = null"
     />
+    <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </BaseModal>
 </template>

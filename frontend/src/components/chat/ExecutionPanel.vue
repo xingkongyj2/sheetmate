@@ -11,7 +11,7 @@ import { computed, ref } from 'vue'
 
 import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { ConversationDetail, TableBrief } from '@/api/types'
+import type { ConversationDetail, FileInfo, TableBrief } from '@/api/types'
 import Mascot from '@/components/brand/Mascot.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
@@ -24,7 +24,7 @@ import { useToast } from '@/composables/useToast'
 import TimelineList from './TimelineList.vue'
 
 const props = defineProps<{ detail: ConversationDetail | null; message: UiMessage | null }>()
-const emit = defineEmits<{ close: []; openTable: [name: string]; refresh: [] }>()
+const emit = defineEmits<{ close: []; openTable: [name: string]; openFile: [file: FileInfo]; refresh: [] }>()
 const toast = useToast()
 const { confirmDelete } = useConfirm()
 
@@ -161,9 +161,10 @@ function stepFlow(r: ConversationDetail['recipes'][number]) {
           <FileCheck2 v-if="f.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
           <FileSpreadsheet v-else class="size-4 shrink-0" :class="f.kind === 'output' ? 'text-ink' : 'text-fun-green'" />
           <div class="min-w-0 flex-1">
-            <div class="truncate text-[13px] font-medium">{{ f.filename }}</div>
+            <button class="block max-w-full truncate text-left text-[13px] font-medium hover:underline" :title="`查看 ${f.filename}`" @click="emit('openFile', f)">{{ f.filename }}</button>
             <div class="text-[11px] text-faint">{{ f.kind_label }} · {{ f.sheets.map((s) => `${s.sheet} ${s.rows} 行`).join(' / ') }}</div>
           </div>
+          <button class="icon-btn" :aria-label="`查看文件 ${f.filename}`" title="查看文件" @click="emit('openFile', f)"><Eye class="size-4" /></button>
           <a :href="f.download_url" class="icon-btn" title="下载"><Download class="size-4" /></a>
         </div>
       </template>

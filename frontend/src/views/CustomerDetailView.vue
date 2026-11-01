@@ -11,7 +11,7 @@ import {
   ArrowLeft, ArrowRight, Download, Eye, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Play, Sparkles,
   Trash2, Upload,
 } from '@lucide/vue'
-import { computed, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi, customerApi, fileApi } from '@/api'
@@ -21,7 +21,6 @@ import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
-import TableViewer from '@/components/common/TableViewer.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import CustomerLogicSummary from '@/components/customer/CustomerLogicSummary.vue'
 import MemoryPanel from '@/components/customer/MemoryPanel.vue'
@@ -33,6 +32,8 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
+
+const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const props = defineProps<{ id: string }>()
 const route = useRoute()
@@ -58,6 +59,7 @@ const editing = ref(false)
 const runDialog = ref<{ recipeId: string | null } | null>(null)
 const runDetail = ref<string | null>(null)
 const preview = ref<FileInfo | null>(null)
+const loadingPreview = ref<string | null>(null)
 const conversationsOpen = ref(false)
 const uploadKind = ref<'input' | 'expected'>('input')
 const uploading = ref(false)
@@ -173,9 +175,16 @@ async function onEdited() {
   await Promise.all([load(), store.refreshCustomers()])
 }
 
-async function loadPreview(offset: number, limit: number) {
-  const data = await fileApi.preview(preview.value!.file_id, undefined, offset, limit)
-  return { columns: data.columns, rows: data.rows, total: data.total }
+async function previewFile(fileId: string) {
+  if (loadingPreview.value) return
+  loadingPreview.value = fileId
+  try {
+    preview.value = await fileApi.get(fileId)
+  } catch (err) {
+    toast.error(errorText(err))
+  } finally {
+    loadingPreview.value = null
+  }
 }
 </script>
 
@@ -335,6 +344,9 @@ async function loadPreview(offset: number, limit: number) {
                 <td class="text-xs text-mute">{{ r.verification ? percent(r.verification.overall_match_rate) : '—' }}</td>
                 <td class="font-mono text-xs text-faint">{{ duration(r.duration_ms) }}</td>
                 <td class="pr-4 text-right" @click.stop>
+                  <button v-if="r.output_file_id" class="icon-btn" :disabled="!!loadingPreview" title="查看结果" @click="previewFile(r.output_file_id)">
+                    <LoaderCircle v-if="loadingPreview === r.output_file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />
+                  </button>
                   <a v-if="r.output_file_id" :href="fileApi.downloadUrl(r.output_file_id)" class="icon-btn" title="下载结果"><Download class="size-4" /></a>
                 </td>
               </tr>
@@ -381,6 +393,6 @@ async function loadPreview(offset: number, limit: number) {
       @done="load"
     />
     <RunDetailDialog v-if="runDetail" :run-id="runDetail" @close="runDetail = null" @changed="load" />
-    <TableViewer v-if="preview" :title="preview.filename" :subtitle="preview.kind_label" :loader="loadPreview" @close="preview = null" />
+    <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </div>
 </template>

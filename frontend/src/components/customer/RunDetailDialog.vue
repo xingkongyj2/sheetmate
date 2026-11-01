@@ -1,16 +1,18 @@
 <script setup lang="ts">
 /** 一次运行的详情：每一步的输入输出、提示、修复记录；可以查看中间表、修改参数后从某一步重跑（断点续跑） */
-import { Download, LoaderCircle } from '@lucide/vue'
-import { computed, onMounted, ref } from 'vue'
+import { Download, Eye, LoaderCircle } from '@lucide/vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 
 import { fileApi, runApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { RunDetail, StepReport } from '@/api/types'
+import type { FileInfo, RunDetail, StepReport } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
 import { duration, percent } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
+
+const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const props = defineProps<{ runId: string }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
@@ -21,6 +23,20 @@ const tables = ref<{ name: string; rows: number }[]>([])
 const selected = ref<StepReport | null>(null)
 const rerunning = ref(false)
 const log = ref<string[]>([])
+const preview = ref<FileInfo | null>(null)
+const loadingPreview = ref(false)
+
+async function previewOutput() {
+  if (!run.value?.output_file_id || loadingPreview.value) return
+  loadingPreview.value = true
+  try {
+    preview.value = await fileApi.get(run.value.output_file_id)
+  } catch (err) {
+    toast.error(errorText(err))
+  } finally {
+    loadingPreview.value = false
+  }
+}
 
 async function load() {
   try {
@@ -102,6 +118,9 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
       </div>
     </div>
     <template v-if="run?.output_file_id" #footer>
+      <button class="btn-line" :disabled="loadingPreview" @click="previewOutput">
+        <LoaderCircle v-if="loadingPreview" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果
+      </button>
       <a :href="fileApi.downloadUrl(run.output_file_id)" class="btn-ink"><Download class="size-4" />下载这次的结果</a>
     </template>
 
@@ -121,5 +140,6 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
       @close="selected = null"
       @rerun="(params) => rerun(selected!, params)"
     />
+    <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </BaseModal>
 </template>

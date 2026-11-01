@@ -1,37 +1,94 @@
 <script setup lang="ts">
 /**
- * 助手消息：计划步骤与状态 → 处理流程 → 折叠的执行过程 → Markdown 回答与产物 → 两种复制操作。
+ * 助手消息：按发生顺序展示折叠的阶段过程与公开小结，最后展示回答和交付结果。
  */
-import { Check, ChevronRight, CircleAlert, Code, Copy, Download, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
+import { fileApi } from '@/api'
+import { errorText } from '@/api/http'
+import type { FileInfo, TableBrief } from '@/api/types'
 import Mascot from '@/components/brand/Mascot.vue'
 import MarkdownView from '@/components/common/MarkdownView.vue'
 import RecipeProgressCard from '@/components/recipe/RecipeProgressCard.vue'
+import { assistantStages, type AssistantStage } from '@/composables/assistantTimeline'
 import type { UiMessage } from '@/composables/chatModel'
+import { fileKindLabel, standaloneFiles } from '@/composables/filePresentation'
 import { copyMarkdown } from '@/composables/markdown'
-import { lastResultTable, messageMarkdown, planSteps, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
+import { lastResultTable, messageMarkdown, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
+import { recipeViewReply } from '@/composables/recipeViewPresentation'
+import { toolPresentation, userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
 
-import PlanProgress from './PlanProgress.vue'
+import RecipeStageDetails from './RecipeStageDetails.vue'
+import RecipeViewCard from './RecipeViewCard.vue'
 import TableCard from './TableCard.vue'
 import TimelineList from './TimelineList.vue'
 
-const props = defineProps<{ message: UiMessage; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean }>()
-const emit = defineEmits<{ answer: [text: string]; openTable: [name: string] }>()
+const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean }>()
+const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo] }>()
 const toast = useToast()
+const openingFile = ref<string | null>(null)
+
+async function previewFile(fileId: string) {
+  if (openingFile.value) return
+  openingFile.value = fileId
+  try {
+    emit('previewFile', await fileApi.get(fileId))
+  } catch (error) {
+    toast.error(errorText(error))
+  } finally {
+    openingFile.value = null
+  }
+}
 const copying = ref(false)
 const copied = ref<'formatted' | 'markdown' | null>(null)
 let copiedTimer = 0
-const markdown = computed(() => messageMarkdown(props.message))
-const hasPlan = computed(() => planSteps(props.message).length > 0)
+const stages = computed(() => assistantStages(props.message))
+const fileContext = computed(() => ({ files: props.files, tables: props.tables }))
+const markdown = computed(() => messageMarkdown(props.message, stages.value.map((stage) => ({ title: stage.title, summary: stageSummary(stage) })), fileContext.value))
 const attempts = computed(() => recipeAttempts(props.message))
-const previousAttempts = computed(() => {
-  const previous = attempts.value.slice(0, -1)
-  return previous.length && previous.every((attempt) => recipeFailure(attempt.progress) && !attempt.progress.file) ? previous : []
+const recipeViews = computed(() => props.message.artifacts.flatMap((artifact) => artifact.kind === 'recipe_view' ? [artifact] : []))
+const deliveries = computed(() => {
+  const available = attempts.value.filter((attempt) => attempt.progress.file || attempt.progress.saved)
+  return [...new Map(available.map((attempt) => [attempt.progress.file?.file_id ?? `${attempt.progress.saved?.recipe_id}:${attempt.progress.saved?.version}`, attempt])).values()]
 })
-const visibleAttempts = computed(() => previousAttempts.value.length ? attempts.value.slice(-1) : attempts.value)
-const reply = computed(() => props.message.content.trim() ? props.message.content : recipeOutcomeSummary(props.message))
+const reply = computed(() => {
+  const content = recipeViewReply(props.message)
+  return content.trim() ? content : recipeOutcomeSummary(props.message)
+})
+const errorMessage = computed(() => userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
+
+function stageSummary(stage: AssistantStage): string {
+  const summaries = [userFacingSummary(stage.summary, '', 1600)]
+  for (const attempt of stage.attempts) {
+    const failure = recipeFailure(attempt.progress)
+    if (failure) summaries.push(userFacingText(failure.summary, '这次尝试未完成，需要调整处理方式。', 400))
+    else if (attempt.progress.status === 'done') summaries.push(userFacingText(attempt.progress.runSummary, '本次处理已完成。', 800))
+  }
+  return [...new Set(summaries.filter(Boolean))].join('\n\n')
+}
+
+function stageActivity(stage: AssistantStage): string {
+  const activeTool = stage.items.find((item) => item.kind === 'tool' && item.status === 'running')
+  if (activeTool?.kind === 'tool') return `正在${toolPresentation(activeTool).label}…`
+  const progress = stage.attempts.find((attempt) => ['thinking', 'running', 'verifying', 'refining'].includes(attempt.progress.status))?.progress
+  if (progress) {
+    if (progress.status === 'verifying') return '正在核对处理结果…'
+    if (progress.status === 'refining') return '正在调整处理步骤…'
+    const step = progress.steps.find((item) => item.status === 'running' || item.status === 'repairing')
+    if (step) return `正在${userFacingText(step.name, '处理数据', 80)}…`
+  }
+  if (stage.status === 'running') return '正在思考…'
+  if (stage.plan) return userFacingText(stage.plan.description, '处理过程', 120)
+  if (stage.attempts.length) return stage.attempts[0]!.label
+  const labels = [...new Set(stage.items.flatMap((item) => item.kind === 'tool' ? [toolPresentation(item).label] : []))]
+  return labels.slice(0, 2).join('、') || '思考过程'
+}
+
+function hasProcess(stage: AssistantStage): boolean {
+  return stage.items.length > 0 || stage.attempts.length > 0 || !!stage.plan || stage.status === 'running'
+}
 
 async function copyReply(format: 'formatted' | 'markdown') {
   if (copying.value) return
@@ -49,16 +106,6 @@ async function copyReply(format: 'formatted' | 'markdown') {
   }
 }
 
-// 执行过程默认折叠：正在执行时也不会自动展开，想看自己点开
-const showProcess = ref(false)
-// 非计划任务执行时显示最新进展，结束后过程说明收进执行明细。
-const stageNotes = computed(() => props.message.timeline.flatMap((t) => (t.kind === 'note' ? [t] : [])))
-const stageNote = computed(() => {
-  const latest = stageNotes.value.at(-1)?.text
-  return latest && !attempts.value.some((attempt) => attempt.notes.includes(latest)) ? latest : ''
-})
-const processItems = computed(() => props.message.timeline.filter((t) => t.kind !== 'plan'))
-const toolCount = computed(() => props.message.timeline.filter((t) => t.kind === 'tool').length)
 const runningTool = computed(() => [...props.message.timeline].reverse().find((t) => t.kind === 'tool' && t.status === 'running'))
 const mood = computed(() => {
   if (props.message.streaming) return runningTool.value ? 'working' : 'thinking'
@@ -66,10 +113,10 @@ const mood = computed(() => {
   return props.message.error || (latest && recipeFailure(latest.progress)) ? 'idle' : 'happy'
 })
 
-// 一条回答里可能有好几张中间表，消息里只放最后一张（最终结果）；其余的在右侧「执行明细」里看
-// 「查询结果」是看数据时的探索（取值分布等），不是用户要的结果，不放进消息；它们在右侧「执行明细」里
+// 正式输入输出只交付文件；小型临时表完整内联，其余计算数据可在执行明细中查看。
 const lastTable = computed(() => lastResultTable(props.message))
-const others = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'file' || a.kind === 'clarify' ? [a] : [])))
+const fileCards = computed(() => standaloneFiles(props.message, fileContext.value))
+const questions = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'clarify' ? [a] : [])))
 
 // 回答正文逐字显示：后端把最终回答整段给过来，这里做一个很快的打字动画；打开历史消息时直接整段显示
 const animate = props.message.streaming
@@ -77,7 +124,12 @@ const shown = ref(animate ? '' : reply.value)
 let timer = 0
 function tick() {
   const full = reply.value
-  if (!full.startsWith(shown.value)) shown.value = '' // 已显示的部分被撤回（其实是过程说明）：从头来
+  if (!full.startsWith(shown.value)) {
+    // 过滤重复流程图或撤回过程说明时，保留仍然有效的前文，避免从头打字。
+    let shared = 0
+    while (shared < shown.value.length && shared < full.length && shown.value[shared] === full[shared]) shared++
+    shown.value = full.slice(0, shared)
+  }
   const remaining = full.length - shown.value.length
   if (remaining <= 0) {
     window.clearInterval(timer)
@@ -92,12 +144,13 @@ watch(
     if (!animate) shown.value = full
     else if (!timer) timer = window.setInterval(tick, 30)
   },
+  { immediate: true },
 )
 onBeforeUnmount(() => {
   window.clearInterval(timer)
   window.clearTimeout(copiedTimer)
 })
-const typing = computed(() => props.message.streaming || shown.value.length < reply.value.length)
+const typing = computed(() => props.message.streaming || shown.value !== reply.value)
 </script>
 
 <template>
@@ -106,61 +159,51 @@ const typing = computed(() => props.message.streaming || shown.value.length < re
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
     <div class="assistant-content min-w-0 flex-1 space-y-3">
+      <!-- 阶段按事件发生顺序排列：过程默认折叠，小结始终留在该阶段之后。 -->
+      <section v-for="stage in stages" :key="stage.key" class="assistant-stage space-y-2" :aria-label="stageActivity(stage)" :data-stage="stage.number">
+        <details v-if="hasProcess(stage)" class="assistant-process group/process">
+          <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
+            <LoaderCircle v-if="stage.status === 'running'" class="size-3.5 shrink-0 animate-spin" />
+            <ChevronRight v-else class="size-3.5 shrink-0 transition group-open/process:rotate-90" />
+            <span class="min-w-0 break-words">{{ stageActivity(stage) }}</span>
+            <span v-if="stage.toolCount && stage.status !== 'running'" class="shrink-0 text-xs text-faint">· {{ stage.toolCount }} 项操作</span>
+            <span v-if="stage.status === 'error' || stage.status === 'warning' || stage.status === 'waiting' || stage.status === 'stopped'" class="ml-1 flex shrink-0 items-center gap-1 text-xs" :class="stage.status === 'error' ? 'text-error' : 'text-mute'">
+              <CircleAlert v-if="stage.status === 'error'" class="size-3" />
+              {{ stage.status === 'error' ? '未完成' : stage.statusLabel }}
+            </span>
+          </summary>
+          <div class="mb-3 ml-1.5 mt-2 space-y-4 border-l-2 border-line py-1 pl-3.5">
+            <TimelineList v-if="stage.items.some((item) => item.kind !== 'thinking')" :items="stage.items" />
+            <RecipeStageDetails v-for="attempt in stage.attempts" :key="attempt.key" :progress="attempt.progress" />
+            <p v-if="stage.items.every((item) => item.kind === 'thinking') && !stage.attempts.length" class="text-xs leading-5 text-mute">{{ stage.status === 'running' ? '正在分析需求，整理处理步骤。' : stage.status === 'pending' ? '尚未开始处理。' : '已完成需求分析。' }}</p>
+          </div>
+        </details>
+        <div v-if="stageSummary(stage)" class="assistant-stage-summary">
+          <MarkdownView :source="stageSummary(stage)" class="!text-[14px] !leading-6" />
+        </div>
+      </section>
+
+      <!-- 全部过程之后，才展示最终回答和交付产物。简单回答直接显示正文。 -->
       <MarkdownView v-if="shown" :source="shown" :streaming="typing" />
+      <!-- 结果可能先于正文到达，等正文接收和打字都结束后再展示，避免底部内容抢先出现。 -->
+      <template v-if="!typing">
+        <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" />
+        <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :customer-id="customerId" hide-details @preview-file="(file) => emit('previewFile', file)" />
 
-      <!-- 阶段小结：知道大概干了什么 -->
-      <PlanProgress v-if="hasPlan" :message="message" />
-      <MarkdownView v-else-if="message.streaming && !shown && stageNote" :source="stageNote" class="animate-rise !text-[14px] !text-mute" />
-
-      <!-- 处理流程：一张精简卡片（细节折叠在里面） -->
-      <template v-for="attempt in visibleAttempts" :key="attempt.key">
-        <p v-if="attempt.notes.length && attempts.length > 1" class="text-xs font-medium text-mute">{{ attempt.label }}</p>
-        <MarkdownView v-if="attempt.notes.length" :source="attempt.notes.join('\n\n')" class="!text-[14px] !leading-6" />
-        <p v-else class="assistant-attempt-note text-[14px] leading-6 text-mute">{{ attempt.label }}</p>
-        <RecipeProgressCard :progress="attempt.progress" :customer-id="customerId" />
-      </template>
-
-      <details v-if="previousAttempts.length" class="group/attempts rounded-xl border border-line px-4 py-3">
-        <summary class="flex cursor-pointer list-none items-center gap-1.5 text-xs text-mute hover:text-ink [&::-webkit-details-marker]:hidden">
-          <ChevronRight class="size-3.5 transition group-open/attempts:rotate-90" />
-          查看前 {{ previousAttempts.length }} 次未完成的尝试
-        </summary>
-        <div class="mt-4 space-y-5">
-          <section v-for="attempt in previousAttempts" :key="attempt.key" class="space-y-2.5" :aria-label="attempt.label">
-            <p class="text-xs font-medium text-mute">{{ attempt.label }}</p>
-            <MarkdownView v-if="attempt.notes.length" :source="attempt.notes.join('\n\n')" class="!text-[14px] !leading-6" />
-            <RecipeProgressCard :progress="attempt.progress" :customer-id="customerId" />
-          </section>
-        </div>
-      </details>
-
-      <!-- 执行过程：默认折叠成一行，正在执行时这一行显示当前在做什么 -->
-      <div v-if="processItems.length || message.streaming" class="assistant-process">
-        <button class="flex items-center gap-1.5 text-xs text-mute hover:text-ink" @click="showProcess = !showProcess">
-          <LoaderCircle v-if="message.streaming" class="size-3.5 animate-spin" />
-          <ChevronRight v-else class="size-3.5 transition" :class="{ 'rotate-90': showProcess }" />
-          <template v-if="message.streaming">
-            {{ runningTool && runningTool.kind === 'tool' ? `正在${runningTool.label}…` : '思考中…' }}
-          </template>
-          <template v-else>{{ showProcess ? '收起执行过程' : `查看执行过程${toolCount ? ` · ${toolCount} 次工具调用` : ''}` }}</template>
-        </button>
-        <div v-if="showProcess && processItems.length" class="mt-2 border-l-2 border-line pl-3.5">
-          <TimelineList :items="processItems" />
-        </div>
-      </div>
-
-      <!-- 结果：最后一张表、文件、需要用户回答的问题 -->
-      <TableCard v-if="lastTable" :table="lastTable" @open="(n) => emit('openTable', n)" />
-      <template v-for="a in others" :key="`b${a.key}`">
-        <div v-if="a.kind === 'file'" class="card-soft flex items-center gap-3 px-4 py-3">
+        <TableCard v-if="lastTable" :table="lastTable" />
+        <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft flex flex-wrap items-center gap-3 px-4 py-3" data-testid="file-delivery">
           <FileSpreadsheet class="size-5 text-fun-green" />
           <div class="min-w-0 flex-1">
-            <div class="truncate text-[13px] font-semibold">{{ a.file.filename }}</div>
-            <div class="text-[11px] text-faint">{{ (a.file.sheets ?? []).map((s) => `${s.sheet} ${s.rows} 行`).join(' · ') }}</div>
+            <div class="flex items-center gap-2">
+              <div class="min-w-0 truncate text-[13px] font-semibold" :title="file.filename">{{ file.filename }}</div>
+              <span v-if="fileKindLabel(file.kind)" class="tag shrink-0">{{ fileKindLabel(file.kind) }}</span>
+            </div>
+            <div class="text-[11px] text-faint">{{ (file.sheets ?? []).map((s) => `${s.sheet} ${s.rows} 行`).join(' · ') }}</div>
           </div>
-          <a :href="a.file.download_url" class="btn-ink py-2"><Download class="size-4" />下载</a>
+          <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看</button>
+          <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载</a>
         </div>
-        <section v-else-if="a.kind === 'clarify'" class="overflow-hidden rounded-2xl border border-[#eadfc9] bg-[#fffcf6]">
+        <section v-for="a in questions" :key="`b${a.key}`" class="overflow-hidden rounded-2xl border border-[#eadfc9] bg-[#fffcf6]">
           <div class="flex items-start gap-3 px-4 pb-3 pt-4 sm:px-5 sm:pt-5">
             <span class="flex size-9 shrink-0 items-center justify-center rounded-xl bg-[#fff1d2] text-[#a56d0d]">
               <MessageCircleQuestion class="size-[18px]" />
@@ -188,15 +231,15 @@ const typing = computed(() => props.message.streaming || shown.value.length < re
         </section>
       </template>
 
-      <div v-if="message.error" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
+      <div v-if="!typing && message.error" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
         <CircleAlert class="mt-0.5 size-4 shrink-0" />
         <span>
-          {{ message.error }}
+          {{ errorMessage }}
           <RouterLink v-if="message.error.includes('API Key') || message.error.includes('设置')" :to="{ name: 'settings' }" class="ml-1 font-medium underline">去设置</RouterLink>
         </span>
       </div>
 
-      <div v-if="!message.streaming && markdown" class="flex items-center gap-1 border-t border-line/60 pt-2">
+      <div v-if="!typing && markdown" class="flex items-center gap-1 border-t border-line/60 pt-2">
         <button type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含计划摘要、结果预览和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
           <Check v-if="copied === 'formatted'" class="size-4 text-success" /><Copy v-else class="size-4" />
         </button>
@@ -223,13 +266,7 @@ const typing = computed(() => props.message.streaming || shown.value.length < re
   margin-top: 0;
 }
 
-.assistant-process:first-child > button {
-  min-height: var(--assistant-avatar-size);
-}
-
-.assistant-attempt-note:first-child {
-  display: flex;
-  align-items: center;
-  min-height: var(--assistant-avatar-size);
+.assistant-stage:first-child {
+  padding-top: max(0px, calc((var(--assistant-avatar-size) - 1.25rem) / 2));
 }
 </style>
