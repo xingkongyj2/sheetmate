@@ -237,6 +237,13 @@ export interface CustomerFormula extends FormulaInfo {
   updated_at: string | null
 }
 
+export interface FormulaGenerationResult {
+  formula: Record<string, unknown>
+  explanation: string
+  warnings: string[]
+  questions: string[]
+}
+
 /** 试运行的结果：failed 不是接口出错，stage 说明在哪一步出的问题 */
 export interface FormulaTrialResult {
   status: 'success' | 'failed'

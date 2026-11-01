@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
 import CustomerLibraryIcon from '@/components/brand/CustomerLibraryIcon.vue'
+import FormulaLibraryIcon from '@/components/brand/FormulaLibraryIcon.vue'
 import LogoMark from '@/components/brand/LogoMark.vue'
 import { mascotStyle } from '@/components/brand/mascots'
 import { useConfirm } from '@/composables/useConfirm'
@@ -71,6 +72,14 @@ async function logout() {
       >
         <CustomerLibraryIcon class="shrink-0" /><span v-if="!collapsed">客户库</span>
         <span v-if="!collapsed && store.customers.length" class="ml-auto text-xs text-faint">{{ store.customers.length }}</span>
+      </RouterLink>
+      <RouterLink
+        :to="{ name: 'formulas' }"
+        class="flex items-center gap-2.5 rounded-xl py-2 text-sm transition hover:bg-black/[0.04]"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'formulas' ? 'bg-black/[0.05] font-medium text-ink' : 'text-mute']"
+        title="公式库"
+      >
+        <FormulaLibraryIcon class="shrink-0" /><span v-if="!collapsed">公式库</span>
       </RouterLink>
     </nav>
 

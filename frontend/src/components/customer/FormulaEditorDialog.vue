@@ -29,13 +29,14 @@ const props = defineProps<{
   files: FileInfo[]
   fieldMapping: Record<string, string[]>
   focusTrial?: boolean
+  initialBody?: Record<string, unknown>
 }>()
 const emit = defineEmits<{ close: []; saved: [formula: CustomerFormula] }>()
 const toast = useToast()
 const { confirm } = useConfirm()
 
-const draft = ref<FormulaDraft>(props.formula ? draftFromBody(bodyFromFormula(props.formula)) : emptyDraft())
-const initialBody = JSON.stringify(draftToBody(draft.value))
+const draft = ref<FormulaDraft>(props.formula ? draftFromBody(bodyFromFormula(props.formula)) : props.initialBody ? draftFromBody(props.initialBody) : emptyDraft())
+const initialSnapshot = JSON.stringify(draftToBody(props.initialBody && !props.formula ? emptyDraft() : draft.value))
 const mode = ref<'form' | 'json'>('form')
 const jsonText = ref('')
 const jsonError = ref<JsonErrorInfo | null>(null)
@@ -65,7 +66,7 @@ const jsonBroken = computed(() => mode.value === 'json' && jsonError.value !== n
 const serverProblems = ref<string[]>([])
 const checking = ref(false)
 const allProblems = computed(() => [...issues.value.problems, ...serverProblems.value])
-const dirty = computed(() => jsonBroken.value || JSON.stringify(body.value) !== initialBody)
+const dirty = computed(() => jsonBroken.value || JSON.stringify(body.value) !== initialSnapshot)
 const canSave = computed(() => dirty.value && !jsonBroken.value && !allProblems.value.length && !saving.value)
 const trialDraft = computed(() => (jsonBroken.value || allProblems.value.length ? null : draft.value))
 const trialBlocked = computed(() => (jsonBroken.value ? 'JSON 格式有误，先改好' : allProblems.value[0] ?? ''))
@@ -220,7 +221,7 @@ async function requestClose() {
 </script>
 
 <template>
-  <BaseModal :title="formula ? `编辑公式 · ${formula.name}` : '新建客户公式'" width="max-w-6xl" @close="requestClose">
+  <BaseModal :title="formula ? `编辑公式 · ${formula.name}` : props.initialBody ? '确认 AI 生成的公式' : '新建客户公式'" width="max-w-6xl" @close="requestClose">
     <div class="grid gap-6 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)]">
       <!-- 左：编辑 -->
       <div class="min-w-0 space-y-5" data-testid="formula-editor">

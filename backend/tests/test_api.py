@@ -88,7 +88,7 @@ def test_demo_customer_detail(client):
     assert recipe["status"] == "active"
     assert recipe["verification"]["match_rate"] == 1.0
     assert [s["formula"] for s in recipe["flow"]["steps"]] == ["pivot_wide", "compute_column", "lookup", "group_aggregate"]
-    assert "整体处理逻辑" in detail["summary"]
+    assert "### 这项工作做什么" in detail["summary"]
     assert detail["field_mapping"]["运单号"] == ["单号", "运单编号"]
 
 
@@ -532,10 +532,17 @@ def test_revise_rule_change_is_not_reverted(client, samples, fake_llm):
     assert client.get(f"/api/conversations/{conv}").json()["conversation"]["recipes"] == []
 
 
-def test_human_edited_summary_is_not_overwritten(client, samples, fake_llm):
+def test_legacy_human_edited_summary_is_not_overwritten(client, samples, fake_llm):
+    from sheetmate.db.database import session_scope
+    from sheetmate.db.models import Customer
+
     fake_llm()
     customer = client.post("/api/customers", json={"name": "测试客户乙"}).json()["customer"]
-    client.put(f"/api/customers/{customer['id']}", json={"summary": "### 整体处理逻辑\n我自己写的说明"})
+    # 历史手写说明保留；当前接口不再允许用户手动修改处理逻辑。
+    with session_scope() as db:
+        record = db.get(Customer, customer["id"])
+        record.summary = "### 整体处理逻辑\n我自己写的说明"
+        record.summary_by = "human"
     conv = _new_conversation(client)
     _upload(client, conv, samples["owners"])
     client.post(f"/api/conversations/{conv}/bind", json={"customer_id": customer["id"]})  # 会触发自动更新

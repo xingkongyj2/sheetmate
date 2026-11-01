@@ -8,7 +8,7 @@
  * - 记忆：业务规则、偏好、字段映射
  */
 import {
-  ArrowLeft, ArrowRight, BookOpen, Download, Eye, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Play, Sparkles,
+  ArrowLeft, ArrowRight, Download, Eye, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Play, Sparkles,
   Trash2, Upload,
 } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
@@ -20,12 +20,10 @@ import type { CustomerDetail, FileInfo } from '@/api/types'
 import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
-import MarkdownView from '@/components/common/MarkdownView.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
-import CustomerFormulas from '@/components/customer/CustomerFormulas.vue'
-import FormulaLibraryDialog from '@/components/customer/FormulaLibraryDialog.vue'
+import CustomerLogicSummary from '@/components/customer/CustomerLogicSummary.vue'
 import MemoryPanel from '@/components/customer/MemoryPanel.vue'
 import RecipePanel from '@/components/customer/RecipePanel.vue'
 import RunDetailDialog from '@/components/customer/RunDetailDialog.vue'
@@ -56,13 +54,10 @@ const tab = ref<Tab>((route.query.tab as Tab) || 'logic')
 const customer = ref<CustomerDetail | null>(null)
 const loading = ref(true)
 const summarizing = ref(false)
-const editingSummary = ref(false)
-const summaryDraft = ref('')
 const editing = ref(false)
 const runDialog = ref<{ recipeId: string | null } | null>(null)
 const runDetail = ref<string | null>(null)
 const preview = ref<FileInfo | null>(null)
-const formulas = ref(false)
 const conversationsOpen = ref(false)
 const uploadKind = ref<'input' | 'expected'>('input')
 const uploading = ref(false)
@@ -70,6 +65,10 @@ const uploading = ref(false)
 async function load() {
   try {
     customer.value = await customerApi.get(props.id)
+    const previous = customer.value.summary
+    if (customer.value.summary_by === 'ai' && previous && !/^#{1,3}\s+这项工作做什么\s*$/m.test(previous)) {
+      void upgradeSummary(previous)
+    }
   } catch (err) {
     toast.error(errorText(err))
     router.replace({ name: 'customers' })
@@ -80,6 +79,23 @@ async function load() {
 onMounted(load)
 
 const inputFiles = computed(() => customer.value?.files ?? [])
+
+async function upgradeSummary(previous: string) {
+  if (summarizing.value) return
+  const customerId = props.id
+  summarizing.value = true
+  try {
+    const result = await customerApi.upgradeSummary(customerId)
+    if (result.summary !== previous && customer.value?.id === customerId && customer.value.summary === previous) {
+      customer.value.summary = result.summary
+      customer.value.summary_by = result.summary_by
+      if (result.updated) customer.value.summary_updated_at = new Date().toISOString()
+    }
+  } catch {
+  } finally {
+    summarizing.value = false
+  }
+}
 
 async function newChat() {
   try {
@@ -99,24 +115,11 @@ async function regenerate() {
       customer.value.summary = result.summary
       customer.value.summary_by = 'ai'
     }
-    toast.success(result.by_ai ? 'AI 已重新总结处理逻辑' : '已按流程结构生成（配置模型后可以让 AI 写得更好）')
+    toast.success(result.by_ai ? '处理说明已更新' : '已根据现有资料整理处理说明')
   } catch (err) {
     toast.error(errorText(err))
   } finally {
     summarizing.value = false
-  }
-}
-
-async function saveSummary() {
-  try {
-    await customerApi.update(props.id, { summary: summaryDraft.value })
-    if (customer.value) {
-      customer.value.summary = summaryDraft.value
-      customer.value.summary_by = 'human'
-    }
-    editingSummary.value = false
-  } catch (err) {
-    toast.error(errorText(err))
   }
 }
 
@@ -230,32 +233,19 @@ async function loadPreview(offset: number, limit: number) {
 
       <!-- 处理逻辑 -->
       <section v-if="tab === 'logic'" class="mt-6">
-        <div class="card-soft p-6">
-          <div class="mb-3 flex items-center gap-2">
-            <BookOpen class="size-4" />
-            <h2 class="text-[15px] font-semibold">Excel 整体处理逻辑</h2>
-            <span v-if="customer.summary_updated_at" class="text-xs text-faint">更新于 {{ timeAgo(customer.summary_updated_at) }}</span>
-            <span
-              class="tag"
-              :title="customer.summary_by === 'human' ? '你手动编辑过，流程变化时不会自动覆盖；点「重新总结」恢复自动更新' : '流程有变化时会自动更新'"
-            >
-              {{ customer.summary_by === 'human' ? '手动编辑 · 不自动更新' : '自动更新' }}
-            </span>
-            <div class="ml-auto flex gap-1">
+        <div class="rounded-[26px] bg-white p-5 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-6">
+          <div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+            <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-faint">
+              <span v-if="customer.summary_updated_at">更新于 {{ timeAgo(customer.summary_updated_at) }}</span>
+              <span v-if="customer.summary_by !== 'human'" title="相关资料变化时会自动更新">自动更新</span>
+            </div>
+            <div class="ml-auto flex shrink-0 gap-1">
               <button class="btn-text" :disabled="summarizing" @click="regenerate">
                 <LoaderCircle v-if="summarizing" class="size-3.5 animate-spin" /><Sparkles v-else class="size-3.5" />重新总结
               </button>
-              <button class="btn-text" @click="editingSummary = !editingSummary; summaryDraft = customer.summary"><Pencil class="size-3.5" />编辑</button>
             </div>
           </div>
-          <div v-if="editingSummary">
-            <textarea v-model="summaryDraft" class="field h-96 font-mono text-[13px]" />
-            <div class="mt-2 flex justify-end gap-2">
-              <button class="btn-line" @click="editingSummary = false">取消</button>
-              <button class="btn-ink" @click="saveSummary">保存</button>
-            </div>
-          </div>
-          <MarkdownView v-else-if="customer.summary" :source="customer.summary" />
+          <CustomerLogicSummary v-if="customer.summary" :source="customer.summary" />
           <div v-else class="py-10 text-center text-sm text-faint">
             还没有处理逻辑说明<br />
             <button class="btn-line mt-3" @click="regenerate"><Sparkles class="size-4" />让 AI 总结</button>
@@ -266,19 +256,8 @@ async function loadPreview(offset: number, limit: number) {
 
       <!-- 流程 -->
       <section v-else-if="tab === 'recipes'" class="mt-6 space-y-5">
-        <div class="flex items-center justify-between">
-          <p class="text-sm text-mute">流程由一步步「公式 + 参数」组成：内置公式覆盖常见操作，客户独有逻辑单独标出。正常执行不调用 AI。</p>
-          <button class="btn-line" @click="formulas = true"><BookOpen class="size-4" />公式库</button>
-        </div>
         <RecipePanel v-for="r in customer.recipes" :key="r.recipe_id" :recipe="r" @run="(id) => (runDialog = { recipeId: id })" @changed="load" />
         <div v-if="!customer.recipes.length" class="card-soft py-14 text-center text-sm text-faint">还没有流程</div>
-        <CustomerFormulas
-          :customer-id="customer.id"
-          :formulas="customer.formulas"
-          :files="customer.files"
-          :field-mapping="customer.field_mapping"
-          @changed="load"
-        />
       </section>
 
       <!-- 文件 -->
@@ -399,6 +378,5 @@ async function loadPreview(offset: number, limit: number) {
     />
     <RunDetailDialog v-if="runDetail" :run-id="runDetail" @close="runDetail = null" @changed="load" />
     <TableViewer v-if="preview" :title="preview.filename" :subtitle="preview.kind_label" :loader="loadPreview" @close="preview = null" />
-    <FormulaLibraryDialog v-if="formulas" :customer-id="customer?.id" @close="formulas = false" />
   </div>
 </template>

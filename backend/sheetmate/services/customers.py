@@ -7,7 +7,7 @@ import random
 import re
 from typing import Any
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from sheetmate.agent.summarizer import customer_summary, fallback_customer_summary
@@ -45,12 +45,9 @@ def create_customer(db: Session, user: User, name: str, code: str = "", descript
 
 
 def update_customer(customer: Customer, data: dict[str, Any]) -> Customer:
-    for key in ("name", "code", "description", "summary", "mascot"):
+    for key in ("name", "code", "description", "mascot"):
         if key in data and data[key] is not None:
             setattr(customer, key, str(data[key]).strip())
-    if data.get("summary") is not None:
-        customer.summary_updated_at = now()
-        customer.summary_by = "human"  # 手动编辑过的总结不再被自动覆盖
     if not customer.name:
         raise ServiceError("客户名称不能为空")
     return customer
@@ -158,6 +155,32 @@ async def refresh_summary(db: Session, customer: Customer, llm: Any | None) -> s
     customer.summary_updated_at = now()
     customer.summary_by = "ai"
     return text
+
+
+def needs_business_summary(customer: Customer) -> bool:
+    return (customer.summary_by == "ai" and bool((customer.summary or "").strip())
+            and not re.search(r"(?m)^#{1,3}\s+这项工作做什么\s*$", customer.summary))
+
+
+async def upgrade_business_summary(db: Session, customer: Customer, llm: Any | None) -> tuple[str, bool]:
+    if not needs_business_summary(customer) or llm is None:
+        return customer.summary, False
+    original = customer.summary
+    files, recipes, memory_text = _summary_inputs(db, customer)
+    try:
+        text = await customer_summary(llm, customer.name, files, recipes, memory_text, previous_summary=original)
+    except Exception:
+        return original, False
+    if not re.search(r"(?m)^#{1,3}\s+这项工作做什么\s*$", text):
+        return original, False
+    changed = db.execute(
+        update(Customer)
+        .where(Customer.id == customer.id, Customer.summary_by == "ai", Customer.summary == original)
+        .values(summary=text, summary_updated_at=now())
+    ).rowcount == 1
+    if not changed:
+        db.refresh(customer, ["summary", "summary_by", "summary_updated_at"])
+    return customer.summary, changed
 
 
 _refreshing: set[str] = set()

@@ -11,6 +11,7 @@ import type {
   CustomerDetail,
   CustomerFormula,
   FileInfo,
+  FormulaGenerationResult,
   FormulaInfo,
   FormulaTrialInput,
   FormulaTrialResult,
@@ -55,11 +56,15 @@ export const customerApi = {
   get: async (id: string) => (await http.get<{ customer: CustomerDetail }>(`/customers/${id}`)).data.customer,
   create: async (payload: { name: string; code?: string; description?: string }) =>
     (await http.post<{ customer: CustomerCard }>('/customers', payload)).data.customer,
-  update: async (id: string, payload: Partial<{ name: string; code: string; description: string; summary: string; mascot: string }>) =>
+  update: async (id: string, payload: Partial<{ name: string; code: string; description: string; mascot: string }>) =>
     (await http.put<{ customer: CustomerCard }>(`/customers/${id}`, payload)).data.customer,
   remove: async (id: string) => http.delete(`/customers/${id}`),
   refreshSummary: async (id: string) =>
     (await http.post<{ summary: string; by_ai: boolean }>(`/customers/${id}/summary`, {}, { timeout: 180_000 })).data,
+  upgradeSummary: async (id: string) =>
+    (await http.post<{ summary: string; updated: boolean; summary_by: 'ai' | 'human' }>(
+      `/customers/${id}/summary`, {}, { params: { only_if_outdated: true }, timeout: 180_000 },
+    )).data,
   uploadFile: async (id: string, file: File, kind = 'input') => {
     const form = new FormData()
     form.append('file', file)
@@ -73,6 +78,8 @@ export const customerApi = {
 
   // ---- 客户独有公式（参数声明 + {{参数}} SQL 模板）
   formulas: async (id: string) => (await http.get<{ formulas: CustomerFormula[] }>(`/customers/${id}/formulas`)).data.formulas,
+  generateFormula: async (id: string, payload: { description: string; file_ids?: string[]; formula?: Record<string, unknown> }) =>
+    (await http.post<FormulaGenerationResult>(`/customers/${id}/formulas/generate`, payload, { timeout: 180_000 })).data,
   /** 新增 / 升级：同一个 id 每保存一次升一个版本。返回保存后的公式，used_by[].problems 是它让哪些流程的哪一步出了问题 */
   saveFormula: async (id: string, body: Record<string, unknown>) =>
     (await http.post<{ formula: CustomerFormula }>(`/customers/${id}/formulas`, body)).data.formula,

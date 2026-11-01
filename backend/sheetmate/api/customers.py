@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from sheetmate.agent.llm import LLMError, get_llm
@@ -15,6 +15,7 @@ from sheetmate.db.models import User
 from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
 from sheetmate.services import formulas as formula_service
+from sheetmate.services import formula_generation
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services.auth import require_customer
@@ -43,11 +44,18 @@ class FormulaStatusBody(BaseModel):
     status: str  # active / deprecated
 
 
+class FormulaGenerateBody(BaseModel):
+    description: str = Field(min_length=1, max_length=12_000)
+    file_ids: list[str] = Field(default_factory=list, max_length=5)
+    formula: dict[str, Any] | None = None
+
+
 class CustomerBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = None
     code: str | None = None
     description: str | None = None
-    summary: str | None = None
     mascot: str | None = None
 
 
@@ -95,13 +103,17 @@ def delete_customer(customer_id: str, db: Session = Depends(get_db), user: User 
 
 
 @router.post("/{customer_id}/summary")
-async def refresh_summary(customer_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+async def refresh_summary(customer_id: str, only_if_outdated: bool = False,
+                          db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     """重新生成「Excel 整体处理逻辑」说明（配置了模型就由 AI 写，否则按流程结构生成）。"""
     customer = require_customer(db, user, customer_id)
     try:
         llm = get_llm()
     except LLMError:
         llm = None
+    if only_if_outdated:
+        summary, updated = await customer_service.upgrade_business_summary(db, customer, llm)
+        return {"ok": True, "summary": summary, "updated": updated, "summary_by": customer.summary_by}
     summary = await customer_service.refresh_summary(db, customer, llm)
     return {"ok": True, "summary": summary, "by_ai": llm is not None}
 
@@ -158,6 +170,17 @@ def check_formula(customer_id: str, body: dict[str, Any], db: Session = Depends(
     """表单边写边检查：和保存时的检查完全一样，但不保存。"""
     require_customer(db, user, customer_id)
     return {"ok": True, "problems": formula_service.check_formula(customer_id, body)}
+
+
+@router.post("/{customer_id}/formulas/generate")
+async def generate_formula(customer_id: str, body: FormulaGenerateBody, db: Session = Depends(get_db),
+                           user: User = Depends(current_user)) -> dict[str, Any]:
+    """根据描述和选中的客户文件生成公式草稿；不保存、不执行。"""
+    customer = require_customer(db, user, customer_id)
+    result = await formula_generation.generate_formula(
+        db, customer, get_llm(), description=body.description, file_ids=body.file_ids, formula=body.formula,
+    )
+    return {"ok": True, **result}
 
 
 @router.post("/{customer_id}/formulas/trial")
