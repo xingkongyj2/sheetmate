@@ -183,26 +183,28 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
         </div>
       </section>
 
-      <!-- 全部过程之后，才展示最终回答和交付产物。简单回答直接显示正文。 -->
+      <!-- 简单回答直接显示正文；文件卡片收到后即可操作。 -->
       <MarkdownView v-if="shown" :source="shown" :streaming="typing" />
-      <!-- 结果可能先于正文到达，等正文接收和打字都结束后再展示，避免底部内容抢先出现。 -->
+      <!-- 表格和流程结果等正文接收和打字都结束后再展示。 -->
       <template v-if="!typing">
         <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" />
         <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :customer-id="customerId" hide-details @preview-file="(file) => emit('previewFile', file)" />
 
         <TableCard v-if="lastTable" :table="lastTable" />
-        <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft flex flex-wrap items-center gap-3 px-4 py-3" data-testid="file-delivery">
-          <FileSpreadsheet class="size-5 text-fun-green" />
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
-              <div class="min-w-0 truncate text-[13px] font-semibold" :title="file.filename">{{ file.filename }}</div>
-              <span v-if="fileKindLabel(file.kind)" class="tag shrink-0">{{ fileKindLabel(file.kind) }}</span>
-            </div>
-            <div class="text-[11px] text-faint">{{ (file.sheets ?? []).map((s) => `${s.sheet} ${s.rows} 行`).join(' · ') }}</div>
+      </template>
+      <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft flex flex-wrap items-center gap-3 px-4 py-3" data-testid="file-delivery">
+        <FileSpreadsheet class="size-5 text-fun-green" />
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2">
+            <div class="min-w-0 truncate text-[13px] font-semibold" :title="file.filename">{{ file.filename }}</div>
+            <span v-if="fileKindLabel(file.kind)" class="tag shrink-0">{{ fileKindLabel(file.kind) }}</span>
           </div>
-          <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看</button>
-          <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载</a>
+          <div class="text-[11px] text-faint">{{ (file.sheets ?? []).map((s) => `${s.sheet} ${s.rows} 行`).join(' · ') }}</div>
         </div>
+        <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看</button>
+        <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载</a>
+      </div>
+      <template v-if="!typing">
         <section v-for="a in questions" :key="`b${a.key}`" class="overflow-hidden rounded-2xl border border-[#eadfc9] bg-[#fffcf6]">
           <div class="flex items-start gap-3 px-4 pb-3 pt-4 sm:px-5 sm:pt-5">
             <span class="flex size-9 shrink-0 items-center justify-center rounded-xl bg-[#fff1d2] text-[#a56d0d]">
