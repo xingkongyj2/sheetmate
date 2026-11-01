@@ -7,10 +7,10 @@ import { LoaderCircle, PanelRight, Pencil, Save } from '@lucide/vue'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { conversationApi, fileApi } from '@/api'
+import { conversationApi, runApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { StreamHandle } from '@/api/sse'
-import type { ConversationDetail, FileInfo, PlanStep } from '@/api/types'
+import type { ConversationDetail, FileInfo, PlanStep, TableBrief } from '@/api/types'
 import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
@@ -20,9 +20,11 @@ import PlanEditor from '@/components/chat/PlanEditor.vue'
 import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
 import UserMessage from '@/components/chat/UserMessage.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
+import DataTable from '@/components/common/DataTable.vue'
+import BaseModal from '@/components/common/BaseModal.vue'
 import { applyEvent, finishMessage, fromStoredMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
-import { fileIdForTable } from '@/composables/filePresentation'
 import { useToast } from '@/composables/useToast'
+import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { pendingStarts } from '@/stores/pending'
 
@@ -45,8 +47,9 @@ const recentlyUploaded = ref<FileInfo[]>([])
 const plan = ref<{ title: string; steps: PlanStep[]; message: string; attachments: string[] } | null>(null)
 const planning = ref(false)
 const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角或消息下方的「查看执行明细」
+const panelTab = ref<'recipes' | 'files' | 'data'>('recipes')
 const selectedKey = ref<string | null>(null)
-const viewing = ref<string | null>(null)
+const viewing = ref<TableBrief | null>(null)
 const viewingFile = ref<FileInfo | null>(null)
 const saveOpen = ref(false)
 const editingTitle = ref(false)
@@ -62,6 +65,8 @@ const selectedMessage = computed(() => {
   return assistants.find((m) => m.key === selectedKey.value) ?? assistants[assistants.length - 1] ?? null
 })
 const customer = computed(() => detail.value?.customer ?? null)
+// 消息中的表名只在当前会话里解析；全客户的同名表由执行明细按来源定位。
+const messageTables = computed(() => conversationTables(detail.value?.tables ?? [], props.id))
 const messageFiles = computed(() => {
   const files = new Map((detail.value?.files ?? []).map((file) => [file.file_id, file]))
   for (const file of recentlyUploaded.value) files.set(file.file_id, file)
@@ -305,32 +310,21 @@ async function onSaved() {
 }
 
 async function loadTable(offset: number, limit: number) {
-  const page = await conversationApi.tablePage(props.id, viewing.value!, offset, limit)
+  const table = viewing.value!
+  const page = table.run_id
+    ? await runApi.tablePage(table.run_id, table.name, offset, limit)
+    : await conversationApi.tablePage(props.id, table.name, offset, limit, table.conversation_id ?? undefined)
   return { columns: page.columns.map((c) => c.name), rows: page.rows, total: page.total }
 }
 
-async function openTable(name: string) {
-  let table = detail.value?.tables.find((item) => item.name === name)
-  let fileId = fileIdForTable(name, detail.value?.tables ?? [], messages.value)
-  const formal = () => table && (table.source === 'uploaded' || ['input', 'expected', 'result'].includes(table.role))
-  if (!fileId && formal()) {
-    await refreshSide()
-    table = detail.value?.tables.find((item) => item.name === name)
-    fileId = fileIdForTable(name, detail.value?.tables ?? [], messages.value)
-  }
-  if (fileId) {
-    try {
-      const file = messageFiles.value.find((item) => item.file_id === fileId) ?? await fileApi.get(fileId)
-      viewing.value = null
-      viewingFile.value = file
-    } catch (err) {
-      toast.error(errorText(err))
-    }
-  } else if (formal()) {
-    toast.error('未找到这张表关联的原始文件，请从文件列表打开对应文件。')
-  } else {
-    viewing.value = name
-  }
+function openTable(table: TableBrief) {
+  viewing.value = table
+}
+
+function inspectMessage(message: UiMessage) {
+  selectedKey.value = message.key
+  panelTab.value = 'recipes'
+  panelOpen.value = true
 }
 
 function answer(option: string) {
@@ -342,18 +336,18 @@ function answer(option: string) {
   <div class="flex h-full min-h-0">
     <div class="flex min-w-0 flex-1 flex-col">
       <!-- 顶部 -->
-      <header class="flex h-14 shrink-0 items-center gap-3 border-b border-line px-5">
+      <header class="flex h-11 shrink-0 items-center gap-2 border-b border-line px-4">
         <div class="min-w-0 flex-1">
           <input
             v-if="editingTitle"
             v-model="titleDraft"
-            class="w-full max-w-md rounded-lg border border-line px-2 py-1 text-sm font-semibold outline-none"
+            class="w-full max-w-md rounded-lg border border-line px-2 py-0.5 text-sm font-semibold outline-none"
             autofocus
             @blur="saveTitle"
             @keydown.enter="saveTitle"
           />
           <button v-else class="group flex max-w-full items-center gap-1.5 text-left" @click="startEditTitle">
-            <span class="truncate text-[15px] font-semibold">{{ detail?.title ?? '…' }}</span>
+            <span class="truncate text-sm font-semibold">{{ detail?.title ?? '…' }}</span>
             <Pencil class="size-3.5 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
           </button>
         </div>
@@ -361,19 +355,21 @@ function answer(option: string) {
         <RouterLink
           v-if="customer"
           :to="{ name: 'customer', params: { id: customer.id } }"
-          class="flex items-center gap-1.5 rounded-full border border-line py-0.5 pl-0.5 pr-3 text-sm transition hover:border-ink/30"
-          title="打开客户页"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-line py-0.5 pl-0.5 pr-2 text-xs transition hover:border-ink/30"
+          title="在新标签页打开客户详情"
         >
-          <span class="flex size-7 items-center justify-center overflow-hidden rounded-full bg-paper">
-            <Mascot :variant="customer.mascot" :size="30" :shadow="false" :track="false" />
+          <span class="flex size-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-paper">
+            <Mascot :variant="customer.mascot" :size="22" :shadow="false" :track="false" />
           </span>
-          <span class="max-w-[160px] truncate font-medium">{{ customer.name }}</span>
+          <span class="max-w-[128px] truncate font-medium">{{ customer.name }}</span>
         </RouterLink>
-        <button v-else-if="detail" class="btn-line py-1.5" title="把这次对话的数据、已保存的流程和记忆保存到客户" @click="saveOpen = true">
-          <Save class="size-4" />保存到客户
+        <button v-else-if="detail" class="btn-line h-7 shrink-0 gap-1.5 whitespace-nowrap px-2.5 py-0 text-xs" title="把这次对话的数据、已保存的流程和记忆保存到客户" @click="saveOpen = true">
+          <Save class="size-3.5" />保存到客户
         </button>
 
-        <button class="icon-btn" :class="{ '!bg-paper !text-ink': panelOpen }" title="执行明细" @click="panelOpen = !panelOpen">
+        <button class="icon-btn size-7 shrink-0" :class="{ '!bg-paper !text-ink': panelOpen }" title="执行明细" aria-label="执行明细" @click="panelTab = 'recipes'; panelOpen = !panelOpen">
           <PanelRight class="size-4" />
         </button>
       </header>
@@ -404,12 +400,13 @@ function answer(option: string) {
                 v-else
                 :message="m"
                 :files="messageFiles"
-                :tables="detail?.tables"
+                :tables="messageTables"
                 :answers-disabled="streaming || messages.at(-1)?.key !== m.key"
                 :customer-id="customer?.id"
                 :mascot="customer?.mascot"
                 @answer="answer"
                 @preview-file="(file) => (viewingFile = file)"
+                @inspect="inspectMessage(m)"
               />
             </template>
 
@@ -439,7 +436,7 @@ function answer(option: string) {
             @send="onSend"
             @stop="stop"
           />
-          <p class="mt-2 text-center text-[11px] text-faint">AI 生成的结果可能存在错误，请核对重要数据后再使用。</p>
+          <p class="mt-2 text-center text-[11px] text-faint">AI 生成的结果可能存在错误，请核对重要数据后再使用</p>
         </div>
       </div>
     </div>
@@ -448,13 +445,18 @@ function answer(option: string) {
       v-if="panelOpen"
       :detail="detail"
       :message="selectedMessage"
+      v-model:active-tab="panelTab"
       @close="panelOpen = false"
       @open-table="openTable"
       @open-file="(file) => (viewingFile = file)"
       @refresh="refreshSide"
     />
 
-    <TableViewer v-if="viewing" :key="viewing" :title="viewing" :loader="loadTable" @close="viewing = null" />
+    <BaseModal v-if="viewing?.preview_only" :key="executionTableKey(viewing)" :title="viewing.label || viewing.name" width="max-w-5xl" @close="viewing = null">
+      <p class="mb-3 text-xs leading-5 text-mute">{{ viewing.conversation_title }} · 临时查询共 {{ viewing.rows }} 行 × {{ viewing.cols }} 列，保留前 {{ viewing.preview?.length ?? 0 }} 行预览；完整临时表已释放。</p>
+      <DataTable :columns="viewing.columns" :rows="viewing.preview ?? []" max-height="62vh" />
+    </BaseModal>
+    <TableViewer v-else-if="viewing" :key="executionTableKey(viewing)" :title="viewing.label || viewing.name" :subtitle="viewing.run_title || viewing.conversation_title" :loader="loadTable" @close="viewing = null" />
     <WorkbookPreview
       v-if="viewingFile"
       :key="viewingFile.file_id"

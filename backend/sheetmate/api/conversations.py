@@ -15,6 +15,7 @@ from sheetmate.services import chat as chat_service
 from sheetmate.services import conversations as conv_service
 from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
+from sheetmate.services.auth import require_customer
 from sheetmate.services.errors import ServiceError
 from sheetmate.services.jobs import jobs
 
@@ -69,6 +70,8 @@ def create_conversation(body: CreateBody, db: Session = Depends(get_db), user: U
 @router.get("/{conversation_id}")
 def get_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     conv = conv_service.get_conversation(db, user, conversation_id)
+    if conv.customer_id:
+        require_customer(db, user, conv.customer_id)
     return {"ok": True, "conversation": {**conv_service.detail(db, conv), "running": jobs.running(conv.id)}}
 
 
@@ -106,7 +109,8 @@ async def upload_file(conversation_id: str, file: UploadFile = File(...), kind: 
     record = file_service.save_upload(db, data=await file.read(), filename=file.filename or "file", user=user,
                                       customer_id=conv.customer_id, conversation_id=conv.id, kind=kind)
     tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
-    return {"ok": True, "file": file_service.file_dict(record), "tables": [conv_service._table_brief(t) for t in tables]}
+    return {"ok": True, "file": file_service.file_dict(record),
+            "tables": [conv_service._table_brief(t, conversation=conv) for t in tables]}
 
 
 @router.post("/{conversation_id}/load-file")
@@ -116,31 +120,34 @@ def load_file(conversation_id: str, body: LoadFileBody, db: Session = Depends(ge
     if record.conversation_id != conv.id and (not conv.customer_id or record.customer_id != conv.customer_id):
         raise ServiceError("只能加载本会话或当前客户的文件")
     tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
-    return {"ok": True, "tables": [conv_service._table_brief(t) for t in tables]}
+    return {"ok": True, "tables": [conv_service._table_brief(t, conversation=conv) for t in tables]}
 
 
 @router.get("/{conversation_id}/tables/{name}")
 def table_page(conversation_id: str, name: str, offset: int = 0, limit: int = 50,
+               source_conversation_id: str | None = None,
                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
-    conv_service.get_conversation(db, user, conversation_id)
-    return {"ok": True, "table": conv_service.workspace(conversation_id).page(name, offset, min(limit, 500))}
+    source = conv_service.table_source(db, user, conversation_id, source_conversation_id)
+    return {"ok": True, "table": conv_service.workspace(source.id).page(name, offset, min(limit, 500))}
 
 
 @router.delete("/{conversation_id}/tables/{name}")
-def drop_table(conversation_id: str, name: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
-    conv_service.get_conversation(db, user, conversation_id)
-    conv_service.workspace(conversation_id).drop(name)
+def drop_table(conversation_id: str, name: str, source_conversation_id: str | None = None,
+               db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    source = conv_service.table_source(db, user, conversation_id, source_conversation_id)
+    conv_service.workspace(source.id).drop(name)
     return {"ok": True}
 
 
 @router.put("/{conversation_id}/tables/{name}/role")
-def set_table_role(conversation_id: str, name: str, body: RoleBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+def set_table_role(conversation_id: str, name: str, body: RoleBody, source_conversation_id: str | None = None,
+                   db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     """标记一张表是输入，还是人工做好的期望结果（生成流程时用来比对）。"""
-    conv_service.get_conversation(db, user, conversation_id)
+    source = conv_service.table_source(db, user, conversation_id, source_conversation_id)
     if body.role not in {"input", "expected"}:
         raise ServiceError("role 只能是 input 或 expected")
-    info = conv_service.workspace(conversation_id).update_meta(name, role=body.role)
-    return {"ok": True, "table": conv_service._table_brief(info)}
+    info = conv_service.workspace(source.id).update_meta(name, role=body.role)
+    return {"ok": True, "table": conv_service._table_brief(info, conversation=source)}
 
 
 @router.post("/{conversation_id}/chat")

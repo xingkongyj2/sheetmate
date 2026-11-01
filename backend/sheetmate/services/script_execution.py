@@ -57,6 +57,7 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                               "table_names": [], "tables": [], "internal_tables": [], "warnings": [], "checks": [], "result": {}, "stdout": "", "stderr": ""}
     committed_paths: list[Path] = []
     created_tables: list[str] = []
+    saved_internal_tables = False
     previous_tables = {table.name for table in host.ws.list_tables()}
     try:
         with TemporaryDirectory(prefix="sheetmate_script_delivery_") as folder:
@@ -96,7 +97,16 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                         if label in outcome.display_tables:
                             created_tables.append(name)
                         else:
-                            report["internal_tables"].append({"name": name, "rows": len(df), "columns": [str(column) for column in df.columns]})
+                            # 分析工作区在本轮结束时清理；中间表另存运行快照，供执行明细查看，
+                            # 不产生 table 事件，也不把调试数据当作正式交付结果。
+                            saved_internal_tables = True
+                            diagnostics = run_service.run_workspaces.get(run_id)
+                            diagnostics.put_dataframe(
+                                name, df, label=str(label), source="computed", role="derived",
+                                created_by="run_python_script", description=f"Python 脚本中间数据，run_id={run_id}",
+                            )
+                            report["internal_tables"].append({"name": name, "rows": len(df),
+                                                              "columns": [str(column) for column in df.columns], "run_id": run_id})
                     if cancel_event.is_set():
                         raise InterruptedError("用户已停止脚本")
                     report["table_names"] = created_tables
@@ -116,6 +126,8 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
             host.ws.drop(name)
         for path in committed_paths:
             path.unlink(missing_ok=True)
+        if saved_internal_tables:
+            run_service.run_workspaces.delete(run_id)
         report.update(ok=False, status="cancelled" if cancel_event.is_set() else "failed", error=str(exc)[:4000],
                       files=[], table_names=[], tables=[], internal_tables=[])
     finally:
@@ -129,6 +141,7 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                 run.finished_at = now()
                 run.validation = {"status": "pass" if report["ok"] and report["checks"] else "not_checked" if report["ok"] else "fail",
                                   "checks": report["checks"], "outputs": report["files"], "tables": report["tables"],
+                                  "internal_tables": report["internal_tables"],
                                   "result": report["result"], "warnings": report["warnings"], "script_status": report["status"]}
                 steps = list(run.steps)
                 steps[0] = {**steps[0], "ok": report["ok"], "stdout": report["stdout"], "stderr": report["stderr"],

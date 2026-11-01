@@ -209,7 +209,8 @@ class AgentExecutor:
                 tool = tool_map.get(name)
                 yield {"type": "tool_call", "id": call["id"], "tool": name,
                        "label": tool.display(args or {}) if tool else name,
-                       "params": tool.public_params(args or {}) if tool and tool.public_params else args or {}}
+                       "params": tool.public_params(args or {}) if tool and tool.public_params else args or {},
+                       "debug_params": args if args is not None else call["function"]["arguments"]}
                 started = time.perf_counter()
                 if tool is None:
                     result = ToolResult(f"没有工具 `{name}`。可用工具：{', '.join(tool_map)}", ok=False)
@@ -229,6 +230,7 @@ class AgentExecutor:
                 yield {"type": "tool_result", "id": call["id"], "tool": name, "ok": result.ok,
                        "summary": result.public_summary if result.public_summary is not None else result.summary or result.text[:200],
                        "text": (result.public_text if result.public_text is not None else result.text)[:3000],
+                       "debug_result": result.text,
                        "duration_ms": int((time.perf_counter() - started) * 1000)}
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})
                 end_turn = end_turn or result.end_turn

@@ -74,7 +74,7 @@ function openStep(id: number) {
         <StatusPill :status="displayedStatus" />
       </div>
       <div class="recipe-panel-actions ml-auto flex shrink-0 items-center gap-1">
-        <button class="btn-ink mr-1 py-2 text-[13px]" @click="emit('run', recipe.recipe_id)"><Play class="size-3.5" />用新文件执行</button>
+        <button class="btn-ink mr-1 h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="emit('run', recipe.recipe_id)"><Play class="size-3.5" />用新文件执行</button>
         <button class="icon-btn" title="处理详情" @click="showDetails = true"><Info class="size-4" /></button>
         <button class="icon-btn" title="版本历史" @click="showVersions"><History class="size-4" /></button>
         <button

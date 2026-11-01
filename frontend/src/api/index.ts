@@ -119,12 +119,13 @@ export const conversationApi = {
   },
   loadFile: async (id: string, fileId: string) =>
     (await http.post<{ tables: TableBrief[] }>(`/conversations/${id}/load-file`, { file_id: fileId })).data.tables,
-  tablePage: async (id: string, name: string, offset = 0, limit = 50) =>
-    (await http.get<{ table: TablePage }>(`/conversations/${id}/tables/${encodeURIComponent(name)}`, { params: { offset, limit } }))
+  tablePage: async (id: string, name: string, offset = 0, limit = 50, sourceConversationId?: string) =>
+    (await http.get<{ table: TablePage }>(`/conversations/${id}/tables/${encodeURIComponent(name)}`, { params: { offset, limit, source_conversation_id: sourceConversationId } }))
       .data.table,
-  dropTable: async (id: string, name: string) => http.delete(`/conversations/${id}/tables/${encodeURIComponent(name)}`),
-  setTableRole: async (id: string, name: string, role: 'input' | 'expected') =>
-    (await http.put<{ table: TableBrief }>(`/conversations/${id}/tables/${encodeURIComponent(name)}/role`, { role })).data.table,
+  dropTable: async (id: string, name: string, sourceConversationId?: string) =>
+    http.delete(`/conversations/${id}/tables/${encodeURIComponent(name)}`, { params: { source_conversation_id: sourceConversationId } }),
+  setTableRole: async (id: string, name: string, role: 'input' | 'expected', sourceConversationId?: string) =>
+    (await http.put<{ table: TableBrief }>(`/conversations/${id}/tables/${encodeURIComponent(name)}/role`, { role }, { params: { source_conversation_id: sourceConversationId } })).data.table,
   plan: async (id: string, message: string) =>
     (await http.post<{ plan: { title: string; steps: PlanStep[] } }>(`/conversations/${id}/plan`, { message })).data.plan,
   stop: async (id: string) => http.post(`/conversations/${id}/stop`),

@@ -11,7 +11,7 @@ import {
   ArrowLeft, ArrowRight, Download, Eye, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Play, Sparkles,
   Trash2, Upload,
 } from '@lucide/vue'
-import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi, customerApi, fileApi } from '@/api'
@@ -63,6 +63,10 @@ const loadingPreview = ref<string | null>(null)
 const conversationsOpen = ref(false)
 const uploadKind = ref<'input' | 'expected'>('input')
 const uploading = ref(false)
+const uploadMenuOpen = ref(false)
+const uploadInput = ref<HTMLInputElement | null>(null)
+const uploadButton = ref<HTMLButtonElement | null>(null)
+const uploadFirstChoice = ref<HTMLButtonElement | null>(null)
 
 async function load() {
   try {
@@ -125,18 +129,45 @@ async function regenerate() {
   }
 }
 
+async function toggleUploadMenu() {
+  if (uploading.value) return
+  uploadMenuOpen.value = !uploadMenuOpen.value
+  if (uploadMenuOpen.value) {
+    await nextTick()
+    uploadFirstChoice.value?.focus({ preventScroll: true })
+  }
+}
+
+function closeUploadMenu() {
+  uploadMenuOpen.value = false
+  uploadButton.value?.focus({ preventScroll: true })
+}
+
+function chooseUpload(kind: 'input' | 'expected') {
+  if (uploading.value) return
+  uploadKind.value = kind
+  closeUploadMenu()
+  uploadInput.value?.click()
+}
+
 async function upload(e: Event) {
   const input = e.target as HTMLInputElement
   const files = Array.from(input.files ?? [])
   input.value = ''
+  if (!files.length || uploading.value) return
+  const kind = uploadKind.value
   uploading.value = true
+  let uploaded = 0
   try {
-    for (const f of files) await customerApi.uploadFile(props.id, f, uploadKind.value)
+    for (const f of files) {
+      await customerApi.uploadFile(props.id, f, kind)
+      uploaded++
+    }
     toast.success(`已上传 ${files.length} 个文件`)
-    await load()
   } catch (err) {
     toast.error(errorText(err))
   } finally {
+    if (uploaded) await load()
     uploading.value = false
   }
 }
@@ -222,7 +253,7 @@ async function previewFile(fileId: string) {
         </div>
         <div class="col-span-2 flex flex-wrap items-center gap-2 sm:col-span-1 sm:col-start-2">
           <button class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="newChat"><MessageSquarePlus class="size-3.5" />新建对话</button>
-          <button v-if="customer.recipes.length" class="btn-line h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="runDialog = { recipeId: null }"><Play class="size-3.5" />用新文件执行</button>
+          <button v-if="customer.recipes.length" class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="runDialog = { recipeId: null }"><Play class="size-3.5" />用新文件执行</button>
         </div>
       </header>
 
@@ -278,34 +309,47 @@ async function previewFile(fileId: string) {
         <div class="card-soft p-5">
           <div class="mb-4 flex flex-wrap items-center gap-2">
             <h2 class="text-[15px] font-semibold">上传过的表格</h2>
-            <div class="ml-auto flex items-center gap-2">
-              <select v-model="uploadKind" class="select select-sm rounded-xl">
-                <option value="input">要处理的表</option>
-                <option value="expected">人工做好的结果</option>
-              </select>
-              <label class="btn-ink cursor-pointer py-2">
-                <LoaderCircle v-if="uploading" class="size-4 animate-spin" /><Upload v-else class="size-4" />上传
-                <input type="file" class="hidden" multiple accept=".xlsx,.xlsm,.xls,.csv" @change="upload" />
-              </label>
+            <div class="relative ml-auto shrink-0" @keydown.esc.stop.prevent="closeUploadMenu">
+              <button
+                ref="uploadButton"
+                type="button"
+                class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs"
+                :disabled="uploading"
+                :aria-expanded="uploadMenuOpen"
+                @click="toggleUploadMenu"
+              >
+                <LoaderCircle v-if="uploading" class="size-3.5 shrink-0 animate-spin" /><Upload v-else class="size-3.5 shrink-0" />
+                <span>{{ uploading ? '上传中…' : '上传' }}</span>
+              </button>
+              <div v-if="uploadMenuOpen" class="fixed inset-0 z-30" @click="closeUploadMenu" />
+              <div v-if="uploadMenuOpen" class="absolute right-0 top-full z-40 mt-2 w-max max-w-[calc(100vw-3rem)] animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl" role="group" aria-label="选择上传文件类型">
+                <button ref="uploadFirstChoice" type="button" class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper focus-visible:bg-paper focus-visible:outline-none" @click="chooseUpload('input')">
+                  <FileSpreadsheet class="size-4 shrink-0 text-fun-green" />
+                  <span class="text-sm font-medium">要处理的文件</span>
+                </button>
+                <button type="button" class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper focus-visible:bg-paper focus-visible:outline-none" @click="chooseUpload('expected')">
+                  <FileCheck2 class="size-4 shrink-0 text-[#b7860b]" />
+                  <span class="text-sm font-medium">人工做好的文件</span>
+                </button>
+              </div>
+              <input ref="uploadInput" type="file" class="hidden" multiple accept=".xlsx,.xlsm,.xls,.csv" @change="upload" />
             </div>
           </div>
           <table class="w-full text-sm">
             <thead class="text-left text-xs text-faint">
-              <tr><th class="py-2 font-normal">文件</th><th class="font-normal">类型</th><th class="font-normal">内容</th><th class="font-normal">上传</th><th /></tr>
+              <tr><th class="py-2 font-normal">文件</th><th class="font-normal">类型</th><th class="font-normal">上传</th><th /></tr>
             </thead>
             <tbody>
               <tr v-for="f in inputFiles" :key="f.file_id" class="border-t border-line">
                 <td class="py-2.5">
-                  <span class="flex items-center gap-2">
+                  <button type="button" class="flex items-center gap-2 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :aria-label="`预览 ${f.filename}`" @click="preview = f">
                     <FileCheck2 v-if="f.kind === 'expected'" class="size-4 text-[#b7860b]" />
                     <FileSpreadsheet v-else class="size-4 text-fun-green" />{{ f.filename }}
-                  </span>
+                  </button>
                 </td>
                 <td><span class="tag" :class="f.kind === 'expected' ? '!bg-fun-yellow/20 !text-[#8a6400]' : ''">{{ f.kind_label }}</span></td>
-                <td class="text-xs text-mute">{{ f.sheets.map((s) => `${s.sheet}：${s.rows} 行 × ${s.cols} 列`).join('；') }}</td>
                 <td class="text-xs text-faint">{{ timeAgo(f.created_at) }}</td>
                 <td class="text-right">
-                  <button class="icon-btn" title="预览" @click="preview = f"><Eye class="size-4" /></button>
                   <a :href="f.download_url" class="icon-btn" title="下载"><Download class="size-4" /></a>
                   <button class="icon-btn hover:text-error" title="删除" @click="removeFile(f)"><Trash2 class="size-4" /></button>
                 </td>
@@ -318,11 +362,10 @@ async function previewFile(fileId: string) {
           <h2 class="mb-3 text-[15px] font-semibold">生成的结果</h2>
           <div v-for="f in customer.outputs" :key="f.file_id" class="flex items-center gap-3 border-t border-line py-2.5 text-sm first:border-0">
             <FileSpreadsheet class="size-4" />
-            <span class="min-w-0 flex-1 truncate">{{ f.filename }}</span>
-            <span class="text-xs text-mute">{{ f.sheets.map((s) => `${s.sheet} ${s.rows} 行`).join(' · ') }}</span>
+            <button type="button" class="min-w-0 flex-1 truncate rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :title="f.filename" :aria-label="`预览 ${f.filename}`" @click="preview = f">{{ f.filename }}</button>
             <span class="text-xs text-faint">{{ timeAgo(f.created_at) }}</span>
-            <button class="icon-btn" title="预览" @click="preview = f"><Eye class="size-4" /></button>
             <a :href="f.download_url" class="icon-btn" title="下载"><Download class="size-4" /></a>
+            <button type="button" class="icon-btn hover:text-error" title="删除" :aria-label="`删除 ${f.filename}`" @click="removeFile(f)"><Trash2 class="size-4" /></button>
           </div>
           <p v-if="!customer.outputs.length" class="py-6 text-center text-sm text-faint">还没有生成过结果</p>
         </div>

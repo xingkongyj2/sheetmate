@@ -277,6 +277,14 @@ export interface TableBrief {
   role: 'input' | 'expected' | 'derived' | 'result'
   file_id?: string | null
   description?: string
+  conversation_id?: string | null
+  conversation_title?: string
+  run_id?: string | null
+  run_title?: string
+  created_at?: string | null
+  preview_only?: boolean
+  preview?: unknown[][]
+  snapshot_id?: string
 }
 
 export interface TablePage {

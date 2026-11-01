@@ -134,6 +134,8 @@ export interface UiMessage {
   streaming: boolean
   timeline: TimelineItem[]
   artifacts: Artifact[]
+  /** 开发者日志保留诊断事件；主聊天仍使用 timeline / artifacts 的用户视图。 */
+  events?: AgentEvent[]
   error?: string
   createdAt?: string
 }
@@ -327,6 +329,8 @@ const RECIPE_TOOLS = new Set(['build_recipe', 'revise_recipe', 'run_recipe'])
 
 /** 把一个事件归并进助手消息（recipe_* 事件交给流程进度对象处理）。 */
 export function applyEvent(msg: UiMessage, e: AgentEvent): void {
+  // 文本增量与模型思考不属于执行诊断，避免日志里堆积流式碎片。
+  if (e.type !== 'text_chunk' && e.type !== 'thinking') (msg.events ??= []).push({ ...e })
   if (e.type === 'recipe_view') {
     // 查看事件不能落进下方 recipe_* 的执行进度分派，否则会产生一次虚假的失败尝试。
     if (typeof e.recipe_id !== 'string' || !e.recipe_id || !e.flow ||

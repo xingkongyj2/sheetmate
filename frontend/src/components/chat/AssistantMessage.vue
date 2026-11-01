@@ -2,7 +2,7 @@
 /**
  * 助手消息：按发生顺序展示折叠的阶段过程与公开小结，最后展示回答和交付结果。
  */
-import { Check, ChevronRight, CircleAlert, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion, PanelRight } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { fileApi } from '@/api'
@@ -26,7 +26,7 @@ import TableCard from './TableCard.vue'
 import TimelineList from './TimelineList.vue'
 
 const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean }>()
-const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo] }>()
+const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo]; inspect: [] }>()
 const toast = useToast()
 const openingFile = ref<string | null>(null)
 
@@ -154,11 +154,11 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
 </script>
 
 <template>
-  <div class="assistant-message group flex items-start gap-3 sm:gap-4">
+  <div class="assistant-message group flex flex-col items-start gap-3">
     <div class="size-12 shrink-0">
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
-    <div class="assistant-content min-w-0 flex-1 space-y-3">
+    <div class="assistant-content w-full min-w-0 space-y-3">
       <!-- 阶段按事件发生顺序排列：过程默认折叠，小结始终留在该阶段之后。 -->
       <section v-for="stage in stages" :key="stage.key" class="assistant-stage space-y-2" :aria-label="stageActivity(stage)" :data-stage="stage.number">
         <details v-if="hasProcess(stage)" class="assistant-process group/process">
@@ -241,34 +241,16 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
         </span>
       </div>
 
-      <div v-if="!typing && markdown" class="flex items-center gap-1 border-t border-line/60 pt-2">
-        <button type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含计划摘要、结果预览和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
+      <div v-if="!typing && (markdown || message.timeline.length || message.error)" class="flex items-center gap-1 border-t border-line/60 pt-2">
+        <button v-if="markdown" type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含计划摘要、结果预览和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
           <Check v-if="copied === 'formatted'" class="size-4 text-success" /><Copy v-else class="size-4" />
         </button>
-        <button type="button" class="icon-btn disabled:opacity-50" :disabled="copying" aria-label="复制 Markdown" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
+        <button v-if="markdown" type="button" class="icon-btn disabled:opacity-50" :disabled="copying" aria-label="复制 Markdown" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
           <Check v-if="copied === 'markdown'" class="size-4 text-success" /><Code v-else class="size-4" />
         </button>
+        <button type="button" class="btn-text ml-auto text-xs" title="查看这条回答的执行明细" @click="emit('inspect')"><PanelRight class="size-3.5" />执行明细</button>
       </div>
     </div>
   </div>
 </template>
 
-<style scoped>
-.assistant-message {
-  --assistant-avatar-size: 3rem;
-}
-
-.assistant-content > :deep(.prose-sm:first-child > :first-child) {
-  padding-top: max(0px, calc((var(--assistant-avatar-size) - 1lh) / 2));
-}
-
-.assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child),
-.assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child > p:first-child),
-.assistant-content > :deep(.prose-sm:first-child > blockquote:first-child > :first-child) {
-  margin-top: 0;
-}
-
-.assistant-stage:first-child {
-  padding-top: max(0px, calc((var(--assistant-avatar-size) - 1.25rem) / 2));
-}
-</style>

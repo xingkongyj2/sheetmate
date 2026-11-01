@@ -327,6 +327,21 @@ class WorkspaceManager:
                 old.close()
             return ws
 
+    def existing_tables(self, key: str) -> list[TableInfo]:
+        """只读已有工作区的表目录，不创建空库，也不挤掉正在使用的缓存连接。"""
+        with self._lock:
+            ws = self._open.get(key)
+            if ws is not None:
+                return ws.list_tables()
+            path = self.root / f"{key}.duckdb"
+            if not path.exists():
+                return []
+            historical = Workspace(path)
+            try:
+                return historical.list_tables()
+            finally:
+                historical.close()
+
     def delete(self, key: str) -> None:
         with self._lock:
             ws = self._open.pop(key, None)

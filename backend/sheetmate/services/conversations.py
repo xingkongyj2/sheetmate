@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -19,6 +20,7 @@ from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
+from sheetmate.services import runs as run_service
 from sheetmate.services.auth import require_customer
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
 
@@ -73,23 +75,84 @@ def message_dict(m: Message) -> dict[str, Any]:
 
 
 def detail(db: Session, conv: Conversation) -> dict[str, Any]:
-    ws = workspace(conv.id)
-    files = file_service.list_files(db, conversation_id=conv.id)
-    recipes = recipe_service.latest_records(db, conversation_id=conv.id, include_deprecated=True)
+    # 展示范围跟客户绑定一致，但执行仍使用各会话独立的工作区，避免同名表互相覆盖。
+    scope = {"customer_id": conv.customer_id} if conv.customer_id else {"conversation_id": conv.id}
+    files = file_service.list_files(db, **scope)
+    recipes = recipe_service.latest_records(db, **scope, include_deprecated=True)
+    sources = list(db.scalars(select(Conversation).where(Conversation.customer_id == conv.customer_id)
+                             .order_by(Conversation.created_at, Conversation.id))) if conv.customer_id else [conv]
+    tables = []
+    for source in sources:
+        tables.extend(_table_brief(t, conversation=source) for t in conversation_workspaces.existing_tables(source.id))
+    source_by_id = {source.id: source for source in sources}
+    # 只读查询不会创建工作区表；保留已展示的有限预览，方便排查本次处理使用过的数据。
+    snapshots = db.execute(select(Message.id, Message.conversation_id, Message.events, Message.created_at)
+                           .where(Message.conversation_id.in_(source_by_id), Message.role == "assistant")
+                           .order_by(Message.created_at, Message.id))
+    for message_id, conversation_id, events, created_at in snapshots:
+        source = source_by_id[conversation_id]
+        for event_index, event in enumerate(events or []):
+            if not isinstance(event, dict):
+                continue
+            table = event.get("table")
+            if event.get("type") != "table" or not isinstance(table, dict):
+                continue
+            if table.get("name") and not table.get("ephemeral"):
+                continue
+            columns = table.get("columns") or []
+            preview = (table.get("preview") or [])[:20]
+            label = table.get("label") or ""
+            tables.append({"name": label or "临时查询结果", "label": label,
+                           "rows": table.get("rows", len(preview)), "cols": table.get("cols", len(columns)),
+                           "columns": columns, "source": "computed", "role": "derived", "file_id": None,
+                           "description": "处理过程中的临时查询预览，仅保留部分数据行。",
+                           "preview_only": True, "preview": preview,
+                           "snapshot_id": f"{message_id}:{event_index}",
+                           "conversation_id": source.id, "conversation_title": source.title,
+                           "created_at": created_at.isoformat()})
+    run_condition = Run.customer_id == conv.customer_id if conv.customer_id else Run.conversation_id == conv.id
+    resource_runs = list(db.scalars(select(Run).where(run_condition).order_by(Run.created_at, Run.id)))
+    for run in resource_runs:
+        for table in run_service.run_workspaces.existing_tables(run.id):
+            if table.source != "computed":
+                continue
+            brief = _table_brief(table, conversation=source_by_id.get(run.conversation_id))
+            brief.update({"run_id": run.id, "run_title": run.request_text[:120],
+                          "conversation_id": run.conversation_id})
+            tables.append(brief)
+    tables.sort(key=lambda t: (t["created_at"], t.get("run_id", ""), t.get("conversation_id") or ""))
     runs = db.scalars(select(Run).where(Run.conversation_id == conv.id).order_by(Run.created_at.desc()).limit(20))
     return {
         **conversation_dict(db, conv),
         "messages": [message_dict(m) for m in conv.messages],
-        "tables": [_table_brief(t) for t in ws.list_tables()],
+        "tables": tables,
         "files": [file_service.file_dict(f) for f in files],
         "recipes": [recipe_service.recipe_brief(r) for r in recipes],
         "runs": [{"run_id": r.id, "kind": r.kind, "status": r.status, "created_at": r.created_at.isoformat()} for r in runs],
     }
 
 
-def _table_brief(t) -> dict[str, Any]:
-    return {"name": t.name, "label": t.label, "rows": t.rows, "cols": len(t.columns), "columns": t.column_names,
-            "source": t.source, "role": t.role, "file_id": t.file_id, "description": t.description}
+def _table_brief(t, *, conversation: Conversation | None = None) -> dict[str, Any]:
+    data = {"name": t.name, "label": t.label, "rows": t.rows, "cols": len(t.columns), "columns": t.column_names,
+            "source": t.source, "role": t.role, "file_id": t.file_id, "description": t.description,
+            "created_at": datetime.fromtimestamp(t.created_at).isoformat()}
+    if conversation is not None:
+        data.update({"conversation_id": conversation.id, "conversation_title": conversation.title})
+    return data
+
+
+def table_source(db: Session, user: User, conversation_id: str,
+                 source_conversation_id: str | None = None) -> Conversation:
+    """表名只在来源工作区中唯一；客户视图允许操作同一客户的其他会话表。"""
+    conv = get_conversation(db, user, conversation_id)
+    if conv.customer_id:
+        require_customer(db, user, conv.customer_id)
+    if not source_conversation_id or source_conversation_id == conv.id:
+        return conv
+    source = db.get(Conversation, source_conversation_id)
+    if source is None or not conv.customer_id or source.customer_id != conv.customer_id:
+        raise Forbidden("只能查看或清理本会话或当前客户的中间数据")
+    return source
 
 
 def update_conversation(db: Session, conv: Conversation, user: User, data: dict[str, Any]) -> Conversation:
