@@ -18,6 +18,6 @@ withDefaults(defineProps<{ size?: number; withText?: boolean }>(), { size: 28, w
         fill="#6265DC"
       />
     </svg>
-    <span v-if="withText" class="text-[17px] font-semibold tracking-tight">SheetMate</span>
+    <span v-if="withText" class="text-[22px] font-semibold tracking-tight">SheetMate</span>
   </span>
 </template>

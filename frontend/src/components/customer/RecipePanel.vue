@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
- * 客户页里的一个流程：说明、输入要求、流程图、输出、校验规则、版本历史、启用/停用、查看 JSON、用新文件执行。
+ * 客户页里的一个流程：说明、流程图、运行记录、校验规则、版本历史、启用/停用、用新文件执行。
  */
-import { Braces, ChevronDown, History, Info, Play, Power, ShieldCheck } from '@lucide/vue'
+import { Braces, ChevronDown, ClipboardList, History, Info, Play, Power, ShieldCheck } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 
 import { recipeApi } from '@/api'
@@ -10,6 +10,7 @@ import { errorText } from '@/api/http'
 import type { CustomerDetail, RecipeStepJSON } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
+import RecipeRunsDialog from '@/components/customer/RecipeRunsDialog.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { percent, timeAgo } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
@@ -23,6 +24,7 @@ const toast = useToast()
 const step = ref<RecipeStepJSON | null>(null)
 const showJson = ref(false)
 const showDetails = ref(false)
+const showRuns = ref(false)
 const versions = ref<Awaited<ReturnType<typeof recipeApi.get>>['versions'] | null>(null)
 const displayedStatus = ref(props.recipe.status)
 const toggling = ref(false)
@@ -73,9 +75,10 @@ function openStep(id: number) {
         <h3 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h3>
         <StatusPill :status="displayedStatus" />
       </div>
-      <div class="recipe-panel-actions ml-auto flex shrink-0 items-center gap-1">
+      <div class="recipe-panel-actions ml-auto flex max-w-full shrink-0 flex-wrap items-center gap-1">
         <button class="btn-ink mr-1 h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="emit('run', recipe.recipe_id)"><Play class="size-3.5" />用新文件执行</button>
-        <button class="icon-btn" title="处理详情" @click="showDetails = true"><Info class="size-4" /></button>
+        <button type="button" class="icon-btn" title="处理详情" aria-label="处理详情" @click="showDetails = true"><Info class="size-4" /></button>
+        <button type="button" class="icon-btn" title="运行记录" aria-label="运行记录" aria-haspopup="dialog" :aria-expanded="showRuns" @click="showRuns = true"><ClipboardList class="size-4" /></button>
         <button class="icon-btn" title="版本历史" @click="showVersions"><History class="size-4" /></button>
         <button
           type="button"
@@ -99,6 +102,8 @@ function openStep(id: number) {
       <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>
       <RecipeFlow :flow="recipe.flow" compact @select="openStep" />
     </div>
+
+    <RecipeRunsDialog v-if="showRuns" :recipe-id="recipe.recipe_id" :recipe-name="recipe.name" :customer-id="recipe.customer_id" @close="showRuns = false" @changed="emit('changed')" />
 
     <BaseModal v-if="showDetails" :title="`${recipe.name} · 处理详情`" width="max-w-lg" @close="showDetails = false">
       <div class="space-y-4">

@@ -376,7 +376,7 @@ function answer(option: string) {
 
       <!-- 消息 -->
       <div ref="scroller" class="min-h-0 flex-1 overflow-y-auto">
-        <div ref="content" class="sheetmate-content-width mx-auto w-full px-6 pb-6 pt-8">
+        <div ref="content" class="chat-messages pb-6 pt-8">
           <div v-if="loading" class="flex justify-center py-20 text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
 
           <!-- 空对话 -->
@@ -466,3 +466,13 @@ function answer(option: string) {
     <SaveToCustomerDialog v-if="saveOpen" :conversation-id="id" @close="saveOpen = false" @saved="onSaved" />
   </div>
 </template>
+
+<style scoped>
+.chat-messages {
+  --chat-message-width: calc(680px - 3rem);
+  width: calc(100% - 5.5rem);
+  max-width: var(--chat-message-width);
+  margin-left: max(4rem, calc((100% - var(--chat-message-width)) / 2));
+  margin-right: 1.5rem;
+}
+</style>

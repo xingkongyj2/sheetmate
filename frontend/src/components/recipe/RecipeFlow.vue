@@ -17,9 +17,18 @@ const props = withDefaults(
 const emit = defineEmits<{ select: [stepId: number] }>()
 
 const stateById = computed(() => Object.fromEntries(props.states.map((s) => [s.step_id, s])))
+const STATUS_LABELS: Record<StepState['status'], string> = {
+  pending: '等待执行', running: '执行中', repairing: '修复中', success: '已完成',
+  repaired: '已修复', warning: '有提示', failed: '执行失败',
+}
 
 function state(id: number): StepState | undefined {
   return stateById.value[id]
+}
+
+function stateLabel(id: number): string {
+  const status = state(id)?.status
+  return status ? STATUS_LABELS[status] : ''
 }
 
 function art(formula: string, kind: string): FunKind {
@@ -69,10 +78,19 @@ const running = computed(() => props.states.some((s) => s.status === 'running' |
             state(step.id)?.status === 'failed' ? 'border-error/60' : '',
             state(step.id)?.status === 'running' ? 'border-info/60' : '',
           ]"
-          :aria-label="`查看步骤：${step.name}`"
+          :aria-label="`查看步骤：${step.name}${state(step.id) ? `，${stateLabel(step.id)}` : ''}`"
           :title="compact ? step.description : undefined"
           @click="emit('select', step.id)"
         >
+          <span v-if="compact && state(step.id)" class="absolute right-1.5 top-1.5 flex size-4 items-center justify-center rounded-full bg-white/90" role="img" :aria-label="stateLabel(step.id)" :title="stateLabel(step.id)">
+            <LoaderCircle v-if="state(step.id)!.status === 'running'" class="size-3 animate-spin text-info" />
+            <Wrench v-else-if="state(step.id)!.status === 'repairing'" class="size-3 animate-pulse text-fun-purple" />
+            <Check v-else-if="state(step.id)!.status === 'success'" class="size-3 text-success" />
+            <Wrench v-else-if="state(step.id)!.status === 'repaired'" class="size-3 text-fun-purple" />
+            <TriangleAlert v-else-if="state(step.id)!.status === 'warning'" class="size-3 text-warning" />
+            <CircleAlert v-else-if="state(step.id)!.status === 'failed'" class="size-3 text-error" />
+            <span v-else class="size-1.5 rounded-full bg-faint" />
+          </span>
           <div class="recipe-flow-step-art flex items-center gap-2">
             <span v-if="!compact" class="flex size-5 items-center justify-center rounded-full bg-ink text-[11px] font-semibold text-white">{{ step.id }}</span>
             <FunObject :kind="art(step.formula, step.formula_kind)" :size="compact ? 34 : 22" />

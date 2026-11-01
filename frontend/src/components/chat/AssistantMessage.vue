@@ -154,8 +154,8 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
 </script>
 
 <template>
-  <div class="assistant-message group flex flex-col items-start gap-3">
-    <div class="size-12 shrink-0">
+  <div class="assistant-message group relative min-h-12">
+    <div class="absolute right-full top-0 mr-4 size-12">
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
     <div class="assistant-content w-full min-w-0 space-y-3">
@@ -253,4 +253,24 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
     </div>
   </div>
 </template>
+
+<style scoped>
+.assistant-message {
+  --assistant-avatar-size: 3rem;
+}
+
+.assistant-content > :deep(.prose-sm:first-child > :first-child) {
+  padding-top: max(0px, calc((var(--assistant-avatar-size) - 1lh) / 2));
+}
+
+.assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child),
+.assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child > p:first-child),
+.assistant-content > :deep(.prose-sm:first-child > blockquote:first-child > :first-child) {
+  margin-top: 0;
+}
+
+.assistant-stage:first-child {
+  padding-top: max(0px, calc((var(--assistant-avatar-size) - 1.25rem) / 2));
+}
+</style>
 

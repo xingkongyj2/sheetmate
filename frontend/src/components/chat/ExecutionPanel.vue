@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /** 客户/会话资源与单次回答的处理流程；表名按来源工作区定位。 */
-import { Download, Eye, FileCheck2, FileSpreadsheet, PanelRightClose, Trash2, Workflow } from '@lucide/vue'
+import { Download, Eye, FileCheck2, FileSpreadsheet, PanelRightClose, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { conversationApi } from '@/api'
-import type { ConversationDetail, FileInfo, TableBrief } from '@/api/types'
+import type { ConversationDetail, FileInfo, RecipeFlowData, TableBrief } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
@@ -50,12 +50,24 @@ async function drop(table: TableBrief) {
   })) return
   emit('refresh')
 }
-function stepFlow(recipe: ConversationDetail['recipes'][number]) {
-  return {
+function stepFlow(recipe: ConversationDetail['recipes'][number]): RecipeFlowData {
+  return recipe.flow ?? {
     inputs: recipe.input_patterns.map((input) => ({ alias: input.alias, description: input.description, file_pattern: input.file_pattern })),
     steps: recipe.steps.map((step) => ({ id: step.id, name: step.name, action: '', formula: step.formula, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: '', inputs: [] })),
     outputs: recipe.outputs.map((name) => ({ name, source: '' })),
   }
+}
+function progressFlow(progress: RecipeProgress): RecipeFlowData {
+  return progress.flow ?? progress.saved?.flow ?? {
+    inputs: progress.inputs.map((input) => ({ alias: input.alias, description: input.filename, file_pattern: '' })),
+    steps: progress.steps.map((step) => ({ id: step.step_id, name: step.name, action: '', formula: step.formula, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: step.output, inputs: [] })),
+    outputs: (progress.outputs ?? []).map((output) => ({ name: output.sheet, source: '' })),
+  }
+}
+function progressStatus(progress: RecipeProgress): string {
+  if (progress.status === 'failed' || progress.failed || ['failed', 'escalated'].includes(progress.runStatus ?? '')) return 'failed'
+  if (progress.status !== 'done') return 'running'
+  return progress.runStatus === 'warning' ? 'warning' : 'success'
 }
 function onKey(event: KeyboardEvent) {
   if (event.key === 'Escape' && !selected.value && !savedStep.value && !document.querySelector('[role="dialog"]')) emit('close')
@@ -86,47 +98,52 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
         @click="tab = item.key"
       >
         {{ item.label }}
-        <span v-if="item.key === 'data' && tables.length" class="ml-0.5 opacity-60">{{ tables.length }}</span>
       </button>
     </div>
 
     <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto p-4">
       <template v-if="tab === 'recipes'">
-        <div v-for="progress in progresses" :key="progress.key" class="mb-5 space-y-3">
-          <div class="flex items-center gap-2">
-            <Workflow class="size-4" />
-            <span class="min-w-0 flex-1 truncate text-[13px] font-semibold">{{ progress.recipeName || '处理流程' }}</span>
+        <article v-for="progress in progresses" :key="progress.key" class="mb-6 min-w-0 space-y-3">
+          <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
+            <h3 class="min-w-0 flex-1 break-words text-[16px] font-semibold leading-relaxed">{{ progress.recipeName || progress.saved?.name || '处理流程' }}</h3>
+            <StatusPill class="shrink-0" :status="progressStatus(progress)" />
             <span v-if="progress.round > 1" class="tag">第 {{ progress.round }} 轮</span>
+          </header>
+          <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
+            <p v-if="progress.recipe?.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ progress.recipe.description }}</p>
+            <RecipeFlow
+              v-if="progress.flow || progress.saved?.flow || progress.steps.length"
+              compact
+              :flow="progressFlow(progress)"
+              :states="progress.steps"
+              @select="(id) => { const step = progress.steps.find((item) => item.step_id === id); if (step) selected = { progress, step } }"
+            />
+            <div v-if="progress.verify || progress.validation || progress.failed" class="mt-4 space-y-3">
+              <VerifyBadge v-if="progress.verify" :report="progress.verify" :rounds="progress.verifyHistory.length" />
+              <p v-if="progress.validation" class="break-words text-xs leading-5 text-mute">运行校验：{{ progress.validation.summary }}</p>
+              <p v-if="progress.failed" class="break-words text-xs leading-5 text-error">{{ progress.failed }}</p>
+            </div>
           </div>
-          <RecipeFlow
-            v-if="progress.flow || progress.steps.length"
-            direction="vertical"
-            :flow="progress.flow ?? { inputs: [], outputs: [], steps: progress.steps.map((step) => ({ id: step.step_id, name: step.name, action: '', formula: step.formula, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: step.output, inputs: [] })) }"
-            :states="progress.steps"
-            @select="(id) => { const step = progress.steps.find((item) => item.step_id === id); if (step) selected = { progress, step } }"
-          />
-          <VerifyBadge v-if="progress.verify" :report="progress.verify" :rounds="progress.verifyHistory.length" />
-          <p v-if="progress.validation" class="text-xs text-mute">运行校验：{{ progress.validation.summary }}</p>
-          <p v-if="progress.failed" class="break-words text-xs text-error">{{ progress.failed }}</p>
-        </div>
+        </article>
         <div v-if="!detail?.recipes.length && !progresses.length" class="py-14 text-center text-sm text-faint">暂无已保存的流程</div>
-        <div v-for="recipe in detail?.recipes ?? []" :key="recipe.recipe_id" class="mb-4 rounded-2xl border border-line p-3">
-          <div class="flex items-center gap-2">
-            <Workflow class="size-4" />
-            <span class="min-w-0 flex-1 truncate text-[13px] font-semibold">{{ recipe.name }}</span>
+        <article v-for="recipe in detail?.recipes ?? []" :key="recipe.recipe_id" class="mb-6 min-w-0 space-y-3">
+          <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
+            <h3 class="min-w-0 flex-1 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h3>
             <span class="tag">v{{ recipe.version }}</span>
-            <StatusPill :status="recipe.status" />
+            <StatusPill class="shrink-0" :status="recipe.status" />
+          </header>
+          <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
+            <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>
+            <RecipeFlow compact :flow="stepFlow(recipe)" @select="(id) => (savedStep = recipe.steps.find((step) => step.id === id) ?? null)" />
+            <RouterLink v-if="recipe.customer_id" :to="{ name: 'customer', params: { id: recipe.customer_id }, query: { tab: 'recipes' } }" class="btn-text -ml-2 mt-3 text-xs">在客户页查看与重复执行 →</RouterLink>
           </div>
-          <p class="mt-1 line-clamp-2 text-xs text-mute">{{ recipe.description }}</p>
-          <div class="mt-3"><RecipeFlow direction="vertical" :flow="stepFlow(recipe)" @select="(id) => (savedStep = recipe.steps.find((step) => step.id === id) ?? null)" /></div>
-          <RouterLink v-if="recipe.customer_id" :to="{ name: 'customer', params: { id: recipe.customer_id }, query: { tab: 'recipes' } }" class="btn-text -ml-2 mt-1 text-xs">在客户页查看与重复执行 →</RouterLink>
-        </div>
+        </article>
       </template>
 
       <template v-else-if="tab === 'files'">
         <div v-if="!fileGroups.length" class="py-14 text-center text-sm text-faint">还没有文件</div>
         <div v-for="group in fileGroups" :key="group.key" class="mb-5">
-          <div class="label-mini mb-2">{{ group.label }}</div>
+          <div class="label-mini mb-2 flex items-center gap-2">{{ group.label }}<span class="font-normal tabular-nums tracking-normal">{{ group.files.length }}</span></div>
           <div v-for="file in group.files" :key="file.file_id" class="mb-1.5 flex items-center gap-2.5 rounded-xl border border-line px-3 py-2">
             <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
             <FileSpreadsheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-fun-green'" />
@@ -139,7 +156,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       <template v-else-if="tab === 'data'">
         <div v-if="!tables.length" class="py-14 text-center text-sm text-faint">暂无中间数据</div>
         <div v-else>
-          <div class="label-mini mb-2">中间数据</div>
+          <div class="label-mini mb-2 flex items-center gap-2">中间数据<span class="font-normal tabular-nums tracking-normal">{{ tables.length }}</span></div>
           <div v-for="table in tables" :key="executionTableKey(table)" class="group mb-1.5 rounded-xl border border-line px-3 py-2.5 transition hover:border-ink/20">
             <div class="flex items-center gap-2">
               <FileCheck2 v-if="table.role === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />

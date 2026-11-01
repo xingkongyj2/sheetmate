@@ -2,13 +2,12 @@
 /**
  * 客户详情：
  * - 处理逻辑：AI 写的「Excel 整体处理逻辑」说明
- * - 流程：每个 Recipe 的流程图、输入要求、校验规则、版本，可用新文件执行
+ * - 流程：每个 Recipe 的流程图、输入要求、运行记录、校验规则、版本，可用新文件执行
  * - 文件：客户上传过的 Excel（含人工结果样例）和生成的结果
- * - 运行记录：每次执行的明细（可单步查看、断点重跑）
  * - 记忆：业务规则、偏好、字段映射
  */
 import {
-  ArrowLeft, ArrowRight, Download, Eye, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Play, Sparkles,
+  ArrowLeft, ArrowRight, Download, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Play, Sparkles,
   Trash2, Upload,
 } from '@lucide/vue'
 import { computed, defineAsyncComponent, nextTick, onMounted, ref } from 'vue'
@@ -20,14 +19,12 @@ import type { CustomerDetail, FileInfo } from '@/api/types'
 import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
-import StatusPill from '@/components/common/StatusPill.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import CustomerLogicSummary from '@/components/customer/CustomerLogicSummary.vue'
 import MemoryPanel from '@/components/customer/MemoryPanel.vue'
 import RecipePanel from '@/components/customer/RecipePanel.vue'
-import RunDetailDialog from '@/components/customer/RunDetailDialog.vue'
 import RunRecipeDialog from '@/components/customer/RunRecipeDialog.vue'
-import { duration, percent, timeAgo } from '@/composables/chatModel'
+import { timeAgo } from '@/composables/chatModel'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
@@ -43,23 +40,21 @@ const { confirmDelete } = useConfirm()
 const store = useWorkspaceStore()
 const auth = useAuthStore()
 
-type Tab = 'logic' | 'recipes' | 'files' | 'runs' | 'memory'
+type Tab = 'logic' | 'recipes' | 'files' | 'memory'
 const TABS: { key: Tab; label: string }[] = [
   { key: 'logic', label: '处理逻辑' },
   { key: 'recipes', label: '流程' },
   { key: 'files', label: '文件' },
-  { key: 'runs', label: '运行记录' },
   { key: 'memory', label: '记忆与字段' },
 ]
-const tab = ref<Tab>((route.query.tab as Tab) || 'logic')
+const initialTab = route.query.tab === 'runs' ? 'recipes' : route.query.tab
+const tab = ref<Tab>(TABS.find((item) => item.key === initialTab)?.key ?? 'logic')
 const customer = ref<CustomerDetail | null>(null)
 const loading = ref(true)
 const summarizing = ref(false)
 const editing = ref(false)
 const runDialog = ref<{ recipeId: string | null } | null>(null)
-const runDetail = ref<string | null>(null)
 const preview = ref<FileInfo | null>(null)
-const loadingPreview = ref<string | null>(null)
 const conversationsOpen = ref(false)
 const uploadKind = ref<'input' | 'expected'>('input')
 const uploading = ref(false)
@@ -82,7 +77,10 @@ async function load() {
     loading.value = false
   }
 }
-onMounted(load)
+onMounted(() => {
+  if (route.query.tab === 'runs') void router.replace({ query: { ...route.query, tab: 'recipes' } })
+  void load()
+})
 
 const inputFiles = computed(() => customer.value?.files ?? [])
 
@@ -204,18 +202,6 @@ async function removeCustomer() {
 async function onEdited() {
   editing.value = false
   await Promise.all([load(), store.refreshCustomers()])
-}
-
-async function previewFile(fileId: string) {
-  if (loadingPreview.value) return
-  loadingPreview.value = fileId
-  try {
-    preview.value = await fileApi.get(fileId)
-  } catch (err) {
-    toast.error(errorText(err))
-  } finally {
-    loadingPreview.value = null
-  }
 }
 </script>
 
@@ -371,34 +357,6 @@ async function previewFile(fileId: string) {
         </div>
       </section>
 
-      <!-- 运行记录 -->
-      <section v-else-if="tab === 'runs'" class="mt-6">
-        <div class="card-soft overflow-hidden">
-          <table class="w-full text-sm">
-            <thead class="bg-paper text-left text-xs text-faint">
-              <tr><th class="px-5 py-2.5 font-normal">时间</th><th class="font-normal">类型</th><th class="font-normal">内容</th><th class="font-normal">状态</th><th class="font-normal">比对</th><th class="font-normal">耗时</th><th /></tr>
-            </thead>
-            <tbody>
-              <tr v-for="r in customer.runs" :key="r.run_id" class="cursor-pointer border-t border-line hover:bg-paper/60" @click="runDetail = r.run_id">
-                <td class="px-5 py-3 text-xs text-mute">{{ r.created_at.replace('T', ' ').slice(5, 16) }}</td>
-                <td><span class="tag">{{ r.kind_label }}</span></td>
-                <td class="max-w-[360px] truncate pr-3">{{ r.request_text || r.tool_sequence }}</td>
-                <td><StatusPill :status="r.status" :label="r.status_label" /></td>
-                <td class="text-xs text-mute">{{ r.verification ? percent(r.verification.overall_match_rate) : '—' }}</td>
-                <td class="font-mono text-xs text-faint">{{ duration(r.duration_ms) }}</td>
-                <td class="pr-4 text-right" @click.stop>
-                  <button v-if="r.output_file_id" class="icon-btn" :disabled="!!loadingPreview" title="查看结果" @click="previewFile(r.output_file_id)">
-                    <LoaderCircle v-if="loadingPreview === r.output_file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />
-                  </button>
-                  <a v-if="r.output_file_id" :href="fileApi.downloadUrl(r.output_file_id)" class="icon-btn" title="下载结果"><Download class="size-4" /></a>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-if="!customer.runs.length" class="py-12 text-center text-sm text-faint">还没有运行记录</p>
-        </div>
-      </section>
-
       <!-- 记忆 -->
       <section v-else class="mt-6">
         <MemoryPanel :customer-id="customer.id" :memories="customer.memories" :mapping="customer.field_mapping" @changed="load" />
@@ -435,7 +393,6 @@ async function previewFile(fileId: string) {
       @close="runDialog = null"
       @done="load"
     />
-    <RunDetailDialog v-if="runDetail" :run-id="runDetail" @close="runDetail = null" @changed="load" />
     <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </div>
 </template>
