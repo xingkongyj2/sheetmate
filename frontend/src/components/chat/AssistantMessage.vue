@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
- * 助手消息：按发生顺序展示折叠的阶段过程与公开小结，最后展示回答和交付结果。
+ * 助手消息：阶段回复与折叠的思考细节按发生顺序穿插，最后展示回答和交付结果。
  */
-import { Check, ChevronRight, CircleAlert, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion, PanelRight } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { fileApi } from '@/api'
@@ -26,7 +26,7 @@ import TableCard from './TableCard.vue'
 import TimelineList from './TimelineList.vue'
 
 const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean }>()
-const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo]; inspect: [] }>()
+const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo] }>()
 const toast = useToast()
 const openingFile = ref<string | null>(null)
 
@@ -83,11 +83,11 @@ function stageActivity(stage: AssistantStage): string {
   if (stage.plan) return userFacingText(stage.plan.description, '处理过程', 120)
   if (stage.attempts.length) return stage.attempts[0]!.label
   const labels = [...new Set(stage.items.flatMap((item) => item.kind === 'tool' ? [toolPresentation(item).label] : []))]
-  return labels.slice(0, 2).join('、') || '思考过程'
+  return labels.slice(0, 2).join('、') || '分析需求'
 }
 
 function hasProcess(stage: AssistantStage): boolean {
-  return stage.items.length > 0 || stage.attempts.length > 0 || !!stage.plan || stage.status === 'running'
+  return stage.items.some((item) => item.kind !== 'thinking') || stage.attempts.length > 0 || !!stage.plan || stage.status === 'running'
 }
 
 async function copyReply(format: 'formatted' | 'markdown') {
@@ -154,28 +154,27 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
 </script>
 
 <template>
-  <div class="assistant-message group relative min-h-12">
+  <div class="assistant-message group/message relative min-h-12">
     <div class="absolute right-full top-0 mr-4 size-12">
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
     <div class="assistant-content w-full min-w-0 space-y-3">
-      <!-- 阶段按事件发生顺序排列：过程默认折叠，小结始终留在该阶段之后。 -->
+      <!-- 回复文字留在原位，思考细节穿插在对应阶段，不能集中到正文之前。 -->
       <section v-for="stage in stages" :key="stage.key" class="assistant-stage space-y-2" :aria-label="stageActivity(stage)" :data-stage="stage.number">
         <details v-if="hasProcess(stage)" class="assistant-process group/process">
           <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
-            <LoaderCircle v-if="stage.status === 'running'" class="size-3.5 shrink-0 animate-spin" />
+            <LoaderCircle v-if="message.streaming && stage.status === 'running'" class="size-3.5 shrink-0 animate-spin" />
             <ChevronRight v-else class="size-3.5 shrink-0 transition group-open/process:rotate-90" />
-            <span class="min-w-0 break-words">{{ stageActivity(stage) }}</span>
-            <span v-if="stage.toolCount && stage.status !== 'running'" class="shrink-0 text-xs text-faint">· {{ stage.toolCount }} 项操作</span>
-            <span v-if="stage.status === 'error' || stage.status === 'warning' || stage.status === 'waiting' || stage.status === 'stopped'" class="ml-1 flex shrink-0 items-center gap-1 text-xs" :class="stage.status === 'error' ? 'text-error' : 'text-mute'">
-              <CircleAlert v-if="stage.status === 'error'" class="size-3" />
-              {{ stage.status === 'error' ? '未完成' : stage.statusLabel }}
-            </span>
+            <span class="min-w-0 break-words">思考细节：{{ stageActivity(stage) }}</span>
           </summary>
-          <div class="mb-3 ml-1.5 mt-2 space-y-4 border-l-2 border-line py-1 pl-3.5">
+          <div class="mb-3 ml-1.5 mt-2 space-y-2 border-l-2 border-line py-1 pl-3.5">
+            <div v-if="stage.plan || stage.attempts.length" class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs leading-5">
+              <p class="font-medium text-mute">{{ stage.plan ? `${stage.plan.num}. ${userFacingText(stage.plan.description, '处理数据', 120)}` : stage.attempts[0]?.label }}</p>
+              <span :class="stage.status === 'error' ? 'text-error' : 'text-faint'">{{ stage.statusLabel }}</span>
+            </div>
             <TimelineList v-if="stage.items.some((item) => item.kind !== 'thinking')" :items="stage.items" />
             <RecipeStageDetails v-for="attempt in stage.attempts" :key="attempt.key" :progress="attempt.progress" />
-            <p v-if="stage.items.every((item) => item.kind === 'thinking') && !stage.attempts.length" class="text-xs leading-5 text-mute">{{ stage.status === 'running' ? '正在分析需求，整理处理步骤。' : stage.status === 'pending' ? '尚未开始处理。' : '已完成需求分析。' }}</p>
+            <p v-if="stage.items.every((item) => item.kind === 'thinking') && !stage.attempts.length && !stageSummary(stage)" class="text-xs leading-5 text-mute">{{ stage.status === 'running' ? '正在分析需求，整理处理步骤。' : stage.status === 'pending' ? '尚未开始处理。' : stage.statusLabel }}</p>
           </div>
         </details>
         <div v-if="stageSummary(stage)" class="assistant-stage-summary">
@@ -241,14 +240,13 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
         </span>
       </div>
 
-      <div v-if="!typing && (markdown || message.timeline.length || message.error)" class="flex items-center gap-1 border-t border-line/60 pt-2">
-        <button v-if="markdown" type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含计划摘要、结果预览和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
+      <div v-if="!typing && markdown" class="assistant-actions pointer-events-none flex items-center gap-1 pt-2 opacity-0 transition-opacity group-hover/message:pointer-events-auto group-hover/message:opacity-100 group-focus-within/message:pointer-events-auto group-focus-within/message:opacity-100">
+        <button type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含阶段回复、回答、简要结果表和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
           <Check v-if="copied === 'formatted'" class="size-4 text-success" /><Copy v-else class="size-4" />
         </button>
-        <button v-if="markdown" type="button" class="icon-btn disabled:opacity-50" :disabled="copying" aria-label="复制 Markdown" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
+        <button type="button" class="icon-btn disabled:opacity-50" :disabled="copying" aria-label="复制 Markdown" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
           <Check v-if="copied === 'markdown'" class="size-4 text-success" /><Code v-else class="size-4" />
         </button>
-        <button type="button" class="btn-text ml-auto text-xs" title="查看这条回答的执行明细" @click="emit('inspect')"><PanelRight class="size-3.5" />执行明细</button>
       </div>
     </div>
   </div>

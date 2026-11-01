@@ -46,7 +46,7 @@ const attachments = ref<Attachment[]>([])
 const recentlyUploaded = ref<FileInfo[]>([])
 const plan = ref<{ title: string; steps: PlanStep[]; message: string; attachments: string[] } | null>(null)
 const planning = ref(false)
-const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角或消息下方的「查看执行明细」
+const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角打开
 const panelTab = ref<'recipes' | 'files' | 'data'>('recipes')
 const selectedKey = ref<string | null>(null)
 const viewing = ref<TableBrief | null>(null)
@@ -321,12 +321,6 @@ function openTable(table: TableBrief) {
   viewing.value = table
 }
 
-function inspectMessage(message: UiMessage) {
-  selectedKey.value = message.key
-  panelTab.value = 'recipes'
-  panelOpen.value = true
-}
-
 function answer(option: string) {
   if (!streaming.value) send(option)
 }
@@ -406,7 +400,6 @@ function answer(option: string) {
                 :mascot="customer?.mascot"
                 @answer="answer"
                 @preview-file="(file) => (viewingFile = file)"
-                @inspect="inspectMessage(m)"
               />
             </template>
 

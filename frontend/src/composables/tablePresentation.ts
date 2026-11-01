@@ -1,12 +1,12 @@
 import type { TableArtifact, UiMessage } from './chatModel'
 
-/** Inline tables are complete, small calculation results; workbooks use file previews. */
-export const INLINE_TABLE_LIMITS = Object.freeze({ rows: 20, cols: 8, cells: 120 })
+/** Inline tables are brief, complete explanations; deliverable workbooks use file previews. */
+export const INLINE_TABLE_LIMITS = Object.freeze({ rows: 8, cols: 6, cells: 40 })
 
 function smallTemporaryTable(table: TableArtifact): boolean {
   if (['input', 'expected', 'result'].includes(table.role ?? '') || table.source === 'uploaded' || table.file_id) return false
   if (!(table.ephemeral || table.role === 'query' || table.role === 'derived' || table.source === 'computed')) return false
-  if (!Number.isInteger(table.rows) || table.rows < 0 || table.rows > INLINE_TABLE_LIMITS.rows) return false
+  if (!Number.isInteger(table.rows) || table.rows < 1 || table.rows > INLINE_TABLE_LIMITS.rows) return false
   if (!Number.isInteger(table.cols) || table.cols < 1 || table.cols > INLINE_TABLE_LIMITS.cols) return false
   if (table.rows * table.cols > INLINE_TABLE_LIMITS.cells || table.columns.length !== table.cols) return false
   if (table.preview.length < table.rows) return false

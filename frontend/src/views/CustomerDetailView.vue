@@ -7,7 +7,7 @@
  * - 记忆：业务规则、偏好、字段映射
  */
 import {
-  ArrowLeft, ArrowRight, Download, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Play, Sparkles,
+  ArrowLeft, ArrowRight, Download, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Sparkles,
   Trash2, Upload,
 } from '@lucide/vue'
 import { computed, defineAsyncComponent, nextTick, onMounted, ref } from 'vue'
@@ -209,7 +209,7 @@ async function onEdited() {
   <div class="h-full overflow-y-auto">
     <div v-if="loading" class="flex h-full items-center justify-center"><LoaderCircle class="size-6 animate-spin text-mute" /></div>
     <div v-else-if="customer" class="sheetmate-content-width mx-auto w-full px-6 pb-16 pt-6">
-      <RouterLink :to="{ name: 'customers' }" class="btn-text -ml-2"><ArrowLeft class="size-4" />全部客户</RouterLink>
+      <RouterLink :to="{ name: 'customers' }" class="btn-ink size-8 p-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" title="返回全部客户" aria-label="返回全部客户"><ArrowLeft class="size-3.5" aria-hidden="true" /></RouterLink>
 
       <!-- 头部 -->
       <header class="mt-5 grid grid-cols-[72px_minmax(0,1fr)] items-center gap-x-4 gap-y-4 sm:grid-cols-[96px_minmax(0,1fr)] sm:gap-x-5">
@@ -239,7 +239,6 @@ async function onEdited() {
         </div>
         <div class="col-span-2 flex flex-wrap items-center gap-2 sm:col-span-1 sm:col-start-2">
           <button class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="newChat"><MessageSquarePlus class="size-3.5" />新建对话</button>
-          <button v-if="customer.recipes.length" class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="runDialog = { recipeId: null }"><Play class="size-3.5" />用新文件执行</button>
         </div>
       </header>
 
