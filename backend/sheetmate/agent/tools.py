@@ -868,7 +868,7 @@ def _static_tools() -> list[Tool]:
 
 def reserved_tool_names() -> set[str]:
     """固定工具的名字。公式会被注册成同名工具，所以客户公式的 id 不能和它们重名（services/recipes.py 保存公式时检查）。"""
-    return {t.name for t in _static_tools()}
+    return {t.name for t in _static_tools()} | {"reconsider_approach"}
 
 
 class ToolRegistry:

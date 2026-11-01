@@ -10,25 +10,33 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 from sheetmate.agent.llm import LLMError
 from sheetmate.agent.prompts import (
     AGENT_SYSTEM,
     AGENT_TABLE_LINE,
+    APPROACH_SWITCH_MESSAGE,
+    AUTONOMOUS_RECOVERY_MESSAGE,
     FINAL_ROUND_MESSAGE,
     MODE_RULES,
     MODIFY_NUDGE,
     PLAN_STEP_MESSAGE,
+    RECOVERY_BUDGET_MESSAGE,
     REPEATED_FAILURE_MESSAGE,
+    REPEATED_SCRIPT_MESSAGE,
     REFLECT_MESSAGE,
     SCRIPT_RETRY_MESSAGE,
     TOOL_FALLBACK_MESSAGE,
 )
+from sheetmate.agent.recovery import MAX_METHODS, METHOD_FAILURE_LIMIT, RECONSIDER_TOOL, RecoveryState
+from sheetmate.agent.scripting import ScriptRequest
 from sheetmate.agent.tools import AgentContext, Tool, ToolRegistry, ToolResult, execute_tool
 
 _TOOL_MARKER = "<｜tool▁call▁begin｜>"
@@ -38,15 +46,32 @@ _EXPLORE_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table",
 _RECIPE_TOOLS = {"build_recipe", "revise_recipe", "run_recipe"}
 _SCRIPT_TOOL = "run_python_script"
 _SCRIPT_EXTRA_ITERATIONS = 12
+_DIAGNOSTIC_TOOLS = (_EXPLORE_TOOLS - {"run_sql"}) | {
+    "inspect_python_script", "inspect_workbook_creation", "list_recipes", "load_file", "show_files",
+    "remember", "save_field_mapping", "save_as_recipe", "delete_recipe", "delete_recipes", "ask_user",
+}
 _NUDGE_AFTER = 4  # 修改模式下查看数据超过这么多次还没生成流程，就提醒一次
 _LIVE_AFTER_CHARS = 140  # 一轮文字超过这么长、且还没出现工具调用，就当作最终回答开始实时输出
 
 
+@dataclass
+class _ScriptAttempt:
+    result: ToolResult
+    executions: int = 1
+
+
+@dataclass
+class _ToolBudget:
+    used: int = 0
+
+
 class AgentExecutor:
-    def __init__(self, llm: Any, registry: ToolRegistry | None = None, max_iterations: int = 12):
+    def __init__(self, llm: Any, registry: ToolRegistry | None = None, max_iterations: int = 12,
+                 max_tool_calls: int = 40):
         self.llm = llm
         self.registry = registry or ToolRegistry()
         self.max_iterations = max_iterations
+        self.max_tool_calls = max(1, max_tool_calls)
 
     # ------------------------------------------------------------------
     # 入口
@@ -65,9 +90,12 @@ class AgentExecutor:
         tools = self.registry.for_context(ctx)
         conversation = [{"role": "system", "content": build_system_prompt(ctx, message)}, *history[-12:],
                         {"role": "user", "content": f"原始需求：{message}\n下面按计划逐步执行。"}]
+        budget = _ToolBudget()
+        executed_steps = 0
         yield {"type": "plan_start", "steps": [{"id": index, "description": str(step.get("description") or f"第 {index} 步")}
                                                 for index, step in enumerate(steps, start=1)]}
         for i, step in enumerate(steps, start=1):
+            executed_steps = i
             description = str(step.get("description") or f"第 {i} 步")
             yield {"type": "step_start", "step_num": i, "total": len(steps), "description": description}
             step_message = PLAN_STEP_MESSAGE.format(num=i, total=len(steps), description=description)
@@ -80,7 +108,7 @@ class AgentExecutor:
             waiting = False
             question = ""
             unresolved_tools: set[str] = set()
-            async for event in self.agent_stream(conversation, tools, ctx, transcript=transcript):
+            async for event in self.agent_stream(conversation, tools, ctx, transcript=transcript, budget=budget):
                 if event["type"] == "text_chunk":
                     step_text += event["content"]  # 每一步的文字小结是过程，不是给用户的最终回答
                     continue
@@ -104,14 +132,20 @@ class AgentExecutor:
                     else:
                         unresolved_tools.add(event["tool"])
             conversation.extend(transcript)
-            status = "waiting" if waiting else "warning" if unresolved_tools else "done"
+            budget_exhausted = budget.used >= self.max_tool_calls
+            status = "waiting" if waiting else "warning" if unresolved_tools or budget_exhausted else "done"
             yield {"type": "step_done", "step_num": i, "status": status, "summary": question if waiting else step_text.strip()}
             if waiting:
                 return
+            if budget_exhausted:
+                break
         yield {"type": "reflect_start"}
         conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message)}
-        reflect = REFLECT_MESSAGE.format(message=message, total=len(steps))
-        async for event in self.agent_stream(conversation + [{"role": "user", "content": reflect}], tools, ctx):
+        reflect = REFLECT_MESSAGE.format(message=message, total=executed_steps)
+        if executed_steps < len(steps):
+            reflect += f"\n工具调用预算已用尽；计划中还有 {len(steps) - executed_steps} 个步骤未执行，不得称已完成。"
+        async for event in self.agent_stream(conversation + [{"role": "user", "content": reflect}], tools, ctx,
+                                             budget=budget):
             yield event
         yield {"type": "reflect_done"}
 
@@ -120,21 +154,33 @@ class AgentExecutor:
     # ------------------------------------------------------------------
 
     async def agent_stream(self, messages: list[dict[str, Any]], tools: list[Tool], ctx: AgentContext,
-                           transcript: list[dict[str, Any]] | None = None) -> AsyncIterator[dict[str, Any]]:
+                           transcript: list[dict[str, Any]] | None = None,
+                           budget: _ToolBudget | None = None) -> AsyncIterator[dict[str, Any]]:
         """transcript 不为空时，把这一轮新增的消息（工具调用、工具结果、最终回答）追加进去，供计划模式接续上下文。"""
         msgs = list(messages)
         start = len(msgs)
         tool_map = {t.name: t for t in tools}
-        definitions = [t.definition() for t in tools] or None
+        recovery = RecoveryState()
+        if tools:
+            tool_map[RECONSIDER_TOOL] = recovery.tool()
         explored, built, nudged = 0, False, False
         iteration, iteration_limit = 0, max(1, self.max_iterations)
         script_budget_added, fallback_suggested = False, False
         failures: dict[tuple[str, str], int] = {}
+        script_attempts: dict[str, _ScriptAttempt] = {}
+        budget = budget or _ToolBudget()
         while iteration < iteration_limit:
+            budget_exhausted = recovery.exhausted or budget.used >= self.max_tool_calls
+            available = [tool for name, tool in tool_map.items()
+                         if (name != RECONSIDER_TOOL or recovery.pending or recovery.results)
+                         and (not recovery.must_switch or name == RECONSIDER_TOOL or name in _DIAGNOSTIC_TOOLS)]
+            definitions = [tool.definition() for tool in available] or None
             # 最后一轮不再允许调用工具，保证一定有回答（TabClaw 原来是直接报「超过最大轮数」）
-            final_round = iteration == iteration_limit - 1 and definitions is not None
+            final_round = budget_exhausted or (iteration == iteration_limit - 1 and definitions is not None)
             iteration += 1
             if final_round:
+                if budget_exhausted:
+                    msgs.append({"role": "user", "content": RECOVERY_BUDGET_MESSAGE})
                 msgs.append({"role": "user", "content": FINAL_ROUND_MESSAGE})
             content, reasoning = "", ""
             calls_acc: dict[int, dict[str, str]] = {}
@@ -156,7 +202,8 @@ class AgentExecutor:
                             suppress = True
                         # 先把文字攒着：后面跟着工具调用的话，这段只是「我先看一下表结构」之类的过程说明，不该出现在回答里。
                         # 只有确定是最终回答（没出现工具调用、文字已经比较长）才开始实时输出
-                        if not live and not calls_acc and not suppress and len(content) >= _LIVE_AFTER_CHARS:
+                        if (not live and not calls_acc and not suppress and len(content) >= _LIVE_AFTER_CHARS
+                                and (final_round or recovery.may_finish)):
                             live = True
                             yield {"type": "text_chunk", "content": content}
                         elif live and not suppress:
@@ -176,6 +223,15 @@ class AgentExecutor:
 
             display = _TOOL_RE.sub("", content).strip()
             if not calls_acc or final_round:
+                if not final_round and definitions and not recovery.may_finish:
+                    # 单一路径失败时先自主恢复；不同方法确实尝试后由 AI 决定是否收尾。
+                    # 不保留要求用户批准重试的正文；空 note 也会撤回已流出的文字。
+                    if live:
+                        yield {"type": "note", "content": ""}
+                    if display:
+                        msgs.append({"role": "assistant", "content": display})
+                    msgs.append({"role": "user", "content": AUTONOMOUS_RECOVERY_MESSAGE})
+                    continue
                 if display and not live:  # 短回答：攒到最后一次性给出，前端会做逐字显示的动画
                     yield {"type": "text_chunk", "content": display}
                 if transcript is not None:
@@ -203,6 +259,10 @@ class AgentExecutor:
             end_turn = False
             guidance: list[str] = []
             for call_index, call in enumerate(calls):
+                if budget.used >= self.max_tool_calls or recovery.exhausted:
+                    assistant["tool_calls"] = calls[:call_index]
+                    break
+                budget.used += 1
                 result: ToolResult | None = None
                 name = call["function"]["name"]
                 args = _parse_args(call["function"]["arguments"])
@@ -212,17 +272,54 @@ class AgentExecutor:
                        "params": tool.public_params(args or {}) if tool and tool.public_params else args or {},
                        "debug_params": args if args is not None else call["function"]["arguments"]}
                 started = time.perf_counter()
+                script_key = None
+                attempt = None
+                repeated_script = False
+                method_blocked = False
                 if tool is None:
                     result = ToolResult(f"没有工具 `{name}`。可用工具：{', '.join(tool_map)}", ok=False)
                 elif args is None:
                     result = ToolResult("工具参数不是合法的 JSON 对象，请重新调用。", ok=False)
+                elif recovery.must_switch and name != RECONSIDER_TOOL and name not in _DIAGNOSTIC_TOOLS:
+                    method_blocked = True
+                    result = ToolResult(
+                        _approach_switch_message(recovery), ok=False, summary="当前方法已达到失败阈值，须先调整方法",
+                        public_summary="正在调整处理方法", public_text="当前方法多次未通过，将重新选择处理方法。",
+                    )
                 else:
-                    async for item in execute_tool(tool, args, ctx):
-                        if isinstance(item, ToolResult):
-                            result = item
-                        else:
-                            yield {**item, "tool_call_id": call["id"]}
+                    if name == _SCRIPT_TOOL:
+                        script_key = _script_key(args, ctx)
+                        attempt = script_attempts.get(script_key) if script_key else None
+                        if attempt is None and script_key and args.get("input_tables") is None:
+                            attempt = script_attempts.get("default:" + script_key)
+                    # 成功结果直接复用；失败允许一次原样重试以容纳暂时性故障。
+                    repeated_script = attempt is not None and (attempt.result.ok or attempt.executions >= 2)
+                    if repeated_script:
+                        result = ToolResult(
+                            REPEATED_SCRIPT_MESSAGE + "\n上次实际执行的反馈：\n" + attempt.result.text,
+                            ok=attempt.result.ok, summary="相同代码与输入已执行，复用上次结果",
+                            public_summary="已读取已有处理结果", public_text="正在根据已有结果核对处理方法。",
+                        )
+                    else:
+                        async for item in execute_tool(tool, args, ctx):
+                            if isinstance(item, ToolResult):
+                                result = item
+                            else:
+                                yield {**item, "tool_call_id": call["id"]}
                 assert result is not None
+                if script_key and not repeated_script:
+                    if attempt is None:
+                        attempt = _ScriptAttempt(result)
+                    else:
+                        attempt.result = result
+                        attempt.executions += 1
+                    script_attempts[script_key] = attempt
+                    if args.get("input_tables") is None:
+                        # 默认输入会自动包含刚产生的中间表；它们不能使原脚本绕过去重。
+                        # 显式选择这些表、或之后由其他工具改变输入，仍会得到新的指纹。
+                        after_key = _script_key(args, ctx)
+                        if after_key:
+                            script_attempts["default:" + after_key] = attempt
                 for table in result.tables:
                     yield {"type": "table", "tool_call_id": call["id"], "table": table}
                 for extra in result.events:
@@ -234,6 +331,9 @@ class AgentExecutor:
                        "duration_ms": int((time.perf_counter() - started) * 1000)}
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})
                 end_turn = end_turn or result.end_turn
+                if name != RECONSIDER_TOOL and not method_blocked:
+                    recovery.observe(name, result, call_id=call["id"], diagnostic=name in _DIAGNOSTIC_TOOLS,
+                                     reused=repeated_script)
                 explored += name in _EXPLORE_TOOLS
                 built = built or name in _RECIPE_TOOLS
                 if name == _SCRIPT_TOOL and tool is not None:
@@ -243,7 +343,7 @@ class AgentExecutor:
                     # 脚本中间表或打印完成不算修改交付，实际文件可替代 Recipe 完成交付。
                     built = built or (result.ok and any(event.get("type") == "file" and event.get("file_id")
                                                        for event in result.events))
-                if not result.ok:
+                if not result.ok and name != RECONSIDER_TOOL and not method_blocked:
                     failure_text = re.sub(r"\brun_id=[A-Za-z0-9_]+", "run_id=<本次运行>", result.summary or result.text)
                     key = (name, failure_text[:1000])
                     failures[key] = failures.get(key, 0) + 1
@@ -254,6 +354,8 @@ class AgentExecutor:
                     elif _SCRIPT_TOOL in tool_map and not fallback_suggested:
                         guidance.append(TOOL_FALLBACK_MESSAGE)
                         fallback_suggested = True
+                if recovery.must_switch and not recovery.exhausted:
+                    guidance.append(_approach_switch_message(recovery))
                 if result.end_turn:
                     # 等待用户回答时立即停止，后续调用不能覆盖确认或产生额外副作用。
                     # 只保留实际执行过的调用，保证计划模式接续时工具消息成对。
@@ -269,6 +371,31 @@ class AgentExecutor:
                 # 收束没有产出修改文件的探索；由模型选择 Recipe 或 Python 完成交付。
                 msgs.append({"role": "user", "content": MODIFY_NUDGE.format(count=explored)})
                 nudged = True
+
+
+def _script_key(args: dict[str, Any], ctx: AgentContext) -> str | None:
+    """只比较代码和实际声明的输入版本，描述变化不构成新尝试。"""
+    try:
+        request = ScriptRequest.model_validate(args)
+    except ValueError:
+        return None  # 参数错误仍由工具按原流程反馈，不能复用此前的有效调用。
+    visible = {table.name: table for table in ctx.visible_tables()}
+    names = request.input_tables
+    if names is None:
+        names = [table.name for table in visible.values() if table.role != "expected"]
+    payload = {
+        "code": request.code,
+        "tables": [(name, visible[name].created_at if name in visible else None) for name in names],
+        "files": request.input_files,
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+
+def _approach_switch_message(recovery: RecoveryState) -> str:
+    return APPROACH_SWITCH_MESSAGE.format(
+        method=recovery.current.name, failures=recovery.current.failures, limit=METHOD_FAILURE_LIMIT,
+        remaining=MAX_METHODS - len(recovery.methods),
+    )
 
 
 def _parse_args(raw: str) -> dict[str, Any] | None:
