@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -170,9 +171,19 @@ class Recipe(BaseModel):
         return self.model_dump(mode="json")
 
     def flow(self) -> dict[str, Any]:
-        """流程图数据：输入 → 步骤 → 输出（前端 RecipeFlow 组件用）。"""
+        """公开流程图数据，同时保留表依赖和文件交付边界。"""
+        input_files: dict[tuple[str, str], dict[str, Any]] = {}
+        for inp in self.inputs:
+            # 一个工作簿的多个 sheet 仍是同一个文件；没有来源文件时不猜合并。
+            key = ("file", inp.source_file) if inp.source_file else ("alias", inp.alias)
+            if key not in input_files:
+                input_files[key] = {"name": inp.source_file or inp.file_pattern or inp.alias,
+                                    "aliases": [], "file_pattern": inp.file_pattern}
+            input_files[key]["aliases"].append(inp.alias)
         return {
-            "inputs": [{"alias": i.alias, "kind": i.kind, "description": i.description, "file_pattern": i.file_pattern} for i in self.inputs],
+            "inputs": [{"alias": i.alias, "kind": i.kind, "description": i.description, "file_pattern": i.file_pattern,
+                        "source_file": i.source_file, "sheet": i.sheet} for i in self.inputs],
+            "input_files": list(input_files.values()),
             "steps": [
                 {
                     "id": s.id,
@@ -188,7 +199,51 @@ class Recipe(BaseModel):
                 for s in self.ordered_steps()
             ],
             "outputs": [{"name": o.name, "source": o.source} for o in self.output_spec],
+            "output_files": self._flow_output_files(),
         }
+
+    def _flow_output_files(self) -> list[dict[str, Any]]:
+        steps = self.ordered_steps()
+        consumed = {ref for step in steps for ref in step_file_refs(step)}
+        for index, step in enumerate(steps):
+            downstream = {ref for later in steps[index + 1:] for ref in step_table_refs(later)}
+            consumed.update(spec["ref"] for table, spec in step.params.get("file_tables", {}).items()
+                            if table in downstream and isinstance(spec, dict) and isinstance(spec.get("ref"), str))
+        files: dict[str, dict[str, Any]] = {}
+        for index, step in enumerate(steps):
+            if step.kind != "python":
+                continue
+            export = step.params.get("workbook_export")
+            if export is not None and index < len(steps) - 1:
+                continue  # 与执行器一致：中途导出的工作簿供后续处理使用。
+            declarations = step.params.get("output_files")
+            if declarations is None:
+                # 旧快照只记了文件导入的表；无表的交付文件从新版声明读取。
+                refs = [spec["ref"] for spec in step.params.get("file_tables", {}).values()
+                        if isinstance(spec, dict) and isinstance(spec.get("ref"), str)]
+                declarations = [{"name": ref.split("/", 1)[1], "ref": ref} for ref in dict.fromkeys(refs)
+                                if isinstance(ref, str) and ref.startswith(f"{step.output}/")]
+                if isinstance(export, dict) and export.get("filename"):
+                    name = export["filename"]
+                    declarations.append({"name": name, "ref": f"{step.output}/{name}"})
+                if not declarations and index == len(steps) - 1 and not self.output_spec and not step_output_tables(step):
+                    declarations = [{"name": "输出文件（名称待确认）", "ref": ""}]
+            for item in declarations if isinstance(declarations, list) else []:
+                if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]:
+                    continue
+                ref = item.get("ref", "")
+                if not isinstance(ref, str) or ref in consumed:
+                    continue
+                files[ref or f"unknown:{step.id}"] = {"name": item["name"], "ref": ref,
+                                                    "source": step.output, "sources": [step.output]}
+        table_sources = list(dict.fromkeys(o.source for o in self.output_spec))
+        if not table_sources and steps and not self.metadata.get("explicit_outputs"):
+            table_sources = step_output_tables(steps[-1])
+        if table_sources:
+            # 普通表格流程由 host/replay 统一导出为「流程名_结果.xlsx」。
+            filename = re.sub(r"[^\w一-鿿.\-()（） ]+", "_", Path(f"{self.name}_结果.xlsx").name).strip(" .")[-120:]
+            files["workbook"] = {"name": filename, "ref": "", "source": table_sources[0], "sources": table_sources}
+        return list(files.values())
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +348,18 @@ def check_recipe(recipe: Recipe, library: FormulaLibrary) -> list[str]:
                 problems.append(f"{label}：output_tables 必须映射脚本结果表名到流程表名")
             elif len(set(mapping.values())) != len(mapping):
                 problems.append(f"{label}：Python 输出表名有重复")
+            declared_files = step.params.get("output_files")
+            if declared_files is not None and (
+                not isinstance(declared_files, list) or any(
+                    not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"]
+                    or "/" in item["name"] or "\\" in item["name"] or item["name"] in {".", ".."}
+                    or not isinstance(item.get("ref"), str) or not item["ref"].startswith(f"{step.output}/")
+                    or not item["ref"][len(step.output) + 1:]
+                    or "/" in item["ref"][len(step.output) + 1:] or "\\" in item["ref"][len(step.output) + 1:]
+                    for item in declared_files
+                )
+            ):
+                problems.append(f"{label}：output_files 必须声明本步骤输出文件的 name 和 ref")
             bindings = step.params.get("table_bindings", {})
             if not isinstance(bindings, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
                                                     for k, v in bindings.items()):

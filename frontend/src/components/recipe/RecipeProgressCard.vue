@@ -22,7 +22,7 @@ import RecipeFlow from './RecipeFlow.vue'
 import StepDetail from './StepDetail.vue'
 import VerifyBadge from './VerifyBadge.vue'
 
-const props = defineProps<{ progress: RecipeProgress; customerId?: string | null; hideDetails?: boolean }>()
+const props = defineProps<{ progress: RecipeProgress; customerId?: string | null }>()
 const emit = defineEmits<{ previewFile: [file: FileInfo] }>()
 const toast = useToast()
 const openingFile = ref(false)
@@ -40,9 +40,9 @@ async function previewFile() {
   }
 }
 
-const selected = ref<StepState | null>(null)
+const selected = ref<(Pick<StepState, 'step_id' | 'name'> & Partial<StepState>) | null>(null)
 const showEvidence = ref(false)
-const showDetail = ref(false) // 流程图、校验、比对默认收起，财务只需要看到结果和下载
+const showDetail = ref(false) // 流程直接展示，校验和比对详情按需展开
 
 const MODE_LABEL = { learn: '规划处理步骤', revise: '调整处理步骤', replay: '执行已有流程' }
 const STATUS_LABEL: Record<string, string> = {
@@ -50,7 +50,8 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 const flow = computed(() => {
-  if (props.progress.flow) return props.progress.flow
+  const snapshot = props.progress.flow ?? props.progress.saved?.flow
+  if (snapshot) return snapshot
   if (!props.progress.steps.length) return null
   return {
     inputs: props.progress.inputs.map((i) => ({ alias: i.alias, kind: i.kind, description: i.filename, file_pattern: '' })),
@@ -62,12 +63,23 @@ const flow = computed(() => {
   }
 })
 
+function selectStep(id: number) {
+  const state = props.progress.steps.find((step) => step.step_id === id)
+  const step = flow.value?.steps.find((item) => item.id === id)
+  // 单独保存流程的历史消息只有流程快照，没有本轮执行记录。
+  selected.value = state ?? (step ? {
+    step_id: step.id, name: step.name, formula: step.formula, kind: step.kind,
+    formula_kind: step.formula_kind, description: step.description, output: step.output,
+  } : null)
+}
+
 const busy = computed(() => ['thinking', 'running', 'verifying', 'refining'].includes(props.progress.status))
 const failure = computed(() => {
   const value = recipeFailure(props.progress)
   return value && { ...value, summary: userFacingText(value.summary, '本次处理未完成，需要调整处理方式后重试。', 400) }
 })
 const renames = computed(() => props.progress.inputs.filter((i) => Object.keys(i.renames).length || i.warnings.length))
+const hasDetails = computed(() => !!(props.progress.verify || props.progress.validation || props.progress.evidence?.length || renames.value.length || failure.value?.detail))
 const pillStatus = computed(() => {
   if (busy.value) return 'running'
   if (props.progress.status === 'failed') return 'failed'
@@ -86,7 +98,7 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
 </script>
 
 <template>
-  <div class="card-soft animate-rise overflow-hidden">
+  <div class="card-soft min-w-0 animate-rise overflow-hidden">
     <!-- 标题 -->
     <div class="flex items-center gap-3 border-b border-line bg-paper/60 px-4 py-3">
       <FunObject kind="blocks" :size="30" />
@@ -104,7 +116,7 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
       <StatusPill :status="pillStatus" :label="STATUS_LABEL[progress.status]" />
     </div>
 
-    <div v-if="!hideDetails || busy || progress.questions?.length || failure" class="space-y-3 px-4 py-3.5">
+    <div v-if="flow || busy || progress.runSummary || progress.questions?.length || failure || hasDetails" class="space-y-3 px-4 py-3.5">
       <!-- 进行中：一条细进度，不展开细节 -->
       <div v-if="busy" class="space-y-2">
         <div class="flex items-center gap-3">
@@ -136,10 +148,13 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
         </div>
       </div>
 
-      <!-- 细节：默认收起 -->
-      <div v-if="!hideDetails && (flow || progress.verify || progress.validation || progress.evidence?.length || failure)">
+      <!-- 流程始终可见，保存后的历史快照也可以查看每个步骤。 -->
+      <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" @select="selectStep" />
+
+      <!-- 校验、比对与错误详情：默认收起 -->
+      <div v-if="hasDetails">
         <button class="flex items-center gap-1 text-xs text-mute hover:text-ink" :aria-expanded="showDetail" @click="showDetail = !showDetail">
-          <ChevronRight class="size-3.5 transition" :class="{ 'rotate-90': showDetail }" />{{ showDetail ? '收起处理流程' : failure ? '查看处理流程和错误详情' : '查看处理流程和校验' }}
+          <ChevronRight class="size-3.5 transition" :class="{ 'rotate-90': showDetail }" />{{ showDetail ? '收起处理详情' : failure ? '查看错误详情和校验' : '查看校验和处理详情' }}
         </button>
         <div v-if="showDetail" class="mt-3 space-y-3">
           <div v-if="failure?.detail" class="rounded-xl bg-paper px-3 py-2.5 text-xs leading-5">
@@ -165,9 +180,6 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
             </div>
           </div>
 
-          <!-- 流程图 -->
-          <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" @select="(id) => (selected = progress.steps.find((s) => s.step_id === id) ?? null)" />
-
           <!-- 比对 / 校验 -->
           <VerifyBadge v-if="progress.verify" :report="progress.verify" :rounds="progress.verifyHistory.length" />
           <div v-if="progress.validation" class="flex items-center gap-2 text-xs text-mute">
@@ -191,7 +203,7 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
     </div>
 
     <StepDetail
-      v-if="selected && !hideDetails"
+      v-if="selected"
       :step-id="selected.step_id"
       :name="selected.name"
       :formula-name="selected.formula_name"

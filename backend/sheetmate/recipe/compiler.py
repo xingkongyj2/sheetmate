@@ -63,6 +63,8 @@ def _params(step: RecipeStep, names: dict[str, str], library: FormulaLibrary) ->
             params["output_tables"] = {key: names.get(value, value) for key, value in (params.get("output_tables") or {}).items()}
         params["file_tables"] = {names.get(key, key): {**value, "ref": _ref(value["ref"], names)}
                                  for key, value in (params.get("file_tables") or {}).items()}
+        if "output_files" in params:
+            params["output_files"] = [{**value, "ref": _ref(value["ref"], names)} for value in params["output_files"]]
         if params.get("workbook_export"):
             for spec in params["workbook_export"].get("output_spec", []):
                 spec["source"] = names.get(spec["source"], spec["source"])
@@ -258,17 +260,21 @@ def compile_script(ws: Workspace, library: FormulaLibrary, *, run_id: str, code:
                    input_tables: list[str], input_files: dict[str, str], output_tables: dict[str, str],
                    file_tables: dict[str, dict[str, Any]], file_resolver: FileResolver,
                    display_tables: list[str] | None = None,
+                   output_files: list[dict[str, str]] | None = None,
                    customer_id: str | None = None, conversation_id: str | None = None,
                    field_mapping: dict[str, list[str]] | None = None) -> Recipe:
     compiler = _Compiler(ws, library, file_resolver=file_resolver)
     bindings = {table: compiler.table(table) for table in input_tables}
     files = {alias: compiler.file(file_id) for alias, file_id in input_files.items()}
     output = sanitize_table_name("脚本_" + run_id)
+    params = {"code": code, "input_tables": list(dict.fromkeys(bindings.values())),
+              "table_bindings": bindings, "input_files": files, "output_tables": output_tables,
+              "file_tables": file_tables}
+    if output_files is not None:
+        params["output_files"] = [{"name": item["name"], "ref": item["ref"]} for item in output_files]
     compiler.append(RecipeStep(id=1, name=description[:40] or "Python 处理", kind="python", formula="python_script",
                               output=output, description=description, explanation="保存实际执行的代码、输入依赖与校验",
-                              params={"code": code, "input_tables": list(dict.fromkeys(bindings.values())),
-                                      "table_bindings": bindings, "input_files": files, "output_tables": output_tables,
-                                      "file_tables": file_tables}))
+                              params=params))
     outputs = [OutputSheet(name=str(label)[:31], source=table) for label, table in output_tables.items()
                if display_tables is None or label in display_tables]
     recipe = compiler.recipe(name=description or "脚本流程", description=description, customer_id=customer_id,
@@ -290,6 +296,7 @@ def with_workbook_export(recipe: Recipe, filename: str, *, plain: bool = False) 
     else:
         params = {"code": "pass", "input_tables": [o.source for o in recipe.output_spec],
                   "workbook_export": {"filename": filename, "output_spec": [o.model_dump() for o in recipe.output_spec]}}
+    params["output_files"] = [{"name": filename, "ref": f"{output}/{filename}"}]
     recipe.steps.append(RecipeStep(id=max((s.id for s in recipe.steps), default=0) + 1, name="生成处理后的工作簿",
                                    kind="python", formula="python_script", output=output, params=params))
     return recipe, f"{output}/{filename}"

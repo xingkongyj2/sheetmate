@@ -149,7 +149,7 @@ class ConversationHost:
             return {**file_service.file_dict(record), "sheets_written": written}
 
     def file_dependency(self, file_id: str) -> FileDependency:
-        """生成文件引用其执行链；上传原件作为新的文件输入，不固定历史结果路径。"""
+        """保留有输入的处理链；从零生成的文件作为后续处理的可替换输入。"""
         with session_scope() as db:
             record = file_service.get_file(db, file_id)
             if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
@@ -168,6 +168,10 @@ class ConversationHost:
                 legacy_run_id = None
             if legacy_run_id is None:
                 recipe = Recipe.model_validate(snapshot)
+                if not recipe.inputs:
+                    # 样例或模板的生成过程不属于后续文件处理流程；重放时应读取新文件，
+                    # 而不是重新执行字面量造数、固定使用上次样例。
+                    return dependency
                 validation = run.validation or {}
                 outputs = [*validation.get("outputs", []), *validation.get("files", [])]
                 match = next((item for item in outputs if item.get("file_id") == file_id and item.get("ref")), None)

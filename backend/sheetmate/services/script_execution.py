@@ -139,6 +139,8 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                                             input_tables=input_tables, input_files=input_files,
                                             output_tables=output_tables, file_tables=file_tables,
                                             display_tables=outcome.display_tables,
+                                            output_files=[{"name": item["filename"], "ref": item["ref"]}
+                                                          for item in report["files"]],
                                             file_resolver=host.file_dependency, customer_id=host.customer_id,
                                             conversation_id=host.conversation_id, field_mapping=host.field_mapping())
                     problems = check_recipe(recipe, library)

@@ -191,6 +191,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
         recipe = compile_script(ws, library, run_id=run_id, code=code, description=description,
                                 input_tables=tables, input_files=files, output_tables=output_tables,
                                 file_tables=file_tables, file_resolver=resolve_file,
+                                output_files=[{"name": record.filename, "ref": file_refs[record.id]} for _, record, _ in outputs],
                                 display_tables=[label for label, name in output_tables.items()
                                                 if any(item.get("name") == name for item in validation.get("tables", []) if isinstance(item, dict))],
                                 customer_id=host.customer_id, conversation_id=host.conversation_id,

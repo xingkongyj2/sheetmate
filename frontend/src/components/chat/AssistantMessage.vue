@@ -187,7 +187,7 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
       <!-- 表格和流程结果等正文接收和打字都结束后再展示。 -->
       <template v-if="!typing">
         <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" />
-        <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :customer-id="customerId" hide-details @preview-file="(file) => emit('previewFile', file)" />
+        <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :customer-id="customerId" @preview-file="(file) => emit('previewFile', file)" />
 
         <TableCard v-if="lastTable" :table="lastTable" />
       </template>
