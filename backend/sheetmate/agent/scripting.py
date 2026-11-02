@@ -15,7 +15,7 @@ class ScriptRequest(BaseModel):
 
     code: StrictStr = Field(min_length=1, max_length=64_000, description="Python 完整脚本。可用 pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、result、check(condition,message)、deliver_files 和 display_tables；后两者默认空列表，只显式列入需要用户查看的最终文件/结果表。")
     description: StrictStr = Field(min_length=1, max_length=2000, description="本次脚本要完成的用户目标及关键校验。")
-    input_tables: list[StrictStr] | None = Field(default=None, max_length=20, description="可选：要传入 tables 的工作区表名；不填传入当前可见的非期望结果表，[] 表示不传表。")
+    input_tables: list[StrictStr] | None = Field(default=None, max_length=20, description="可选：要传入 tables 的工作区表名；指定 input_files 时默认不传表，否则默认当前可见非期望结果表。建议显式选择实际依赖，[] 表示不传表。")
     input_files: dict[StrictStr, StrictStr] = Field(default_factory=dict, max_length=20, description="需要直接操作工作簿时传 {别名:file_id}，files[别名] 是隔离副本路径。只允许本会话或已授权客户的文件。")
 
 
@@ -27,7 +27,7 @@ def python_script_tools():
         visible = {table.name for table in ctx.visible_tables()}
         tables = request.input_tables
         if tables is None:
-            tables = [table.name for table in ctx.visible_tables() if table.role != "expected"]
+            tables = [] if request.input_files else [table.name for table in ctx.visible_tables() if table.role != "expected"]
         if any(name not in visible for name in tables):
             raise ValueError("input_tables 只能使用当前可见的工作区表名")
         if len(tables) > 20:
@@ -75,8 +75,8 @@ def python_script_tools():
 
     return [
         Tool("run_python_script",
-             "［独立 Python 脚本技能］按需要编写并执行脚本，和内置公式、SQL 一起完成分析、复杂数据处理、保留工作簿格式的修改或从零建表。"
-             "可自主选用，不必先把其他方式尝试一遍。脚本中 pd/np/openpyxl 已加载；tables 是传入 DataFrame 副本，files 是按别名传入的文件副本路径；"
+             "［Python 工具］按需要编写并执行脚本，和公式、SQL 作为三类独立工具一起完成分析、复杂数据处理、保留工作簿格式的修改或从零建表。"
+             "根据真实结构和规模比较稳定性、性能、准确性后自主选用或混合，不采用固定尝试顺序。成功脚本的实际代码、输入绑定、输出与校验可在用户明确要求时用 save_as_recipe 保存为重复流程。脚本中 pd/np/openpyxl 已加载；tables 是传入 DataFrame 副本，files 是按别名传入的文件副本路径；"
              "OUTPUT_DIR 是运行目录，写入文件不会自动交付。deliver_files 默认[]，只有明确列入的最终文件才提供下载，例如 deliver_files=[OUTPUT_DIR / '武汉行程.xlsx']；probe.xlsx 等测试文件留在临时目录。"
              "result_tables['结果名']=DataFrame 可回传内部数据继续用 SQL/公式；display_tables 默认[]，只把需要用户查看的最终结果表名列入，其他表不展示。"
              "result 可保存简短 JSON 摘要，check(condition,message) 记录校验，失败会阻止本次交付。"

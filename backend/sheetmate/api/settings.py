@@ -10,14 +10,14 @@ from pydantic import BaseModel
 
 from sheetmate.agent.llm import LLMError, test_connection
 from sheetmate.api.deps import current_user
-from sheetmate.config import DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MODELS, LLMSettings, get_llm_settings, save_llm_settings
+from sheetmate.config import DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MODELS, DEEPSEEK_THINKING_MODELS, LLMSettings, get_llm_settings, save_llm_settings
 from sheetmate.db.models import User
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 PROVIDERS = [
     {"id": "deepseek", "name": "DeepSeek（推荐）", "base_url": DEEPSEEK_BASE_URL,
-     "models": list(DEEPSEEK_MODELS)},
+     "models": list(DEEPSEEK_MODELS), "thinking_models": list(DEEPSEEK_THINKING_MODELS)},
     {"id": "siliconflow", "name": "硅基流动", "base_url": "https://api.siliconflow.cn/v1",
      "models": ["deepseek-ai/DeepSeek-V3", "Qwen/Qwen2.5-72B-Instruct"]},
     {"id": "qwen", "name": "阿里云百炼", "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -36,7 +36,8 @@ class LLMBody(BaseModel):
 
 def _view(cfg: LLMSettings) -> dict[str, Any]:
     return {"configured": cfg.configured, "base_url": cfg.base_url, "model": cfg.model, "key_hint": cfg.key_hint(),
-            "default_model": DEEPSEEK_DEFAULT_MODEL, "providers": PROVIDERS, "thinking_enabled": cfg.thinking_enabled}
+            "default_model": DEEPSEEK_DEFAULT_MODEL, "providers": PROVIDERS,
+            "thinking_supported": cfg.thinking_supported, "thinking_enabled": cfg.thinking_enabled and cfg.thinking_supported}
 
 
 @router.get("/llm")

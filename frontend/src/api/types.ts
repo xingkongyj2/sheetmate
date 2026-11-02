@@ -36,11 +36,25 @@ export interface FileInfo {
   download_url: string
 }
 
+export type RecipeToolKind = 'formula' | 'sql' | 'python'
+export type RecipeInputKind = 'table' | 'file'
+
+export interface RecipeArtifact {
+  step_id: number
+  ref: string
+  name: string
+  path?: string
+  file_id?: string
+  filename?: string
+  download_url?: string
+}
+
 export interface FlowStep {
   id: number
   name: string
   action: string
   formula: string
+  kind?: RecipeToolKind
   formula_kind: 'builtin' | 'customer'
   description: string
   output: string
@@ -48,7 +62,7 @@ export interface FlowStep {
 }
 
 export interface RecipeFlowData {
-  inputs: { alias: string; description: string; file_pattern: string }[]
+  inputs: { alias: string; kind?: RecipeInputKind; description: string; file_pattern: string }[]
   steps: FlowStep[]
   outputs: { name: string; source: string }[]
 }
@@ -70,10 +84,10 @@ export interface RecipeBrief {
   customer_id: string | null
   conversation_id: string | null
   inputs: string[]
-  input_patterns: { alias: string; file_pattern: string; description: string }[]
+  input_patterns: { alias: string; kind?: RecipeInputKind; file_pattern: string; description: string }[]
   outputs: string[]
   step_count: number
-  steps: { id: number; name: string; formula: string; formula_kind: string; description: string }[]
+  steps: { id: number; name: string; formula: string; kind?: RecipeToolKind; formula_kind: string; description: string }[]
   verification: Verification | null
   last_run: { run_id: string; status: string } | null
   created_by: string
@@ -88,6 +102,7 @@ export interface RecipeStepJSON {
   name: string
   action: string
   formula: string
+  kind?: RecipeToolKind
   formula_kind: 'builtin' | 'customer'
   params: Record<string, unknown>
   output: string
@@ -108,6 +123,7 @@ export interface RecipeJSON {
   customer_id: string | null
   inputs: {
     alias: string
+    kind?: RecipeInputKind
     description: string
     file_pattern: string
     sheet: string | null
@@ -174,7 +190,7 @@ export interface RunBrief {
 
 export interface RunDetail extends RunBrief {
   steps: StepReport[]
-  validation: Record<string, unknown> & { checks?: ValidationCheck[]; summary?: string; status?: string }
+  validation: Record<string, unknown> & { checks?: ValidationCheck[]; summary?: string; status?: string; files?: RecipeArtifact[] }
   verification_detail: Record<string, unknown>
 }
 
@@ -340,6 +356,7 @@ export interface StepReport {
   step_id: number
   name: string
   formula: string
+  kind?: RecipeToolKind
   formula_name: string
   formula_kind?: string
   description: string
@@ -355,6 +372,11 @@ export interface StepReport {
   preview?: { columns: string[]; rows: unknown[][]; total: number }
   sql?: string
   params?: Record<string, unknown>
+  stdout?: string
+  stderr?: string
+  checks?: { message: string; ok: boolean }[]
+  result?: Record<string, unknown>
+  output_files?: RecipeArtifact[]
   error?: string
 }
 
@@ -400,7 +422,8 @@ export interface LLMConfig {
   base_url: string
   model: string
   thinking_enabled: boolean
+  thinking_supported: boolean
   key_hint: string
   default_model: string
-  providers: { id: string; name: string; base_url: string; models: string[] }[]
+  providers: { id: string; name: string; base_url: string; models: string[]; thinking_models?: string[] }[]
 }

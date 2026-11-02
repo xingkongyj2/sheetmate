@@ -53,9 +53,9 @@ const flow = computed(() => {
   if (props.progress.flow) return props.progress.flow
   if (!props.progress.steps.length) return null
   return {
-    inputs: props.progress.inputs.map((i) => ({ alias: i.alias, description: i.filename, file_pattern: '' })),
+    inputs: props.progress.inputs.map((i) => ({ alias: i.alias, kind: i.kind, description: i.filename, file_pattern: '' })),
     steps: props.progress.steps.map((s) => ({
-      id: s.step_id, name: s.name, action: '', formula: s.formula, formula_kind: s.formula_kind as 'builtin' | 'customer',
+      id: s.step_id, name: s.name, action: '', formula: s.formula, kind: s.kind, formula_kind: s.formula_kind as 'builtin' | 'customer',
       description: s.description, output: s.output, inputs: [],
     })),
     outputs: (props.progress.outputs ?? []).map((o) => ({ name: o.sheet, source: '' })),
@@ -195,6 +195,8 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
       :step-id="selected.step_id"
       :name="selected.name"
       :formula-name="selected.formula_name"
+      :formula="selected.formula"
+      :kind="selected.kind"
       :formula-kind="selected.formula_kind"
       :description="selected.description"
       :explanation="recipeStep(selected.step_id)?.explanation"

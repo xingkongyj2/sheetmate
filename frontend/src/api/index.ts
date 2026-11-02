@@ -157,7 +157,7 @@ export const recipeApi = {
     (await http.post<{ recipe: RecipeBrief }>(`/recipes/${id}/status`, { status })).data.recipe,
   remove: async (id: string) => http.delete(`/recipes/${id}`),
   match: async (id: string, fileIds: string[]) =>
-    (await http.post<{ inputs: { alias: string; description: string; file_pattern: string; required_columns: string[]; match: { key: string; score: number; filename: string; sheet: string } | null }[]; candidates: { key: string; filename: string; sheet: string; rows: number }[] }>(
+    (await http.post<{ inputs: { alias: string; kind?: 'table' | 'file'; description: string; file_pattern: string; required_columns: string[]; match: { key: string; score: number; filename: string; sheet: string | null } | null }[]; candidates: { key: string; kind?: 'table' | 'file'; filename: string; sheet: string | null; rows: number }[] }>(
       `/recipes/${id}/match`, { file_ids: fileIds })).data,
   run: (id: string, body: { file_ids: string[]; inputs?: Record<string, string>; allow_repair?: boolean }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/recipes/${id}/run`, body, onEvent),

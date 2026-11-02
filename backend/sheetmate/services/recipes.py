@@ -144,11 +144,11 @@ def recipe_brief(record: RecipeRecord) -> dict[str, Any]:
         "customer_id": record.customer_id,
         "conversation_id": record.conversation_id,
         "inputs": [i.get("alias") for i in body.get("inputs", [])],
-        "input_patterns": [{"alias": i.get("alias"), "file_pattern": i.get("file_pattern"), "description": i.get("description")}
+        "input_patterns": [{"alias": i.get("alias"), "kind": i.get("kind", "table"), "file_pattern": i.get("file_pattern"), "description": i.get("description")}
                            for i in body.get("inputs", [])],
         "outputs": [o.get("name") for o in body.get("output_spec", [])],
         "step_count": len(steps),
-        "steps": [{"id": s.get("id"), "name": s.get("name"), "formula": s.get("formula"), "formula_kind": s.get("formula_kind"),
+        "steps": [{"id": s.get("id"), "name": s.get("name"), "kind": s.get("kind") or ("sql" if s.get("formula") == "custom_sql" else "python" if s.get("formula") == "python_script" else "formula"), "formula": s.get("formula"), "formula_kind": s.get("formula_kind"),
                    "description": s.get("description")} for s in steps],
         "verification": meta.get("verification"),
         "last_run": meta.get("last_run"),

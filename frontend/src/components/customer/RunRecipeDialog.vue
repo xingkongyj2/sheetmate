@@ -34,17 +34,17 @@ const matching = ref(false)
 const match = ref<Awaited<ReturnType<typeof recipeApi.match>> | null>(null)
 const mapping = ref<Record<string, string>>({})
 const progress = reactive<RecipeProgress>(newProgress('replay'))
-const file = ref<FileArtifact | null>(null)
+const outputFiles = ref<FileArtifact[]>([])
 const running = ref(false)
 const selected = ref<StepState | null>(null)
 const preview = ref<FileInfo | null>(null)
 const loadingPreview = ref(false)
 
-async function previewOutput() {
-  if (!file.value || loadingPreview.value) return
+async function previewOutput(file: FileArtifact) {
+  if (loadingPreview.value) return
   loadingPreview.value = true
   try {
-    preview.value = await fileApi.get(file.value.file_id)
+    preview.value = await fileApi.get(file.file_id)
   } catch (err) {
     toast.error(errorText(err))
   } finally {
@@ -90,10 +90,13 @@ async function run() {
   stage.value = 'run'
   running.value = true
   Object.assign(progress, newProgress('replay'))
+  outputFiles.value = []
   const fileIds = [...new Set(Object.values(mapping.value).filter(Boolean).map((k) => k.split('::')[0]))]
   const handle = recipeApi.run(recipeId.value, { file_ids: fileIds, inputs: mapping.value, allow_repair: allowRepair.value }, (e) => {
     if (e.type.startsWith('recipe_')) applyRecipeEvent(progress, e)
-    else if (e.type === 'file') file.value = { file_id: e.file_id, filename: e.filename, download_url: e.download_url, sheets: e.sheets }
+    else if (e.type === 'file') {
+      if (!outputFiles.value.some((file) => file.file_id === e.file_id)) outputFiles.value.push({ file_id: e.file_id, filename: e.filename, download_url: e.download_url, sheets: e.sheets })
+    }
     else if (e.type === 'error') progress.failed = e.content
   })
   try {
@@ -153,7 +156,7 @@ const flow = computed(() => recipe.value?.flow as never)
 
     <!-- 2. 匹配输入 -->
     <div v-else-if="stage === 'match' && match" class="space-y-4">
-      <p class="text-sm text-mute">已经按列名、文件名自动匹配，确认每个输入对应的文件（列名不同也没关系，会按客户的字段映射自动统一）：</p>
+      <p class="text-sm text-mute">已按输入要求自动匹配。数据表按列名和文件名匹配，完整文件按文件名匹配；可以调整对应关系：</p>
       <div v-for="inp in match.inputs" :key="inp.alias" class="rounded-2xl border border-line p-3">
         <div class="flex items-center gap-2">
           <span class="font-medium">{{ inp.alias }}</span>
@@ -163,9 +166,9 @@ const flow = computed(() => recipe.value?.flow as never)
         </div>
         <select v-model="mapping[inp.alias]" class="select select-sm mt-2 w-full rounded-xl">
           <option value="">— 请选择 —</option>
-          <option v-for="c in match.candidates" :key="c.key" :value="c.key">{{ c.filename }} · {{ c.sheet }}（{{ c.rows }} 行）</option>
+          <option v-for="c in match.candidates.filter((candidate) => (candidate.kind ?? 'table') === (inp.kind ?? 'table'))" :key="c.key" :value="c.key">{{ c.filename }}{{ c.kind === 'file' ? '（完整文件）' : ` · ${c.sheet}（${c.rows} 行）` }}</option>
         </select>
-        <div class="mt-1.5 text-[11px] text-faint">必需的列：{{ inp.required_columns.join('、') || '无' }}</div>
+        <div v-if="inp.kind !== 'file'" class="mt-1.5 text-[11px] text-faint">必需的列：{{ inp.required_columns.join('、') || '无' }}</div>
       </div>
       <label class="flex items-center gap-2 text-sm">
         <input v-model="allowRepair" type="checkbox" class="toggle toggle-sm" />
@@ -181,7 +184,7 @@ const flow = computed(() => recipe.value?.flow as never)
       </div>
       <div v-if="progress.inputs.length" class="space-y-1">
         <div v-for="i in progress.inputs" :key="i.alias" class="flex flex-wrap items-center gap-1.5 text-xs text-mute">
-          <FileSpreadsheet class="size-3.5" /><b class="font-medium text-ink">{{ i.alias }}</b> ← {{ i.filename }} · {{ i.sheet }}（{{ i.rows }} 行）
+          <FileSpreadsheet class="size-3.5" /><b class="font-medium text-ink">{{ i.alias }}</b> ← {{ i.filename }}<template v-if="i.kind !== 'file'"> · {{ i.sheet }}（{{ i.rows }} 行）</template><span v-else>（完整文件）</span>
           <span v-for="(std, raw) in i.renames" :key="raw" class="rounded bg-info/10 px-1.5 text-info">{{ raw }} → {{ std }}</span>
           <span v-for="w in i.warnings" :key="w" class="rounded bg-warning/10 px-1.5 text-[#8a5a00]">{{ w }}</span>
         </div>
@@ -190,6 +193,14 @@ const flow = computed(() => recipe.value?.flow as never)
       <p v-if="progress.validation" class="text-xs text-mute">运行校验：{{ progress.validation.summary }}</p>
       <div v-if="progress.escalation || progress.failed" class="whitespace-pre-wrap rounded-xl bg-error/5 px-3 py-2.5 text-[13px] leading-relaxed text-error">{{ progress.escalation || progress.failed }}</div>
       <p v-else-if="progress.runSummary" class="text-sm text-mute">{{ progress.runSummary }}</p>
+      <div v-if="outputFiles.length" class="space-y-2">
+        <div v-for="file in outputFiles" :key="file.file_id" class="flex items-center gap-2 rounded-xl border border-line px-3 py-2">
+          <FileSpreadsheet class="size-4 shrink-0 text-fun-green" />
+          <span class="min-w-0 flex-1 truncate text-sm">{{ file.filename }}</span>
+          <button class="btn-text text-xs" :disabled="loadingPreview" @click="previewOutput(file)"><Eye class="size-3.5" />查看</button>
+          <a :href="file.download_url" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
+        </div>
+      </div>
       <div v-if="progress.saved" class="rounded-xl bg-fun-purple/10 px-3 py-2 text-xs text-fun-purple">流程已保存为 v{{ progress.saved.version }}（草稿）。</div>
     </div>
 
@@ -205,10 +216,6 @@ const flow = computed(() => recipe.value?.flow as never)
         <button class="btn-ink" :disabled="Object.values(mapping).some((v) => !v)" @click="run"><Play class="size-4" />开始执行</button>
       </template>
       <template v-else>
-        <button v-if="file" class="btn-line" :disabled="loadingPreview" @click="previewOutput">
-          <LoaderCircle v-if="loadingPreview" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果
-        </button>
-        <a v-if="file" :href="file.download_url" class="btn-ink"><Download class="size-4" />下载 {{ file.filename }}</a>
         <button class="btn-line" :disabled="running" @click="emit('close')">{{ running ? '执行中…' : '完成' }}</button>
       </template>
     </template>
@@ -218,6 +225,8 @@ const flow = computed(() => recipe.value?.flow as never)
       :step-id="selected.step_id"
       :name="selected.name"
       :formula-name="selected.formula_name"
+      :formula="selected.formula"
+      :kind="selected.kind"
       :formula-kind="selected.formula_kind"
       :description="selected.description"
       :status="selected.status"

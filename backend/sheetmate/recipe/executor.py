@@ -14,11 +14,14 @@ run() 是异步生成器，边执行边产出事件（前端右侧「执行明�
 from __future__ import annotations
 
 import asyncio
+import shutil
+import threading
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import aclosing, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from tempfile import mkdtemp
 from typing import Any, Protocol
 
 import pandas as pd
@@ -29,11 +32,12 @@ from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.profile import dtype_label
 from sheetmate.engine.reader import ReadError, SheetData, read_sheet, read_workbook
 from sheetmate.engine.runner import StepOutcome, apply_formula
-from sheetmate.engine.sqlutil import frame_to_text, quote_ident
+from sheetmate.engine.script_runner import ScriptResult, execute_script
+from sheetmate.engine.sqlutil import frame_rows, frame_to_text, quote_ident
 from sheetmate.engine.template_writer import TemplatePreservationError, TemplateSource, write_like_original
 from sheetmate.engine.workspace import Workspace
 from sheetmate.engine.writer import SheetSpec, write_excel
-from sheetmate.recipe.schema import Recipe, RecipeInput, RecipeStep, step_table_refs
+from sheetmate.recipe.schema import OutputSheet, Recipe, RecipeInput, RecipeStep, ValidationRule, step_file_refs, step_output_tables, step_table_refs
 from sheetmate.recipe.templating import plan_outputs
 from sheetmate.recipe.validator import validate_run
 
@@ -92,6 +96,7 @@ class RecipeRunner:
         repairer: StepRepairer | None = None,
         max_repair: int = 3,
         run_id: str = "",
+        artifact_dir: Path | None = None,
     ):
         self.recipe = recipe
         self.library = library
@@ -106,6 +111,11 @@ class RecipeRunner:
         self.sources: dict[str, TemplateSource] = {}
         self._files: FileCopies | None = None
         self._input_paths: set[Path] = set()
+        self._file_inputs: dict[str, Path] = {}
+        self._artifact_dir = artifact_dir or (ws.path.parent / f"{ws.path.stem}_files" if ws.path is not None else None)
+        self._cancel_event = threading.Event()
+        self._script_results: dict[int, ScriptResult] = {}
+        self._pending_python: dict[int, dict[str, Any]] = {}
         self.report: dict[str, Any] = {
             "run_id": run_id,
             "recipe_id": recipe.id,
@@ -115,7 +125,11 @@ class RecipeRunner:
             "inputs": [],
             "steps": [],
             "outputs": [],
+            "artifacts": [],  # 包含中间文件，供文件链和断点重跑使用
+            "files": [],  # 只有全部步骤成功才交付脚本文件
             "validation": None,
+            "validation_checkpoints": [],
+            "checkpoint_warnings": [],
             "error": "",
             "escalation": "",
             "output_style": "",
@@ -138,6 +152,8 @@ class RecipeRunner:
         output_path: Path | None = None,
         history: list[dict[str, Any]] | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
+        self._cancel_event.clear()
+        self.report["files"] = []
         with self._working_files():
             async with aclosing(self._run(sources, start_step=start_step, stop_step=stop_step,
                                           output_path=output_path, history=history)) as stream:
@@ -162,8 +178,19 @@ class RecipeRunner:
                 self._input_paths.update(source.path.resolve() for source in sources.values() if source.path is not None)
                 for event in await self._in_worker(self._load_inputs, sources):
                     yield event
+            # 断点之后重跑仍须验证已保留的上游结果，不能绕过其原有业务规则。
+            checkpoint_ok = True
+            for checkpoint in self._checkpoints():
+                if checkpoint["after_step"] >= start_step:
+                    continue
+                validation = await self._in_worker(self._validate_checkpoint, checkpoint, history)
+                yield {"type": "recipe_validation", "report": validation, "checkpoint": True,
+                       "after_step": checkpoint["after_step"]}
+                if not self._record_checkpoint(checkpoint, validation):
+                    checkpoint_ok = False
+                    break
             steps = [s for s in self.recipe.ordered_steps() if s.id >= start_step and (stop_step is None or s.id <= stop_step)]
-            for step in steps:
+            for step in steps if checkpoint_ok else []:
                 ok = True
                 async for event in self._run_step(step):
                     if event.get("type") == "_step_failed":
@@ -174,16 +201,37 @@ class RecipeRunner:
                     self.report["status"] = "escalated"
                     self.report["failed_stage"] = "step"
                     break
+                for checkpoint in self._checkpoints():
+                    if checkpoint["after_step"] != step.id:
+                        continue
+                    validation = await self._in_worker(self._validate_checkpoint, checkpoint, history)
+                    yield {"type": "recipe_validation", "report": validation, "checkpoint": True,
+                           "after_step": checkpoint["after_step"]}
+                    if not self._record_checkpoint(checkpoint, validation):
+                        checkpoint_ok = False
+                        break
+                if not checkpoint_ok:
+                    break
             finished_all = stop_step is None or stop_step >= max((s.id for s in self.recipe.ordered_steps()), default=0)
             if self.report["status"] == "running" and finished_all and output_path is not None:
                 outputs = await self._in_worker(self.collect_outputs)
-                written = await self._in_worker(self.write_outputs, output_path, outputs)
+                written = await self._in_worker(self.write_outputs, output_path, outputs) if outputs else []
                 self.report["outputs"] = written
+                if not outputs:
+                    deliveries = self._delivery_files()
+                    if not deliveries:
+                        raise ValueError("没有可以输出的结果：流程没有生成结果表或交付文件")
+                    self.output_path = Path(deliveries[-1]["path"])
+                    self.report["output_style"] = "script"
+                if self.output_path is None:
+                    raise ValueError("没有可以输出的结果：流程没有生成结果表或交付文件")
                 yield {"type": "recipe_output", "path": str(self.output_path), "sheets": written}
-                validation = await self._in_worker(validate_run, self.recipe, self.input_frames or self._input_frames(), outputs, history)
+                validation = await self._in_worker(self._validate_outputs, outputs, history)
                 self.report["validation"] = validation
                 yield {"type": "recipe_validation", "report": validation}
             if self.report["status"] == "running":
+                self.report["output_warnings"] = list(dict.fromkeys(
+                    self.report["output_warnings"] + self.report["checkpoint_warnings"]))
                 failed = self.report["validation"] and self.report["validation"]["status"] == "fail"
                 if failed:
                     self.report["failed_stage"] = "validation"
@@ -192,6 +240,14 @@ class RecipeRunner:
                     self.report["validation"] and self.report["validation"]["status"] == "warn"
                 )
                 self.report["status"] = "failed" if failed else "warning" if warned else "success"
+            if self.report["status"] in {"success", "warning"} and finished_all:
+                self.report["files"] = self._delivery_files()
+        except asyncio.CancelledError:
+            self._cancel_event.set()
+            for step_id in list(self._pending_python):
+                self._discard_python(step_id)
+            self.report.update(status="cancelled", files=[], failed_stage="step", error="流程执行已停止")
+            raise
         except (RecipeInputError, ReadError) as exc:
             self.report["status"] = "failed"
             self.report["failed_stage"] = "input"
@@ -225,6 +281,15 @@ class RecipeRunner:
         sheet: SheetData | None = None
         if src.path is not None and self._files is not None:
             src = replace(src, path=self._files.file_copy(src.path))
+        if src.path is not None:
+            self._file_inputs[inp.alias] = Path(src.path)
+        original_path = self._files.original_path(src.path) if src.path is not None and self._files is not None else src.path
+        file_info = {"kind": inp.kind, "file_id": src.file_id, "path": str(original_path) if original_path is not None else ""}
+        if inp.kind == "file":
+            if src.path is None or not src.path.is_file():
+                raise RecipeInputError(f"输入「{inp.alias}」没有提供可读取的文件")
+            return {"alias": inp.alias, "filename": src.filename or src.path.name, "sheet": "", "rows": 0,
+                    "columns": [], "renames": {}, "warnings": [], "source": None, **file_info}
         if src.df is not None:
             df, sheet_name = src.df.copy(), src.sheet or inp.sheet or ""
         else:
@@ -260,7 +325,7 @@ class RecipeRunner:
         source = self._record_source(inp, src, sheet_name, df, sheet)
         return {"alias": inp.alias, "filename": src.filename, "sheet": sheet_name, "rows": int(len(df)),
                 "columns": [str(c) for c in df.columns], "renames": renames, "warnings": warnings,
-                "source": source.to_persist() if source else None}
+                "source": source.to_persist() if source else None, **file_info}
 
     def _record_source(self, inp: RecipeInput, src: InputSource, sheet_name: str, df: pd.DataFrame,
                        sheet: SheetData | None) -> TemplateSource | None:
@@ -290,12 +355,40 @@ class RecipeRunner:
         """从断点重跑时没有重新读输入文件：用上次运行记下的位置信息恢复（文件路径靠 file_id 再查）。"""
         for info in infos:
             data = info.get("source")
+            file_id = info.get("file_id") or (data or {}).get("file_id")
+            path = path_of(file_id) if file_id else None
+            if path is None and info.get("path"):
+                candidate = Path(info["path"])
+                path = candidate if candidate.is_file() else None
+            if path is not None:
+                self._file_inputs[info["alias"]] = path
+                self._input_paths.add(path.resolve())
             if not data or not data.get("file_id"):
                 continue
-            path = path_of(data["file_id"])
             if path is not None:
                 self.sources[info["alias"]] = TemplateSource.from_persist(info["alias"], data, path)
                 self._input_paths.add(path.resolve())
+
+    def restore_artifacts(self, artifacts: list[dict[str, Any]]) -> None:
+        """恢复已成功步骤的文件；服务层先按 start_step 过滤掉需要重跑的步骤。"""
+        self.report["artifacts"] = [dict(item) for item in artifacts]
+        available = {item["ref"]: Path(item["path"]) for item in artifacts}
+        for step in self.recipe.ordered_steps():
+            for target, spec in step.params.get("file_tables", {}).items():
+                path = available.get(spec["ref"])
+                if path is not None and path.is_file() and self.ws.exists(target):
+                    sheet = read_sheet(path, spec.get("sheet"), header_hint=spec.get("header"))
+                    self._record_file_table_source(target, path, sheet)
+
+    def _delivery_files(self) -> list[dict[str, Any]]:
+        steps = self.recipe.ordered_steps()
+        consumed = {ref for step in steps for ref in step_file_refs(step)}
+        for index, step in enumerate(steps):
+            downstream = {ref for later in steps[index + 1:] for ref in step_table_refs(later, self.library)}
+            consumed.update(spec["ref"] for table, spec in step.params.get("file_tables", {}).items() if table in downstream)
+        intermediate_exports = {step.id for step in steps[:-1] if step.params.get("workbook_export") is not None}
+        return [dict(item) for item in self.report["artifacts"]
+                if item["ref"] not in consumed and item["step_id"] not in intermediate_exports]
 
     @contextmanager
     def _working_files(self) -> Iterator[FileCopies]:
@@ -309,6 +402,7 @@ class RecipeRunner:
             finally:
                 self.sources = {alias: replace(source, path=files.original_path(source.path))
                                 for alias, source in self.sources.items()}
+                self._file_inputs = {alias: files.original_path(path) for alias, path in self._file_inputs.items()}
                 self._files = None
 
     def _copy_templates(self) -> None:
@@ -316,12 +410,16 @@ class RecipeRunner:
         for alias, source in list(self.sources.items()):
             self._input_paths.add(self._files.original_path(source.path).resolve())
             self.sources[alias] = replace(source, path=self._files.file_copy(source.path))
+        for alias, path in list(self._file_inputs.items()):
+            self._input_paths.add(self._files.original_path(path).resolve())
+            self._file_inputs[alias] = self._files.file_copy(path)
 
     async def _in_worker(self, action: Callable[..., Any], *args: Any) -> Any:
         worker = asyncio.create_task(asyncio.to_thread(action, *args))
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
+            self._cancel_event.set()
             self.ws.interrupt()
             try:
                 await worker
@@ -374,7 +472,7 @@ class RecipeRunner:
     async def _run_step(self, step: RecipeStep) -> AsyncIterator[dict[str, Any]]:
         formula_name = self._formula_name(step.formula)
         yield {"type": "recipe_step_start", "step_id": step.id, "name": step.name, "formula": step.formula,
-               "formula_name": formula_name, "description": step.description}
+               "kind": step.kind, "formula_name": formula_name, "description": step.description}
         current = step
         attempts: list[dict[str, Any]] = []
         started = time.perf_counter()
@@ -387,6 +485,8 @@ class RecipeRunner:
                     raise _AssertionFailure([a["message"] for a in failed])
                 break
             except Exception as exc:  # 任何错误都进入修复流程（参数错、SQL 错、断言不通过…）
+                if current.kind == "python":
+                    await self._in_worker(self._discard_python, current.id)
                 error = str(exc) or type(exc).__name__
                 attempts.append({"attempt": len(attempts) + 1, "formula": current.formula, "params": current.params, "error": error})
                 yield {"type": "recipe_step_error", "step_id": step.id, "error": error, "attempt": len(attempts)}
@@ -409,6 +509,8 @@ class RecipeRunner:
                        "explanation": fixed.explanation, "formula": fixed.formula, "params": fixed.params}
                 current = fixed
 
+        if current.kind == "python":
+            self._commit_python(current.id)
         repaired = current is not step
         if repaired:
             self._replace_step(step, current)
@@ -419,13 +521,243 @@ class RecipeRunner:
         yield {"type": "recipe_step_done", **item}
 
     def _execute(self, step: RecipeStep) -> StepOutcome:
+        if step.kind == "python":
+            return self._execute_python(step)
         return apply_formula(
             self.ws, self.library, step.formula, step.params, step.output,
             label=step.name, created_by=f"step_{step.id}", description=step.description,
         )
 
+    def _execute_python(self, step: RecipeStep) -> StepOutcome:
+        """执行已保存脚本；成功后先暂存，断言通过才把文件加入可恢复的产物清单。"""
+        refs = step_table_refs(step, self.library)
+        frames = {name: self.ws.df(name) for name in refs}
+        bindings = step.params.get("table_bindings", {})
+        bound_sources = set(bindings.values())
+        tables = {name: frames[name] for name in step.params.get("input_tables", []) if name not in bound_sources}
+        tables.update({alias: frames[name] for alias, name in bindings.items()})
+        available = {**self._file_inputs, **{item["ref"]: Path(item["path"]) for item in self.report["artifacts"]}}
+        files: dict[str, Path] = {}
+        for alias, ref in step.params.get("input_files", {}).items():
+            path = available.get(ref)
+            if path is None or not path.is_file():
+                raise RecipeInputError(f"脚本输入文件「{ref}」不可用，请从产生该文件的步骤重新运行")
+            files[alias] = path
+        if self._artifact_dir is None:
+            self._artifact_dir = Path(mkdtemp(prefix="sheetmate_recipe_files_"))
+        self._artifact_dir.mkdir(parents=True, exist_ok=True)
+        directory = Path(mkdtemp(prefix=f"step_{step.id}_", dir=self._artifact_dir))
+        pending = {"directory": directory, "tables": [], "backups": {}, "sources": {}, "artifacts": []}
+        self._pending_python[step.id] = pending
+        try:
+            if step.params.get("workbook_export") is not None:
+                result = self._export_workbook(step, directory)
+            else:
+                result = execute_script(step.params.get("code", ""), tables, files, directory, cancel_event=self._cancel_event)
+            self._script_results[step.id] = result
+            if not result.ok:
+                raise ValueError(result.error or "Python 脚本执行失败")
+            mapping = step.params.get("output_tables")
+            if mapping is None:
+                if len(result.result_tables) > 1:
+                    raise ValueError("脚本返回多个结果表时必须保存 output_tables 映射")
+                mapping = {name: step.output for name in result.result_tables}
+            if not isinstance(mapping, dict) or any(not isinstance(name, str) or not name.strip() for name in mapping.values()):
+                raise ValueError("脚本 output_tables 映射无效")
+            if len(set(mapping.values())) != len(mapping):
+                raise ValueError("脚本输出表名不能重复")
+            missing = set(mapping) - set(result.result_tables)
+            if missing:
+                raise ValueError(f"脚本没有返回流程要求的结果表：{sorted(missing)}")
+            pending["artifacts"] = [{"step_id": step.id, "ref": f"{step.output}/{path.name}",
+                                      "name": path.name, "path": str(path.resolve())} for path in result.output_files]
+            available.update({item["ref"]: Path(item["path"]) for item in pending["artifacts"]})
+            outputs = {target: result.result_tables[name] for name, target in mapping.items()}
+            file_sources: dict[str, tuple[Path, SheetData]] = {}
+            for target, source in step.params.get("file_tables", {}).items():
+                if target in outputs:
+                    raise ValueError(f"文件读取表「{target}」与脚本结果表重名")
+                path = available.get(source.get("ref"))
+                if path is None or not path.is_file():
+                    raise ValueError(f"脚本没有生成后续步骤要求的文件：{source.get('ref')}")
+                sheet = read_sheet(path, source.get("sheet"), header_hint=source.get("header"))
+                outputs[target] = sheet.df
+                file_sources[target] = (path, sheet)
+            input_aliases = set(self.recipe.input_aliases())
+            if input_aliases & set(outputs):
+                raise ValueError("脚本输出不能覆盖流程输入表")
+            for name, frame in outputs.items():
+                if self.ws.exists(name):
+                    pending["backups"][name] = (self.ws.df(name), self.ws.require(name).to_dict())
+                pending["sources"][name] = self.sources.get(name)
+                pending["tables"].append(name)
+                self.ws.put_dataframe(name, frame, label=name, source="computed", role="result",
+                                      created_by=f"step_{step.id}", description=step.description,
+                                      step={"kind": "python", "formula": "python_script", "params": step.params})
+                if name in file_sources:
+                    path, sheet = file_sources[name]
+                    self._record_file_table_source(name, path, sheet)
+                else:
+                    self.sources.pop(name, None)
+            primary = step.output if step.output in outputs else next(iter(outputs), None)
+            primary_frame = outputs.get(primary) if primary is not None else None
+            preview = ({"columns": self.ws.require(primary).column_names,
+                        "rows": frame_rows(self.ws.df(primary, limit=20)), "total": len(primary_frame)}
+                       if primary is not None else {})
+            return StepOutcome(
+                formula="python_script", formula_kind="builtin", output=primary or step.output, params=step.params,
+                sql="", inputs=refs, rows_in={name: len(frame) for name, frame in frames.items()},
+                rows_out=len(primary_frame) if primary_frame is not None else 0,
+                columns_out=[str(c) for c in primary_frame.columns] if primary_frame is not None else [],
+                description=step.description, notes={"output_tables": list(outputs), "file_only": not outputs},
+                duration_ms=result.duration_ms, preview=preview,
+            )
+        except BaseException:
+            self._discard_python(step.id)
+            raise
+
+    def _export_workbook(self, step: RecipeStep, directory: Path) -> ScriptResult:
+        """物化保存流程中的工作簿快照，沿用普通回放的原表样式写出器。"""
+        export = step.params["workbook_export"]
+        filename = export.get("filename", "")
+        if not isinstance(filename, str) or not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
+            raise ValueError("工作簿导出的 filename 必须是文件名")
+        original_recipe, original_path = self.recipe, self.output_path
+        original_style = self.report["output_style"]
+        original_warnings = list(self.report["output_warnings"])
+        try:
+            specs = [OutputSheet.model_validate(spec) for spec in export["output_spec"]]
+            self.recipe = self.recipe.model_copy(update={"output_spec": specs})
+            outputs = self.collect_outputs()
+            if len(outputs) != len(specs):
+                raise ValueError("工作簿快照的部分来源表不存在")
+            self.write_outputs(directory / filename, outputs)
+            assert self.output_path is not None
+            return ScriptResult(ok=True, status="success", output_files=[self.output_path],
+                                checks=[{"ok": True, "message": "工作簿快照已按保存的输出规则生成"}],
+                                result={"warnings": list(self.report["output_warnings"])})
+        finally:
+            self.recipe, self.output_path = original_recipe, original_path
+            self.report["output_style"] = original_style
+            self.report["output_warnings"] = original_warnings
+
+    def _discard_python(self, step_id: int) -> None:
+        pending = self._pending_python.pop(step_id, None)
+        if pending is None:
+            return
+        for name in pending["tables"]:
+            self.ws.drop(name)
+            if pending["sources"][name] is None:
+                self.sources.pop(name, None)
+            else:
+                self.sources[name] = pending["sources"][name]
+            if name in pending["backups"]:
+                frame, metadata = pending["backups"][name]
+                self.ws.put_dataframe(name, frame, **{key: value for key, value in metadata.items()
+                                                      if key not in {"name", "columns", "rows"}})
+        shutil.rmtree(pending["directory"], ignore_errors=True)
+
+    def _record_file_table_source(self, target: str, path: Path, sheet: SheetData) -> None:
+        """文件回表仍保留脚本工作簿的模板位置，后续公式和 SQL 可继续沿用其排版。"""
+        self._record_source(RecipeInput(alias=target), InputSource(target, path=path), sheet.name, sheet.df, sheet)
+
+    def _commit_python(self, step_id: int) -> None:
+        pending = self._pending_python.pop(step_id, None)
+        if pending is not None:
+            kept = [item for item in self.report["artifacts"] if item["step_id"] != step_id]
+            self.report["artifacts"] = kept + pending["artifacts"]
+
+    def _script_report(self, step: RecipeStep) -> dict[str, Any]:
+        result = self._script_results.get(step.id)
+        if step.kind != "python" or result is None:
+            return {}
+        return {"stdout": result.stdout, "stderr": result.stderr, "checks": result.checks, "result": result.result,
+                "output_files": [dict(item) for item in self.report["artifacts"] if item["step_id"] == step.id]}
+
+    def _validate_outputs(self, outputs: dict[str, pd.DataFrame], history: list[dict[str, Any]] | None) -> dict[str, Any]:
+        validation = validate_run(self.recipe, self.input_frames or self._input_frames(), outputs, history)
+        if outputs or not self.report["artifacts"] or self.recipe.output_spec:
+            return validation
+        # 文件脚本的交付物已经过沙箱文件检查；不能要求它额外伪造一张结果表。
+        checks = [item for item in validation["checks"] if item["rule_id"] != "auto_not_empty"]
+        paths = [Path(item["path"]) for item in self._delivery_files()]
+        valid = bool(paths) and all(path.is_file() and path.stat().st_size > 0 for path in paths)
+        checks.append({"rule_id": "auto_files_exist", "rule_type": "files_exist", "description": "脚本交付文件完整",
+                       "status": "pass" if valid else "fail", "severity": "error", "actual": len(paths),
+                       "message": "" if valid else "部分脚本交付文件不存在或为空"})
+        for step in self.report["steps"]:
+            for index, item in enumerate(step.get("checks", [])):
+                checks.append({"rule_id": f"script_{step['step_id']}_{index}", "rule_type": "script_check",
+                               "description": item["message"], "status": "pass" if item["ok"] else "fail",
+                               "severity": "error", "message": "" if item["ok"] else item["message"]})
+        return self._validation_summary(checks)
+
+    def _checkpoints(self) -> list[dict[str, Any]]:
+        checkpoints = self.recipe.metadata.get("validation_checkpoints", [])
+        if not isinstance(checkpoints, list):
+            raise ValueError("流程校验检查点格式无效")
+        for checkpoint in checkpoints:
+            if not isinstance(checkpoint, dict) or not isinstance(checkpoint.get("after_step"), int):
+                raise ValueError("流程校验检查点缺少 after_step")
+            if checkpoint["after_step"] not in {step.id for step in self.recipe.ordered_steps()}:
+                raise ValueError(f"流程校验检查点的第 {checkpoint['after_step']} 步不存在或已停用")
+        return sorted(checkpoints, key=lambda checkpoint: checkpoint["after_step"])
+
+    def _validate_checkpoint(self, checkpoint: dict[str, Any], history: list[dict[str, Any]] | None) -> dict[str, Any]:
+        specs = [OutputSheet.model_validate(value) for value in checkpoint.get("output_spec", [])]
+        rules = [ValidationRule.model_validate(value) for value in checkpoint.get("validation_rules", [])]
+        checkpoint_recipe = Recipe(name="原流程校验", output_spec=specs, validation_rules=rules)
+        inputs = {}
+        for alias in checkpoint.get("input_aliases", []):
+            if alias in self.input_frames:
+                inputs[alias] = self.input_frames[alias]
+            elif self.ws.exists(alias):
+                inputs[alias] = self.ws.df(alias)
+        outputs = {}
+        for spec in specs:
+            if self.ws.exists(spec.source):
+                frame = self.ws.df(spec.source)
+                if spec.columns:
+                    frame = frame[[column for column in spec.columns if column in frame.columns]]
+                outputs[spec.name] = frame
+        validation = validate_run(checkpoint_recipe, inputs, outputs, history)
+        if specs:
+            return validation
+        # 文件流程的完整性由沙箱与脚本 check 保证；无结果表时仅执行显式业务规则。
+        checks = [check for check in validation["checks"] if check["rule_id"] != "auto_not_empty"]
+        return self._validation_summary(checks)
+
+    @staticmethod
+    def _validation_summary(checks: list[dict[str, Any]]) -> dict[str, Any]:
+        passed = sum(item["status"] == "pass" for item in checks)
+        warnings = sum(item["status"] == "warn" for item in checks)
+        failures = sum(item["status"] == "fail" for item in checks)
+        status = "fail" if failures else "warn" if warnings else "pass"
+        summary = f"{failures} 项校验未通过，{warnings} 项警告" if failures else (
+            f"校验通过，有 {warnings} 项警告" if warnings else f"全部 {passed} 项校验通过")
+        return {"status": status, "summary": summary, "passed": passed, "warnings": warnings,
+                "failures": failures, "checks": checks}
+
+    def _record_checkpoint(self, checkpoint: dict[str, Any], validation: dict[str, Any]) -> bool:
+        after_step = checkpoint["after_step"]
+        self.report["validation_checkpoints"].append({"after_step": after_step, "report": validation})
+        self.report["checkpoint_warnings"].extend(
+            f"第 {after_step} 步后原流程校验提示：{item.get('message') or item['description']}"
+            for item in validation["checks"] if item["status"] == "warn")
+        if validation["status"] != "fail":
+            return True
+        failures = [item.get("message") or item["description"] for item in validation["checks"] if item["status"] == "fail"]
+        message = f"第 {after_step} 步后原流程校验未通过：" + "；".join(failures)
+        self.report.update(status="failed", failed_stage="checkpoint", validation=validation,
+                           files=[], error=message, escalation=message)
+        return False
+
     def _check_assertions(self, step: RecipeStep, outcome: StepOutcome) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
+        if step.kind == "python" and outcome.notes.get("file_only"):
+            if step.assertions:
+                raise ValueError("纯文件脚本不能使用表格行列断言，请在脚本内用 check(...) 校验文件内容")
+            return results
         if outcome.rows_out == 0:
             results.append({"type": "not_empty", "status": "fail", "severity": "warning", "message": "这一步的结果是空表"})
         main_rows = next(iter(outcome.rows_in.values()), 0)
@@ -475,6 +807,7 @@ class RecipeRunner:
         return {
             "step_id": step.id,
             "name": step.name,
+            "kind": step.kind,
             "formula": step.formula,
             "formula_name": self._formula_name(step.formula),
             "formula_kind": outcome.formula_kind,
@@ -493,15 +826,18 @@ class RecipeRunner:
             "preview": outcome.preview,
             "sql": outcome.sql,
             "params": step.params,
+            **self._script_report(step),
         }
 
     def _record_failure(self, original: RecipeStep, current: RecipeStep, attempts: list[dict[str, Any]], started: float) -> None:
         last = attempts[-1]["error"] if attempts else "未知错误"
         self.report["steps"].append({
             "step_id": original.id, "name": original.name, "formula": current.formula,
+            "kind": current.kind,
             "formula_name": self._formula_name(current.formula), "description": original.description,
             "status": "failed", "output": original.output, "error": last, "attempts": attempts,
             "duration_ms": int((time.perf_counter() - started) * 1000), "params": current.params,
+            **self._script_report(current),
         })
         self.report["error"] = f"第 {original.id} 步「{original.name}」失败：{last}"
         self.report["escalation"] = escalation_report(original, attempts, self.max_repair, self.repairer is not None)
@@ -510,7 +846,7 @@ class RecipeRunner:
         fixed.id, fixed.output, fixed.name = original.id, original.output, original.name
         fixed.assertions = fixed.assertions or original.assertions
         fixed.confidence = round(min(original.confidence, 0.95) * 0.85, 2)
-        fixed.formula_kind = self.library.resolve(fixed.formula).kind
+        fixed.formula_kind = "builtin" if fixed.kind == "python" else self.library.resolve(fixed.formula).kind
         self.recipe.steps = [fixed if s.id == original.id else s for s in self.recipe.steps]
         self.recipe_changed = True
 
@@ -536,9 +872,14 @@ class RecipeRunner:
         outputs: dict[str, pd.DataFrame] = {}
         specs = self.recipe.output_spec
         if not specs:
+            if self.recipe.metadata.get("explicit_outputs"):
+                return outputs
             steps = self.recipe.ordered_steps()
-            if steps and self.ws.exists(steps[-1].output):
-                outputs["结果"] = self.ws.df(steps[-1].output)
+            if steps:
+                names = step_output_tables(steps[-1])
+                for name in names:
+                    if self.ws.exists(name):
+                        outputs["结果" if len(names) == 1 else name] = self.ws.df(name)
             return outputs
         for spec in specs:
             if not self.ws.exists(spec.source):
@@ -603,6 +944,8 @@ class RecipeRunner:
     # ------------------------------------------------------------------
 
     def _formula_name(self, formula_id: str) -> str:
+        if formula_id == "python_script":
+            return "Python 脚本"
         try:
             return self.library.resolve(formula_id).spec.name
         except ValueError:
@@ -612,7 +955,7 @@ class RecipeRunner:
         return {
             "id": self.recipe.id, "version": self.recipe.version, "name": self.recipe.name,
             "steps": [
-                {"id": s.id, "name": s.name, "formula": s.formula, "formula_name": self._formula_name(s.formula),
+                {"id": s.id, "name": s.name, "kind": s.kind, "formula": s.formula, "formula_name": self._formula_name(s.formula),
                  "formula_kind": s.formula_kind, "description": s.description, "output": s.output}
                 for s in self.recipe.ordered_steps()
             ],
@@ -629,6 +972,7 @@ class RecipeRunner:
         for out in r["outputs"]:
             cols = out.get("columns") or []
             parts.append(f"输出「{out['sheet']}」{out['rows']} 行 × {len(cols)} 列" + (f"（{'、'.join(cols)}）" if cols else ""))
+        parts.extend(f"输出文件「{item['name']}」" for item in r.get("files", []))
         if r["validation"]:
             parts.append(r["validation"]["summary"])
         return "，".join(parts)

@@ -78,6 +78,7 @@ class ToolHost(Protocol):
     def list_recipes(self, *, include_deprecated: bool = False) -> list[dict[str, Any]]: ...
     def get_recipe(self, recipe_id: str) -> Recipe | None: ...
     def latest_conversation_recipe(self) -> Recipe | None: ...
+    def executed_recipe(self, run_id: str) -> Recipe | None: ...
     def store_recipe(self, recipe: Recipe, *, note: str = "") -> dict[str, Any]: ...
     def request_recipe_deletion(self, recipe_ids: list[str]) -> dict[str, Any]: ...
     def delete_recipe(self, recipe_id: str) -> dict[str, Any]: ...
@@ -405,12 +406,20 @@ def _recipe_input(ctx: AgentContext, table: str) -> TableInfo:
 
 
 def _learn_context(ctx: AgentContext, requirement: str, inputs: dict[str, str], expected_tables: list[str],
-                   recipe_name: str | None = None, mode: str = "learn") -> LearnContext:
+                   recipe_name: str | None = None, mode: str = "learn", file_inputs: dict[str, str] | None = None) -> LearnContext:
     frames, meta = {}, {}
     for alias, table in inputs.items():
         info = _recipe_input(ctx, table)
         frames[alias] = ctx.ws.df(table)
         meta[alias] = _table_meta(info, ctx)
+    available = {f["file_id"]: f for f in ctx.host.list_files()} if file_inputs else {}
+    for alias, file_id in (file_inputs or {}).items():
+        if alias in meta:
+            raise ValueError(f"文件别名「{alias}」和输入表重名")
+        if file_id not in available:
+            raise ValueError("输入文件不属于当前客户或会话")
+        meta[alias] = InputMeta(kind="file", filename=available[file_id]["filename"], file_id=file_id,
+                                path=ctx.host.original_file_path(file_id))
     expected, sources = {}, []
     for table in expected_tables:
         info = ctx.ws.require(table)
@@ -439,13 +448,17 @@ def _copy_results(ctx: AgentContext, outputs: dict[str, pd.DataFrame], recipe: R
     """把流程产出的结果表放回会话工作区，方便继续追问和查看。同一个流程再次执行时覆盖上一次的结果表。"""
     payloads = []
     owner = f"recipe:{recipe.id}"
-    for sheet, df in outputs.items():
+    for index, (sheet, df) in enumerate(outputs.items()):
         name = sanitize_table_name(f"结果_{sheet}")
         info = ctx.ws.info(name)
         if info is not None and not (info.role == "result" and info.created_by == owner):
             name = ctx.ws.unique_name(name)
         ctx.ws.put_dataframe(name, df, label=f"流程结果 · {sheet}", source="computed", role="result",
-                             created_by=owner, description=f"「{recipe.name}」v{recipe.version} 的输出")
+                             created_by=owner, description=f"「{recipe.name}」v{recipe.version} 的输出",
+                             step={"recipe_snapshot": recipe.to_dict(),
+                                   "table_ref": next((o.source for o in recipe.output_spec if o.name == sheet),
+                                                     recipe.output_spec[index].source if index < len(recipe.output_spec) else recipe.final_outputs()[-1]),
+                                   "run_id": (recipe.metadata.get("last_run") or {}).get("run_id")})
         payloads.append(table_payload(ctx.ws, name))
     return payloads
 
@@ -468,7 +481,7 @@ def _recipe_result_text(result: dict[str, Any]) -> str:
     by_id = {s["step_id"]: s for s in result["report"]["steps"]}
     for step in recipe.ordered_steps():
         rep = by_id.get(step.id, {})
-        kind = "客户独有" if step.formula_kind == "customer" or step.formula == "custom_sql" else "内置公式"
+        kind = "Python 脚本" if step.kind == "python" else "SQL" if step.kind == "sql" else "客户独有公式" if step.formula_kind == "customer" else "内置公式"
         rows = f"，结果 {rep['rows_out']} 行" if rep.get("rows_out") is not None else ""
         status = {"repaired": "（自动修复过）", "failed": "（失败）", "warning": "（有提示）"}.get(rep.get("status", ""), "")
         lines.append(f"{step.id}. {step.name}［{step.formula}·{kind}］{step.description}{rows}{status}")
@@ -498,9 +511,10 @@ async def _stream_build_recipe(args: dict[str, Any], ctx: AgentContext) -> Async
     input_tables = [str(t) for t in (args.get("input_tables") or _default_inputs(ctx))]
     expected_tables = [str(t) for t in (args.get("expected_tables") or _default_expected(ctx))]
     expected_tables = [t for t in expected_tables if t not in input_tables]
-    if not input_tables:
-        raise ValueError("没有输入表：请先上传要处理的文件")
-    lctx = _learn_context(ctx, requirement, {t: t for t in input_tables}, expected_tables, args.get("recipe_name"))
+    file_inputs = {str(k): str(v) for k, v in (args.get("input_files") or {}).items()}
+    if not input_tables and not file_inputs:
+        raise ValueError("没有输入表或文件：请先上传要处理的文件")
+    lctx = _learn_context(ctx, requirement, {t: t for t in input_tables}, expected_tables, args.get("recipe_name"), file_inputs=file_inputs)
     pipeline = RecipePipeline(ctx.llm, ctx.library, ctx.host.pipeline_host(), max_rounds=ctx.verify_rounds, max_repair=ctx.max_repair)
     async for event in pipeline.build(lctx, save_recipe=ctx.save_recipe_requested):
         yield event
@@ -521,7 +535,9 @@ async def _stream_revise_recipe(args: dict[str, Any], ctx: AgentContext) -> Asyn
         f"历史处理说明（仅沿用未被本次要求覆盖的部分）：\n{previous}\n\n"
         f"本次修改要求（与历史说明或客户记忆冲突时以本次要求为准）：\n{instruction}"
     )
-    lctx = _learn_context(ctx, requirement, mapping, expected_tables, mode="revise")
+    file_aliases = {i.alias for i in recipe.inputs if i.kind == "file"}
+    lctx = _learn_context(ctx, requirement, {k: v for k, v in mapping.items() if k not in file_aliases}, expected_tables, mode="revise",
+                          file_inputs={k: v for k, v in mapping.items() if k in file_aliases})
     pipeline = RecipePipeline(ctx.llm, ctx.library, ctx.host.pipeline_host(), max_rounds=ctx.verify_rounds, max_repair=ctx.max_repair)
     async for event in pipeline.build(lctx, base=recipe, instruction=instruction, save_recipe=ctx.save_recipe_requested):
         yield event
@@ -552,11 +568,17 @@ def _resolve_inputs(ctx: AgentContext, recipe: Recipe, explicit: Any) -> dict[st
     mapping: dict[str, str] = {}
     if isinstance(explicit, dict):
         mapping = {str(k): str(v) for k, v in explicit.items() if v}
+    unknown = set(mapping) - set(recipe.input_aliases())
+    if unknown:
+        raise ValueError(f"流程没有这些输入：{sorted(unknown)}")
+    available_files = {f["file_id"]: f for f in ctx.host.list_files()} if any(i.kind == "file" for i in recipe.inputs) else {}
     pending = [i for i in recipe.inputs if i.alias not in mapping]
     if pending:
         candidates = [Candidate(key=t.name, columns=t.column_names, filename=t.filename, sheet=t.sheet, rows=t.rows)
                       for t in ctx.ws.list_tables() if t.source == "uploaded" and t.role == "input"
                       and t.name not in mapping.values()]
+        candidates.extend(Candidate(key=f["file_id"], kind="file", columns=[], filename=f["filename"])
+                          for f in available_files.values() if f.get("kind") == "input" and f["file_id"] not in mapping.values())
         partial = Recipe(name=recipe.name, inputs=pending)
         for alias, hit in match_inputs(partial, candidates, ctx.host.field_mapping()).items():
             mapping[alias] = hit["key"]
@@ -564,8 +586,13 @@ def _resolve_inputs(ctx: AgentContext, recipe: Recipe, explicit: Any) -> dict[st
     if missing:
         tables = "、".join(_default_inputs(ctx)) or "（没有）"
         raise ValueError(f"找不到流程需要的输入 {missing}。工作区里的表：{tables}。请用 inputs 参数指定 {{输入名: 表名}}，或先上传对应文件")
-    for table in mapping.values():
-        _recipe_input(ctx, table)
+    definitions = {i.alias: i for i in recipe.inputs}
+    for alias, value in mapping.items():
+        if definitions[alias].kind == "file":
+            if value not in available_files:
+                raise ValueError("输入文件不属于当前客户或会话")
+        else:
+            _recipe_input(ctx, value)
     return mapping
 
 
@@ -584,6 +611,10 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
                           repairer=repairer, max_repair=ctx.max_repair, run_id=handle.run_id)
     sources = {}
     for alias, table in mapping.items():
+        if next(i for i in recipe.inputs if i.alias == alias).kind == "file":
+            item = next(f for f in ctx.host.list_files() if f["file_id"] == table)
+            sources[alias] = InputSource(alias=alias, filename=item["filename"], file_id=table, path=ctx.host.original_file_path(table))
+            continue
         info = ctx.ws.require(table)
         sources[alias] = InputSource(alias=alias, df=ctx.ws.df(table), filename=info.filename or info.label,
                                      sheet=info.sheet, file_id=info.file_id, header=info.header,
@@ -594,7 +625,8 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
     file_info = host.finish_run(handle, runner.recipe, runner.report)
     runner.recipe.metadata["last_run"] = {"run_id": handle.run_id, "status": runner.report["status"]}
     if file_info:
-        yield {"type": "file", **file_info}
+        for item in file_info.get("files", [file_info]):
+            yield {"type": "file", **item}
     note = ""
     if runner.recipe_changed and ctx.save_recipe_requested and runner.report["status"] in {"success", "warning"}:
         saved = ctx.host.store_recipe(runner.recipe, note="执行时自动修复")
@@ -623,9 +655,10 @@ def _tool_save_as_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         )
         saved = ctx.host.store_recipe(recipe, note="按用户要求保存分析流程")
     else:
-        recipe = ctx.host.get_recipe(str(args["recipe_id"])) if args.get("recipe_id") else ctx.host.latest_conversation_recipe()
+        recipe = (ctx.host.executed_recipe(str(args["run_id"])) if args.get("run_id") else
+                  ctx.host.get_recipe(str(args["recipe_id"])) if args.get("recipe_id") else ctx.host.latest_conversation_recipe())
         if recipe is None:
-            raise ValueError("本会话没有可保存的已执行流程；脚本任务尚不支持保存为无需 AI 的重复流程。")
+            raise ValueError("没有找到可保存的执行记录；请指定已执行的 run_id 或最终结果表。公式、SQL 和 Python 脚本均可保存。")
         if args.get("name"):
             recipe.name = str(args["name"])
         if args.get("description"):
@@ -817,25 +850,27 @@ def _static_tools() -> list[Tool]:
                    "filename": {**_STR, "description": "文件名（不含扩展名）"}}, ["sheets"]),
              analyze, run=_tool_export_excel, label=lambda a: f"导出 Excel · {a.get('filename', '')}"),
         Tool("build_recipe",
-             "生成并执行一个可重复执行的处理流程（Recipe）：系统会比对输入和人工结果（如有）、规划步骤、用 DuckDB 执行、"
+             "生成并执行一个可重复执行的处理流程（Recipe）：比对输入和人工结果（如有），按稳定性、性能、准确性选择公式、SQL、Python 或混合步骤，由相应引擎执行、"
              "出错自动修复、校验并验证能否复现人工结果，最后输出 Excel。默认只完成本次处理；仅当用户明确要求长期重复执行时才保存流程。",
              _obj({"requirement": {**_STR, "description": "清楚的处理说明：要做哪些处理、业务规则、输出什么（相当于 SheetAgent 的 process.md）"},
                    "input_tables": {**_STR_LIST, "description": "原始上传的输入表名；不填自动使用。辅助分析结果用于完善 requirement，不代替原始输入"},
+                   "input_files": {"type": "object", "additionalProperties": {"type": "string"}, "description": "可选：{完整文件输入别名: file_id}，用于 Python 排版或读取原始工作簿；与 input_tables 可同时提供"},
                    "expected_tables": {**_STR_LIST, "description": "人工做好的期望结果表（如有）；不填会自动使用标记为期望结果的表"},
                    "recipe_name": {**_STR, "description": "可选：流程名"}}, ["requirement"]),
              modify, stream=_stream_build_recipe, label=lambda a: "生成处理流程"),
         Tool("revise_recipe", "按用户的修改意见调整本次处理，重新执行和验证；仅明确要求保存/更新重复流程时才持久保存新版本。",
              _obj({"instruction": {**_STR, "description": "修改要求"},
                    "recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
-                   "inputs": {"type": "object", "description": "可选：{流程输入名: 表名}"},
+                   "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；table 输入对应真实工作区表名，file 输入对应完整文件 file_id"},
                    "expected_tables": _STR_LIST}, ["instruction"]),
              modify, stream=_stream_revise_recipe, label=lambda a: "修订处理流程"),
-        Tool("run_recipe", "用已保存的流程直接处理当前的表（不需要重新生成），输出 Excel。",
-             _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名}，不填自动按列匹配"},
+        Tool("run_recipe", "用已保存的公式、SQL、Python 或混合流程直接处理当前表和文件，不需要重新生成步骤或重写代码，输出正式结果。",
+             _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；table 输入按列匹配，file 输入按文件名匹配"},
                    "allow_repair": {"type": "boolean", "description": "出错时是否允许 AI 自动修复，默认 true"}}, ["recipe_id"]),
              modify, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
-        Tool("save_as_recipe", "仅用户明确要求保存为每月等重复流程时调用。可把公式结果表编为流程，或保存本会话最近已执行的处理；不需要重新处理文件。",
-             _obj({"output_tables": {**_STR_LIST, "description": "可选：分析过程中公式生成的最终结果表。不填则保存最近已执行流程"}, "name": _STR,
+        Tool("save_as_recipe", "仅用户明确要求保存重复流程时调用。支持公式、SQL、Python 脚本和混合流程；保存实际执行的代码与依赖，不需要重新处理文件。",
+             _obj({"output_tables": {**_STR_LIST, "description": "可选：公式、SQL 或脚本生成的最终结果表。不填则保存指定或最近已执行流程"}, "name": _STR,
+                   "run_id": {**_STR, "description": "可选：明确指定脚本或混合流程的运行 ID，优先于 recipe_id"},
                    "recipe_id": {**_STR, "description": "可选：指定本会话已执行的流程 ID，不填用最近的"},
                    "description": {**_STR, "description": "流程说明"}}),
              both, run=_tool_save_as_recipe, label=lambda a: f"保存流程 · {a.get('name', '')}"),

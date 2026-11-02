@@ -33,7 +33,7 @@ class LLMStepRepairer:
             step_id=step.id,
             attempt=ctx.attempt,
             step=json.dumps(
-                {"name": step.name, "formula": step.formula, "params": step.params, "output": step.output, "description": step.description},
+                {"name": step.name, "kind": step.kind, "formula": step.formula, "params": step.params, "output": step.output, "description": step.description},
                 ensure_ascii=False, indent=1,
             ),
             error=ctx.error,
@@ -47,16 +47,32 @@ class LLMStepRepairer:
         if not isinstance(result, dict) or result.get("give_up"):
             return None
         formula = str(result.get("formula") or step.formula)
-        if not ctx.library.has(formula):
+        if result.get("kind") == "python":
+            formula = "python_script"
+        elif result.get("kind") == "sql":
+            formula = "custom_sql"
+        if formula != "python_script" and not ctx.library.has(formula):
             formula = step.formula
         params = result.get("params")
         if not isinstance(params, dict) or not params:
             return None
         explanation = str(result.get("explanation") or "调整了参数")
-        return step.model_copy(update={"formula": formula, "params": params, "explanation": f"自动修复：{explanation}"}, deep=True)
+        return step.model_copy(update={
+            "formula": formula, "kind": "python" if formula == "python_script" else "sql" if formula == "custom_sql" else "formula",
+            "formula_kind": ctx.library.resolve(formula).kind if ctx.library.has(formula) else "builtin",
+            "params": params, "explanation": f"自动修复：{explanation}",
+        }, deep=True)
 
 
 def _formula_text(ctx: RepairContext, formula_id: str) -> str:
+    if formula_id == "python_script":
+        return (
+            "python_script（Python 脚本）：params.code 为完整脚本；input_tables 为真实表名列表；"
+            "input_files 为脚本文件别名到流程输入别名或前序步骤output/文件名的映射；"
+            "output_tables 为 result_tables 键到工作区表名的映射，纯文件步骤使用空对象。"
+            "已提供 pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、deliver_files、result、check。"
+            "保留业务 check 校验和输入输出契约；文件必须写入 OUTPUT_DIR 并放入 deliver_files。"
+        )
     spec = ctx.library.resolve(formula_id).spec
     lines = [f"{spec.id}（{spec.name}）：{spec.intent}"]
     for name, p in spec.params.items():

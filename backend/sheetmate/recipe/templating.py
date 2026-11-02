@@ -15,7 +15,7 @@ import pandas as pd
 
 from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.template_writer import OutputPlan, TemplateSource
-from sheetmate.recipe.schema import Recipe, step_table_refs
+from sheetmate.recipe.schema import Recipe, step_table_refs, step_output_tables
 
 
 def primary_inputs(recipe: Recipe, library: FormulaLibrary) -> dict[str, str]:
@@ -25,7 +25,11 @@ def primary_inputs(recipe: Recipe, library: FormulaLibrary) -> dict[str, str]:
         refs = step_table_refs(step, library)
         parent = next((mapping[r] for r in refs if r in mapping), None)
         if parent is not None:
-            mapping[step.output] = parent
+            for output in step_output_tables(step):
+                mapping[output] = parent
+        if step.formula == "python_script":
+            for target in step.params.get("file_tables", {}):
+                mapping[target] = target
     return mapping
 
 
@@ -40,7 +44,7 @@ def plan_outputs(
     summaries: set[str] = set()
     for step in recipe.ordered_steps():
         if step.formula == "group_aggregate" or any(ref in summaries for ref in step_table_refs(step, library)):
-            summaries.add(step.output)
+            summaries.update(step_output_tables(step))
     spec_by_name = {o.name: o for o in recipe.output_spec}
     candidates: list[tuple[str, pd.DataFrame, TemplateSource | None]] = []
     for name, df in outputs.items():

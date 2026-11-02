@@ -33,6 +33,7 @@ from sheetmate.recipe.schema import (
     StepAssertion,
     ValidationRule,
     file_pattern_from_name,
+    step_output_tables,
     step_table_refs,
 )
 from sheetmate.recipe.verifier import report_to_text
@@ -47,6 +48,7 @@ class InputMeta:
     """一张输入表的来源信息（生成 RecipeInput 用）。"""
 
     filename: str = ""
+    kind: str = "table"
     sheet: str | None = None
     header: dict[str, Any] | None = None
     file_id: str | None = None
@@ -151,7 +153,10 @@ def inputs_text(ctx: LearnContext) -> str:
         meta = ctx.input_meta.get(alias, InputMeta())
         label = f"{meta.filename} · {meta.sheet}" if meta.filename else ""
         parts.append(frame_profile_text(alias, df, label))
-    return "\n\n".join(parts) or "（没有输入表）"
+    for alias, meta in ctx.input_meta.items():
+        if meta.kind == "file" and alias not in ctx.input_frames:
+            parts.append(f"### 文件「{alias}」：{meta.filename or alias}（完整文件，可用于 Python input_files）")
+    return "\n\n".join(parts) or "（没有输入表或文件）"
 
 
 def expected_text(ctx: LearnContext) -> str:
@@ -246,6 +251,11 @@ def parse_steps(result: dict[str, Any], library: FormulaLibrary) -> list[RecipeS
         if not isinstance(raw, dict):
             continue
         formula = str(raw.get("formula") or raw.get("action") or "").strip()
+        tool_kind = str(raw.get("kind") or "")
+        if tool_kind == "python":
+            formula = "python_script"
+        elif tool_kind == "sql":
+            formula = "custom_sql"
         params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
         params = _fix_params(params, formula, library)
         output = str(raw.get("output") or params.pop("result_name", None) or f"步骤{i}结果").strip()
@@ -269,6 +279,7 @@ def parse_steps(result: dict[str, Any], library: FormulaLibrary) -> list[RecipeS
                 name=str(raw.get("name") or f"第 {i} 步")[:40],
                 action=str(raw.get("action") or "custom"),
                 formula=formula,
+                kind="python" if formula == "python_script" else "sql" if formula == "custom_sql" else "formula",
                 formula_kind=kind,
                 params=params,
                 output=output,
@@ -296,7 +307,8 @@ def _fix_params(params: dict[str, Any], formula: str, library: FormulaLibrary) -
 
 def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnContext, base: Recipe | None = None) -> list[OutputSheet]:
     outputs: list[OutputSheet] = []
-    known = {s.output for s in steps}
+    table_outputs = [name for step in steps for name in step_output_tables(step)]
+    known = set(table_outputs)
     for raw in result.get("output_sheets") or result.get("output_spec") or []:
         if not isinstance(raw, dict):
             continue
@@ -313,8 +325,8 @@ def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnCon
             split_by=raw.get("split_by"),
             columns=[str(c) for c in columns] if isinstance(columns, list) and columns else None,
         ))
-    if not outputs:
-        last = steps[-1].output
+    if not outputs and known:
+        last = table_outputs[-1]
         name = next(iter(ctx.expected)) if len(ctx.expected) == 1 else "结果"
         outputs.append(OutputSheet(name=name, source=last))
     previous = {o.name: o for o in (base.output_spec if base else [])}
@@ -337,11 +349,13 @@ def build_inputs(ctx: LearnContext, steps: list[RecipeStep], key_columns: dict[s
     for alias, df in ctx.input_frames.items():
         columns = [str(c) for c in df.columns]
         meta = ctx.input_meta.get(alias, InputMeta())
+        old = previous.get(alias)
+        if meta.kind == "file" or (old is not None and old.kind == "file"):
+            continue
         required = [c for c in columns if c in used.get(alias, set())]
         if not required:  # SheetAgent 的兜底：前 10 个没有空值的列
             required = [c for c in columns if df[c].notna().all()][:10]
         keys = [c for c in key_columns.get(alias, []) if c in columns]
-        old = previous.get(alias)
         rows = len(df)
         inputs.append(
             RecipeInput(
@@ -358,6 +372,23 @@ def build_inputs(ctx: LearnContext, steps: list[RecipeStep], key_columns: dict[s
                 header=meta.header,
             )
         )
+    file_refs = {
+        str(ref)
+        for step in steps if step.kind == "python"
+        for ref in (step.params.get("input_files") if isinstance(step.params.get("input_files"), dict) else {}).values()
+    }
+    aliases = {item.alias for item in inputs}
+    for alias in sorted(file_refs - aliases):
+        old = previous.get(alias)
+        meta = ctx.input_meta.get(alias)
+        if old is not None and old.kind == "file":
+            inputs.append(old.model_copy(deep=True))
+        elif meta is not None and meta.kind == "file":
+            inputs.append(RecipeInput(
+                alias=alias, kind="file", description=f"来自「{meta.filename or alias}」的完整文件",
+                file_pattern=file_pattern_from_name(meta.filename) if meta.filename else "",
+                source_file=meta.filename,
+            ))
     return inputs
 
 
@@ -371,12 +402,18 @@ def _referenced_columns(steps: list[RecipeStep], ctx: LearnContext) -> dict[str,
     used: dict[str, set[str]] = {alias: set() for alias in ctx.input_frames}
     lineage: dict[str, set[str]] = {alias: {alias} for alias in ctx.input_frames}  # 表 → 它来自哪些输入表
     for step in steps:
+        refs = step_table_refs(step, ctx.library)
+        sources = set().union(*(lineage.get(r, set()) for r in refs)) if refs else set()
+        for output in step_output_tables(step):
+            lineage[output] = sources
+        if step.kind == "python":
+            # 代码可能动态访问列，不能只取前十列或靠字符串猜测；保守保留声明输入的列契约。
+            for alias in sources:
+                used[alias] |= columns[alias]
+            continue
         if not ctx.library.has(step.formula):
             continue
         spec = ctx.library.resolve(step.formula).spec
-        refs = step_table_refs(step, ctx.library)
-        sources = set().union(*(lineage.get(r, set()) for r in refs)) if refs else set()
-        lineage[step.output] = sources
         names: set[str] = set()
         blob = []
         for name, p in spec.params.items():

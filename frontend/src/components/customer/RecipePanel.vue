@@ -121,7 +121,8 @@ function openStep(id: number) {
             <div class="label-mini mb-2">资料要求</div>
             <div v-for="inp in recipe.recipe.inputs" :key="inp.alias" class="mb-2 rounded-xl bg-paper px-3 py-2 text-xs">
               <div class="flex flex-wrap items-center gap-2"><span class="font-medium text-ink">{{ inp.alias }}</span><span class="break-all font-mono text-faint">{{ inp.file_pattern }}</span></div>
-              <div class="mt-1 break-words text-mute">需要包含：{{ inp.required_columns.join('、') || '未指定列要求' }}</div>
+              <div v-if="inp.kind === 'file'" class="mt-1 text-mute">完整文件，由脚本读取并核对工作簿内容。</div>
+              <div v-else class="mt-1 break-words text-mute">需要包含：{{ inp.required_columns.join('、') || '未指定列要求' }}</div>
               <div v-if="inp.key_columns.length" class="break-words text-mute">用于匹配的列：{{ inp.key_columns.join('、') }}</div>
             </div>
           </div>

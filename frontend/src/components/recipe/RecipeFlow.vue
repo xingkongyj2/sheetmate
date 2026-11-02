@@ -1,14 +1,15 @@
 <script setup lang="ts">
 /**
- * Recipe 流程图：输入表 → 每一步（公式 + 人话说明）→ 输出 sheet。
- * 机器执行的是公式和 SQL，这里只给人看「人话卡片」；执行时显示每一步的实时状态。
+ * Recipe 流程图：输入表或文件 → 公式、SQL、Python 步骤 → 输出。
+ * 业务步骤名优先展示，工具类型用于查看与复核；执行时显示每一步的实时状态。
  */
 import { Check, CircleAlert, LoaderCircle, TriangleAlert, Wrench } from '@lucide/vue'
 import { computed } from 'vue'
 
-import type { RecipeFlowData } from '@/api/types'
+import type { FlowStep, RecipeFlowData } from '@/api/types'
 import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
 import { formulaArt, percent, type StepState } from '@/composables/chatModel'
+import { recipeToolKind, recipeToolLabel } from '@/composables/recipeTools'
 
 const props = withDefaults(
   defineProps<{ flow: RecipeFlowData; states?: StepState[]; direction?: 'horizontal' | 'vertical'; activeStep?: number | null; compact?: boolean }>(),
@@ -31,18 +32,21 @@ function stateLabel(id: number): string {
   return status ? STATUS_LABELS[status] : ''
 }
 
-function art(formula: string, kind: string): FunKind {
-  return formulaArt(formula, kind) as FunKind
+function art(step: FlowStep): FunKind {
+  return recipeToolKind(step) === 'formula' ? formulaArt(step.formula, step.formula_kind) as FunKind : 'code'
 }
 
 function rowsText(s?: StepState): string {
   const r = s?.report
-  if (!r || r.rows_out === undefined) return ''
+  if (!r) return ''
+  if (recipeToolKind(r) === 'python' && !r.columns?.length) return r.output_files?.length ? `${r.output_files.length} 个文件` : '处理完成'
+  if (r.rows_out === undefined) return ''
   const first = r.rows_in ? Object.values(r.rows_in)[0] : undefined
   return first !== undefined ? `${first} → ${r.rows_out} 行` : `${r.rows_out} 行`
 }
 
 const running = computed(() => props.states.some((s) => s.status === 'running' || s.status === 'repairing'))
+const outputs = computed(() => props.flow.outputs.length ? props.flow.outputs : props.flow.steps.some((step) => recipeToolKind(step) === 'python') ? [{ name: '脚本结果', source: '' }] : [])
 </script>
 
 <template>
@@ -56,10 +60,11 @@ const running = computed(() => props.states.some((s) => s.status === 'running' |
           class="recipe-flow-input flex items-center gap-2 rounded-xl border border-line bg-white py-1.5 pl-1.5 pr-3"
           :title="inp.description"
         >
-          <FunObject kind="sheet" :size="compact ? 28 : 26" />
+          <FunObject :kind="inp.kind === 'file' ? 'folder' : 'sheet'" :size="compact ? 28 : 26" />
           <div class="leading-tight">
             <div class="recipe-flow-file-name text-[13px] font-medium">{{ inp.alias }}</div>
             <div v-if="!compact && inp.file_pattern" class="font-mono text-[10px] text-faint">{{ inp.file_pattern }}</div>
+            <div v-if="!compact && inp.kind === 'file'" class="text-[10px] text-faint">完整文件</div>
           </div>
         </div>
       </div>
@@ -93,9 +98,9 @@ const running = computed(() => props.states.some((s) => s.status === 'running' |
           </span>
           <div class="recipe-flow-step-art flex items-center gap-2">
             <span v-if="!compact" class="flex size-5 items-center justify-center rounded-full bg-ink text-[11px] font-semibold text-white">{{ step.id }}</span>
-            <FunObject :kind="art(step.formula, step.formula_kind)" :size="compact ? 34 : 22" />
-            <span v-if="!compact" class="tag ml-auto" :class="step.formula_kind === 'customer' || step.formula === 'custom_sql' ? '!bg-fun-purple/10 !text-fun-purple' : ''">
-              {{ step.formula_kind === 'customer' || step.formula === 'custom_sql' ? '客户独有' : '内置公式' }}
+            <FunObject :kind="art(step)" :size="compact ? 34 : 22" />
+            <span v-if="!compact" class="tag ml-auto" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">
+              {{ recipeToolLabel(step) }}
             </span>
           </div>
           <div class="recipe-flow-step-name mt-2 text-[13.5px] font-semibold leading-snug">{{ step.name }}</div>
@@ -126,11 +131,11 @@ const running = computed(() => props.states.some((s) => s.status === 'running' |
         </svg>
       </div>
       <div class="flex flex-col justify-center gap-2">
-        <div v-for="out in flow.outputs" :key="out.name" class="recipe-flow-output flex items-center gap-2 rounded-xl bg-ink py-1.5 pl-1.5 pr-3 text-white">
+        <div v-for="out in outputs" :key="out.name" class="recipe-flow-output flex items-center gap-2 rounded-xl bg-ink py-1.5 pl-1.5 pr-3 text-white">
           <span class="flex size-[26px] items-center justify-center rounded-lg bg-white/15"><FunObject kind="plane" :size="18" /></span>
           <div class="leading-tight">
             <div class="recipe-flow-file-name text-[13px] font-medium">{{ out.name }}</div>
-            <div v-if="!compact" class="text-[10px] text-white/50">输出 sheet</div>
+            <div v-if="!compact" class="text-[10px] text-white/50">{{ out.source ? '结果表' : '处理结果' }}</div>
           </div>
         </div>
       </div>
@@ -159,8 +164,8 @@ const running = computed(() => props.states.some((s) => s.status === 'running' |
       <button class="mb-1 min-w-0 flex-1 rounded-xl px-2 py-1 text-left hover:bg-paper" @click="emit('select', step.id)">
         <div class="flex items-center gap-1.5">
           <span class="truncate text-[13px] font-medium">{{ step.name }}</span>
-          <span class="tag shrink-0" :class="step.formula_kind === 'customer' || step.formula === 'custom_sql' ? '!bg-fun-purple/10 !text-fun-purple' : ''">
-            {{ step.formula_kind === 'customer' || step.formula === 'custom_sql' ? '独有' : '内置' }}
+          <span class="tag shrink-0" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">
+            {{ recipeToolLabel(step) }}
           </span>
         </div>
         <div class="line-clamp-2 text-xs text-mute">{{ step.description }}</div>

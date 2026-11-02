@@ -5,14 +5,19 @@ from __future__ import annotations
 import shutil
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
+from uuid import uuid4
 
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import Run, now
+from sheetmate.db.models import Run
 from sheetmate.engine.reader import ReadError
 from sheetmate.engine.sqlutil import sanitize_table_name
+from sheetmate.recipe.compiler import compile_script
+from sheetmate.recipe.schema import check_recipe
+from sheetmate.services import recipes as recipe_service
 from sheetmate.services import files as file_service
 from sheetmate.services import runs as run_service
 from sheetmate.services.errors import ServiceError
@@ -27,6 +32,7 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
     from sheetmate.engine.script_runner import execute_script
 
     started = time.perf_counter()
+    host._last_recipe = None
     if len(input_tables) > 20 or len(input_files) > 20 or len(set(input_tables)) != len(input_tables):
         raise ValueError("一次脚本最多使用 20 张不同的表和 20 个文件")
     tables = {}
@@ -59,6 +65,8 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
     created_tables: list[str] = []
     saved_internal_tables = False
     previous_tables = {table.name for table in host.ws.list_tables()}
+    output_tables: dict[str, str] = {}
+    file_tables: dict[str, dict[str, Any]] = {}
     try:
         with TemporaryDirectory(prefix="sheetmate_script_delivery_") as folder:
             outcome = execute_script(code, tables, source_files, Path(folder), cancel_event=cancel_event)
@@ -74,7 +82,7 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                         if cancel_event.is_set():
                             raise InterruptedError("用户已停止脚本")
                         name = file_service.safe_filename(output.name)
-                        path = run_service.output_path(run, name)
+                        path = run_service.output_path(run, f"{uuid4().hex[:8]}_{name}")
                         # 只创建新文件，禁止覆盖旧结果或任何输入件。
                         with output.open("rb") as source, path.open("xb") as destination:
                             committed_paths.append(path)
@@ -82,18 +90,21 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                         record = file_service.register_output(db, path=path, filename=name, customer_id=host.customer_id,
                                                               conversation_id=host.conversation_id, run_id=run_id, user_id=host.user_id)
                         report["files"].append({**file_service.file_dict(record), "script_run_id": run_id})
+                        report["files"][-1]["ref"] = f"脚本_{run_id}/{output.name}"
                         try:
                             loaded = file_service.load_into_workspace(host.ws, record)
                             for info in loaded:
                                 created_tables.append(info.name)
                                 host.ws.update_meta(info.name, created_by="run_python_script",
                                                     description=f"Python 脚本结果，run_id={run_id}")
+                                file_tables[info.name] = {"ref": f"脚本_{run_id}/{output.name}", "sheet": info.sheet, "header": info.header}
                         except ReadError:
                             report["warnings"].append(f"「{name}」没有可供数据分析的非空表，文件仍可下载。")
                     for label, df in outcome.result_tables.items():
                         name = host.ws.unique_name(sanitize_table_name(str(label)))
                         host.ws.put_dataframe(name, df, label=str(label), source="computed", role="derived",
                                               created_by="run_python_script", description=f"Python 脚本结果，run_id={run_id}")
+                        output_tables[str(label)] = name
                         if label in outcome.display_tables:
                             created_tables.append(name)
                         else:
@@ -120,6 +131,26 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                         report["warnings"].append("本次未声明交付文件；如需交付，将最终文件列入 deliver_files，临时测试文件不要列入。")
                     # 文件登记和全部表元信息准备好后再提交；失败不留下可下载的半成品。
                     run.output_file_id = report["files"][-1]["file_id"] if report["files"] else None
+                # 只记录实际执行的代码和依赖，不再次执行，也不创建永久流程卡片。
+                try:
+                    with session_scope() as db:
+                        library = recipe_service.library_for(db, host.customer_id)
+                    recipe = compile_script(host.ws, library, run_id=run_id, code=code, description=description,
+                                            input_tables=input_tables, input_files=input_files,
+                                            output_tables=output_tables, file_tables=file_tables,
+                                            display_tables=outcome.display_tables,
+                                            file_resolver=host.file_dependency, customer_id=host.customer_id,
+                                            conversation_id=host.conversation_id, field_mapping=host.field_mapping())
+                    problems = check_recipe(recipe, library)
+                    if problems:
+                        raise ValueError("；".join(problems))
+                    report["recipe_snapshot"] = recipe.to_dict()
+                    for table in [*output_tables.values(), *file_tables]:
+                        host.ws.update_meta(table, step={"recipe_snapshot": recipe.to_dict(), "table_ref": table, "run_id": run_id})
+                    host._last_recipe = recipe
+                except (ValueError, KeyError, ServiceError) as exc:
+                    report["workflow_save_error"] = str(exc)
+                    report["warnings"].append(f"处理已完成，但流程依赖记录不完整：{exc}")
     except Exception as exc:
         # 多 sheet 导入也可能在中间出错，不能仅清理完整返回的 loaded 列表。
         for name in {table.name for table in host.ws.list_tables()} - previous_tables:
@@ -138,11 +169,17 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                 run.error = report["error"]
                 run.summary = ("脚本执行成功" if report["ok"] else "脚本未完成") + f"：{description[:500]}"
                 run.duration_ms = int((time.perf_counter() - started) * 1000)
-                run.finished_at = now()
+                run.finished_at = datetime.now()
                 run.validation = {"status": "pass" if report["ok"] and report["checks"] else "not_checked" if report["ok"] else "fail",
                                   "checks": report["checks"], "outputs": report["files"], "tables": report["tables"],
                                   "internal_tables": report["internal_tables"],
                                   "result": report["result"], "warnings": report["warnings"], "script_status": report["status"]}
+                if report["ok"] and report.get("recipe_snapshot"):
+                    run.validation = {**run.validation, "recipe_snapshot": report["recipe_snapshot"]}
+                    run.recipe_id = report["recipe_snapshot"]["id"]
+                    run.recipe_version = report["recipe_snapshot"]["version"]
+                if report.get("workflow_save_error"):
+                    run.validation = {**run.validation, "workflow_save_error": report["workflow_save_error"]}
                 steps = list(run.steps)
                 steps[0] = {**steps[0], "ok": report["ok"], "stdout": report["stdout"], "stderr": report["stderr"],
                             "summary": run.summary, "error": report["error"], "duration_ms": run.duration_ms}

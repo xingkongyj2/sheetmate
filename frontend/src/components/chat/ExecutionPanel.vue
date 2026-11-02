@@ -12,6 +12,7 @@ import StepDetail from '@/components/recipe/StepDetail.vue'
 import VerifyBadge from '@/components/recipe/VerifyBadge.vue'
 import type { RecipeProgress, StepState, UiMessage } from '@/composables/chatModel'
 import { executionFileGroups, executionTableKey, executionTables } from '@/composables/executionPresentation'
+import { recipeToolLabel } from '@/composables/recipeTools'
 import { useConfirm } from '@/composables/useConfirm'
 
 type Tab = 'recipes' | 'files' | 'data'
@@ -52,15 +53,15 @@ async function drop(table: TableBrief) {
 }
 function stepFlow(recipe: ConversationDetail['recipes'][number]): RecipeFlowData {
   return recipe.flow ?? {
-    inputs: recipe.input_patterns.map((input) => ({ alias: input.alias, description: input.description, file_pattern: input.file_pattern })),
-    steps: recipe.steps.map((step) => ({ id: step.id, name: step.name, action: '', formula: step.formula, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: '', inputs: [] })),
+    inputs: recipe.input_patterns.map((input) => ({ alias: input.alias, kind: input.kind, description: input.description, file_pattern: input.file_pattern })),
+    steps: recipe.steps.map((step) => ({ id: step.id, name: step.name, action: '', formula: step.formula, kind: step.kind, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: '', inputs: [] })),
     outputs: recipe.outputs.map((name) => ({ name, source: '' })),
   }
 }
 function progressFlow(progress: RecipeProgress): RecipeFlowData {
   return progress.flow ?? progress.saved?.flow ?? {
-    inputs: progress.inputs.map((input) => ({ alias: input.alias, description: input.filename, file_pattern: '' })),
-    steps: progress.steps.map((step) => ({ id: step.step_id, name: step.name, action: '', formula: step.formula, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: step.output, inputs: [] })),
+    inputs: progress.inputs.map((input) => ({ alias: input.alias, kind: input.kind, description: input.filename, file_pattern: '' })),
+    steps: progress.steps.map((step) => ({ id: step.step_id, name: step.name, action: '', formula: step.formula, kind: step.kind, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: step.output, inputs: [] })),
     outputs: (progress.outputs ?? []).map((output) => ({ name: output.sheet, source: '' })),
   }
 }
@@ -174,10 +175,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </template>
 
     </div>
-    <StepDetail v-if="selected" :step-id="selected.step.step_id" :name="selected.step.name" :formula-name="selected.step.formula_name" :formula-kind="selected.step.formula_kind" :description="selected.step.description" :status="selected.step.status" :report="selected.step.report" :run-id="selected.progress.runId" :error="selected.step.error" :repairs="selected.step.repairs" @close="selected = null" />
+    <StepDetail v-if="selected" :step-id="selected.step.step_id" :name="selected.step.name" :formula-name="selected.step.formula_name" :formula="selected.step.formula" :kind="selected.step.kind" :formula-kind="selected.step.formula_kind" :description="selected.step.description" :status="selected.step.status" :report="selected.step.report" :run-id="selected.progress.runId" :error="selected.step.error" :repairs="selected.step.repairs" @close="selected = null" />
     <BaseModal v-if="savedStep" :title="`第 ${savedStep.id} 步 · ${savedStep.name}`" width="max-w-lg" @close="savedStep = null">
       <p v-if="savedStep.description" class="text-sm leading-7">{{ savedStep.description }}</p>
-      <p v-if="savedStep.formula" class="mt-3 text-xs text-mute">{{ savedStep.formula_kind === 'customer' ? '客户公式' : '内置公式' }} · <code class="font-mono">{{ savedStep.formula }}</code></p>
+      <p v-if="savedStep.formula" class="mt-3 text-xs text-mute">{{ recipeToolLabel(savedStep) }} · <code class="font-mono">{{ savedStep.formula }}</code></p>
     </BaseModal>
   </aside>
 </template>

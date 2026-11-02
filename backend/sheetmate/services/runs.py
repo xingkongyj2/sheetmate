@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -45,6 +47,34 @@ def output_path(run: Run, filename: str) -> Path:
     return folder / f"{run.id}_{filename}"
 
 
+def register_delivery_files(db: Session, run: Run, artifacts: list[dict[str, Any]], *, user_id: int | None) -> list[dict[str, Any]]:
+    """把正式交付复制到独立输出件，保留内部文件供后续步骤或断点重跑使用。"""
+    from sheetmate.services import files as file_service
+
+    copied: list[Path] = []
+    deliveries: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    try:
+        for artifact in artifacts:
+            source_path = Path(artifact["path"])
+            if source_path.resolve() in seen:
+                continue
+            seen.add(source_path.resolve())
+            name = file_service.safe_filename(artifact.get("name") or source_path.name)
+            path = output_path(run, f"{uuid4().hex[:8]}_{name}")
+            with source_path.open("rb") as source, path.open("xb") as destination:
+                copied.append(path)
+                shutil.copyfileobj(source, destination)
+            record = file_service.register_output(db, path=path, filename=name, customer_id=run.customer_id,
+                                                  conversation_id=run.conversation_id, run_id=run.id, user_id=user_id)
+            deliveries.append({**artifact, **file_service.file_dict(record)})
+    except BaseException:
+        for path in copied:
+            path.unlink(missing_ok=True)
+        raise
+    return deliveries
+
+
 def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification: dict[str, Any] | None = None,
                output_file_id: str | None = None, diff: dict[str, Any] | None = None, outputs_metrics: dict[str, float] | None = None) -> Run:
     run = db.get(Run, run_id)
@@ -64,6 +94,9 @@ def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification
         validation["before_after"] = diff
     validation["inputs"] = report.get("inputs", [])
     validation["outputs"] = report.get("outputs", [])
+    validation["artifacts"] = report.get("artifacts", [])
+    validation["files"] = report.get("files", [])
+    validation["checkpoints"] = report.get("validation_checkpoints", [])
     run.validation = validation
     run.verification = verification or {}
     run.error = report.get("error", "")

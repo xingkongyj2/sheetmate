@@ -143,7 +143,9 @@ def test_formulas_and_settings(client):
     assert cfg["configured"] is False and cfg["model"] == "deepseek-v4-pro"
     assert cfg["default_model"] == "deepseek-v4-pro"
     deepseek = next(p for p in cfg["providers"] if p["id"] == "deepseek")
-    assert deepseek["models"] == ["deepseek-v4-pro", "deepseek-flash"]
+    assert deepseek["models"] == ["deepseek-v4-pro", "deepseek-flash", "deepseek-chat"]
+    assert deepseek["thinking_models"] == ["deepseek-v4-pro", "deepseek-flash"]
+    assert cfg["thinking_supported"] is True
 
 
 def test_chat_without_llm_key_explains_how_to_configure(client):

@@ -18,6 +18,7 @@ from sheetmate.engine.reader import ReadError
 from sheetmate.engine.workbook_builder import write_created_workbook
 from sheetmate.engine.workspace import TableInfo, Workspace
 from sheetmate.recipe.matcher import Candidate, match_inputs
+from sheetmate.recipe.compiler import FileDependency, compile_from_workspace, with_workbook_export
 from sheetmate.recipe.executor import has_reviewable_output
 from sheetmate.recipe.pipeline import RunHandle
 from sheetmate.recipe.schema import Recipe
@@ -89,11 +90,28 @@ class ConversationHost:
     def load_file(self, file_id: str) -> list[TableInfo]:
         with session_scope() as db:
             record = file_service.get_file(db, file_id)
-            if record.customer_id != self.customer_id and record.conversation_id != self.conversation_id:
+            if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
                 raise ServiceError("这个文件不属于当前客户或会话")
             source = Path(record.stored_path)
             path = self.analysis.file_copy(source) if self.analysis else (self.files.file_copy(source) if self.files else None)
-            return file_service.load_into_workspace(self.ws, record, path=path)
+            loaded = file_service.load_into_workspace(self.ws, record, path=path)
+            is_output = record.kind == "output"
+        if is_output:
+            dependency = self.file_dependency(file_id)
+            if dependency.recipe is not None and dependency.ref:
+                recipe = dependency.recipe.model_copy(deep=True)
+                namespace = dependency.ref.partition("/")[0]
+                producer = next((step for step in recipe.steps if step.output == namespace), None)
+                if producer is not None:
+                    bindings = dict(producer.params.get("file_tables") or {})
+                    for info in loaded:
+                        bindings[info.name] = {"ref": dependency.ref, "sheet": info.sheet, "header": info.header}
+                    producer.params["file_tables"] = bindings
+                    for info in loaded:
+                        self.ws.update_meta(info.name, source="computed", role="result",
+                                            step={"recipe_snapshot": recipe.to_dict(), "table_ref": info.name,
+                                                  "run_id": (recipe.metadata.get("last_run") or {}).get("run_id")})
+        return [self.ws.require(info.name) for info in loaded]
 
     def export_excel(self, sheets: list[tuple[str, str]], filename: str) -> dict[str, Any]:
         for table, _ in sheets:
@@ -101,6 +119,18 @@ class ConversationHost:
         name = file_service.safe_filename(filename)
         if not name.lower().endswith(".xlsx"):
             name += ".xlsx"
+        snapshot = None
+        try:
+            with session_scope() as db:
+                library = recipe_service.library_for(db, self.customer_id)
+            snapshot = compile_from_workspace(self.ws, [table for table, _ in sheets], library,
+                                              name=f"导出 {name}", customer_id=self.customer_id,
+                                              conversation_id=self.conversation_id, field_mapping=self.field_mapping())
+            for spec, (_, sheet) in zip(snapshot.output_spec, sheets):
+                spec.name = sheet
+        except ValueError:
+            # 临时查询仍可导出；没有执行血缘的结果不能冒充完整流程。
+            pass
         with session_scope() as db:
             run = run_service.create_run(db, kind="analysis", user_id=self.user_id, customer_id=self.customer_id,
                                          conversation_id=self.conversation_id, request_text=f"导出 {name}")
@@ -110,8 +140,65 @@ class ConversationHost:
                                                   conversation_id=self.conversation_id, run_id=run.id, user_id=self.user_id)
             run.status = "success"
             run.output_file_id = record.id
-            run.finished_at = datetime.now().replace(microsecond=0)
+            run.finished_at = datetime.now()
+            if snapshot is not None:
+                snapshot.metadata["last_run"] = {"run_id": run.id, "status": "success"}
+                run.recipe_id, run.recipe_version = snapshot.id, snapshot.version
+                run.validation = {"recipe_snapshot": snapshot.to_dict(), "plain_export": True}
+                self._last_recipe = snapshot
             return {**file_service.file_dict(record), "sheets_written": written}
+
+    def file_dependency(self, file_id: str) -> FileDependency:
+        """生成文件引用其执行链；上传原件作为新的文件输入，不固定历史结果路径。"""
+        with session_scope() as db:
+            record = file_service.get_file(db, file_id)
+            if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
+                raise ServiceError("这个文件不属于当前客户或会话")
+            dependency = FileDependency(record.id, record.filename)
+            run = db.get(Run, record.run_id) if record.run_id else None
+            snapshot = (run.validation or {}).get("recipe_snapshot") if run else None
+            if not isinstance(snapshot, dict):
+                if run is not None and run.kind == "script":
+                    legacy_run_id = run.id
+                elif record.kind == "output":
+                    raise ServiceError("这个结果文件缺少生成步骤，不能将历史输出当作原始输入保存流程")
+                else:
+                    return dependency
+            else:
+                legacy_run_id = None
+            if legacy_run_id is None:
+                recipe = Recipe.model_validate(snapshot)
+                validation = run.validation or {}
+                outputs = [*validation.get("outputs", []), *validation.get("files", [])]
+                match = next((item for item in outputs if item.get("file_id") == file_id and item.get("ref")), None)
+                if match:
+                    dependency.recipe, dependency.ref = recipe, str(match["ref"])
+                else:
+                    dependency.recipe, dependency.ref = with_workbook_export(recipe, record.filename, plain=bool(validation.get("plain_export")))
+                return dependency
+        from sheetmate.services.workflow_capture import capture_legacy_script
+
+        capture_legacy_script(self, legacy_run_id)
+        return self.file_dependency(file_id)
+
+    def executed_recipe(self, run_id: str) -> Recipe | None:
+        with session_scope() as db:
+            run = run_service.get_run(db, run_id)
+            if run.conversation_id != self.conversation_id:
+                raise ServiceError("这次执行不属于当前会话")
+            if (run.validation or {}).get("recipe_deleted"):
+                raise ServiceError("这个流程已删除")
+            snapshot = (run.validation or {}).get("recipe_snapshot")
+            if (run.validation or {}).get("workflow_save_error"):
+                raise ServiceError(f"本次处理的依赖记录不完整：{run.validation['workflow_save_error']}")
+            if isinstance(snapshot, dict):
+                return Recipe.model_validate(snapshot)
+            legacy = run.kind == "script"
+        if legacy:
+            from sheetmate.services.workflow_capture import capture_legacy_script
+
+            return capture_legacy_script(self, run_id)
+        return None
 
     def create_workbook(self, spec: dict[str, Any], filename: str) -> dict[str, Any]:
         from sheetmate.agent.creation import prepare_workbook_spec
@@ -215,6 +302,9 @@ class ConversationHost:
         pending = self._recent_recipe(recipe_id)
         with session_scope() as db:
             try:
+                record = recipe_service.get_record(db, recipe_id)
+                if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
+                    return pending
                 recipe = recipe_service.get_recipe(db, recipe_id)
             except NotFound:
                 return pending
@@ -240,17 +330,27 @@ class ConversationHost:
                 return self._last_recipe.model_copy(deep=True)
             self._last_recipe = None
         # 执行快照只供本会话追问；不会进入客户的可重复流程目录。
+        legacy_run_id = None
         with session_scope() as db:
             query = select(Run).where(Run.conversation_id == self.conversation_id,
-                                      Run.kind.in_(("modify", "replay"))).order_by(Run.finished_at.desc(), Run.created_at.desc())
+                                      Run.kind.in_(("modify", "replay", "script", "analysis"))).order_by(Run.finished_at.desc(), Run.created_at.desc())
             if recipe_id is not None:
                 query = query.where(Run.recipe_id == recipe_id)
             for run in db.scalars(query):
                 if (run.validation or {}).get("recipe_deleted"):
                     continue
+                if (run.validation or {}).get("workflow_save_error"):
+                    raise ServiceError(f"最近一次处理的依赖记录不完整：{run.validation['workflow_save_error']}。请指定要保存的运行记录。")
                 snapshot = (run.validation or {}).get("recipe_snapshot")
                 if isinstance(snapshot, dict):
                     return Recipe.model_validate(snapshot)
+                if run.kind == "script":
+                    legacy_run_id = run.id
+                    break
+        if legacy_run_id:
+            from sheetmate.services.workflow_capture import capture_legacy_script
+
+            return capture_legacy_script(self, legacy_run_id)
         return None
 
     def store_recipe(self, recipe: Recipe, *, note: str = "") -> dict[str, Any]:
@@ -327,32 +427,51 @@ class ConversationHost:
                    register_output: bool = True) -> dict[str, Any] | None:
         with session_scope() as db:
             record: FileRecord | None = None
+            delivered: list[dict[str, Any]] = []
             metrics = None
-            if register_output and handle.output_path.exists() and has_reviewable_output(report):
-                suffix = ("_结果" if report.get("status") in {"success", "warning"} else "_结果_未通过校验") + handle.output_path.suffix
-                record = file_service.register_output(db, path=handle.output_path, filename=f"{recipe.name}{suffix}",
-                                                      customer_id=self.customer_id, conversation_id=self.conversation_id,
-                                                      run_id=handle.run_id, user_id=self.user_id)
-                try:
-                    from sheetmate.engine.reader import read_workbook
+            if register_output and has_reviewable_output(report):
+                run = db.get(Run, handle.run_id)
+                assert run is not None
+                artifacts = [dict(item) for item in report.get("files", [])]
+                paths = {str(item["path"]) for item in report.get("artifacts", [])}
+                paths.update(str(item["path"]) for item in artifacts)
+                if handle.output_path.exists() and str(handle.output_path) not in paths:
+                    suffix = ("_结果" if report.get("status") in {"success", "warning"} else "_结果_未通过校验") + handle.output_path.suffix
+                    artifacts.append({"path": str(handle.output_path), "name": f"{recipe.name}{suffix}"})
+                delivered = run_service.register_delivery_files(db, run, artifacts, user_id=self.user_id)
+                if delivered:
+                    record = db.get(FileRecord, delivered[-1]["file_id"])
+                for artifact in artifacts:
+                    path = Path(artifact["path"])
+                    try:
+                        from sheetmate.engine.reader import read_workbook
 
-                    metrics = run_service.metrics_of({s.name: s.df for s in read_workbook(handle.output_path)})
-                except Exception:
-                    metrics = None
-            run_service.finish_run(db, handle.run_id, report, verification=verification,
+                        metrics = run_service.metrics_of({s.name: s.df for s in read_workbook(path)})
+                    except Exception:
+                        pass
+            persisted_report = {**report, "files": delivered} if register_output else report
+            run_service.finish_run(db, handle.run_id, persisted_report, verification=verification,
                                    output_file_id=record.id if record else None, diff=diff, outputs_metrics=metrics)
             if register_output:
                 snapshot = recipe.model_copy(deep=True)
                 snapshot.metadata["last_run"] = {"run_id": handle.run_id, "status": report.get("status")}
                 snapshot.metadata["verification"] = verification
+                snapshot.learned_from["input_bindings"] = {
+                    item["alias"]: {"file_id": item.get("file_id") or (item.get("source") or {}).get("file_id"),
+                                    "sheet": item.get("sheet")} for item in report.get("inputs", [])}
+                recipe.learned_from["input_bindings"] = dict(snapshot.learned_from["input_bindings"])
                 run = db.get(Run, handle.run_id)
                 assert run is not None
+                actual_inputs = [i.get("file_id") or (i.get("source") or {}).get("file_id") for i in report.get("inputs", [])]
+                run.input_file_ids = list(dict.fromkeys(fid for fid in actual_inputs if fid))
                 run.validation = {**(run.validation or {}), "recipe_snapshot": snapshot.to_dict()}
+                run.validation = {**run.validation, "files": delivered}
                 if not run.validation.get("recipe_deleted"):
                     self._last_recipe = snapshot
                 elif self._last_recipe is not None and self._last_recipe.id == recipe.id:
                     self._last_recipe = None
-            return {**file_service.file_dict(record), "run_id": handle.run_id} if record else None
+            public = [{key: value for key, value in item.items() if key != "path"} for item in delivered]
+            return {**public[-1], "files": public} if public else None
 
     def save_recipe(self, recipe: Recipe, *, verification: dict[str, Any] | None, run_report: dict[str, Any]) -> dict[str, Any]:
         """流程闭环结束后保存：执行成功且（有人工结果时）验证通过 → active，否则 draft。"""

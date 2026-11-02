@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import openpyxl
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -99,7 +100,19 @@ def register_output(db: Session, *, path: Path, filename: str, customer_id: str 
 
 def profile_file(path: Path) -> dict[str, Any]:
     """文件画像（不含数据预览，预览按需读取）。"""
-    sheets = _read_file_copy(path)
+    try:
+        sheets = _read_file_copy(path)
+    except ReadError as exc:
+        # 空白或只含样式的合法工作簿仍能交给脚本处理，损坏文件不能借此绕过校验。
+        if path.suffix.lower() not in {".xlsx", ".xlsm"} or "没有可读取的数据" not in str(exc):
+            raise
+        try:
+            with temporary_file_copies() as copies:
+                workbook = openpyxl.load_workbook(copies.file_copy(path), read_only=True, data_only=False)
+                workbook.close()
+        except Exception as invalid:
+            raise exc from invalid
+        return {"sheets": [], "file_only": True}
     profile = profile_workbook(sheets, preview_rows=0)
     for sheet in profile["sheets"]:
         sheet.pop("preview", None)
@@ -178,6 +191,8 @@ def table_base_name(filename: str) -> str:
 
 def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None = None) -> list[TableInfo]:
     """把文件的每个 sheet 存成工作区里的一张表。期望结果文件的表名用「期望_sheet名」。"""
+    if (getattr(record, "profile", None) or {}).get("file_only"):
+        return []
     sheets = read_workbook(path) if path is not None else _read_file_copy(Path(record.stored_path))
     for info in ws.list_tables():  # 同一个文件重复加载时先清掉旧表
         if info.file_id == record.id:

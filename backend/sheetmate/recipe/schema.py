@@ -2,7 +2,7 @@
 
 总体结构沿用 SheetAgent 的 Recipe（inputs / steps / output_spec / validation_rules / learned_from / metadata），
 并加入 SheetMate 的逻辑：
-- 步骤不再保存 pandas / M 代码，而是「公式 id + 参数取值」，执行时由引擎编译成 DuckDB SQL
+- 公式、SQL 和沙箱 Python 都保存为可重复执行的步骤，可以混合编排
 - formula_kind 标明这一步用的是内置公式还是客户独有公式
 - 步骤可以挂断言（row_count_range / match_rate_min / no_duplicate_keys …），不通过就触发修复
 - field_mapping 记录这个流程依赖的字段别名（标准字段 → 别名）
@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.sqlutil import sql_table_refs
@@ -36,6 +36,7 @@ class RecipeInput(BaseModel):
     model_config = {"extra": "ignore"}
 
     alias: str  # 表名：步骤参数里引用它
+    kind: Literal["table", "file"] = "table"
     description: str = ""
     file_pattern: str = ""  # 文件名规则，例如「运费明细*」，重复执行时自动匹配文件
     sheet: str | None = None
@@ -63,12 +64,13 @@ class StepAssertion(BaseModel):
 
 
 class RecipeStep(BaseModel):
-    """Recipe 的一步：调用一个公式，结果存成 output 表。"""
+    """Recipe 的一步：公式、SQL 或沙箱 Python；output 同时作为文件产物的逻辑命名空间。"""
 
     model_config = {"extra": "ignore"}
 
     id: int
     name: str
+    kind: Literal["formula", "sql", "python"] = "formula"
     action: str = "custom"  # filter / merge / pivot / aggregate / calculate / clean / output / custom
     formula: str
     formula_kind: Literal["builtin", "customer"] = "builtin"
@@ -80,6 +82,14 @@ class RecipeStep(BaseModel):
     sql: str = ""  # 最近一次执行时编译出的 SQL，仅供审计
     assertions: list[StepAssertion] = Field(default_factory=list)
     enabled: bool = True
+
+    @model_validator(mode="before")
+    @classmethod
+    def _infer_kind(cls, value: Any) -> Any:
+        if isinstance(value, dict) and "kind" not in value:
+            value = dict(value)
+            value["kind"] = {"custom_sql": "sql", "python_script": "python"}.get(value.get("formula"), "formula")
+        return value
 
     @field_validator("output")
     @classmethod
@@ -154,7 +164,7 @@ class Recipe(BaseModel):
         if self.output_spec:
             return [o.source for o in self.output_spec]
         steps = self.ordered_steps()
-        return [steps[-1].output] if steps else []
+        return step_output_tables(steps[-1]) if steps else []
 
     def to_dict(self) -> dict[str, Any]:
         return self.model_dump(mode="json")
@@ -162,17 +172,18 @@ class Recipe(BaseModel):
     def flow(self) -> dict[str, Any]:
         """流程图数据：输入 → 步骤 → 输出（前端 RecipeFlow 组件用）。"""
         return {
-            "inputs": [{"alias": i.alias, "description": i.description, "file_pattern": i.file_pattern} for i in self.inputs],
+            "inputs": [{"alias": i.alias, "kind": i.kind, "description": i.description, "file_pattern": i.file_pattern} for i in self.inputs],
             "steps": [
                 {
                     "id": s.id,
                     "name": s.name,
+                    "kind": s.kind,
                     "action": s.action,
                     "formula": s.formula,
                     "formula_kind": s.formula_kind,
                     "description": s.description,
                     "output": s.output,
-                    "inputs": step_table_refs(s),
+                    "inputs": list(dict.fromkeys(step_table_refs(s) + step_file_refs(s))),
                 }
                 for s in self.ordered_steps()
             ],
@@ -189,6 +200,18 @@ _TABLE_PARAM_TYPES = {"table", "tables"}
 
 def step_table_refs(step: RecipeStep, library: FormulaLibrary | None = None) -> list[str]:
     """这一步读了哪些表。"""
+    if step.kind == "python":
+        values = step.params.get("input_tables", [])
+        refs = [str(value) for value in values] if isinstance(values, list) else []
+        bindings = step.params.get("table_bindings", {})
+        if isinstance(bindings, dict):
+            refs.extend(str(value) for value in bindings.values())
+        export = step.params.get("workbook_export", {})
+        if isinstance(export, dict):
+            for spec in export.get("output_spec", []):
+                if isinstance(spec, dict) and isinstance(spec.get("source"), str):
+                    refs.append(spec["source"])
+        return list(dict.fromkeys(refs))
     lib = library or FormulaLibrary()
     refs: list[str] = []
     try:
@@ -208,11 +231,31 @@ def step_table_refs(step: RecipeStep, library: FormulaLibrary | None = None) -> 
     return refs
 
 
+def step_file_refs(step: RecipeStep) -> list[str]:
+    """文件输入引用输入别名，或前序脚本的 output/文件名。"""
+    values = step.params.get("input_files", {}) if step.kind == "python" else {}
+    return list(dict.fromkeys(str(value) for value in values.values())) if isinstance(values, dict) else []
+
+
+def step_output_tables(step: RecipeStep) -> list[str]:
+    if step.kind != "python":
+        return [step.output]
+    mapping = step.params.get("output_tables")
+    outputs = [step.output] if mapping is None else list(mapping.values()) if isinstance(mapping, dict) else []
+    file_tables = step.params.get("file_tables", {})
+    if isinstance(file_tables, dict):
+        outputs.extend(file_tables)
+    return outputs
+
+
 def check_recipe(recipe: Recipe, library: FormulaLibrary) -> list[str]:
     """返回问题列表（空列表表示通过）。只检查结构，列是否存在要到执行时由引擎检查。"""
     problems: list[str] = []
-    known = set(recipe.input_aliases())
-    if len(known) != len(recipe.inputs):
+    aliases = recipe.input_aliases()
+    known = {inp.alias for inp in recipe.inputs if inp.kind == "table"}
+    file_inputs = set(aliases)
+    file_outputs: set[str] = set()
+    if len(set(aliases)) != len(recipe.inputs):
         problems.append("输入别名有重复")
     if not recipe.steps:
         problems.append("Recipe 至少需要一个步骤")
@@ -222,22 +265,91 @@ def check_recipe(recipe: Recipe, library: FormulaLibrary) -> list[str]:
         if step.id in seen_ids:
             problems.append(f"{label}：步骤 id 重复")
         seen_ids.add(step.id)
-        if not library.has(step.formula):
-            problems.append(f"{label}：公式「{step.formula}」不存在")
-            continue
-        spec = library.resolve(step.formula).spec
-        unknown = set(step.params) - set(spec.params)
-        if unknown:
-            problems.append(f"{label}：公式「{step.formula}」没有参数 {sorted(unknown)}")
-        missing = [n for n, p in spec.params.items() if p.required and step.params.get(n) in (None, "", [], {})]
-        if missing:
-            problems.append(f"{label}：缺少必填参数 {missing}")
+        if step.kind == "python":
+            if step.formula != "python_script":
+                problems.append(f"{label}：Python 步骤的 formula 必须为 python_script")
+            code = step.params.get("code")
+            if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > 100_000:
+                problems.append(f"{label}：Python 脚本不能为空，且不能超过 100 KB")
+            else:
+                try:
+                    compile(code, "<recipe_script>", "exec")
+                except SyntaxError as exc:
+                    problems.append(f"{label}：Python 语法错误（第 {exc.lineno} 行）：{exc.msg}")
+            tables = step.params.get("input_tables", [])
+            if not isinstance(tables, list) or any(not isinstance(t, str) or not t.strip() for t in tables):
+                problems.append(f"{label}：input_tables 必须是表名列表")
+            files = step.params.get("input_files", {})
+            if not isinstance(files, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
+                                                  for k, v in files.items()):
+                problems.append(f"{label}：input_files 必须映射文件别名到输入或前序脚本文件")
+            for ref in step_file_refs(step):
+                if ref not in file_inputs and not any(ref.startswith(f"{namespace}/") and len(ref) > len(namespace) + 1
+                                                     for namespace in file_outputs):
+                    problems.append(f"{label}：引用的文件「{ref}」不存在（只能用输入文件或前面脚本的输出）")
+            mapping = step.params.get("output_tables", {})
+            if not isinstance(mapping, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
+                                                    for k, v in mapping.items()):
+                problems.append(f"{label}：output_tables 必须映射脚本结果表名到流程表名")
+            elif len(set(mapping.values())) != len(mapping):
+                problems.append(f"{label}：Python 输出表名有重复")
+            bindings = step.params.get("table_bindings", {})
+            if not isinstance(bindings, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
+                                                    for k, v in bindings.items()):
+                problems.append(f"{label}：table_bindings 必须映射脚本表名到流程表名")
+            file_tables = step.params.get("file_tables", {})
+            if not isinstance(file_tables, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, dict)
+                                                       or not isinstance(v.get("ref"), str) or not v["ref"].strip()
+                                                       for k, v in file_tables.items()):
+                problems.append(f"{label}：file_tables 必须映射流程表名到文件来源")
+            elif isinstance(mapping, dict) and set(file_tables) & {v for v in mapping.values() if isinstance(v, str)}:
+                problems.append(f"{label}：文件读取表和脚本结果表重名")
+            else:
+                for spec in file_tables.values() if isinstance(file_tables, dict) else []:
+                    ref = spec["ref"]
+                    if ref not in file_inputs and not any(ref.startswith(f"{namespace}/") for namespace in file_outputs | {step.output}):
+                        problems.append(f"{label}：文件读取表的来源「{ref}」不存在")
+            export = step.params.get("workbook_export")
+            if export is not None:
+                if not isinstance(export, dict) or not isinstance(export.get("output_spec"), list) or not export["output_spec"]:
+                    problems.append(f"{label}：workbook_export 必须指定输出工作表")
+                else:
+                    try:
+                        for output in export["output_spec"]:
+                            OutputSheet.model_validate(output)
+                    except ValueError:
+                        problems.append(f"{label}：workbook_export 的工作表定义无效")
+                filename = export.get("filename", "") if isinstance(export, dict) else ""
+                if not isinstance(filename, str) or not filename or "/" in filename or "\\" in filename or filename in {".", ".."}:
+                    problems.append(f"{label}：workbook_export.filename 必须是文件名")
+        else:
+            if step.kind == "sql" and step.formula != "custom_sql":
+                problems.append(f"{label}：SQL 步骤的 formula 必须为 custom_sql")
+            if not library.has(step.formula):
+                problems.append(f"{label}：公式「{step.formula}」不存在")
+                continue
+            spec = library.resolve(step.formula).spec
+            unknown = set(step.params) - set(spec.params)
+            if unknown:
+                problems.append(f"{label}：公式「{step.formula}」没有参数 {sorted(unknown)}")
+            missing = [n for n, p in spec.params.items() if p.required and step.params.get(n) in (None, "", [], {})]
+            if missing:
+                problems.append(f"{label}：缺少必填参数 {missing}")
         for ref in step_table_refs(step, library):
             if ref not in known:
                 problems.append(f"{label}：引用的表「{ref}」不存在（只能用输入表或前面步骤的输出）")
-        if step.output in recipe.input_aliases():
-            problems.append(f"{label}：输出名「{step.output}」和输入表重名")
-        known.add(step.output)
+        for output in step_output_tables(step):
+            if not isinstance(output, str):
+                continue
+            if output in aliases:
+                problems.append(f"{label}：输出名「{output}」和输入表重名")
+            if output in known and output not in aliases:
+                problems.append(f"{label}：输出名「{output}」和前面步骤重名")
+            known.add(output)
+        if step.kind == "python":
+            if step.output in file_outputs or step.output in file_inputs:
+                problems.append(f"{label}：文件输出命名空间「{step.output}」重复")
+            file_outputs.add(step.output)
     for out in recipe.output_spec:
         if out.source not in known:
             problems.append(f"输出 sheet「{out.name}」的来源「{out.source}」不存在")

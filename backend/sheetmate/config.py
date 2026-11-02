@@ -27,7 +27,8 @@ load_dotenv(BACKEND_DIR / ".env")
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro"
-DEEPSEEK_MODELS = (DEEPSEEK_DEFAULT_MODEL, "deepseek-flash")
+DEEPSEEK_THINKING_MODELS = (DEEPSEEK_DEFAULT_MODEL, "deepseek-flash")
+DEEPSEEK_MODELS = (*DEEPSEEK_THINKING_MODELS, "deepseek-chat")
 
 
 def is_deepseek_url(base_url: str) -> bool:
@@ -144,6 +145,10 @@ class LLMSettings:
     thinking_enabled: bool = False
 
     @property
+    def thinking_supported(self) -> bool:
+        return is_deepseek_url(self.base_url) and self.model in DEEPSEEK_THINKING_MODELS
+
+    @property
     def configured(self) -> bool:
         return bool(self.api_key)
 
@@ -185,10 +190,9 @@ def get_llm_settings() -> LLMSettings:
     env_key = _env("LLM_API_KEY") or _env("DEEPSEEK_API_KEY")
     base_url = overrides.get("base_url") or _env("LLM_BASE_URL") or DEEPSEEK_BASE_URL
     model = overrides.get("model") or _env("LLM_MODEL") or DEEPSEEK_DEFAULT_MODEL
-    # 旧安装可能在 .env 或设置页保存过旧模型名，随默认模型一起迁移。
-    if is_deepseek_url(base_url):
-        if model in {"deepseek-chat", "deepseek-reasoner"}:
-            model = DEEPSEEK_DEFAULT_MODEL
+    # deepseek-chat 仍可显式选择；已移除的 reasoner 沿用新默认模型。
+    if is_deepseek_url(base_url) and model == "deepseek-reasoner":
+        model = DEEPSEEK_DEFAULT_MODEL
     return LLMSettings(
         api_key=overrides.get("api_key") or env_key,
         base_url=base_url,
@@ -197,7 +201,7 @@ def get_llm_settings() -> LLMSettings:
         timeout=float(_env("LLM_TIMEOUT", "120") or 120),
         max_tokens=_env_int("LLM_MAX_TOKENS", 8192),
         extra_body=extra_body,
-        thinking_enabled=thinking_enabled,
+        thinking_enabled=thinking_enabled and is_deepseek_url(base_url) and model in DEEPSEEK_THINKING_MODELS,
     )
 
 

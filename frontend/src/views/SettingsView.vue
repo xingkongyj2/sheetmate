@@ -25,6 +25,14 @@ const testResult = ref<{ ok: boolean; text: string } | null>(null)
 const displayName = ref(auth.user?.display_name ?? '')
 
 const providerInfo = computed(() => config.value?.providers.find((p) => p.id === provider.value))
+const thinkingSupported = computed(() => {
+  const url = baseUrl.value.trim().replace(/\/+$/, '')
+  return config.value?.providers.some((p) => {
+    const providerUrl = p.base_url.replace(/\/+$/, '')
+    return !!providerUrl && !!p.thinking_models?.includes(model.value)
+      && (url === providerUrl || url === `${providerUrl}/v1`)
+  }) ?? false
+})
 
 watch([provider, apiKey, baseUrl, model, thinkingEnabled], () => {
   testResult.value = null
@@ -54,7 +62,7 @@ async function save() {
   try {
     config.value = await settingsApi.saveLLM({
       api_key: apiKey.value || undefined, base_url: baseUrl.value, model: model.value,
-      thinking_enabled: thinkingEnabled.value,
+      thinking_enabled: thinkingSupported.value && thinkingEnabled.value,
     })
     model.value = config.value.model
     thinkingEnabled.value = config.value.thinking_enabled
@@ -73,7 +81,7 @@ async function test() {
   try {
     const result = await settingsApi.testLLM({
       api_key: apiKey.value || undefined, base_url: baseUrl.value, model: model.value,
-      thinking_enabled: thinkingEnabled.value,
+      thinking_enabled: thinkingSupported.value && thinkingEnabled.value,
     })
     testResult.value = result.ok ? { ok: true, text: `连接成功（${result.model}）：${result.reply}` } : { ok: false, text: result.error?.message ?? '连接失败' }
   } catch (err) {
@@ -149,7 +157,7 @@ async function saveName() {
               </template>
             </label>
           </div>
-          <label v-if="provider === 'deepseek'" class="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
+          <label v-if="thinkingSupported" class="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
             <span>
               <span class="block text-sm font-medium">开启思考</span>
               <span class="mt-1 block text-xs leading-relaxed text-mute">开启后适合复杂分析，但响应更慢；关闭可更快获得回答。</span>

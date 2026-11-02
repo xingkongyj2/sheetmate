@@ -14,6 +14,7 @@ import json
 import math
 import re
 import threading
+from collections.abc import Iterator
 from typing import Any
 
 import duckdb
@@ -129,27 +130,41 @@ def sql_table_refs(sql: str) -> list[str]:
         return []
     if ast.get("error"):
         return []
-    tables: list[str] = []
-    ctes: set[str] = set()
+    return list(dict.fromkeys(node["table_name"] for node in sql_base_table_nodes(ast)))
 
-    def walk(node: Any) -> None:
-        if isinstance(node, dict):
-            if node.get("type") == "BASE_TABLE" and node.get("table_name"):
-                if node["table_name"] not in tables:
-                    tables.append(node["table_name"])
-            cte_map = node.get("cte_map")
-            if isinstance(cte_map, dict):
-                for item in cte_map.get("map", []):
-                    if isinstance(item, dict) and item.get("key"):
-                        ctes.add(item["key"])
-            for value in node.values():
-                walk(value)
-        elif isinstance(node, list):
-            for value in node:
-                walk(value)
 
-    walk(ast)
-    return [t for t in tables if t not in ctes]
+def sql_base_table_nodes(ast: Any) -> Iterator[dict[str, Any]]:
+    """遍历 DuckDB AST 的真实表引用，按查询作用域排除 CTE（保留可原位改写的节点）。"""
+    def walk(node: Any, scope: frozenset[str]) -> Iterator[dict[str, Any]]:
+        if isinstance(node, list):
+            for child in node:
+                yield from walk(child, scope)
+            return
+        if not isinstance(node, dict):
+            return
+        local = scope
+        cte_map = node.get("cte_map")
+        if isinstance(cte_map, dict):
+            # 非递归 CTE 只看得见之前的 CTE；自己的定义中同名表仍是实际输入表。
+            for item in cte_map.get("map", []):
+                if isinstance(item, dict):
+                    yield from walk(item.get("value"), local)
+                    if item.get("key"):
+                        local = local | {str(item["key"]).casefold()}
+        if node.get("type") == "BASE_TABLE" and node.get("table_name"):
+            path = (node.get("qualified_name") or {}).get("path") or []
+            qualified = bool(node.get("schema_name") or node.get("catalog_name") or len(path) > 1)
+            if qualified or str(node["table_name"]).casefold() not in local:
+                yield node
+        recursive = node.get("type") == "RECURSIVE_CTE_NODE" and node.get("cte_name")
+        for key, child in node.items():
+            if key == "cte_map":
+                continue
+            # 递归 CTE 的种子仍能读同名原表，递归分支才绑定 CTE 本身。
+            child_scope = local | {str(node["cte_name"]).casefold()} if recursive and key == "right" else local
+            yield from walk(child, child_scope)
+
+    yield from walk(ast, frozenset())
 
 
 # ---------------------------------------------------------------------------

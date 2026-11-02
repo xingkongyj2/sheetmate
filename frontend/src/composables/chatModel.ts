@@ -7,7 +7,7 @@
  * - artifacts 产物：结果表、文件、处理流程卡片、澄清问题
  * 刷新页面时用数据库里存的事件重新归并，得到同样的界面。
  */
-import type { AgentEvent, DiffCard, RecipeFlowData, RecipeJSON, StepReport, VerifyReport } from '@/api/types'
+import type { AgentEvent, DiffCard, RecipeFlowData, RecipeJSON, RecipeToolKind, StepReport, VerifyReport } from '@/api/types'
 
 export type ToolStatus = 'running' | 'ok' | 'error'
 export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' | 'error' | 'stopped'
@@ -37,6 +37,7 @@ export interface StepState {
   name: string
   formula: string
   formula_name: string
+  kind?: RecipeToolKind
   formula_kind: string
   description: string
   output: string
@@ -63,7 +64,7 @@ export interface RecipeProgress {
   recipeVersion?: number
   deleted?: boolean
   steps: StepState[]
-  inputs: { alias: string; filename: string; sheet: string; rows: number; renames: Record<string, string>; warnings: string[] }[]
+  inputs: { alias: string; kind?: 'table' | 'file'; filename: string; sheet: string | null; rows: number; renames: Record<string, string>; warnings: string[] }[]
   outputs?: { sheet: string; rows: number }[]
   validation?: { status: string; summary: string; checks: { status: string; description: string; message: string }[] }
   verify?: VerifyReport
@@ -203,6 +204,7 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
         step_id: (s as unknown as { id: number }).id,
         name: s.name,
         formula: s.formula,
+        kind: s.kind,
         formula_name: s.formula_name,
         formula_kind: s.formula_kind,
         description: s.description,
@@ -213,7 +215,7 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.status = 'running'
       return true
     case 'recipe_input':
-      p.inputs.push({ alias: e.alias, filename: e.filename, sheet: e.sheet, rows: e.rows, renames: e.renames ?? {}, warnings: e.warnings ?? [] })
+      p.inputs.push({ alias: e.alias, kind: e.kind, filename: e.filename, sheet: e.sheet, rows: e.rows, renames: e.renames ?? {}, warnings: e.warnings ?? [] })
       return true
     case 'recipe_step_start': {
       const s = stepOf(p, e.step_id)
@@ -242,6 +244,7 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
         s.status = e.status
         s.report = e as unknown as StepReport
         s.formula = e.formula
+        s.kind = e.kind ?? s.kind
         s.formula_name = e.formula_name
         s.formula_kind = e.formula_kind ?? s.formula_kind
       }
@@ -299,7 +302,7 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
         p.steps = (p.recipe?.steps ?? []).map((step) => {
           const result = reports.find((item) => item.step_id === step.id)
           return {
-            step_id: step.id, name: step.name, formula: step.formula,
+            step_id: step.id, name: step.name, formula: step.formula, kind: result?.kind ?? step.kind,
             formula_name: result?.formula_name ?? step.formula,
             formula_kind: result?.formula_kind ?? step.formula_kind ?? 'builtin',
             description: step.description, output: step.output,
@@ -342,10 +345,10 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       // 只接收流程图公开字段，快照不依赖后续 API 请求，也不携带执行参数或 SQL。
       flow: {
         inputs: e.flow.inputs.map((input: RecipeFlowData['inputs'][number]) => ({
-          alias: input.alias, description: input.description, file_pattern: input.file_pattern,
+          alias: input.alias, kind: input.kind, description: input.description, file_pattern: input.file_pattern,
         })),
         steps: e.flow.steps.map((step: RecipeFlowData['steps'][number]) => ({
-          id: step.id, name: step.name, action: step.action, formula: step.formula,
+          id: step.id, name: step.name, action: step.action, formula: step.formula, kind: step.kind,
           formula_kind: step.formula_kind, description: step.description, output: step.output,
           inputs: [...(step.inputs ?? [])],
         })),
@@ -588,7 +591,7 @@ export const FORMULA_ART: Record<string, string> = {
   fill_null: 'broom', drop_duplicates: 'broom', filter_rows: 'funnel', sort_rows: 'crown', top_n: 'crown',
   compute_column: 'calc', map_values: 'calc', split_column: 'calc', concat_columns: 'calc', add_serial: 'calc',
   lookup: 'magnet', join_tables: 'puzzle', concat_tables: 'puzzle', group_aggregate: 'sigma', append_total: 'sigma',
-  pivot_wide: 'blocks', unpivot_long: 'blocks', custom_sql: 'code',
+  pivot_wide: 'blocks', unpivot_long: 'blocks', custom_sql: 'code', python_script: 'code',
 }
 
 export function formulaArt(formula: string, kind?: string): string {

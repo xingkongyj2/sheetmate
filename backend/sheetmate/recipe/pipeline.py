@@ -38,7 +38,7 @@ class _Attempt:
 
     def score(self) -> tuple[int, int, float]:
         """执行成功 > 失败；再比比对状态和匹配率。"""
-        executed = 0 if self.runner.report.get("failed_stage") in {"input", "step", "error"} else 1
+        executed = 0 if self.runner.report.get("failed_stage") in {"input", "step", "error", "checkpoint"} else 1
         valid = 0 if self.runner.report.get("failed_stage") == "validation" else 1
         if self.informational:
             return (executed, valid, 0.0)
@@ -117,7 +117,7 @@ class RecipePipeline:
             attempt = _Attempt(runner, handle, informational=revising)
             attempts.append(attempt)
             stage = report.get("failed_stage")
-            if stage in {"input", "step", "error"}:
+            if stage in {"input", "step", "error", "checkpoint"}:
                 break  # 执行层面的失败（已经过内层修复），交给用户处理
             if revising and instruction and not stage:
                 added = await asyncio.to_thread(_keep_requested_columns, recipe, runner, handle, instruction)
@@ -177,7 +177,8 @@ class RecipePipeline:
         # ---- 4. 记录本次运行与交付；保存重复流程是独立的显式请求 ----
         file_info = self.host.finish_run(handle, recipe, report, verification=verification, diff=before_after)
         if file_info:
-            yield {"type": "file", **file_info}
+            for item in file_info.get("files", [file_info]):
+                yield {"type": "file", **item}
         recipe.metadata["verification"] = _verification_brief(verification)
         recipe.metadata["last_run"] = {"run_id": report["run_id"], "status": report["status"]}
         saved = None
@@ -223,6 +224,9 @@ class RecipePipeline:
             sources[alias] = InputSource(alias=alias, df=df, filename=meta.filename if meta else "",
                                          sheet=meta.sheet if meta else None, file_id=meta.file_id if meta else None,
                                          path=meta.path if meta else None, header=meta.header if meta else None)
+        for alias, meta in ctx.input_meta.items():
+            if meta.kind == "file":
+                sources[alias] = InputSource(alias=alias, filename=meta.filename, file_id=meta.file_id, path=meta.path)
         return sources
 
 

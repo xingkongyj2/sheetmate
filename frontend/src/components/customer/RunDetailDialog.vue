@@ -26,11 +26,11 @@ const log = ref<string[]>([])
 const preview = ref<FileInfo | null>(null)
 const loadingPreview = ref(false)
 
-async function previewOutput() {
-  if (!run.value?.output_file_id || loadingPreview.value) return
+async function previewOutput(fileId: string) {
+  if (loadingPreview.value) return
   loadingPreview.value = true
   try {
-    preview.value = await fileApi.get(run.value.output_file_id)
+    preview.value = await fileApi.get(fileId)
   } catch (err) {
     toast.error(errorText(err))
   } finally {
@@ -50,6 +50,12 @@ async function load() {
 onMounted(load)
 
 const hasTables = computed(() => tables.value.length > 0)
+const outputFiles = computed(() => {
+  const files = (run.value?.validation?.files ?? []).flatMap((file) => file.file_id ? [{ id: file.file_id, name: file.filename || file.name || '运行结果' }] : [])
+  const primary = run.value?.output_file_id
+  if (primary && !files.some((file) => file.id === primary)) files.unshift({ id: primary, name: '运行结果' })
+  return files
+})
 
 async function rerun(step: StepReport, params: Record<string, unknown>) {
   selected.value = null
@@ -116,27 +122,31 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
         <div v-for="(l, i) in log" :key="i">{{ l }}</div>
         <LoaderCircle v-if="rerunning" class="mt-1 size-3.5 animate-spin" />
       </div>
+      <div v-if="outputFiles.length" class="space-y-2">
+        <div class="label-mini">结果文件</div>
+        <div v-for="file in outputFiles" :key="file.id" class="flex items-center gap-2 rounded-xl border border-line px-3 py-2">
+          <span class="min-w-0 flex-1 truncate text-sm">{{ file.name }}</span>
+          <button class="btn-text text-xs" :disabled="loadingPreview" @click="previewOutput(file.id)"><Eye class="size-3.5" />查看</button>
+          <a :href="fileApi.downloadUrl(file.id)" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
+        </div>
+      </div>
     </div>
-    <template v-if="run?.output_file_id" #footer>
-      <button class="btn-line" :disabled="loadingPreview" @click="previewOutput">
-        <LoaderCircle v-if="loadingPreview" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果
-      </button>
-      <a :href="fileApi.downloadUrl(run.output_file_id)" class="btn-ink"><Download class="size-4" />下载这次的结果</a>
-    </template>
 
     <StepDetail
       v-if="selected"
       :step-id="selected.step_id"
       :name="selected.name"
       :formula-name="selected.formula_name"
+      :formula="selected.formula"
+      :kind="selected.kind"
       :formula-kind="selected.formula_kind"
       :description="selected.description"
       :status="selected.status"
       :report="selected"
       :params="selected.params"
-      :run-id="hasTables ? runId : null"
+      :run-id="runId"
       :error="selected.error"
-      :can-rerun="hasTables && !!run?.recipe_id && !rerunning"
+      :can-rerun="!!run?.recipe_id && !rerunning"
       @close="selected = null"
       @rerun="(params) => rerun(selected!, params)"
     />
