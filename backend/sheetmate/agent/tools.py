@@ -828,7 +828,7 @@ def _static_tools() -> list[Tool]:
         Tool("preview_table", "读取表的若干行供分析核对，不代表交付完整表格。正式明细和较大结果通过文件卡片预览下载；不要为展示工作簿而反复读取或拼接行数据。",
              _obj({"table": _STR, "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "最多 100"}}, ["table"]),
              both, run=_tool_preview, label=lambda a: f"查看数据 · {a.get('table', '')}"),
-        Tool("run_sql", "在分析副本上执行一条 DuckDB SELECT，辅助分析或修改。列名和表名用双引号。给 result_name 可保存中间表；不改原件或最终格式副本。0 行查询无需展示空表，正式明细或较大结果需通过文件交付。",
+        Tool("run_sql", "［优先数据处理工具］在分析副本上执行一条 DuckDB SELECT，适合关联、筛选、分组汇总、窗口计算和复杂条件，优先于 Python 脚本。列名和表名用双引号。给 result_name 可保存中间表并供后续公式或流程使用；不改原件或最终格式副本。0 行查询无需展示空表，正式明细或较大结果需通过文件交付。",
              _obj({"sql": {**_STR, "description": "一条 SELECT 语句"},
                    "result_name": {**_STR, "description": "可选：辅助分析结果表名，两种模式均可使用"},
                    "description": {**_STR, "description": "可选：这条查询做什么"}}, ["sql"]),
@@ -850,7 +850,7 @@ def _static_tools() -> list[Tool]:
                    "filename": {**_STR, "description": "文件名（不含扩展名）"}}, ["sheets"]),
              analyze, run=_tool_export_excel, label=lambda a: f"导出 Excel · {a.get('filename', '')}"),
         Tool("build_recipe",
-             "生成并执行一个可重复执行的处理流程（Recipe）：比对输入和人工结果（如有），按稳定性、性能、准确性选择公式、SQL、Python 或混合步骤，由相应引擎执行、"
+             "［数据修改优先］生成并执行一个可重复执行的处理流程（Recipe）：比对输入和人工结果（如有），优先使用公式或 SQL，仅为它们不好做或超出范围的部分加入 Python，可混合步骤，由相应引擎执行、"
              "出错自动修复、校验并验证能否复现人工结果，最后输出 Excel。默认只完成本次处理；仅当用户明确要求长期重复执行时才保存流程。",
              _obj({"requirement": {**_STR, "description": "清楚的处理说明：要做哪些处理、业务规则、输出什么（相当于 SheetAgent 的 process.md）"},
                    "input_tables": {**_STR_LIST, "description": "原始上传的输入表名；不填自动使用。辅助分析结果用于完善 requirement，不代替原始输入"},
@@ -918,6 +918,8 @@ class ToolRegistry:
             for spec in ctx.library.builtin_specs():
                 if spec.id != "custom_sql":
                     tools.append(formula_tool(spec, "builtin"))
+        # 与选择规则一致，脚本入口放在公式、SQL 和流程工具之后。
+        tools.sort(key=lambda tool: tool.name == "run_python_script")
         return tools
 
     def find(self, name: str, ctx: AgentContext) -> Tool | None:

@@ -477,7 +477,7 @@ def build_system_prompt(ctx: AgentContext, message: str) -> str:
         if t.created_by == "create_workbook":
             tag += f"，建表生成，file_id={t.file_id}（可查看布局并另建新版）"
         elif t.created_by == _SCRIPT_TOOL:
-            tag += f"，脚本生成，file_id={t.file_id}（可作为脚本输入副本继续处理）"
+            tag += f"，脚本生成，file_id={t.file_id}（结果表可继续用公式或 SQL；文件副本可供必要的脚本处理）"
             script_run_id = (t.header or {}).get("script_run_id")
             if not script_run_id:
                 match = re.search(r"run_id=([A-Za-z0-9_]+)", t.description or "")
