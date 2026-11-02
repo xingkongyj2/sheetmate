@@ -32,7 +32,7 @@ function openStep(id: number) {
     </header>
     <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
       <p v-if="view.description" class="mb-5 whitespace-pre-line break-words text-[13px] leading-[1.8] text-mute">{{ userFacingSummary(view.description) }}</p>
-      <RecipeFlow :flow="view.flow" compact @select="openStep" />
+      <RecipeFlow :flow="view.flow" @select="openStep" />
     </div>
 
     <BaseModal v-if="selected" :title="selected.name" width="max-w-lg" @close="selected = null">

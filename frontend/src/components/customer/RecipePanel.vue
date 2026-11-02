@@ -2,7 +2,7 @@
 /**
  * 客户页里的一个流程：说明、流程图、运行记录、校验规则、版本历史、启用/停用、用新文件执行。
  */
-import { Braces, ChevronDown, ClipboardList, History, Info, Play, Power, ShieldCheck } from '@lucide/vue'
+import { Braces, ChevronDown, ClipboardList, History, Info, Play, Power, ShieldCheck, Trash2 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 
 import { recipeApi } from '@/api'
@@ -13,6 +13,7 @@ import StatusPill from '@/components/common/StatusPill.vue'
 import RecipeRunsDialog from '@/components/customer/RecipeRunsDialog.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { percent, timeAgo } from '@/composables/chatModel'
+import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
 type CustomerRecipe = CustomerDetail['recipes'][number]
@@ -20,6 +21,7 @@ type CustomerRecipe = CustomerDetail['recipes'][number]
 const props = defineProps<{ recipe: CustomerRecipe }>()
 const emit = defineEmits<{ run: [recipeId: string]; changed: [] }>()
 const toast = useToast()
+const { confirmDelete } = useConfirm()
 
 const step = ref<RecipeStepJSON | null>(null)
 const showJson = ref(false)
@@ -63,6 +65,20 @@ async function showVersions() {
   }
 }
 
+async function removeRecipe() {
+  const recipeId = props.recipe.recipe_id
+  if (!await confirmDelete({
+    title: '删除这个流程？',
+    target: props.recipe.name,
+    description: '这个流程及其所有版本都会被删除，文件和运行记录会保留。删除后无法恢复。',
+    confirmText: '删除流程',
+    action: () => recipeApi.remove(recipeId),
+  })) return
+  showDetails.value = false
+  toast.success('已删除流程')
+  emit('changed')
+}
+
 function openStep(id: number) {
   step.value = props.recipe.recipe.steps.find((s) => s.id === id) ?? null
 }
@@ -100,7 +116,7 @@ function openStep(id: number) {
 
     <div class="rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
       <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>
-      <RecipeFlow :flow="recipe.flow" compact @select="openStep" />
+      <RecipeFlow :flow="recipe.flow" @select="openStep" />
     </div>
 
     <RecipeRunsDialog v-if="showRuns" :recipe-id="recipe.recipe_id" :recipe-name="recipe.name" :customer-id="recipe.customer_id" @close="showRuns = false" @changed="emit('changed')" />
@@ -149,6 +165,9 @@ function openStep(id: number) {
           <button class="btn-text ml-auto text-xs" title="查看 JSON" @click="showJson = true"><Braces class="size-3.5" />查看流程数据</button>
         </div>
       </div>
+      <template #footer>
+        <button type="button" class="btn-line w-full justify-center border-error/20 text-error hover:border-error/40 hover:bg-error/5" @click="removeRecipe"><Trash2 class="size-4" />删除流程</button>
+      </template>
     </BaseModal>
 
     <BaseModal v-if="step" :title="step.name" width="max-w-lg" @close="step = null">

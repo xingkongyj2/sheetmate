@@ -125,7 +125,8 @@ class ConversationHost:
                 library = recipe_service.library_for(db, self.customer_id)
             snapshot = compile_from_workspace(self.ws, [table for table, _ in sheets], library,
                                               name=f"导出 {name}", customer_id=self.customer_id,
-                                              conversation_id=self.conversation_id, field_mapping=self.field_mapping())
+                                              conversation_id=self.conversation_id, field_mapping=self.field_mapping(),
+                                              file_resolver=self.file_dependency)
             for spec, (_, sheet) in zip(snapshot.output_spec, sheets):
                 spec.name = sheet
         except ValueError:
@@ -171,6 +172,9 @@ class ConversationHost:
                 if not recipe.inputs:
                     # 样例或模板的生成过程不属于后续文件处理流程；重放时应读取新文件，
                     # 而不是重新执行字面量造数、固定使用上次样例。
+                    if run.status not in {"success", "warning"}:
+                        raise ServiceError("这个文件的生成记录未成功，不能作为重复流程的输入")
+                    dependency.replaceable_source = True
                     return dependency
                 validation = run.validation or {}
                 outputs = [*validation.get("outputs", []), *validation.get("files", [])]

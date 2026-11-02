@@ -12,6 +12,7 @@ import StepDetail from '@/components/recipe/StepDetail.vue'
 import VerifyBadge from '@/components/recipe/VerifyBadge.vue'
 import type { RecipeProgress, StepState, UiMessage } from '@/composables/chatModel'
 import { executionFileGroups, executionTableKey, executionTables } from '@/composables/executionPresentation'
+import { progressFlow } from '@/composables/recipeFlow'
 import { recipeToolLabel } from '@/composables/recipeTools'
 import { useConfirm } from '@/composables/useConfirm'
 
@@ -56,13 +57,6 @@ function stepFlow(recipe: ConversationDetail['recipes'][number]): RecipeFlowData
     inputs: recipe.input_patterns.map((input) => ({ alias: input.alias, kind: input.kind, description: input.description, file_pattern: input.file_pattern })),
     steps: recipe.steps.map((step) => ({ id: step.id, name: step.name, action: '', formula: step.formula, kind: step.kind, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: '', inputs: [] })),
     outputs: recipe.outputs.map((name) => ({ name, source: '' })),
-  }
-}
-function progressFlow(progress: RecipeProgress): RecipeFlowData {
-  return progress.flow ?? progress.saved?.flow ?? {
-    inputs: progress.inputs.map((input) => ({ alias: input.alias, kind: input.kind, description: input.filename, file_pattern: '' })),
-    steps: progress.steps.map((step) => ({ id: step.step_id, name: step.name, action: '', formula: step.formula, kind: step.kind, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: step.output, inputs: [] })),
-    outputs: (progress.outputs ?? []).map((output) => ({ name: output.sheet, source: '' })),
   }
 }
 function progressStatus(progress: RecipeProgress): string {
@@ -114,7 +108,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             <p v-if="progress.recipe?.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ progress.recipe.description }}</p>
             <RecipeFlow
               v-if="progress.flow || progress.saved?.flow || progress.steps.length"
-              compact
               :flow="progressFlow(progress)"
               :states="progress.steps"
               @select="(id) => { const step = progress.steps.find((item) => item.step_id === id); if (step) selected = { progress, step } }"
@@ -135,7 +128,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           </header>
           <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
             <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>
-            <RecipeFlow compact :flow="stepFlow(recipe)" @select="(id) => (savedStep = recipe.steps.find((step) => step.id === id) ?? null)" />
+            <RecipeFlow :flow="stepFlow(recipe)" @select="(id) => (savedStep = recipe.steps.find((step) => step.id === id) ?? null)" />
             <RouterLink v-if="recipe.customer_id" :to="{ name: 'customer', params: { id: recipe.customer_id }, query: { tab: 'recipes' } }" class="btn-text -ml-2 mt-3 text-xs">在客户页查看与重复执行 →</RouterLink>
           </div>
         </article>

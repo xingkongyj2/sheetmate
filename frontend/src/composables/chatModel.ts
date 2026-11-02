@@ -75,6 +75,7 @@ export interface RecipeProgress {
   escalation?: string
   saved?: { recipe_id: string; version: number; name: string; status: string; status_label: string; verification?: unknown; flow?: RecipeFlowData }
   file?: FileArtifact
+  files?: FileArtifact[]
   failed?: string
 }
 
@@ -160,6 +161,13 @@ export function newProgress(mode: RecipeProgress['mode'] = 'learn', toolCallId?:
   return { key: uid('r'), toolCallId, mode, status: 'thinking', round: 1, steps: [], inputs: [], verifyHistory: [] }
 }
 
+/** Keep every delivered file for this run, retaining the legacy primary result. */
+export function addProgressFile(progress: RecipeProgress, file: FileArtifact): void {
+  const files = progress.files ?? (progress.file ? [progress.file] : [])
+  progress.files = [...files.filter((item) => item.file_id !== file.file_id), file]
+  progress.file = file
+}
+
 function stepOf(p: RecipeProgress, id: number): StepState | undefined {
   return p.steps.find((s) => s.step_id === id)
 }
@@ -200,6 +208,8 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.runSummary = undefined
       p.verify = undefined
       p.outputs = undefined
+      p.file = undefined
+      p.files = undefined
       p.steps = (e.recipe?.steps ?? []).map((s: StepState) => ({
         step_id: (s as unknown as { id: number }).id,
         name: s.name,
@@ -346,6 +356,10 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       flow: {
         inputs: e.flow.inputs.map((input: RecipeFlowData['inputs'][number]) => ({
           alias: input.alias, kind: input.kind, description: input.description, file_pattern: input.file_pattern,
+          source_file: input.source_file, sheet: input.sheet,
+        })),
+        input_files: e.flow.input_files?.map((file: NonNullable<RecipeFlowData['input_files']>[number]) => ({
+          name: file.name, aliases: [...file.aliases], file_pattern: file.file_pattern,
         })),
         steps: e.flow.steps.map((step: RecipeFlowData['steps'][number]) => ({
           id: step.id, name: step.name, action: step.action, formula: step.formula, kind: step.kind,
@@ -353,6 +367,9 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
           inputs: [...(step.inputs ?? [])],
         })),
         outputs: e.flow.outputs.map((output: RecipeFlowData['outputs'][number]) => ({ name: output.name, source: output.source })),
+        output_files: e.flow.output_files?.map((file: NonNullable<RecipeFlowData['output_files']>[number]) => ({
+          name: file.name, ref: file.ref, source: file.source, sources: [...file.sources],
+        })),
       },
     }
     const previous = msg.artifacts.find((artifact) => artifact.kind === 'recipe_view' &&
@@ -420,7 +437,7 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     case 'file': {
       const file: FileArtifact = { file_id: e.file_id, toolCallId: e.tool_call_id, filename: e.filename, kind: e.kind, kind_label: e.kind_label, download_url: e.download_url, sheets: e.sheets, run_id: e.run_id }
       const progress = e.tool_call_id ? findProgress(msg, e.tool_call_id) : undefined
-      if (progress) progress.file = file
+      if (progress) addProgressFile(progress, file)
       else msg.artifacts.push({ kind: 'file', key: uid('a'), file })
       break
     }

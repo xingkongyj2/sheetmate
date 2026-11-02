@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 import threading
 import time
@@ -11,8 +12,10 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import delete
+
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import Run
+from sheetmate.db.models import FileRecord, Run
 from sheetmate.engine.reader import ReadError
 from sheetmate.engine.sqlutil import sanitize_table_name
 from sheetmate.recipe.compiler import compile_script
@@ -21,6 +24,8 @@ from sheetmate.services import recipes as recipe_service
 from sheetmate.services import files as file_service
 from sheetmate.services import runs as run_service
 from sheetmate.services.errors import ServiceError
+
+logger = logging.getLogger(__name__)
 
 
 def _scoped(host, record) -> bool:
@@ -146,13 +151,18 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                     problems = check_recipe(recipe, library)
                     if problems:
                         raise ValueError("；".join(problems))
-                    report["recipe_snapshot"] = recipe.to_dict()
+                    snapshot = recipe.to_dict()
                     for table in [*output_tables.values(), *file_tables]:
-                        host.ws.update_meta(table, step={"recipe_snapshot": recipe.to_dict(), "table_ref": table, "run_id": run_id})
+                        host.ws.update_meta(table, step={"recipe_snapshot": snapshot, "table_ref": table, "run_id": run_id})
+                    report["recipe_snapshot"] = snapshot
                     host._last_recipe = recipe
-                except (ValueError, KeyError, ServiceError) as exc:
-                    report["workflow_save_error"] = str(exc)
-                    report["warnings"].append(f"处理已完成，但流程依赖记录不完整：{exc}")
+                except Exception as exc:
+                    # 依赖快照只是附加记录；记录器异常不能撤销已经校验并登记的交付文件。
+                    logger.exception("脚本 %s 的流程依赖记录失败，保留已完成的交付文件", run_id)
+                    report["workflow_save_error"] = str(exc) or type(exc).__name__
+                    report["warnings"].append(f"处理已完成，但流程依赖记录不完整：{report['workflow_save_error']}")
+        if cancel_event.is_set():
+            raise InterruptedError("用户已停止脚本")
     except Exception as exc:
         # 多 sheet 导入也可能在中间出错，不能仅清理完整返回的 loaded 列表。
         for name in {table.name for table in host.ws.list_tables()} - previous_tables:
@@ -161,12 +171,18 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
             path.unlink(missing_ok=True)
         if saved_internal_tables:
             run_service.run_workspaces.delete(run_id)
+        host._last_recipe = None
+        report.pop("recipe_snapshot", None)
         report.update(ok=False, status="cancelled" if cancel_event.is_set() else "failed", error=str(exc)[:4000],
                       files=[], table_names=[], tables=[], internal_tables=[])
     finally:
         with session_scope() as db:
             run = db.get(Run, run_id)
             if run is not None:
+                if not report["ok"]:
+                    # 异常也可能发生在文件登记事务提交之后；清理记录，避免留下指向已删文件的卡片。
+                    run.output_file_id = None
+                    db.execute(delete(FileRecord).where(FileRecord.run_id == run_id, FileRecord.kind == "output"))
                 run.status = "success" if report["ok"] else "failed"
                 run.error = report["error"]
                 run.summary = ("脚本执行成功" if report["ok"] else "脚本未完成") + f"：{description[:500]}"

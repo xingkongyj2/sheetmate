@@ -652,6 +652,7 @@ def _tool_save_as_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         recipe = compile_from_workspace(
             ctx.ws, targets, ctx.library, name=str(args.get("name") or "分析流程"), description=str(args.get("description") or ""),
             customer_id=(ctx.customer or {}).get("id"), conversation_id=ctx.conversation_id, field_mapping=ctx.host.field_mapping(),
+            file_resolver=ctx.host.file_dependency,
         )
         saved = ctx.host.store_recipe(recipe, note="按用户要求保存分析流程")
     else:

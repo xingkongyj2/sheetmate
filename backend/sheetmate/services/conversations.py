@@ -10,11 +10,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.config import settings
-from sheetmate.db.models import Conversation, Customer, FileRecord, Message, Run, User
+from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeRecord, Run, User
 from sheetmate.engine.workspace import Workspace, WorkspaceManager
 from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
@@ -69,8 +69,59 @@ def conversation_dict(db: Session, conv: Conversation) -> dict[str, Any]:
     }
 
 
-def message_dict(m: Message) -> dict[str, Any]:
-    return {"id": m.id, "role": m.role, "content": m.content, "events": m.events or [], "meta": m.meta or {},
+_RECIPE_FLOW_EVENTS = {"recipe_generated", "recipe_saved", "recipe_completed", "recipe_view"}
+
+
+def _recipe_event_key(event: Any) -> tuple[str, int] | None:
+    if not isinstance(event, dict) or event.get("type") not in _RECIPE_FLOW_EVENTS:
+        return None
+    recipe = event.get("recipe") if isinstance(event.get("recipe"), dict) else {}
+    recipe_id = event.get("recipe_id") or recipe.get("id")
+    version = event.get("version") or recipe.get("version")
+    # 缺版本的历史事件不能取最新版，否则会把旧消息改画成后来修订的流程。
+    if not isinstance(recipe_id, str) or not recipe_id or type(version) is not int or version < 1:
+        return None
+    return recipe_id, version
+
+
+def _historical_recipe_flows(db: Session, conv: Conversation) -> dict[tuple[str, int], dict[str, Any]]:
+    wanted = set()
+    for message in conv.messages:
+        for event in message.events or []:
+            key = _recipe_event_key(event)
+            flow = event.get("flow") if isinstance(event, dict) else None
+            if key and (not isinstance(flow, dict) or "input_files" not in flow or "output_files" not in flow):
+                wanted.add(key)
+    if not wanted:
+        return {}
+    scope = [RecipeRecord.conversation_id == conv.id, RecipeRecord.scope == "global"]
+    if conv.customer_id:
+        scope.append(RecipeRecord.customer_id == conv.customer_id)
+    records = db.scalars(select(RecipeRecord).where(
+        RecipeRecord.recipe_id.in_({key[0] for key in wanted}), or_(*scope),
+    ))
+    flows = {}
+    for record in records:
+        key = record.recipe_id, record.version
+        if key not in wanted:
+            continue
+        try:
+            flows[key] = recipe_service.record_to_recipe(record).flow()
+        except ValueError:
+            # 个别损坏或已删除的旧版本保留原消息，不影响整个会话读取。
+            continue
+    return flows
+
+
+def message_dict(m: Message, *, recipe_flows: dict[tuple[str, int], dict[str, Any]] | None = None) -> dict[str, Any]:
+    events = []
+    for event in m.events or []:
+        key = _recipe_event_key(event)
+        flow = event.get("flow") if isinstance(event, dict) else None
+        if key in (recipe_flows or {}) and (not isinstance(flow, dict) or "input_files" not in flow or "output_files" not in flow):
+            event = {**event, "flow": recipe_flows[key]}
+        events.append(event)
+    return {"id": m.id, "role": m.role, "content": m.content, "events": events, "meta": m.meta or {},
             "created_at": m.created_at.isoformat()}
 
 
@@ -122,9 +173,10 @@ def detail(db: Session, conv: Conversation) -> dict[str, Any]:
             tables.append(brief)
     tables.sort(key=lambda t: (t["created_at"], t.get("run_id", ""), t.get("conversation_id") or ""))
     runs = db.scalars(select(Run).where(Run.conversation_id == conv.id).order_by(Run.created_at.desc()).limit(20))
+    recipe_flows = _historical_recipe_flows(db, conv)
     return {
         **conversation_dict(db, conv),
-        "messages": [message_dict(m) for m in conv.messages],
+        "messages": [message_dict(m, recipe_flows=recipe_flows) for m in conv.messages],
         "tables": tables,
         "files": [file_service.file_dict(f) for f in files],
         "recipes": [recipe_service.recipe_brief(r) for r in recipes],

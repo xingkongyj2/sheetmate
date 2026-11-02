@@ -22,6 +22,7 @@ class FileDependency:
     filename: str
     recipe: Recipe | None = None
     ref: str | None = None
+    replaceable_source: bool = False
 
 
 FileResolver = Callable[[str], FileDependency]
@@ -183,11 +184,13 @@ class _Compiler:
         self.visiting.add(marker)
         info = self.ws.require(table)
         provenance = info.step or {}
-        if provenance.get("recipe_snapshot"):
-            recipe = Recipe.model_validate(provenance["recipe_snapshot"])
+        recipe = Recipe.model_validate(provenance["recipe_snapshot"]) if provenance.get("recipe_snapshot") else None
+        replaceable = bool(recipe is not None and not recipe.inputs and info.file_id and self.file_resolver
+                           and self.file_resolver(info.file_id).replaceable_source)
+        if recipe is not None and not replaceable:
             names = self.snapshot(recipe, str(provenance.get("run_id") or recipe.id))
             result = names[str(provenance["table_ref"])]
-        elif info.source == "uploaded" and info.role == "input":
+        elif replaceable or (info.source == "uploaded" and info.role == "input"):
             meta = InputMeta(filename=info.filename or info.label, sheet=info.sheet, header=info.header, file_id=info.file_id)
             ctx = LearnContext(requirement="", library=self.library, input_frames={table: self.ws.df(table)}, input_meta={table: meta})
             self.inputs[table] = build_inputs(ctx, [], {}, None)[0]
@@ -247,10 +250,11 @@ class _Compiler:
 
 def compile_from_workspace(ws: Workspace, targets: list[str], library: FormulaLibrary, *, name: str,
                            description: str = "", customer_id: str | None = None, conversation_id: str | None = None,
-                           field_mapping: dict[str, list[str]] | None = None) -> Recipe:
+                           field_mapping: dict[str, list[str]] | None = None,
+                           file_resolver: FileResolver | None = None) -> Recipe:
     if not targets:
         raise ValueError("请指定要输出的结果表")
-    compiler = _Compiler(ws, library)
+    compiler = _Compiler(ws, library, file_resolver=file_resolver)
     outputs = [OutputSheet(name=(ws.require(table).label or table)[:31], source=compiler.table(table)) for table in targets]
     return compiler.recipe(name=name, description=description, customer_id=customer_id,
                            conversation_id=conversation_id, field_mapping=field_mapping, outputs=outputs)

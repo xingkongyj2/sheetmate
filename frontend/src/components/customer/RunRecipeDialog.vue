@@ -10,12 +10,13 @@ import { computed, defineAsyncComponent, reactive, ref } from 'vue'
 
 import { customerApi, fileApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { FileInfo, RecipeBrief } from '@/api/types'
+import type { FileInfo, RecipeBrief, RecipeFlowData } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
-import { applyRecipeEvent, newProgress, type FileArtifact, type RecipeProgress, type StepState } from '@/composables/chatModel'
+import { addProgressFile, applyRecipeEvent, newProgress, type FileArtifact, type RecipeProgress, type StepState } from '@/composables/chatModel'
+import { progressFlow } from '@/composables/recipeFlow'
 import { useToast } from '@/composables/useToast'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
@@ -95,7 +96,9 @@ async function run() {
   const handle = recipeApi.run(recipeId.value, { file_ids: fileIds, inputs: mapping.value, allow_repair: allowRepair.value }, (e) => {
     if (e.type.startsWith('recipe_')) applyRecipeEvent(progress, e)
     else if (e.type === 'file') {
-      if (!outputFiles.value.some((file) => file.file_id === e.file_id)) outputFiles.value.push({ file_id: e.file_id, filename: e.filename, download_url: e.download_url, sheets: e.sheets })
+      const file = { file_id: e.file_id, filename: e.filename, download_url: e.download_url, sheets: e.sheets }
+      addProgressFile(progress, file)
+      if (!outputFiles.value.some((item) => item.file_id === file.file_id)) outputFiles.value.push(file)
     }
     else if (e.type === 'error') progress.failed = e.content
   })
@@ -110,7 +113,10 @@ async function run() {
   }
 }
 
-const flow = computed(() => recipe.value?.flow as never)
+const flow = computed(() => {
+  const snapshot = recipe.value?.flow as RecipeFlowData | undefined
+  return snapshot ? progressFlow({ ...progress, flow: snapshot }) : null
+})
 </script>
 
 <template>

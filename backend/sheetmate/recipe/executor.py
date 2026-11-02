@@ -70,6 +70,7 @@ class RepairContext:
     history: list[dict[str, Any]]
     tables_text: str  # 这一步能用的表：结构 + 样本
     library: FormulaLibrary
+    script_stderr: str = ""
 
 
 class StepRepairer(Protocol):
@@ -488,12 +489,16 @@ class RecipeRunner:
                 if current.kind == "python":
                     await self._in_worker(self._discard_python, current.id)
                 error = str(exc) or type(exc).__name__
-                attempts.append({"attempt": len(attempts) + 1, "formula": current.formula, "params": current.params, "error": error})
+                script_result = self._script_results.get(current.id) if current.kind == "python" else None
+                script_stderr = script_result.stderr[-8000:] if script_result is not None else ""
+                attempts.append({"attempt": len(attempts) + 1, "formula": current.formula, "params": current.params, "error": error,
+                                 **({"stderr": script_stderr} if script_stderr else {})})
                 yield {"type": "recipe_step_error", "step_id": step.id, "error": error, "attempt": len(attempts)}
                 fixed = None
                 if self.repairer is not None and len(attempts) <= self.max_repair:
                     yield {"type": "recipe_repair", "step_id": step.id, "attempt": len(attempts), "status": "trying"}
-                    ctx = RepairContext(self.recipe, current, error, len(attempts), attempts, self._tables_text(current), self.library)
+                    ctx = RepairContext(self.recipe, current, error, len(attempts), attempts, self._tables_text(current), self.library,
+                                        script_stderr=script_stderr)
                     try:
                         fixed = await self.repairer.repair(ctx)
                     except Exception as repair_exc:  # 修复器本身出错（LLM 不可用等）
@@ -530,6 +535,7 @@ class RecipeRunner:
 
     def _execute_python(self, step: RecipeStep) -> StepOutcome:
         """执行已保存脚本；成功后先暂存，断言通过才把文件加入可恢复的产物清单。"""
+        self._script_results.pop(step.id, None)
         refs = step_table_refs(step, self.library)
         frames = {name: self.ws.df(name) for name in refs}
         bindings = step.params.get("table_bindings", {})

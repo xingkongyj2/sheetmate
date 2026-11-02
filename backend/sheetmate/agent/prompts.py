@@ -412,7 +412,7 @@ RECIPE_SYSTEM = """你是 SheetMate 的 Recipe 生成器：根据输入表、处
 - python：formula 填 python_script；params 必须含完整 code，可指定 input_tables（工作区表名列表）、input_files（脚本文件别名到输入文件 alias 或「前序步骤output/文件名」的映射）、output_tables（result_tables 键到后续工作区表名的映射）。纯文件脚本将 output_tables 显式设为空对象；省略时只允许单张 result_tables 自动映射为本步 output
 - 脚本保存的 tables 键需要保持不变时，可用 table_bindings 将脚本表名绑定到实际流程表名。脚本只交付工作簿文件但后续还需公式或 SQL 时，可用 file_tables 将流程表名映射到包含 ref（文件引用）、sheet（工作表名）、header（表头定位）的读取声明，再引用该流程表名
 - Python 在已有受限运行环境中执行，pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、deliver_files、display_tables、result、check 已提供。代码不得访问宿主文件、联网、安装依赖或启动外部程序
-- Python 只读取声明的 tables/files；生成表放 result_tables，正式文件保存到 OUTPUT_DIR 并显式放入 deliver_files。需要衔接其他步骤的表用 output_tables 命名，衔接文件用「本步output/文件名」。脚本必须包含关键业务和必要格式校验，不得仅凭代码无异常判为成功
+- Python 只读取声明的 tables/files；tables 是表名到 DataFrame 的字典，files 是脚本文件别名到 Path 的字典（如 files['source']）。生成表放 result_tables；deliver_files 默认是空列表，正式文件保存到 OUTPUT_DIR 后显式设置 deliver_files = [OUTPUT_DIR / '结果.xlsx'] 或 deliver_files.append(path)，不能按文件名下标赋值。params.output_files 是流程输出声明，与脚本变量 deliver_files 分开。需要衔接其他步骤的表用 output_tables 命名，衔接文件用「本步output/文件名」。脚本必须包含关键业务和必要格式校验，不得仅凭代码无异常判为成功
 - 脚本保存实际代码、绑定和校验，重复执行直接使用已保存内容，无需 AI 重写。修改时保留未涉及的工具种类、绑定和校验；不能把脚本删掉后称完整保存了流程
 
 差异（diff）是证据，当前处理说明是指引。当前明确要求优先于旧流程、客户记忆和历史样例，不得把明确的新要求当成冲突放进 questions。

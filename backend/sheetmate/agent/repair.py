@@ -26,6 +26,7 @@ class LLMStepRepairer:
             spec_text = "（当前公式不存在，请换一个可用的公式）"
         history = "\n".join(
             f"- 第 {h['attempt']} 次：公式 {h['formula']}，参数 {json.dumps(h['params'], ensure_ascii=False)}，错误：{h['error']}"
+            + (f"\nPython 错误栈：\n{h['stderr']}" if h.get("stderr") else "")
             + (f"；修改说明：{h['explanation']}" if h.get("explanation") else "")
             for h in ctx.history[:-1]
         ) or "（第一次修复）"
@@ -36,7 +37,7 @@ class LLMStepRepairer:
                 {"name": step.name, "kind": step.kind, "formula": step.formula, "params": step.params, "output": step.output, "description": step.description},
                 ensure_ascii=False, indent=1,
             ),
-            error=ctx.error,
+            error=ctx.error + (f"\n\nPython 错误栈（末尾）：\n{ctx.script_stderr[-8000:]}" if ctx.script_stderr else ""),
             history=history,
             tables=ctx.tables_text,
             formula=spec_text,
@@ -71,7 +72,10 @@ def _formula_text(ctx: RepairContext, formula_id: str) -> str:
             "input_files 为脚本文件别名到流程输入别名或前序步骤output/文件名的映射；"
             "output_tables 为 result_tables 键到工作区表名的映射，纯文件步骤使用空对象。"
             "已提供 pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、deliver_files、result、check。"
-            "保留业务 check 校验和输入输出契约；文件必须写入 OUTPUT_DIR 并放入 deliver_files。"
+            "files 是文件别名到 Path 的字典，例如 files['source']；deliver_files 是默认空列表，"
+            "文件保存到 OUTPUT_DIR 后使用 deliver_files = [OUTPUT_DIR / '结果.xlsx'] 或 deliver_files.append(path)，"
+            "不能按文件名给 deliver_files 下标赋值。params.output_files 是流程输出声明，不是脚本交付变量。"
+            "根据错误栈中的具体脚本行修复；不要仅凭 list indices 报错就更改 input_files。保留业务 check 校验和输入输出契约。"
         )
     spec = ctx.library.resolve(formula_id).spec
     lines = [f"{spec.id}（{spec.name}）：{spec.intent}"]

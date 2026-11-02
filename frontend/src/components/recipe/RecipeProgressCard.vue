@@ -14,6 +14,7 @@ import Mascot from '@/components/brand/Mascot.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import type { RecipeProgress, StepState } from '@/composables/chatModel'
 import { recipeFailure } from '@/composables/messagePresentation'
+import { progressFlow } from '@/composables/recipeFlow'
 import { userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
 
@@ -50,17 +51,8 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 const flow = computed(() => {
-  const snapshot = props.progress.flow ?? props.progress.saved?.flow
-  if (snapshot) return snapshot
-  if (!props.progress.steps.length) return null
-  return {
-    inputs: props.progress.inputs.map((i) => ({ alias: i.alias, kind: i.kind, description: i.filename, file_pattern: '' })),
-    steps: props.progress.steps.map((s) => ({
-      id: s.step_id, name: s.name, action: '', formula: s.formula, kind: s.kind, formula_kind: s.formula_kind as 'builtin' | 'customer',
-      description: s.description, output: s.output, inputs: [],
-    })),
-    outputs: (props.progress.outputs ?? []).map((o) => ({ name: o.sheet, source: '' })),
-  }
+  if (!props.progress.flow && !props.progress.saved?.flow && !props.progress.steps.length) return null
+  return progressFlow(props.progress)
 })
 
 function selectStep(id: number) {

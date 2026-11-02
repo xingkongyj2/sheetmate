@@ -2,6 +2,7 @@
 /**
  * Recipe 流程图：输入表或文件 → 公式、SQL、Python 步骤 → 输出。
  * 业务步骤名优先展示，工具类型用于查看与复核；执行时显示每一步的实时状态。
+ * 横向默认使用原始宽卡片，正式流程、临时处理和重复执行共用。
  */
 import { Check, CircleAlert, LoaderCircle, TriangleAlert, Wrench } from '@lucide/vue'
 import { computed } from 'vue'
@@ -9,6 +10,7 @@ import { computed } from 'vue'
 import type { FlowStep, RecipeFlowData } from '@/api/types'
 import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
 import { formulaArt, percent, type StepState } from '@/composables/chatModel'
+import { flowInputFiles, flowOutputFiles } from '@/composables/recipeFlow'
 import { recipeToolKind, recipeToolLabel } from '@/composables/recipeTools'
 
 const props = withDefaults(
@@ -46,7 +48,17 @@ function rowsText(s?: StepState): string {
 }
 
 const running = computed(() => props.states.some((s) => s.status === 'running' || s.status === 'repairing'))
-const outputs = computed(() => props.flow.outputs.length ? props.flow.outputs : props.flow.steps.some((step) => recipeToolKind(step) === 'python') ? [{ name: '脚本结果', source: '' }] : [])
+const inputs = computed(() => {
+  const files = flowInputFiles(props.flow)
+  return files.length ? files.map((file) => ({
+    alias: file.name, kind: 'file', description: file.aliases.join('、'), file_pattern: file.file_pattern,
+  })) : [{ alias: '输入文件未记录', kind: 'file', description: '', file_pattern: '' }]
+})
+const outputs = computed(() => {
+  const files = flowOutputFiles(props.flow)
+  return files.length ? files.map((file) => ({ name: file.name, source: '' }))
+    : [{ name: '输出文件未记录', source: '' }]
+})
 </script>
 
 <template>
@@ -55,7 +67,7 @@ const outputs = computed(() => props.flow.outputs.length ? props.flow.outputs : 
     <div class="recipe-flow-row flex min-w-max items-stretch gap-0">
       <div class="flex flex-col justify-center gap-2 pr-1">
         <div
-          v-for="inp in flow.inputs"
+          v-for="inp in inputs"
           :key="inp.alias"
           class="recipe-flow-input flex items-center gap-2 rounded-xl border border-line bg-white py-1.5 pl-1.5 pr-3"
           :title="inp.description"
@@ -64,7 +76,7 @@ const outputs = computed(() => props.flow.outputs.length ? props.flow.outputs : 
           <div class="leading-tight">
             <div class="recipe-flow-file-name text-[13px] font-medium">{{ inp.alias }}</div>
             <div v-if="!compact && inp.file_pattern" class="font-mono text-[10px] text-faint">{{ inp.file_pattern }}</div>
-            <div v-if="!compact && inp.kind === 'file'" class="text-[10px] text-faint">完整文件</div>
+            <div v-if="!compact && inp.kind === 'file'" class="text-[10px] text-faint">输入文件</div>
           </div>
         </div>
       </div>
@@ -135,7 +147,7 @@ const outputs = computed(() => props.flow.outputs.length ? props.flow.outputs : 
           <span class="flex size-[26px] items-center justify-center rounded-lg bg-white/15"><FunObject kind="plane" :size="18" /></span>
           <div class="leading-tight">
             <div class="recipe-flow-file-name text-[13px] font-medium">{{ out.name }}</div>
-            <div v-if="!compact" class="text-[10px] text-white/50">{{ out.source ? '结果表' : '处理结果' }}</div>
+            <div v-if="!compact" class="text-[10px] text-white/50">输出文件</div>
           </div>
         </div>
       </div>
@@ -180,9 +192,11 @@ const outputs = computed(() => props.flow.outputs.length ? props.flow.outputs : 
 </template>
 
 <style scoped>
+/* Auto margins center a fitting flow and collapse to zero when it overflows. */
+.recipe-flow-row { width: max-content; margin-inline: auto; }
 .recipe-flow-compact { padding: 6px 2px 10px; }
 .recipe-flow-compact:focus-visible { outline: 2px solid #a6a2df; outline-offset: 4px; border-radius: 12px; }
-.recipe-flow-compact .recipe-flow-row { align-items: center; justify-content: space-between; gap: 0; min-width: max-content; }
+.recipe-flow-compact .recipe-flow-row { align-items: center; gap: 0; min-width: max-content; }
 .recipe-flow-compact .recipe-flow-step { width: 76px; min-height: 102px; flex-shrink: 0; align-items: center; justify-content: center; padding: 12px 7px; border: 0; background: #f8f8fc; text-align: center; box-shadow: 0 2px 8px #34345205; }
 .recipe-flow-compact .recipe-flow-step:hover { background: #f0effb; box-shadow: 0 5px 14px #6265dc12; }
 .recipe-flow-compact .recipe-flow-step:focus-visible { outline: 2px solid #8581cc; outline-offset: 3px; }

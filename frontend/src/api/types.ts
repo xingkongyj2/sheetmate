@@ -62,9 +62,11 @@ export interface FlowStep {
 }
 
 export interface RecipeFlowData {
-  inputs: { alias: string; kind?: RecipeInputKind; description: string; file_pattern: string }[]
+  inputs: { alias: string; kind?: RecipeInputKind; description: string; file_pattern: string; source_file?: string; sheet?: string | null }[]
+  input_files?: { name: string; aliases: string[]; file_pattern: string }[]
   steps: FlowStep[]
   outputs: { name: string; source: string }[]
+  output_files?: { name: string; ref: string; source: string; sources: string[] }[]
 }
 
 export interface Verification {
@@ -126,6 +128,7 @@ export interface RecipeJSON {
     kind?: RecipeInputKind
     description: string
     file_pattern: string
+    source_file?: string
     sheet: string | null
     expected_columns: string[]
     required_columns: string[]

@@ -184,7 +184,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
                     raise ServiceError("历史脚本引用的文件不属于当前客户或会话")
                 generated = record.kind == "output"
             dependency = host.file_dependency(file_id)
-            if generated and (dependency.recipe is None or not dependency.ref):
+            if generated and not dependency.replaceable_source and (dependency.recipe is None or not dependency.ref):
                 raise ServiceError("历史脚本引用的结果文件缺少生成步骤，不能将该输出当作原始输入保存")
             return dependency
 
