@@ -222,6 +222,9 @@ class AgentExecutor:
                 return
 
             display = _TOOL_RE.sub("", content).strip()
+            reply: dict[str, Any] = {"role": "assistant", "content": display}
+            if reasoning:
+                reply["reasoning_content"] = reasoning
             if not calls_acc or final_round:
                 if not final_round and definitions and not recovery.may_finish:
                     # 单一路径失败时先自主恢复；不同方法确实尝试后由 AI 决定是否收尾。
@@ -229,7 +232,7 @@ class AgentExecutor:
                     if live:
                         yield {"type": "note", "content": ""}
                     if display:
-                        msgs.append({"role": "assistant", "content": display})
+                        msgs.append(reply)
                     msgs.append({"role": "user", "content": AUTONOMOUS_RECOVERY_MESSAGE})
                     continue
                 if display and not live:  # 短回答：攒到最后一次性给出，前端会做逐字显示的动画
@@ -237,7 +240,7 @@ class AgentExecutor:
                 if transcript is not None:
                     transcript.extend(m for m in msgs[start:] if m.get("content") != FINAL_ROUND_MESSAGE)
                     if display:
-                        transcript.append({"role": "assistant", "content": display})
+                        transcript.append(reply)
                 yield {"type": "final_text", "content": display}
                 return
             if display or live:

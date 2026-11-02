@@ -1,6 +1,6 @@
 """LLM 客户端（沿用 TabClaw 的 LLMClient，补充 JSON 输出、错误翻译和用量统计）。
 
-OpenAI 兼容接口，默认连接 DeepSeek（deepseek-chat 支持工具调用和流式）。
+OpenAI 兼容接口，默认连接 DeepSeek（deepseek-v4-pro，可选 deepseek-flash）。
 只要配置 DEEPSEEK_API_KEY 就能用；也可以在设置页换成其他兼容服务。
 """
 
@@ -14,7 +14,7 @@ from typing import Any
 import openai
 from openai import AsyncOpenAI
 
-from sheetmate.config import LLMSettings, get_llm_settings
+from sheetmate.config import DEEPSEEK_MODELS, LLMSettings, get_llm_settings, is_deepseek_url
 
 
 class LLMError(RuntimeError):
@@ -85,6 +85,10 @@ class LLMClient:
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
+        if tools and self.model in DEEPSEEK_MODELS and is_deepseek_url(self.cfg.base_url):
+            # 历史摘要没有原始思考字段；新模型携带 tools 时仍要求该字段存在。
+            messages = [{"reasoning_content": "", **message} if message.get("role") == "assistant" else message
+                        for message in messages]
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
@@ -92,8 +96,11 @@ class LLMClient:
         }
         if self.cfg.max_tokens > 0:
             kwargs["max_tokens"] = self.cfg.max_tokens
-        if self.cfg.extra_body:
-            kwargs["extra_body"] = self.cfg.extra_body
+        extra_body = dict(self.cfg.extra_body)
+        if self.model in DEEPSEEK_MODELS and is_deepseek_url(self.cfg.base_url):
+            extra_body["thinking"] = {"type": "enabled" if self.cfg.thinking_enabled else "disabled"}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         if tools:
             kwargs["tools"] = tools
         kwargs.update({k: v for k, v in extra.items() if v is not None})
@@ -176,5 +183,12 @@ def get_llm() -> LLMClient:
 async def test_connection(cfg: LLMSettings) -> dict[str, Any]:
     """设置页「测试连接」：发一个最小请求。"""
     client = LLMClient(cfg)
-    msg = await client.chat([{"role": "user", "content": "回复两个字：你好"}], max_tokens=10)
-    return {"ok": True, "model": cfg.model, "reply": (msg.content or "").strip()[:50]}
+    extra: dict[str, Any] = {}
+    if cfg.model in DEEPSEEK_MODELS and is_deepseek_url(cfg.base_url):
+        # 连接探测无需思考，避免极小的输出预算被思考内容耗尽。
+        extra["extra_body"] = {**cfg.extra_body, "thinking": {"type": "disabled"}}
+    msg = await client.chat([{"role": "user", "content": "回复两个字：你好"}], max_tokens=10, **extra)
+    reply = (msg.content or "").strip()[:50]
+    if not reply:
+        raise LLMError("模型返回了空回复，请检查模型设置后重试。")
+    return {"ok": True, "model": cfg.model, "reply": reply}

@@ -7,6 +7,28 @@ from tests.conftest import _chunk
 from tests.test_api import _chat, _new_conversation, _upload
 
 
+def test_plan_preserves_reasoning_between_steps(client, fake_llm):
+    conversation = _new_conversation(client)
+    llm = fake_llm(script=[{"text": "已核对输入。"}, {"text": "已整理结果。"}, {"text": "处理完成。"}])
+    stream_chat = llm.stream_chat
+
+    async def with_reasoning(*args, **kwargs):
+        chunk = _chunk()
+        chunk.choices[0].delta.reasoning_content = f"思考{len(llm.calls) + 1}"
+        yield chunk
+        async for chunk in stream_chat(*args, **kwargs):
+            yield chunk
+
+    llm.stream_chat = with_reasoning
+    _chat(client, conversation, "统计运单数", plan_steps=[
+        {"id": 1, "description": "核对输入"}, {"id": 2, "description": "整理结果"},
+    ])
+    first = next(m for m in llm.calls[1] if m.get("content") == "已核对输入。")
+    second = next(m for m in llm.calls[2] if m.get("content") == "已整理结果。")
+    assert first["reasoning_content"] == "思考1"
+    assert second["reasoning_content"] == "思考2"
+
+
 def test_plan_summaries_are_separate_from_progress_and_final_reply(client, samples, fake_llm):
     conversation = _new_conversation(client)
     _upload(client, conversation, samples["fees_sep"])

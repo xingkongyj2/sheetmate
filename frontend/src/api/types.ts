@@ -399,6 +399,7 @@ export interface LLMConfig {
   configured: boolean
   base_url: string
   model: string
+  thinking_enabled: boolean
   key_hint: string
   default_model: string
   providers: { id: string; name: string; base_url: string; models: string[] }[]

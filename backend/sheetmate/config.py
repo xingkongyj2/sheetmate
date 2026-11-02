@@ -26,7 +26,12 @@ load_dotenv(PROJECT_DIR / ".env")
 load_dotenv(BACKEND_DIR / ".env")
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-DEEPSEEK_DEFAULT_MODEL = "deepseek-chat"
+DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro"
+DEEPSEEK_MODELS = (DEEPSEEK_DEFAULT_MODEL, "deepseek-flash")
+
+
+def is_deepseek_url(base_url: str) -> bool:
+    return base_url.rstrip("/") in {DEEPSEEK_BASE_URL, f"{DEEPSEEK_BASE_URL}/v1"}
 
 
 def _env(name: str, default: str = "") -> str:
@@ -134,8 +139,9 @@ class LLMSettings:
     model: str
     temperature: float = 0.1
     timeout: float = 120.0
-    max_tokens: int = 8192  # deepseek-chat 最多输出 8K；Recipe JSON 较长，默认给足
+    max_tokens: int = 8192  # Recipe JSON 较长，默认预留 8K，可通过 LLM_MAX_TOKENS 调整
     extra_body: dict = field(default_factory=dict)
+    thinking_enabled: bool = False
 
     @property
     def configured(self) -> bool:
@@ -168,19 +174,35 @@ def get_llm_settings() -> LLMSettings:
         extra = json.loads(extra_raw) if extra_raw else {}
     except json.JSONDecodeError:
         extra = {}
+    extra_body = overrides.get("extra_body", extra) or {}
+    if not isinstance(extra_body, dict):
+        extra_body = {}
+    thinking_enabled = overrides.get("thinking_enabled")
+    if not isinstance(thinking_enabled, bool):
+        # 保留已有额外参数中的明确选择；未配置时默认关闭思考。
+        thinking = extra_body.get("thinking", {})
+        thinking_enabled = isinstance(thinking, dict) and thinking.get("type") == "enabled"
     env_key = _env("LLM_API_KEY") or _env("DEEPSEEK_API_KEY")
+    base_url = overrides.get("base_url") or _env("LLM_BASE_URL") or DEEPSEEK_BASE_URL
+    model = overrides.get("model") or _env("LLM_MODEL") or DEEPSEEK_DEFAULT_MODEL
+    # 旧安装可能在 .env 或设置页保存过旧模型名，随默认模型一起迁移。
+    if is_deepseek_url(base_url):
+        if model in {"deepseek-chat", "deepseek-reasoner"}:
+            model = DEEPSEEK_DEFAULT_MODEL
     return LLMSettings(
         api_key=overrides.get("api_key") or env_key,
-        base_url=overrides.get("base_url") or _env("LLM_BASE_URL", DEEPSEEK_BASE_URL),
-        model=overrides.get("model") or _env("LLM_MODEL", DEEPSEEK_DEFAULT_MODEL),
+        base_url=base_url,
+        model=model,
         temperature=float(overrides.get("temperature", _env("LLM_TEMPERATURE", "0.1") or 0.1)),
         timeout=float(_env("LLM_TIMEOUT", "120") or 120),
         max_tokens=_env_int("LLM_MAX_TOKENS", 8192),
-        extra_body=overrides.get("extra_body", extra) or {},
+        extra_body=extra_body,
+        thinking_enabled=thinking_enabled,
     )
 
 
-def save_llm_settings(api_key: str | None, base_url: str | None, model: str | None) -> LLMSettings:
+def save_llm_settings(api_key: str | None, base_url: str | None, model: str | None,
+                      thinking_enabled: bool | None = None) -> LLMSettings:
     """保存设置页提交的 LLM 配置。api_key 传 None 表示保持原值，传空串表示清除。"""
     data = _read_settings_file()
     llm = data.get("llm", {})
@@ -190,7 +212,9 @@ def save_llm_settings(api_key: str | None, base_url: str | None, model: str | No
         llm["base_url"] = base_url.strip()
     if model is not None:
         llm["model"] = model.strip()
-    data["llm"] = {k: v for k, v in llm.items() if v}
+    if thinking_enabled is not None:
+        llm["thinking_enabled"] = thinking_enabled
+    data["llm"] = {k: v for k, v in llm.items() if v or k == "thinking_enabled"}
     settings.ensure_dirs()
     settings.settings_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     try:

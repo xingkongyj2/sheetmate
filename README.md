@@ -26,6 +26,9 @@
 - 在 `.env` 里填 `DEEPSEEK_API_KEY=sk-...`，重启；
 - 或者登录后到「设置」页填 API Key，点「测试连接」，保存后立即生效（也可以换成硅基流动、阿里云百炼等 OpenAI 兼容服务）。
 
+DeepSeek 默认使用 `deepseek-v4-pro`，可在「设置」页切换为 `deepseek-flash`；通过 `.env` 配置时也可设置 `LLM_MODEL=deepseek-flash`。
+「设置」页提供「开启思考」开关，默认关闭以更快获得回答，复杂分析时可开启；保存后立即应用于后续请求。
+
 不配置模型也能看效果：首次启动会写入一个示例客户「顺达物流（示例）」，里面有原始文件、人工结果样例、一个已验证的月结账单流程、字段映射和业务规则；客户页的「用新文件执行」不需要 AI。
 
 环境要求：Python 3.10+、Node.js 20+。Windows 用户在 `backend` 目录执行 `python -m venv .venv`、`.venv\Scripts\pip install -r requirements.txt`，在 `frontend` 目录执行 `npm install && npm run build`，再回到 `backend` 执行 `.venv\Scripts\python -m sheetmate`。

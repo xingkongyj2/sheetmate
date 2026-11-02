@@ -43,9 +43,9 @@ export const authApi = {
 // ---------------------------------------------------------------- 设置
 export const settingsApi = {
   getLLM: async () => (await http.get<LLMConfig>('/settings/llm')).data,
-  saveLLM: async (payload: { api_key?: string; base_url?: string; model?: string }) =>
+  saveLLM: async (payload: { api_key?: string; base_url?: string; model?: string; thinking_enabled?: boolean }) =>
     (await http.put<LLMConfig>('/settings/llm', payload)).data,
-  testLLM: async (payload: { api_key?: string; base_url?: string; model?: string }) =>
+  testLLM: async (payload: { api_key?: string; base_url?: string; model?: string; thinking_enabled?: boolean }) =>
     (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/llm/test', payload,
       { validateStatus: () => true })).data,
 }

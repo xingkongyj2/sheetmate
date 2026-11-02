@@ -140,7 +140,10 @@ def test_formulas_and_settings(client):
     data = client.get("/api/formulas").json()
     assert any(f["id"] == "lookup" for f in data["builtin"])
     cfg = client.get("/api/settings/llm").json()
-    assert cfg["configured"] is False and cfg["model"] == "deepseek-chat"
+    assert cfg["configured"] is False and cfg["model"] == "deepseek-v4-pro"
+    assert cfg["default_model"] == "deepseek-v4-pro"
+    deepseek = next(p for p in cfg["providers"] if p["id"] == "deepseek")
+    assert deepseek["models"] == ["deepseek-v4-pro", "deepseek-flash"]
 
 
 def test_chat_without_llm_key_explains_how_to_configure(client):
