@@ -4,6 +4,8 @@ import { computed } from 'vue'
 
 import type { RecipeProgress, StepState } from '@/composables/chatModel'
 import { userFacingText } from '@/composables/timelinePresentation'
+import ScriptFile from '@/components/common/ScriptFile.vue'
+import { scriptReferences } from '@/composables/scriptPresentation'
 
 const props = defineProps<{ progress: RecipeProgress }>()
 const checks = computed(() => props.progress.validation?.checks ?? [])
@@ -35,6 +37,7 @@ const STEP_LABELS: Record<StepState['status'], string> = {
           </div>
           <p v-if="step.description" class="break-words text-mute">{{ userFacingText(step.description) }}</p>
           <p v-if="step.formula_name && step.formula_name !== step.formula" class="text-xs text-faint">使用工具：{{ userFacingText(step.formula_name, '数据处理工具', 80) }}</p>
+          <ScriptFile v-for="script in scriptReferences(step.report?.params)" :key="script.script_id" :script="script" compact />
           <p v-if="step.report?.rows_out !== undefined" class="text-xs text-mute">输出 {{ step.report.rows_out }} 行<template v-if="step.output"> · {{ step.output }}</template></p>
           <p v-if="step.repairs.length" class="text-xs text-mute">调整了 {{ step.repairs.length }} 次{{ step.status === 'repaired' ? '，已完成修正' : '' }}</p>
           <p v-if="step.status === 'failed' && step.error" class="text-xs text-error">{{ userFacingText(step.error, '这一步未能完成，需调整处理方式后重试。') }}</p>

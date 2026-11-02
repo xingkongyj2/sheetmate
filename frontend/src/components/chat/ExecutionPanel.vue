@@ -7,6 +7,7 @@ import { conversationApi } from '@/api'
 import type { ConversationDetail, FileInfo, RecipeFlowData, TableBrief } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
+import ScriptFile from '@/components/common/ScriptFile.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
 import VerifyBadge from '@/components/recipe/VerifyBadge.vue'
@@ -14,6 +15,7 @@ import type { RecipeProgress, StepState, UiMessage } from '@/composables/chatMod
 import { executionFileGroups, executionTableKey, executionTables } from '@/composables/executionPresentation'
 import { progressFlow } from '@/composables/recipeFlow'
 import { recipeToolLabel } from '@/composables/recipeTools'
+import { scriptReferences } from '@/composables/scriptPresentation'
 import { useConfirm } from '@/composables/useConfirm'
 
 type Tab = 'recipes' | 'files' | 'data'
@@ -55,7 +57,7 @@ async function drop(table: TableBrief) {
 function stepFlow(recipe: ConversationDetail['recipes'][number]): RecipeFlowData {
   return recipe.flow ?? {
     inputs: recipe.input_patterns.map((input) => ({ alias: input.alias, kind: input.kind, description: input.description, file_pattern: input.file_pattern })),
-    steps: recipe.steps.map((step) => ({ id: step.id, name: step.name, action: '', formula: step.formula, kind: step.kind, formula_kind: step.formula_kind as 'builtin' | 'customer', description: step.description, output: '', inputs: [] })),
+    steps: recipe.steps.map((step) => ({ ...step, action: '', formula_kind: step.formula_kind as 'builtin' | 'customer', output: '', inputs: [] })),
     outputs: recipe.outputs.map((name) => ({ name, source: '' })),
   }
 }
@@ -172,6 +174,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <BaseModal v-if="savedStep" :title="`第 ${savedStep.id} 步 · ${savedStep.name}`" width="max-w-lg" @close="savedStep = null">
       <p v-if="savedStep.description" class="text-sm leading-7">{{ savedStep.description }}</p>
       <p v-if="savedStep.formula" class="mt-3 text-xs text-mute">{{ recipeToolLabel(savedStep) }} · <code class="font-mono">{{ savedStep.formula }}</code></p>
+      <div class="mt-3"><ScriptFile v-for="script in scriptReferences(savedStep)" :key="script.script_id" :script="script" /></div>
     </BaseModal>
   </aside>
 </template>

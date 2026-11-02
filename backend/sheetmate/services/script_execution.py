@@ -17,6 +17,7 @@ from sqlalchemy import delete
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import FileRecord, Run
 from sheetmate.engine.reader import ReadError
+from sheetmate.engine.script_store import bind_script, read_script, script_params
 from sheetmate.engine.sqlutil import sanitize_table_name
 from sheetmate.recipe.compiler import compile_script
 from sheetmate.recipe.schema import check_recipe
@@ -33,7 +34,8 @@ def _scoped(host, record) -> bool:
 
 
 def execute_for_conversation(host, *, code: str, description: str, input_tables: list[str],
-                             input_files: dict[str, str], cancel_event: threading.Event) -> dict[str, Any]:
+                             input_files: dict[str, str], cancel_event: threading.Event,
+                             title: str = "", script_id: str | None = None) -> dict[str, Any]:
     from sheetmate.engine.script_runner import execute_script
 
     started = time.perf_counter()
@@ -57,14 +59,23 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                 raise ServiceError("这个文件不属于当前客户或会话")
             source_files[alias] = Path(record.stored_path)
             input_file_ids.append(file_id)
+        source_params: dict[str, Any] = {"code": code, "description": description,
+                                       "input_tables": input_tables, "input_files": input_files}
+        if title:
+            source_params["script_title"] = title
+        if script_id:
+            source_params["script_id"] = script_id
+        params = script_params(source_params, title=description)
+        script = {key: params[key] for key in ("script_id", "script_title", "script_filename")}
+        bind_script(script["script_id"], user_id=host.user_id, customer_id=host.customer_id,
+                    conversation_id=host.conversation_id)
         run = run_service.create_run(db, kind="script", user_id=host.user_id, customer_id=host.customer_id,
                                      conversation_id=host.conversation_id, request_text=description,
                                      input_file_ids=list(dict.fromkeys(input_file_ids)))
-        run.steps = [{"tool": "run_python_script", "label": description[:100],
-                      "params": {"code": code, "description": description, "input_tables": input_tables, "input_files": input_files}}]
+        run.steps = [{"tool": "run_python_script", "label": script["script_title"], "params": params}]
         run.tool_sequence = "run_python_script"
         run_id = run.id
-    report: dict[str, Any] = {"run_id": run_id, "ok": False, "status": "failed", "error": "", "files": [],
+    report: dict[str, Any] = {"run_id": run_id, **script, "ok": False, "status": "failed", "error": "", "files": [],
                               "table_names": [], "tables": [], "internal_tables": [], "warnings": [], "checks": [], "result": {}, "stdout": "", "stderr": ""}
     committed_paths: list[Path] = []
     created_tables: list[str] = []
@@ -141,6 +152,7 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                     with session_scope() as db:
                         library = recipe_service.library_for(db, host.customer_id)
                     recipe = compile_script(host.ws, library, run_id=run_id, code=code, description=description,
+                                            script_id=script["script_id"], script_title=script["script_title"],
                                             input_tables=input_tables, input_files=input_files,
                                             output_tables=output_tables, file_tables=file_tables,
                                             display_tables=outcome.display_tables,
@@ -213,7 +225,15 @@ def inspect_for_conversation(host, run_id: str) -> dict[str, Any]:
         if run.kind != "script":
             raise ServiceError("这条记录不是 Python 脚本运行")
         params = next((step.get("params", {}) for step in run.steps if step.get("tool") == "run_python_script"), {})
-        return {"run_id": run.id, "status": run.status, **params, "error": run.error,
+        if params.get("script_id"):
+            source = read_script(params["script_id"])
+        else:
+            params = script_params(params, title=run.request_text)
+            source = read_script(params["script_id"])
+            run.steps = [{**step, "params": params} if step.get("tool") == "run_python_script" else step for step in run.steps]
+        bind_script(source["script_id"], user_id=run.user_id, customer_id=run.customer_id,
+                    conversation_id=run.conversation_id)
+        return {"run_id": run.id, "status": run.status, **params, **source, "error": run.error,
                 "stdout": run.steps[0].get("stdout", "") if run.steps else "",
                 "stderr": run.steps[0].get("stderr", "") if run.steps else "",
                 "checks": (run.validation or {}).get("checks", []), "result": (run.validation or {}).get("result", {}),

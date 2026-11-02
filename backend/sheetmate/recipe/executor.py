@@ -33,6 +33,7 @@ from sheetmate.engine.profile import dtype_label
 from sheetmate.engine.reader import ReadError, SheetData, read_sheet, read_workbook
 from sheetmate.engine.runner import StepOutcome, apply_formula
 from sheetmate.engine.script_runner import ScriptResult, execute_script
+from sheetmate.engine.script_store import resolve_script_code, script_params
 from sheetmate.engine.sqlutil import frame_rows, frame_to_text, quote_ident
 from sheetmate.engine.template_writer import TemplatePreservationError, TemplateSource, write_like_original
 from sheetmate.engine.workspace import Workspace
@@ -471,9 +472,13 @@ class RecipeRunner:
     # ------------------------------------------------------------------
 
     async def _run_step(self, step: RecipeStep) -> AsyncIterator[dict[str, Any]]:
+        if step.kind == "python":
+            step.params = script_params(step.params, title=step.name[:20])
         formula_name = self._formula_name(step.formula)
         yield {"type": "recipe_step_start", "step_id": step.id, "name": step.name, "formula": step.formula,
-               "kind": step.kind, "formula_name": formula_name, "description": step.description}
+               "kind": step.kind, "formula_name": formula_name, "description": step.description,
+               **({key: step.params[key] for key in ("script_id", "script_title", "script_filename") if key in step.params}
+                  if step.kind == "python" else {})}
         current = step
         attempts: list[dict[str, Any]] = []
         started = time.perf_counter()
@@ -509,6 +514,8 @@ class RecipeRunner:
                     yield {"type": "recipe_repair", "step_id": step.id, "attempt": len(attempts), "status": "gave_up"}
                     yield {"type": "_step_failed"}
                     return
+                if fixed.kind == "python":
+                    fixed.params = script_params(fixed.params, title=fixed.name[:20])
                 attempts[-1]["explanation"] = fixed.explanation
                 yield {"type": "recipe_repair", "step_id": step.id, "attempt": len(attempts), "status": "retry",
                        "explanation": fixed.explanation, "formula": fixed.formula, "params": fixed.params}
@@ -559,7 +566,7 @@ class RecipeRunner:
             if step.params.get("workbook_export") is not None:
                 result = self._export_workbook(step, directory)
             else:
-                result = execute_script(step.params.get("code", ""), tables, files, directory, cancel_event=self._cancel_event)
+                result = execute_script(resolve_script_code(step.params), tables, files, directory, cancel_event=self._cancel_event)
             self._script_results[step.id] = result
             if not result.ok:
                 raise ValueError(result.error or "Python 脚本执行失败")
@@ -674,10 +681,13 @@ class RecipeRunner:
             self.report["artifacts"] = kept + pending["artifacts"]
 
     def _script_report(self, step: RecipeStep) -> dict[str, Any]:
-        result = self._script_results.get(step.id)
-        if step.kind != "python" or result is None:
+        if step.kind != "python":
             return {}
-        return {"stdout": result.stdout, "stderr": result.stderr, "checks": result.checks, "result": result.result,
+        reference = {key: step.params[key] for key in ("script_id", "script_title", "script_filename") if key in step.params}
+        result = self._script_results.get(step.id)
+        if result is None:
+            return reference
+        return {**reference, "stdout": result.stdout, "stderr": result.stderr, "checks": result.checks, "result": result.result,
                 "output_files": [dict(item) for item in self.report["artifacts"] if item["step_id"] == step.id]}
 
     def _validate_outputs(self, outputs: dict[str, pd.DataFrame], history: list[dict[str, Any]] | None) -> dict[str, Any]:
@@ -962,7 +972,9 @@ class RecipeRunner:
             "id": self.recipe.id, "version": self.recipe.version, "name": self.recipe.name,
             "steps": [
                 {"id": s.id, "name": s.name, "kind": s.kind, "formula": s.formula, "formula_name": self._formula_name(s.formula),
-                 "formula_kind": s.formula_kind, "description": s.description, "output": s.output}
+                 "formula_kind": s.formula_kind, "description": s.description, "output": s.output,
+                 **({key: s.params[key] for key in ("script_id", "script_title", "script_filename") if key in s.params}
+                    if s.kind == "python" else {})}
                 for s in self.recipe.ordered_steps()
             ],
         }

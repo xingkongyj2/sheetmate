@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from sheetmate.db.models import Conversation, FormulaRecord, RecipeRecord, Run, User, now
 from sheetmate.engine.formulas import BUILTIN_FORMULAS, Formula, FormulaError, FormulaLibrary
+from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.recipe.schema import Recipe
 from sheetmate.services.auth import require_customer
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
@@ -41,6 +42,7 @@ def save_recipe(db: Session, recipe: Recipe, *, status: str | None = None, conve
     )
     db.add(record)
     db.flush()
+    _bind_scripts(record)
     return record
 
 
@@ -53,8 +55,10 @@ def get_recipe(db: Session, recipe_id: str, version: int | None = None) -> Recip
     return record_to_recipe(record)
 
 
-def get_record(db: Session, recipe_id: str) -> RecipeRecord:
-    record = db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id).order_by(RecipeRecord.version.desc()).limit(1)).first()
+def get_record(db: Session, recipe_id: str, version: int | None = None) -> RecipeRecord:
+    stmt = select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id)
+    stmt = stmt.where(RecipeRecord.version == version) if version is not None else stmt.order_by(RecipeRecord.version.desc())
+    record = db.scalars(stmt.limit(1)).first()
     if record is None:
         raise NotFound("流程不存在")
     return record
@@ -64,7 +68,12 @@ def record_to_recipe(record: RecipeRecord) -> Recipe:
     data = dict(record.body or {})
     data.update({"id": record.recipe_id, "version": record.version, "status": record.status,
                  "customer_id": record.customer_id, "scope": record.scope})
-    return Recipe(**data)
+    recipe = Recipe(**data)
+    body = recipe.to_dict()
+    if record.body != body:
+        record.body = body
+    _bind_scripts(record)
+    return recipe
 
 
 def latest_records(db: Session, *, customer_id: str | None = None, conversation_id: str | None = None,
@@ -131,7 +140,10 @@ def assign_customer(db: Session, *, conversation_id: str, customer_id: str) -> i
 
 
 def recipe_brief(record: RecipeRecord) -> dict[str, Any]:
-    body = record.body or {}
+    body = externalize_script_references(record.body or {})
+    if body != record.body:
+        record.body = body
+    _bind_scripts(record)
     steps = sorted((s for s in body.get("steps", []) if s.get("enabled", True)), key=lambda s: s.get("id", 0))
     meta = body.get("metadata", {})
     return {
@@ -149,12 +161,20 @@ def recipe_brief(record: RecipeRecord) -> dict[str, Any]:
         "outputs": [o.get("name") for o in body.get("output_spec", [])],
         "step_count": len(steps),
         "steps": [{"id": s.get("id"), "name": s.get("name"), "kind": s.get("kind") or ("sql" if s.get("formula") == "custom_sql" else "python" if s.get("formula") == "python_script" else "formula"), "formula": s.get("formula"), "formula_kind": s.get("formula_kind"),
-                   "description": s.get("description")} for s in steps],
+                   "description": s.get("description"),
+                   **{key: s.get("params", {}).get(key) for key in ("script_id", "script_title", "script_filename")
+                      if s.get("params", {}).get(key)}} for s in steps],
         "verification": meta.get("verification"),
         "last_run": meta.get("last_run"),
         "created_by": record.created_by,
         "updated_at": record.updated_at.isoformat() if record.updated_at else None,
     }
+
+
+def _bind_scripts(record: RecipeRecord) -> None:
+    bind_script_references(record.body, customer_id=record.customer_id,
+                           conversation_id=record.conversation_id or (record.body or {}).get("learned_from", {}).get("conversation_id"),
+                           global_access=record.scope == "global")
 
 
 # ---------------------------------------------------------------------------

@@ -3,6 +3,7 @@ import { Check, ChevronDown, CircleAlert, Copy, FileCode2, LoaderCircle, Search 
 import { computed, ref, watch } from 'vue'
 
 import type { UiMessage } from '@/composables/chatModel'
+import ScriptFile from '@/components/common/ScriptFile.vue'
 import { buildExecutionLogs, exportExecutionLogs, filterExecutionLogs, formatLogValue, type LogFilter } from '@/composables/executionLogs'
 import { useToast } from '@/composables/useToast'
 
@@ -83,6 +84,9 @@ async function copy(text: string, key: string) {
             </div>
             <ChevronDown class="mt-0.5 size-3.5 shrink-0 text-faint transition" :class="isExpanded(entry.key) ? 'rotate-180' : ''" />
           </button>
+          <div v-if="entry.scripts.length" class="space-y-1 px-3 pb-3">
+            <ScriptFile v-for="script in entry.scripts" :key="script.script_id" :script="script" compact />
+          </div>
           <div v-if="isExpanded(entry.key)" class="space-y-3 border-t border-line bg-paper/40 p-3">
             <p v-if="entry.summary" class="break-words text-[11px] leading-5 [overflow-wrap:anywhere]" :class="entry.status === 'error' ? 'text-error' : 'text-mute'">{{ entry.summary }}</p>
             <div v-for="(part, index) in entry.sections" :key="`${entry.key}-${index}`" class="min-w-0">

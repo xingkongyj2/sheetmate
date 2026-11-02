@@ -8,9 +8,11 @@ import type { RecipeToolKind, StepReport } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
+import ScriptFile from '@/components/common/ScriptFile.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
 import { duration, percent } from '@/composables/chatModel'
 import { recipeToolKind, recipeToolLabel } from '@/composables/recipeTools'
+import { scriptReferences } from '@/composables/scriptPresentation'
 
 const props = defineProps<{
   stepId: number
@@ -42,6 +44,7 @@ const paramsError = ref('')
 const rowsIn = computed(() => Object.entries(props.report?.rows_in ?? {}))
 const tool = computed(() => ({ kind: props.report?.kind ?? props.kind, formula: props.report?.formula ?? props.formula, formula_kind: props.report?.formula_kind ?? props.formulaKind }))
 const isPython = computed(() => recipeToolKind(tool.value) === 'python')
+const script = computed(() => scriptReferences(props.report?.params ?? props.params)[0])
 const code = computed(() => {
   const value = (props.report?.params ?? props.params)?.code
   return typeof value === 'string' ? value : ''
@@ -145,7 +148,12 @@ async function loadFull(offset: number, limit: number) {
         <p v-if="paramsError" class="mt-1 text-xs text-error">{{ paramsError }}</p>
       </div>
 
-      <div v-if="isPython && code">
+      <div v-if="isPython && script" class="space-y-1.5">
+        <div class="label-mini">执行脚本</div>
+        <ScriptFile :script="script" />
+      </div>
+
+      <div v-else-if="isPython && code">
         <button class="btn-text -ml-2" @click="showCode = !showCode"><Code class="size-3.5" />{{ showCode ? '收起' : '查看' }}执行的 Python 脚本</button>
         <pre v-if="showCode" class="mt-1 max-h-80 overflow-auto rounded-xl bg-[#0f0f11] p-3 font-mono text-[11.5px] leading-relaxed text-[#d7f5e3]">{{ code }}</pre>
       </div>

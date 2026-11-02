@@ -14,6 +14,8 @@ class ScriptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: StrictStr = Field(min_length=1, max_length=64_000, description="Python 完整脚本。可用 pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、result、check(condition,message)、deliver_files 和 display_tables；后两者默认空列表，只显式列入需要用户查看的最终文件/结果表。")
+    title: StrictStr = Field(default="", max_length=20, description="脚本文件的简短标题，最多 20 个字符；应概括这次处理的目标。")
+    script_id: StrictStr | None = Field(default=None, pattern=r"^scr_[0-9a-f]{32}$", description="已有脚本文件的唯一 ID；通常由系统自动填写。修改代码后会保存为新的脚本文件。")
     description: StrictStr = Field(min_length=1, max_length=2000, description="本次脚本要完成的用户目标及关键校验。")
     input_tables: list[StrictStr] | None = Field(default=None, max_length=20, description="可选：要传入 tables 的工作区表名；指定 input_files 时默认不传表，否则默认当前可见非期望结果表。建议显式选择实际依赖，[] 表示不传表。")
     input_files: dict[StrictStr, StrictStr] = Field(default_factory=dict, max_length=20, description="需要直接操作工作簿时传 {别名:file_id}，files[别名] 是隔离副本路径。只允许本会话或已授权客户的文件。")
@@ -36,6 +38,7 @@ def python_script_tools():
         worker = asyncio.create_task(asyncio.to_thread(
             ctx.host.run_python_script, code=request.code, description=request.description,
             input_tables=tables, input_files=request.input_files, cancel_event=cancelled,
+            title=request.title, script_id=request.script_id,
         ))
         try:
             report = await asyncio.shield(worker)
@@ -48,8 +51,9 @@ def python_script_tools():
                 pass
             raise
         files = report.get("files", [])
+        script = {key: report[key] for key in ("script_id", "script_title", "script_filename") if key in report}
         payload = {
-            "run_id": report["run_id"], "status": report["status"], "error": report.get("error", ""),
+            "run_id": report["run_id"], **script, "status": report["status"], "error": report.get("error", ""),
             "stdout": report.get("stdout", ""), "stderr": report.get("stderr", ""),
             "checks": report.get("checks", []), "result": report.get("result", {}),
             "files": [{"file_id": file["file_id"], "filename": file["filename"], "run_id": report["run_id"]} for file in files],
@@ -63,7 +67,8 @@ def python_script_tools():
         yield ToolResult(text, ok=bool(report.get("ok")),
                          summary=f"脚本 run_id={report['run_id']}：" + ("执行成功" if report.get("ok") else str(report.get("error") or report["status"])[:160]),
                          tables=[table_payload(ctx.ws, name) for name in report.get("table_names", [])],
-                         events=[{"type": "file", **file, "script_run_id": report["run_id"]} for file in files],
+                         events=[*([{"type": "script", **script, "run_id": report["run_id"]}] if script else []),
+                                 *[{"type": "file", **file, "script_run_id": report["run_id"]} for file in files]],
                          public_summary="处理完成" if report.get("ok") else "本次尝试未完成",
                          public_text=(f"已生成 {len(files)} 个文件、{len(report.get('table_names', []))} 张结果表。"
                                       if files or report.get("table_names") else "已完成计算。") if report.get("ok") else "本次处理未完成。")
@@ -85,7 +90,10 @@ def python_script_tools():
              "执行错误、日志、校验和实际产物返回后可继续改代码重试；不要把代码无异常等同于满足用户目标。"
              "无网络、无安装包能力；只能访问隔离副本和运行目录，支持已有的 pandas/numpy/openpyxl 和标准处理库。",
              ScriptRequest.model_json_schema(), stream=run, label=lambda args: "处理表格",
-             public_params=lambda args: {"description": args.get("description", "处理表格")}),
+             public_params=lambda args: {"description": args.get("description", "处理表格"),
+                                         "script_title": (args.get("title") or args.get("description") or "Python 脚本")[:20],
+                                         **({"script_id": args["script_id"], "script_filename": f"{args['script_id']}.py"}
+                                            if args.get("script_id") else {})}),
         Tool("inspect_python_script", "读取本会话或客户某次脚本运行的代码、输入绑定、日志、校验及输出文件，用于用户追问时继续调整；run_id 来自脚本结果或文件。",
              {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]},
              run=inspect, label=lambda args: "读取处理记录", public_params=lambda args: {}),

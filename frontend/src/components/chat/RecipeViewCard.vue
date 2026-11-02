@@ -4,8 +4,10 @@ import { ref } from 'vue'
 import type { FlowStep, RecipeFlowData } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
+import ScriptFile from '@/components/common/ScriptFile.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
+import { scriptReferences } from '@/composables/scriptPresentation'
 
 const props = defineProps<{
   view: {
@@ -40,6 +42,7 @@ function openStep(id: number) {
         <p class="whitespace-pre-line leading-7 text-ink">{{ userFacingSummary(selected.description || selected.action, '按照流程设置处理输入数据。') }}</p>
         <p v-if="selected.inputs.length" class="break-words text-[13px] leading-6 text-mute">使用：{{ selected.inputs.map((name) => userFacingText(name)).filter(Boolean).join('、') }}</p>
         <p v-if="selected.output" class="break-words text-[13px] leading-6 text-mute">产出：{{ userFacingText(selected.output) }}</p>
+        <ScriptFile v-for="script in scriptReferences(selected)" :key="script.script_id" :script="script" />
       </div>
     </BaseModal>
   </article>

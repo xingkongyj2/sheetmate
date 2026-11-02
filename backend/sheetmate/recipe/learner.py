@@ -23,6 +23,7 @@ from sheetmate.agent.prompts import (
 )
 from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.profile import detect_keys, profile_columns
+from sheetmate.engine.script_store import resolve_script_code
 from sheetmate.engine.sqlutil import frame_to_text
 from sheetmate.recipe.differ import diff_to_text
 from sheetmate.recipe.schema import (
@@ -180,6 +181,9 @@ def _recipe_json(recipe: Recipe) -> str:
         data.pop(key, None)
     for step in data.get("steps", []):
         step.pop("sql", None)
+        if step.get("kind") == "python":
+            # 完整代码只进入本次调整的模型上下文，保存的流程和前端节点始终使用文件引用。
+            step["params"]["code"] = resolve_script_code(step["params"])
     return json.dumps(data, ensure_ascii=False, indent=1)
 
 

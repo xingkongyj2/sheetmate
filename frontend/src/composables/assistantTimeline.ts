@@ -174,7 +174,7 @@ export function assistantStages(message: UiMessage): AssistantStage[] {
   // A short answer does not gain a compulsory "thinking" section just because the
   // provider emitted a reasoning event. Keep the initial indicator while streaming.
   const meaningful = stages.some((stage) => stage.toolCount || stage.attempts.length || stage.plan || stage.summary ||
-    stage.items.some((item) => item.kind === 'agent' || item.kind === 'info'))
+    stage.items.some((item) => item.kind === 'agent' || item.kind === 'info' || item.kind === 'script'))
   if (!meaningful && (!message.streaming || message.content.trim())) return []
 
   if (message.streaming && !message.content.trim() && !stages.some((stage) => stage.status === 'running')) {

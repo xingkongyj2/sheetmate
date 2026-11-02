@@ -23,10 +23,16 @@ import type {
   RecipeJSON,
   RunBrief,
   RunDetail,
+  ScriptFile,
   TableBrief,
   TablePage,
   User,
 } from './types'
+
+export const scriptApi = {
+  get: async (id: string) =>
+    (await http.get<{ script: ScriptFile }>(`/scripts/${encodeURIComponent(id)}`)).data.script,
+}
 
 // ---------------------------------------------------------------- 认证
 export const authApi = {

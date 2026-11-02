@@ -27,6 +27,7 @@ from sheetmate.services import runs as run_service
 from sheetmate.services.auth import can_access_customer, require_customer
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
 from sheetmate.services.jobs import Job, jobs
+from sheetmate.services.scripts import require_script_references
 
 
 def _candidates(records: list[FileRecord]) -> list[Candidate]:
@@ -60,7 +61,10 @@ def _file_path(file_id: str, user: User) -> Path | None:
 
 
 def _load_recipe_for_user(db, user: User, recipe_id: str, version: int | None = None) -> Recipe:
+    record = recipe_service.get_record(db, recipe_id, version)
+    require_script_references(db, user, record.body)
     recipe = recipe_service.get_recipe(db, recipe_id, version)
+    require_script_references(db, user, recipe.to_dict())
     if recipe.customer_id:
         require_customer(db, user, recipe.customer_id)
     elif user.role != "admin":
@@ -156,7 +160,12 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
             if conv is None or conv.user_id != user.id:
                 raise Forbidden("你没有权限查看这条运行记录")
         snapshot = (run.validation or {}).get("recipe_snapshot")
+        require_script_references(db, user, snapshot)
+        require_script_references(db, user, params)
+        if not isinstance(snapshot, dict):
+            require_script_references(db, user, recipe_service.get_record(db, run.recipe_id, run.recipe_version).body)
         recipe = Recipe.model_validate(snapshot) if isinstance(snapshot, dict) else recipe_service.get_recipe(db, run.recipe_id, run.recipe_version)
+        require_script_references(db, user, recipe.to_dict())
         library = recipe_service.library_for(db, recipe.customer_id)
         mapping = memory_service.field_mapping_for(db, recipe.customer_id)
         if not (settings.runs_dir / f"{run_id}.duckdb").exists():

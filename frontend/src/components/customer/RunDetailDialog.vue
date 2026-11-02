@@ -8,8 +8,10 @@ import { errorText } from '@/api/http'
 import type { FileInfo, RunDetail, StepReport } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
+import ScriptFile from '@/components/common/ScriptFile.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
 import { duration, percent } from '@/composables/chatModel'
+import { scriptReferences } from '@/composables/scriptPresentation'
 import { useToast } from '@/composables/useToast'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
@@ -101,9 +103,8 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
       <div v-if="run.steps.length">
         <div class="label-mini mb-2">每一步{{ hasTables ? '（点开可以查看中间表、修改参数后从这一步重跑）' : '' }}</div>
         <div class="space-y-1.5">
+          <div v-for="s in run.steps" :key="s.step_id ?? (s as unknown as { tool: string }).tool" class="space-y-1.5">
           <button
-            v-for="s in run.steps"
-            :key="s.step_id ?? (s as unknown as { tool: string }).tool"
             class="flex w-full items-center gap-3 rounded-xl border border-line px-3 py-2.5 text-left hover:bg-paper"
             @click="s.step_id ? (selected = s) : undefined"
           >
@@ -115,6 +116,8 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
             <span v-if="s.rows_out !== undefined" class="font-mono text-[11px] text-faint">{{ s.rows_out }} 行</span>
             <StatusPill v-if="s.status" :status="s.status" />
           </button>
+          <ScriptFile v-for="script in scriptReferences(s.params)" :key="script.script_id" :script="script" compact />
+          </div>
         </div>
       </div>
 

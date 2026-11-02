@@ -39,6 +39,16 @@ export interface FileInfo {
 export type RecipeToolKind = 'formula' | 'sql' | 'python'
 export type RecipeInputKind = 'table' | 'file'
 
+export interface ScriptReference {
+  script_id: string
+  script_title: string
+  script_filename: string
+}
+
+export interface ScriptFile extends ScriptReference {
+  code: string
+}
+
 export interface RecipeArtifact {
   step_id: number
   ref: string
@@ -59,6 +69,10 @@ export interface FlowStep {
   description: string
   output: string
   inputs: string[]
+  params?: Record<string, unknown>
+  script_id?: string
+  script_title?: string
+  script_filename?: string
 }
 
 export interface RecipeFlowData {
@@ -89,7 +103,7 @@ export interface RecipeBrief {
   input_patterns: { alias: string; kind?: RecipeInputKind; file_pattern: string; description: string }[]
   outputs: string[]
   step_count: number
-  steps: { id: number; name: string; formula: string; kind?: RecipeToolKind; formula_kind: string; description: string }[]
+  steps: ({ id: number; name: string; formula: string; kind?: RecipeToolKind; formula_kind: string; description: string } & Partial<ScriptReference>)[]
   verification: Verification | null
   last_run: { run_id: string; status: string } | null
   created_by: string

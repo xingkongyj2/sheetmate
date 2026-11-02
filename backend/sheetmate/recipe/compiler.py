@@ -10,6 +10,7 @@ from typing import Any
 import duckdb
 
 from sheetmate.engine.formulas import FormulaLibrary
+from sheetmate.engine.script_store import script_params
 from sheetmate.engine.sqlutil import sanitize_table_name, sql_base_table_nodes
 from sheetmate.engine.workspace import Workspace
 from sheetmate.recipe.learner import InputMeta, LearnContext, build_inputs
@@ -266,7 +267,8 @@ def compile_script(ws: Workspace, library: FormulaLibrary, *, run_id: str, code:
                    display_tables: list[str] | None = None,
                    output_files: list[dict[str, str]] | None = None,
                    customer_id: str | None = None, conversation_id: str | None = None,
-                   field_mapping: dict[str, list[str]] | None = None) -> Recipe:
+                   field_mapping: dict[str, list[str]] | None = None,
+                   script_id: str | None = None, script_title: str = "") -> Recipe:
     compiler = _Compiler(ws, library, file_resolver=file_resolver)
     bindings = {table: compiler.table(table) for table in input_tables}
     files = {alias: compiler.file(file_id) for alias, file_id in input_files.items()}
@@ -274,6 +276,11 @@ def compile_script(ws: Workspace, library: FormulaLibrary, *, run_id: str, code:
     params = {"code": code, "input_tables": list(dict.fromkeys(bindings.values())),
               "table_bindings": bindings, "input_files": files, "output_tables": output_tables,
               "file_tables": file_tables}
+    if script_id:
+        params["script_id"] = script_id
+    if script_title:
+        params["script_title"] = script_title
+    params = script_params(params, title=(script_title or description or "Python 处理")[:20])
     if output_files is not None:
         params["output_files"] = [{"name": item["name"], "ref": item["ref"]} for item in output_files]
     compiler.append(RecipeStep(id=1, name=description[:40] or "Python 处理", kind="python", formula="python_script",

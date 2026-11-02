@@ -28,6 +28,7 @@ from sheetmate.agent.tools import AgentContext, ToolRegistry
 from sheetmate.config import settings
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import Conversation, Customer, Message, User
+from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.services import conversations as conv_service
 from sheetmate.services import customers as customer_service
 from sheetmate.services import memory as memory_service
@@ -43,7 +44,7 @@ from sheetmate.services.jobs import Job, jobs
 _registry = ToolRegistry()
 _background: set[asyncio.Task] = set()  # 持有后台任务的引用，防止被垃圾回收
 _KEEP_EVENTS = {
-    "note", "tool_call", "tool_result", "table", "file", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
+    "note", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
@@ -100,6 +101,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
 
     async def emit(event: dict[str, Any]) -> None:
         nonlocal final_text
+        event = externalize_script_references(event)
+        bind_script_references(event, user_id=user_id, conversation_id=conversation_id)
         recorder.observe(event)
         if event["type"] == "text_chunk":
             text_parts.append(event["content"])
@@ -409,7 +412,7 @@ def _recipe_fallback(events: list[dict[str, Any]], *, interrupted: bool = False)
 
 def _slim(event: dict[str, Any]) -> dict[str, Any]:
     """存库前精简：表格预览只留前 20 行，去掉大段文本。"""
-    item = dict(event)
+    item = externalize_script_references(event)
     if item.get("type") == "table" and isinstance(item.get("table"), dict):
         table = dict(item["table"])
         table["preview"] = (table.get("preview") or [])[:20]

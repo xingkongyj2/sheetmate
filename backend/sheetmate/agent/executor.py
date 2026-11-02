@@ -38,6 +38,8 @@ from sheetmate.agent.prompts import (
 from sheetmate.agent.recovery import MAX_METHODS, METHOD_FAILURE_LIMIT, RECONSIDER_TOOL, RecoveryState
 from sheetmate.agent.scripting import ScriptRequest
 from sheetmate.agent.tools import AgentContext, Tool, ToolRegistry, ToolResult, execute_tool
+from sheetmate.engine.script_references import externalize_script_references, externalize_script_text
+from sheetmate.engine.script_store import script_params
 
 _TOOL_MARKER = "<｜tool▁call▁begin｜>"
 _TOOL_RE = re.compile(r"<｜tool[\s\S]*?(?:<｜tool▁calls?▁end｜>|$)")
@@ -270,10 +272,25 @@ class AgentExecutor:
                 name = call["function"]["name"]
                 args = _parse_args(call["function"]["arguments"])
                 tool = tool_map.get(name)
+                debug_params: Any = args if args is not None else call["function"]["arguments"]
+                script_ref: dict[str, Any] = {}
+                if name == _SCRIPT_TOOL and args is not None:
+                    try:
+                        request = ScriptRequest.model_validate(args)
+                        prepared = script_params(args, title=getattr(request, "title", "") or request.description)
+                        script_ref = {key: prepared[key] for key in ("script_id", "script_title", "script_filename")}
+                        args = {**args, "script_id": script_ref["script_id"]}
+                        debug_params = prepared
+                    except (ValueError, OSError):
+                        debug_params = externalize_script_references(args, python=True)
+                elif name == _SCRIPT_TOOL:
+                    debug_params = "工具参数不是合法的 JSON，未保存源码"
+                else:
+                    debug_params = externalize_script_references(debug_params)
                 yield {"type": "tool_call", "id": call["id"], "tool": name,
                        "label": tool.display(args or {}) if tool else name,
-                       "params": tool.public_params(args or {}) if tool and tool.public_params else args or {},
-                       "debug_params": args if args is not None else call["function"]["arguments"]}
+                       "params": {**(tool.public_params(args or {}) if tool and tool.public_params else debug_params if isinstance(debug_params, dict) else {}), **script_ref},
+                       "debug_params": debug_params, **script_ref}
                 started = time.perf_counter()
                 script_key = None
                 attempt = None
@@ -327,10 +344,14 @@ class AgentExecutor:
                     yield {"type": "table", "tool_call_id": call["id"], "table": table}
                 for extra in result.events:
                     yield {**extra, "tool_call_id": call["id"]}
+                public_text = externalize_script_text(
+                    result.public_text if result.public_text is not None else result.text,
+                    python=name in {_SCRIPT_TOOL, "inspect_python_script"},
+                )
                 yield {"type": "tool_result", "id": call["id"], "tool": name, "ok": result.ok,
                        "summary": result.public_summary if result.public_summary is not None else result.summary or result.text[:200],
-                       "text": (result.public_text if result.public_text is not None else result.text)[:3000],
-                       "debug_result": result.text,
+                       "text": public_text[:3000],
+                       "debug_result": externalize_script_text(result.text, python=name in {_SCRIPT_TOOL, "inspect_python_script"}),
                        "duration_ms": int((time.perf_counter() - started) * 1000)}
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})
                 end_turn = end_turn or result.end_turn

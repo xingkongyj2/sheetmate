@@ -10,6 +10,7 @@ from typing import Any
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import FileRecord
 from sheetmate.engine.sqlutil import sanitize_table_name
+from sheetmate.engine.script_store import resolve_script_code, script_params
 from sheetmate.engine.workspace import Workspace
 from sheetmate.recipe.compiler import compile_script
 from sheetmate.recipe.schema import Recipe, check_recipe
@@ -109,9 +110,8 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
             if len(steps) != 1 or not isinstance(steps[0].get("params"), dict):
                 raise ServiceError("历史脚本缺少完整的代码和输入绑定，不能保存流程")
             params = dict(steps[0]["params"])
-            code = params.get("code")
-            if not isinstance(code, str) or not code.strip():
-                raise ServiceError("历史脚本缺少实际执行代码，不能保存流程")
+            code = resolve_script_code(params)
+            params = script_params(params, title=run.request_text)
             tables = params.get("input_tables") or []
             files = params.get("input_files") or {}
             if not isinstance(tables, list) or any(not isinstance(name, str) or not name for name in tables) or not isinstance(files, dict) or any(not isinstance(alias, str) or not isinstance(fid, str) for alias, fid in files.items()):
@@ -189,6 +189,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
             return dependency
 
         recipe = compile_script(ws, library, run_id=run_id, code=code, description=description,
+                                script_id=params["script_id"], script_title=params["script_title"],
                                 input_tables=tables, input_files=files, output_tables=output_tables,
                                 file_tables=file_tables, file_resolver=resolve_file,
                                 output_files=[{"name": record.filename, "ref": file_refs[record.id]} for _, record, _ in outputs],

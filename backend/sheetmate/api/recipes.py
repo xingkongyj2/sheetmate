@@ -19,6 +19,7 @@ from sheetmate.services import replay as replay_service
 from sheetmate.services import runs as run_service
 from sheetmate.services.auth import require_customer
 from sheetmate.services.errors import ServiceError
+from sheetmate.services.scripts import require_script_references
 
 router = APIRouter(prefix="/api", tags=["recipes"])
 
@@ -69,6 +70,7 @@ def update_recipe(recipe_id: str, body: dict[str, Any], background: BackgroundTa
     current = recipe_service.get_recipe(db, recipe_id)
     _check(db, user, current)
     data = {**body, "id": current.id, "customer_id": current.customer_id, "created_by": "human"}
+    require_script_references(db, user, data)
     try:
         recipe = Recipe(**data)
     except ValueError as exc:

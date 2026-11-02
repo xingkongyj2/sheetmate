@@ -274,11 +274,12 @@ class ConversationHost:
     # Python 脚本
     # ------------------------------------------------------------------
 
-    def run_python_script(self, *, code: str, description: str, input_tables: list[str], input_files: dict[str, str], cancel_event: Any) -> dict[str, Any]:
+    def run_python_script(self, *, code: str, description: str, input_tables: list[str], input_files: dict[str, str], cancel_event: Any,
+                          title: str = "", script_id: str | None = None) -> dict[str, Any]:
         from sheetmate.services.script_execution import execute_for_conversation
 
         return execute_for_conversation(self, code=code, description=description, input_tables=input_tables,
-                                        input_files=input_files, cancel_event=cancel_event)
+                                        input_files=input_files, cancel_event=cancel_event, title=title, script_id=script_id)
 
     def inspect_python_script(self, run_id: str) -> dict[str, Any]:
         from sheetmate.services.script_execution import inspect_for_conversation

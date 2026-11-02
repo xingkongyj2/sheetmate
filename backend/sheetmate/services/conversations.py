@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from sheetmate.config import settings
 from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeRecord, Run, User
 from sheetmate.engine.workspace import Workspace, WorkspaceManager
+from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
 from sheetmate.services import memory as memory_service
@@ -114,6 +115,10 @@ def _historical_recipe_flows(db: Session, conv: Conversation) -> dict[tuple[str,
 
 
 def message_dict(m: Message, *, recipe_flows: dict[tuple[str, int], dict[str, Any]] | None = None) -> dict[str, Any]:
+    migrated = externalize_script_references(m.events or [])
+    if migrated != m.events:
+        m.events = migrated
+    bind_script_references(migrated, conversation_id=m.conversation_id)
     events = []
     for event in m.events or []:
         key = _recipe_event_key(event)
@@ -251,7 +256,9 @@ def delete_conversation(db: Session, conv: Conversation) -> None:
 
 def add_message(db: Session, conv: Conversation, role: str, content: str, *, events: list[dict[str, Any]] | None = None,
                 meta: dict[str, Any] | None = None) -> Message:
-    msg = Message(conversation_id=conv.id, role=role, content=content, events=events or [], meta=meta or {})
+    normalized = externalize_script_references(events or [])
+    bind_script_references(normalized, user_id=conv.user_id, customer_id=conv.customer_id, conversation_id=conv.id)
+    msg = Message(conversation_id=conv.id, role=role, content=content, events=normalized, meta=meta or {})
     db.add(msg)
     conv.updated_at = msg.created_at or conv.updated_at
     db.flush()

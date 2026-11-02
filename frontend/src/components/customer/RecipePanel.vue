@@ -10,9 +10,11 @@ import { errorText } from '@/api/http'
 import type { CustomerDetail, RecipeStepJSON } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
+import ScriptFile from '@/components/common/ScriptFile.vue'
 import RecipeRunsDialog from '@/components/customer/RecipeRunsDialog.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { percent, timeAgo } from '@/composables/chatModel'
+import { scriptReferences } from '@/composables/scriptPresentation'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
@@ -173,6 +175,7 @@ function openStep(id: number) {
     <BaseModal v-if="step" :title="step.name" width="max-w-lg" @close="step = null">
       <div class="space-y-4 text-sm">
         <p class="leading-7 text-ink">{{ step.description || '暂无这一步的说明。' }}</p>
+        <ScriptFile v-for="script in scriptReferences(step.params)" :key="script.script_id" :script="script" />
         <div v-if="step.explanation" class="rounded-2xl bg-[#f5f5ff] px-4 py-3 text-[13px] leading-6 text-mute">
           <div class="mb-1 font-medium text-ink">处理依据</div>{{ step.explanation }}
         </div>

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from sheetmate.config import settings
 from sheetmate.db.models import Run, new_id, now
 from sheetmate.engine.workspace import WorkspaceManager
+from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.recipe.validator import output_metrics
 from sheetmate.services.errors import NotFound
 
@@ -83,7 +84,7 @@ def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification
     run.status = report.get("status", "failed")
     if run.status == "running":
         run.status = "failed"
-    run.steps = [_slim_step(s) for s in report.get("steps", [])]
+    run.steps = externalize_script_references([_slim_step(s) for s in report.get("steps", [])])
     run.tool_sequence = " → ".join(str(s.get("formula")) for s in report.get("steps", []))
     validation = dict(report.get("validation") or {})
     if (run.validation or {}).get("recipe_deleted"):
@@ -97,7 +98,8 @@ def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification
     validation["artifacts"] = report.get("artifacts", [])
     validation["files"] = report.get("files", [])
     validation["checkpoints"] = report.get("validation_checkpoints", [])
-    run.validation = validation
+    run.validation = externalize_script_references(validation)
+    _bind_scripts(run)
     run.verification = verification or {}
     run.error = report.get("error", "")
     run.summary = report.get("escalation") or ""
@@ -114,7 +116,8 @@ def finish_analysis_run(db: Session, run_id: str, record: dict[str, Any]) -> Non
     if run is None:
         return
     run.status = "failed" if record.get("error") else "success"
-    run.steps = record.get("steps", [])
+    run.steps = externalize_script_references(record.get("steps", []))
+    _bind_scripts(run)
     run.tool_sequence = record.get("tool_sequence", "")
     run.error = record.get("error", "")
     run.summary = record.get("final_text", "")[:1000]
@@ -133,6 +136,14 @@ def _slim_step(step: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_dict(run: Run, *, with_steps: bool = True) -> dict[str, Any]:
+    if with_steps:
+        steps = externalize_script_references(run.steps)
+        validation = externalize_script_references(run.validation)
+        if steps != run.steps:
+            run.steps = steps
+        if validation != run.validation:
+            run.validation = validation
+        _bind_scripts(run)
     data = {
         "run_id": run.id, "kind": run.kind, "kind_label": KIND_LABELS.get(run.kind, run.kind),
         "status": run.status, "status_label": STATUS_LABELS.get(run.status, run.status),
@@ -148,6 +159,11 @@ def run_dict(run: Run, *, with_steps: bool = True) -> dict[str, Any]:
         data["validation"] = run.validation
         data["verification_detail"] = run.verification
     return data
+
+
+def _bind_scripts(run: Run) -> None:
+    bind_script_references([run.steps, run.validation], user_id=run.user_id,
+                           customer_id=run.customer_id, conversation_id=run.conversation_id)
 
 
 def get_run(db: Session, run_id: str) -> Run:

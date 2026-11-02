@@ -1,13 +1,15 @@
 <script setup lang="ts">
 /** 弹窗（daisyUI modal 结构），点遮罩或按 Esc 关闭 */
 import { X } from '@lucide/vue'
-import { onBeforeUnmount, onMounted } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 
 withDefaults(defineProps<{ title?: string; width?: string }>(), { title: '', width: 'max-w-3xl' })
 const emit = defineEmits<{ close: [] }>()
+const dialog = ref<HTMLElement | null>(null)
 
 function onKey(e: KeyboardEvent) {
-  if (e.key === 'Escape') emit('close')
+  const dialogs = document.querySelectorAll('[role="dialog"]')
+  if (e.key === 'Escape' && dialogs[dialogs.length - 1] === dialog.value) emit('close')
 }
 onMounted(() => window.addEventListener('keydown', onKey))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
@@ -15,7 +17,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 <template>
   <Teleport to="body">
-    <div class="modal modal-open" role="dialog">
+    <div ref="dialog" class="modal modal-open" role="dialog" aria-modal="true">
       <div class="modal-box w-full animate-pop rounded-3xl border border-line p-0 shadow-2xl" :class="width">
         <div class="flex items-center justify-between border-b border-line px-6 py-4">
           <div class="min-w-0">

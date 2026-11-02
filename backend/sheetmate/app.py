@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from sheetmate import __version__
 from sheetmate.agent.llm import LLMError
-from sheetmate.api import auth, conversations, customers, files, recipes, runs
+from sheetmate.api import auth, conversations, customers, files, recipes, runs, scripts
 from sheetmate.api import settings as settings_api
 from sheetmate.config import get_llm_settings, settings
 from sheetmate.services.errors import ServiceError
@@ -67,7 +67,7 @@ def create_app() -> FastAPI:
     def health() -> dict:
         return {"ok": True, "version": __version__, "llm_configured": get_llm_settings().configured}
 
-    for module in (auth, settings_api, customers, conversations, files, recipes, runs):
+    for module in (auth, settings_api, customers, conversations, files, recipes, runs, scripts):
         app.include_router(module.router)
     app.include_router(customers.memories_router)
 

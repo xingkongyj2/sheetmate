@@ -9,9 +9,11 @@ import { computed } from 'vue'
 
 import type { FlowStep, RecipeFlowData } from '@/api/types'
 import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
+import ScriptFile from '@/components/common/ScriptFile.vue'
 import { formulaArt, percent, type StepState } from '@/composables/chatModel'
 import { flowInputFiles, flowOutputFiles } from '@/composables/recipeFlow'
 import { recipeToolKind, recipeToolLabel } from '@/composables/recipeTools'
+import { scriptReferences } from '@/composables/scriptPresentation'
 
 const props = withDefaults(
   defineProps<{ flow: RecipeFlowData; states?: StepState[]; direction?: 'horizontal' | 'vertical'; activeStep?: number | null; compact?: boolean }>(),
@@ -36,6 +38,10 @@ function stateLabel(id: number): string {
 
 function art(step: FlowStep): FunKind {
   return recipeToolKind(step) === 'formula' ? formulaArt(step.formula, step.formula_kind) as FunKind : 'code'
+}
+
+function scripts(step: FlowStep) {
+  return scriptReferences([step, state(step.id)?.report?.params])
 }
 
 function rowsText(s?: StepState): string {
@@ -88,17 +94,17 @@ const outputs = computed(() => {
             <path d="M28 2l5 4-5 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
           </svg>
         </div>
-        <button
+        <div
           class="recipe-flow-step group relative flex w-[212px] flex-col rounded-2xl border bg-white p-3 text-left transition hover:-translate-y-0.5 hover:shadow-[0_10px_24px_-14px_rgba(0,0,0,0.3)]"
           :class="[
             activeStep === step.id ? 'border-ink' : 'border-line',
             state(step.id)?.status === 'failed' ? 'border-error/60' : '',
             state(step.id)?.status === 'running' ? 'border-info/60' : '',
           ]"
-          :aria-label="`查看步骤：${step.name}${state(step.id) ? `，${stateLabel(step.id)}` : ''}`"
           :title="compact ? step.description : undefined"
           @click="emit('select', step.id)"
         >
+          <button type="button" class="absolute inset-0 rounded-2xl focus-visible:outline-2 focus-visible:outline-fun-purple" :aria-label="`查看步骤：${step.name}${state(step.id) ? `，${stateLabel(step.id)}` : ''}`" @click.stop="emit('select', step.id)" />
           <span v-if="compact && state(step.id)" class="absolute right-1.5 top-1.5 flex size-4 items-center justify-center rounded-full bg-white/90" role="img" :aria-label="stateLabel(step.id)" :title="stateLabel(step.id)">
             <LoaderCircle v-if="state(step.id)!.status === 'running'" class="size-3 animate-spin text-info" />
             <Wrench v-else-if="state(step.id)!.status === 'repairing'" class="size-3 animate-pulse text-fun-purple" />
@@ -117,6 +123,9 @@ const outputs = computed(() => {
           </div>
           <div class="recipe-flow-step-name mt-2 text-[13.5px] font-semibold leading-snug">{{ step.name }}</div>
           <div v-if="!compact" class="mt-1 line-clamp-2 text-xs leading-relaxed text-mute">{{ step.description }}</div>
+          <div v-if="scripts(step).length" class="relative z-10 mt-2 w-full min-w-0">
+            <ScriptFile v-for="script in scripts(step)" :key="script.script_id" :script="script" compact />
+          </div>
           <div v-if="!compact" class="mt-auto flex items-center gap-1.5 pt-2.5 text-[11px] text-faint">
             <template v-if="state(step.id)">
               <LoaderCircle v-if="state(step.id)!.status === 'running'" class="size-3.5 animate-spin text-info" />
@@ -133,7 +142,7 @@ const outputs = computed(() => {
             </template>
             <span v-else class="font-mono">→ {{ step.output }}</span>
           </div>
-        </button>
+        </div>
       </template>
 
       <div class="recipe-flow-connector flex w-9 items-center" aria-hidden="true">
@@ -173,7 +182,8 @@ const outputs = computed(() => {
         </span>
         <span class="w-px flex-1 bg-line" />
       </div>
-      <button class="mb-1 min-w-0 flex-1 rounded-xl px-2 py-1 text-left hover:bg-paper" @click="emit('select', step.id)">
+      <div class="mb-1 min-w-0 flex-1 rounded-xl px-2 py-1 text-left hover:bg-paper">
+        <button type="button" class="w-full text-left" @click="emit('select', step.id)">
         <div class="flex items-center gap-1.5">
           <span class="truncate text-[13px] font-medium">{{ step.name }}</span>
           <span class="tag shrink-0" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">
@@ -186,7 +196,9 @@ const outputs = computed(() => {
           <template v-if="state(step.id)?.report?.warnings?.length"> · {{ state(step.id)!.report!.warnings!.length }} 条提示</template>
         </div>
         <div v-else-if="state(step.id)?.error" class="mt-0.5 line-clamp-2 text-[11px] text-error">{{ state(step.id)!.error }}</div>
-      </button>
+        </button>
+        <ScriptFile v-for="script in scripts(step)" :key="script.script_id" :script="script" compact />
+      </div>
     </li>
   </ol>
 </template>

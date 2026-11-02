@@ -7,6 +7,8 @@ import { duration, type TimelineItem } from '@/composables/chatModel'
 import { PLAN_STATUS_LABELS } from '@/composables/messagePresentation'
 import { toolPresentation, userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import MarkdownView from '@/components/common/MarkdownView.vue'
+import ScriptFile from '@/components/common/ScriptFile.vue'
+import { scriptReferences } from '@/composables/scriptPresentation'
 
 const props = withDefaults(defineProps<{ items: TimelineItem[]; detailed?: boolean }>(), { detailed: false })
 const open = ref<Record<string, boolean>>({})
@@ -43,7 +45,12 @@ const tools = computed(() => new Map(props.items.flatMap((item) => item.kind ===
           </span>
           <span v-if="detailed && item.duration_ms" class="ml-auto shrink-0 font-mono text-[10px] text-faint">{{ duration(item.duration_ms) }}</span>
         </div>
+        <div class="ml-5 space-y-1">
+          <ScriptFile v-for="script in scriptReferences([item.params, item.text])" :key="script.script_id" :script="script" compact />
+        </div>
       </div>
+
+      <ScriptFile v-else-if="item.kind === 'script'" :script="item.script" compact />
 
       <!-- 计划步骤 -->
       <div v-else-if="item.kind === 'plan'" class="flex items-center gap-2 py-1">

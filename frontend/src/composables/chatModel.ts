@@ -7,7 +7,8 @@
  * - artifacts 产物：结果表、文件、处理流程卡片、澄清问题
  * 刷新页面时用数据库里存的事件重新归并，得到同样的界面。
  */
-import type { AgentEvent, DiffCard, RecipeFlowData, RecipeJSON, RecipeToolKind, StepReport, VerifyReport } from '@/api/types'
+import type { AgentEvent, DiffCard, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
+import { scriptReferences } from './scriptPresentation.ts'
 
 export type ToolStatus = 'running' | 'ok' | 'error'
 export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' | 'error' | 'stopped'
@@ -15,6 +16,7 @@ export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' 
 export type TimelineItem =
   | { kind: 'note'; key: string; text: string; step?: number }
   | { kind: 'thinking'; key: string; text: string; step?: number }
+  | { kind: 'script'; key: string; script: ScriptReference; step?: number }
   | {
       kind: 'tool'
       key: string
@@ -365,6 +367,7 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
           id: step.id, name: step.name, action: step.action, formula: step.formula, kind: step.kind,
           formula_kind: step.formula_kind, description: step.description, output: step.output,
           inputs: [...(step.inputs ?? [])],
+          ...scriptReferences(step)[0],
         })),
         outputs: e.flow.outputs.map((output: RecipeFlowData['outputs'][number]) => ({ name: output.name, source: output.source })),
         output_files: e.flow.output_files?.map((file: NonNullable<RecipeFlowData['output_files']>[number]) => ({
@@ -434,6 +437,16 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     case 'table':
       msg.artifacts.push({ kind: 'table', key: uid('a'), table: { ...e.table, toolCallId: e.tool_call_id } })
       break
+    case 'script': {
+      const script = scriptReferences(e)[0]
+      if (!script) break
+      const item = msg.timeline.find((entry) => entry.kind === 'tool' && entry.id === e.tool_call_id)
+      if (item?.kind === 'tool') item.params = { ...item.params, ...script }
+      else if (!msg.timeline.some((entry) => entry.kind === 'script' && entry.script.script_id === script.script_id)) {
+        msg.timeline.push({ kind: 'script', key: uid('t'), script, step: activePlan(msg)?.num })
+      }
+      break
+    }
     case 'file': {
       const file: FileArtifact = { file_id: e.file_id, toolCallId: e.tool_call_id, filename: e.filename, kind: e.kind, kind_label: e.kind_label, download_url: e.download_url, sheets: e.sheets, run_id: e.run_id }
       const progress = e.tool_call_id ? findProgress(msg, e.tool_call_id) : undefined

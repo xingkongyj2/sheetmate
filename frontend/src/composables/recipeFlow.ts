@@ -41,6 +41,7 @@ export function progressFlow(progress: RecipeProgress): RecipeFlowData {
       id: step.step_id, name: step.name, action: '', formula: step.formula, kind: step.kind,
       formula_kind: step.formula_kind as 'builtin' | 'customer',
       description: step.description, output: step.output, inputs: [],
+      params: step.report?.params,
     })),
     outputs: snapshot?.outputs ?? (progress.outputs ?? []).map((output) => ({ name: output.sheet, source: '' })),
     output_files: delivered.length ? delivered.map((file) => {

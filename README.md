@@ -220,7 +220,9 @@ sheetmate/
 }
 ```
 
-Recipe 每一步明确记录 `kind=formula|sql|python`。公式保存公式 id 与参数，SQL 用 `custom_sql` 保存一条 DuckDB SELECT；Python 用 `python_script` 保存实际代码、输入表、文件绑定、输出表映射和代码中的业务校验，执行时进入同一受限脚本环境。三类步骤可任意混合，脚本结果表可继续交给公式或 SQL，后续脚本可引用前一步文件。流程输入区分数据表与完整文件，纯排版脚本无需虚构数据表；旧流程会自动推断工具类型，继续兼容执行。
+Recipe 每一步明确记录 `kind=formula|sql|python`。公式保存公式 id 与参数，SQL 用 `custom_sql` 保存一条 DuckDB SELECT；Python 用 `python_script` 保存脚本文件引用、输入表、文件绑定和输出表映射，执行时从脚本文件读取实际代码并进入同一受限环境。三类步骤可任意混合，脚本结果表可继续交给公式或 SQL，后续脚本可引用前一步文件。流程输入区分数据表与完整文件，纯排版脚本无需虚构数据表；旧流程会自动推断工具类型，继续兼容执行。
+
+Python 源码独立保存在 `data/scripts/scr_<UUID>.py`，每个脚本版本都有唯一 ID 和最多 20 个字符的标题。运行记录、流程节点和消息日志只保留 `script_id`、`script_title`、`script_filename` 等引用，不重复嵌入完整源码。点击节点、执行时间线或日志中的脚本文件可按需查看、复制和下载；修改代码会生成新 ID，历史版本仍可查看和重跑。旧记录中的内嵌代码在读取时自动迁移为文件引用，查看和重跑均沿用原会话或客户的权限。
 
 ### 内置公式（`engine/formulas/builtin.py`）
 

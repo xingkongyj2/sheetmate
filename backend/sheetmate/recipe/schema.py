@@ -20,6 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sheetmate.engine.formulas import FormulaLibrary
+from sheetmate.engine.script_store import resolve_script_code, script_params
 from sheetmate.engine.sqlutil import sql_table_refs
 
 
@@ -87,9 +88,16 @@ class RecipeStep(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _infer_kind(cls, value: Any) -> Any:
-        if isinstance(value, dict) and "kind" not in value:
+        if isinstance(value, dict):
             value = dict(value)
-            value["kind"] = {"custom_sql": "sql", "python_script": "python"}.get(value.get("formula"), "formula")
+            if "kind" not in value:
+                value["kind"] = {"custom_sql": "sql", "python_script": "python"}.get(value.get("formula"), "formula")
+            params = value.get("params")
+            if value["kind"] == "python" and isinstance(params, dict):
+                code = params.get("code")
+                # 旧流程和模型新生成的代码只物化一次；无效代码仍交给 check_recipe 汇总错误。
+                if isinstance(code, str) and code.strip() and len(code.encode("utf-8")) <= 100_000:
+                    value["params"] = script_params(params, title=str(value.get("name") or "Python 脚本")[:20])
         return value
 
     @field_validator("output")
@@ -168,6 +176,10 @@ class Recipe(BaseModel):
         return step_output_tables(steps[-1]) if steps else []
 
     def to_dict(self) -> dict[str, Any]:
+        # model_copy(update=...) 和断点重跑允许直接改参数，保存前同样转换为不可变脚本引用。
+        for step in self.steps:
+            if step.kind == "python":
+                step.params = script_params(step.params, title=step.name[:20])
         return self.model_dump(mode="json")
 
     def flow(self) -> dict[str, Any]:
@@ -195,6 +207,8 @@ class Recipe(BaseModel):
                     "description": s.description,
                     "output": s.output,
                     "inputs": list(dict.fromkeys(step_table_refs(s) + step_file_refs(s))),
+                    **({key: s.params[key] for key in ("script_id", "script_title", "script_filename") if key in s.params}
+                       if s.kind == "python" else {}),
                 }
                 for s in self.ordered_steps()
             ],
@@ -323,7 +337,11 @@ def check_recipe(recipe: Recipe, library: FormulaLibrary) -> list[str]:
         if step.kind == "python":
             if step.formula != "python_script":
                 problems.append(f"{label}：Python 步骤的 formula 必须为 python_script")
-            code = step.params.get("code")
+            try:
+                code = resolve_script_code(step.params)
+            except (OSError, ValueError) as exc:
+                code = None
+                problems.append(f"{label}：无法读取 Python 脚本：{exc}")
             if not isinstance(code, str) or not code.strip() or len(code.encode("utf-8")) > 100_000:
                 problems.append(f"{label}：Python 脚本不能为空，且不能超过 100 KB")
             else:

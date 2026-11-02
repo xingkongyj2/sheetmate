@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from sheetmate.agent.prompts import REPAIR_PROMPT, REPAIR_SYSTEM
+from sheetmate.engine.script_store import resolve_script_code
 from sheetmate.recipe.executor import RepairContext
 from sheetmate.recipe.schema import RecipeStep
 
@@ -20,6 +21,13 @@ class LLMStepRepairer:
 
     async def repair(self, ctx: RepairContext) -> RecipeStep | None:
         step = ctx.step
+        params = dict(step.params)
+        if step.kind == "python":
+            # 只在修复上下文按需读取代码，运行记录和节点仍保存脚本文件引用。
+            try:
+                params["code"] = resolve_script_code(params)
+            except (OSError, ValueError):
+                pass
         try:
             spec_text = _formula_text(ctx, step.formula)
         except ValueError:
@@ -34,7 +42,7 @@ class LLMStepRepairer:
             step_id=step.id,
             attempt=ctx.attempt,
             step=json.dumps(
-                {"name": step.name, "kind": step.kind, "formula": step.formula, "params": step.params, "output": step.output, "description": step.description},
+                {"name": step.name, "kind": step.kind, "formula": step.formula, "params": params, "output": step.output, "description": step.description},
                 ensure_ascii=False, indent=1,
             ),
             error=ctx.error + (f"\n\nPython 错误栈（末尾）：\n{ctx.script_stderr[-8000:]}" if ctx.script_stderr else ""),
@@ -58,11 +66,11 @@ class LLMStepRepairer:
         if not isinstance(params, dict) or not params:
             return None
         explanation = str(result.get("explanation") or "调整了参数")
-        return step.model_copy(update={
+        return RecipeStep.model_validate({**step.model_dump(),
             "formula": formula, "kind": "python" if formula == "python_script" else "sql" if formula == "custom_sql" else "formula",
             "formula_kind": ctx.library.resolve(formula).kind if ctx.library.has(formula) else "builtin",
             "params": params, "explanation": f"自动修复：{explanation}",
-        }, deep=True)
+        })
 
 
 def _formula_text(ctx: RepairContext, formula_id: str) -> str:

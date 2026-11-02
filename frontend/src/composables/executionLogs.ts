@@ -1,5 +1,6 @@
-import type { AgentEvent } from '../api/types.ts'
+import type { AgentEvent, ScriptReference } from '../api/types.ts'
 import type { TimelineItem, UiMessage } from './chatModel.ts'
+import { scriptReferences, withoutScriptCode } from './scriptPresentation.ts'
 
 export type LogFilter = 'all' | 'tools' | 'errors'
 export type LogStatus = 'running' | 'success' | 'error' | 'warning' | 'info'
@@ -21,13 +22,14 @@ export interface ExecutionLog {
   callId?: string
   duration?: number
   sections: LogSection[]
+  scripts: ScriptReference[]
   raw: unknown
 }
 
 const EVENT_LABELS: Record<string, string> = {
   note: '处理说明', error: '执行错误', start: '开始处理', done: '处理结束',
   plan_start: '执行计划', step_start: '计划步骤开始', step_done: '计划步骤结束',
-  table: '数据产物', file: '交付文件', clarify: '待确认问题',
+  table: '数据产物', file: '交付文件', script: '脚本文件', clarify: '待确认问题',
   memory_saved: '记忆已保存', field_mapping_saved: '字段映射已保存', compacted: '上下文已压缩',
   reflect_start: '自检开始', reflect_done: '自检结束', agent_pool_start: '并行任务开始',
   agent_start: '专员开始', agent_done: '专员结束', aggregate_start: '汇总开始',
@@ -108,7 +110,8 @@ export function buildExecutionLogs(message: UiMessage | null): ExecutionLog[] {
   const events = message.events?.length ? message.events : timelineEvents(message.timeline)
   const entries: ExecutionLog[] = []
   const calls = new Map<string, ExecutionLog>()
-  for (const [index, event] of events.entries()) {
+  for (const [index, original] of events.entries()) {
+    const event = withoutScriptCode(original) as AgentEvent
     if (['text_chunk', 'thinking', 'recipe_thinking', 'final_text'].includes(event.type)) continue
     if (event.type === 'tool_call') {
       const entry: ExecutionLog = {
@@ -116,6 +119,7 @@ export function buildExecutionLogs(message: UiMessage | null): ExecutionLog[] {
         title: String(event.tool || event.label || '工具调用'), type: event.type,
         status: message.streaming ? 'running' : 'error', summary: String(event.label || ''),
         callId: event.id, sections: parameterSections(event.debug_params ?? event.params ?? {}, event.tool), raw: { request: event },
+        scripts: scriptReferences(event),
       }
       calls.set(event.id, entry)
       entries.push(entry)
@@ -127,6 +131,7 @@ export function buildExecutionLogs(message: UiMessage | null): ExecutionLog[] {
         call.status = event.ok ? 'success' : 'error'
         call.summary = (!event.ok && resultError(event.debug_result)) || String(event.summary || call.summary)
         call.duration = event.duration_ms
+        call.scripts = scriptReferences([call.scripts, event])
         if (event.debug_result !== undefined || event.text !== undefined) {
           const value = event.debug_result ?? event.text
           call.sections.push(section('返回结果', value, typeof value === 'string' && !value.trimStart().startsWith('{') && !value.trimStart().startsWith('[') ? 'Text' : 'JSON'))
@@ -143,11 +148,12 @@ export function buildExecutionLogs(message: UiMessage | null): ExecutionLog[] {
       title: EVENT_LABELS[event.type] ?? event.type, type: event.type, status: eventStatus(event),
       summary: eventSummary(event), callId: event.tool_call_id ?? event.id, duration: event.duration_ms,
       sections: parts, raw: event,
+      scripts: scriptReferences(event),
     })
   }
   if (message.error && !entries.some((entry) => entry.status === 'error' && entry.summary === message.error)) {
     entries.push({ key: 'message-error', sequence: events.length + 1, category: 'event', title: '执行错误', type: 'error',
-      status: 'error', summary: message.error, sections: [], raw: { type: 'error', content: message.error } })
+      status: 'error', summary: message.error, sections: [], scripts: [], raw: { type: 'error', content: message.error } })
   }
   return entries
 }
