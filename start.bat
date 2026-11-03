@@ -68,32 +68,17 @@ try {
     }
 
     $backend = Join-Path $root 'backend'
-    $venv = Join-Path $backend '.venv'
-    $python = Join-Path $venv 'Scripts\python.exe'
-    $uv = Get-Command uv -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $python = Join-Path $backend '.venv\Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-        Write-Host '创建 backend/.venv…'
-        if ($uv) {
-            Invoke-Step $uv.Source @('venv', $venv)
-        } else {
-            $launcher = Get-Command py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($launcher) {
-                Invoke-Step $launcher.Source @('-3', '-m', 'venv', $venv)
-            } else {
-                $launcher = Get-Command python -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-                if (-not $launcher) { throw '请安装 Python 3.10+ 或 uv，或先创建 backend/.venv。' }
-                Invoke-Step $launcher.Source @('-m', 'venv', $venv)
-            }
-        }
+        throw "未找到项目虚拟环境 Python：$python"
     }
     Invoke-Step $python @('-c', 'import sys; assert sys.version_info >= (3, 10), sys.version')
     Set-Location -LiteralPath $backend
     Write-Host '安装后端依赖…'
-    if ($uv) {
-        Invoke-Step $uv.Source @('pip', 'install', '--python', $python, '-r', 'requirements.txt')
-    } else {
-        Invoke-Step $python @('-m', 'pip', 'install', '-r', 'requirements.txt')
-    }
+    $pipReady = $false
+    try { & $python -m pip --version *> $null; $pipReady = $LASTEXITCODE -eq 0 } catch {}
+    if (-not $pipReady) { Invoke-Step $python @('-m', 'ensurepip', '--upgrade') }
+    Invoke-Step $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', (Join-Path $root 'requirements.txt'))
     Set-Location -LiteralPath (Join-Path $root 'frontend')
     $npm = (Get-Command npm.cmd -CommandType Application -ErrorAction Stop).Source
     Write-Host '安装前端依赖…'

@@ -74,28 +74,22 @@ free_port "$PORT" || ports_ready=false
 free_port 5173 || ports_ready=false
 [ "$ports_ready" = true ] || exit 1
 
-# 2. 后端依赖；运行始终使用 backend/.venv。
-command -v node >/dev/null 2>&1 || { echo "请先安装 Node.js 20+。" >&2; exit 1; }
-command -v npm >/dev/null 2>&1 || { echo "未找到 npm，请检查 Node.js 安装。" >&2; exit 1; }
+# 2. 用已有的 backend/.venv 安装依赖。
 cd "$ROOT/backend"
 if [ ! -x "$PYTHON" ]; then
-  echo "创建 Python 虚拟环境…"
-  # 需要 Python 3.10 及以上
-  if command -v uv >/dev/null 2>&1; then
-    uv venv .venv -q
-  else
-    command -v python3 >/dev/null 2>&1 || { echo "请先安装 Python 3.10+ 或 uv。" >&2; exit 1; }
-    python3 -m venv .venv
-  fi
+  echo "未找到项目虚拟环境：$PYTHON" >&2
+  exit 1
 fi
+"$PYTHON" -c 'import sys; assert sys.version_info >= (3, 10), sys.version'
 echo "安装后端依赖…"
-if command -v uv >/dev/null 2>&1; then
-  uv pip install -q --python "$PYTHON" -r requirements.txt
-else
-  "$PYTHON" -m pip install -q -r requirements.txt
+if ! "$PYTHON" -m pip --version >/dev/null 2>&1; then
+  "$PYTHON" -m ensurepip --upgrade
 fi
+"$PYTHON" -m pip install --disable-pip-version-check -r "$ROOT/requirements.txt"
 
 # 3. 同步前端依赖并重新构建，确保配置和依赖修改也生效。
+command -v node >/dev/null 2>&1 || { echo "请先安装 Node.js 20+。" >&2; exit 1; }
+command -v npm >/dev/null 2>&1 || { echo "未找到 npm，请检查 Node.js 安装。" >&2; exit 1; }
 cd "$ROOT/frontend"
 echo "安装前端依赖…"
 npm install --no-audit --no-fund
