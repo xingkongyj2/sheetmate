@@ -19,7 +19,15 @@
 ./start.sh
 ```
 
-第一次运行会自动：生成 `.env` → 建 Python 虚拟环境并安装依赖 → 安装并构建前端 → 启动服务。然后打开 <http://127.0.0.1:8000>，用 **admin / admin123** 登录。
+Windows 双击项目根目录的 `start.bat`，或在终端运行：
+
+```bat
+start.bat
+```
+
+两个脚本执行相同流程：生成缺失的 `.env` → 强制结束占用后端端口（默认 `8000`，可通过 `PORT` 配置）和前端开发端口 `5173` 的进程 → 准备 `backend/.venv` 并安装依赖 → 安装、构建前端 → 启动后端。端口空闲时直接继续；端口无法释放或安装、构建失败时停止并显示错误。每次启动都会检查两个端口，包括上次异常退出后留下的进程。
+
+打开 <http://127.0.0.1:8000>，用 **admin / admin123** 登录。前端构建结果由后端统一提供页面，配置了其他 `PORT` 时使用启动日志中的地址。
 
 配置模型（二选一）：
 
@@ -31,9 +39,19 @@ Pro / Flash 在「设置」页提供「开启思考」开关，默认关闭以�
 
 不配置模型也能看效果：首次启动会写入一个示例客户「顺达物流（示例）」，里面有原始文件、人工结果样例、一个已验证的月结账单流程、字段映射和业务规则；客户页的「用新文件执行」不需要 AI。
 
-环境要求：Python 3.10+、Node.js 20+。Windows 用户在 `backend` 目录执行 `python -m venv .venv`、`.venv\Scripts\pip install -r requirements.txt`，在 `frontend` 目录执行 `npm install && npm run build`，再回到 `backend` 执行 `.venv\Scripts\python -m sheetmate`。
+环境要求：Python 3.10+、Node.js 20+。Windows 用户在 `backend` 目录创建 `.venv` 后，使用 PowerShell 执行：
 
-开发模式（前端热更新）：`./dev.sh`，打开 <http://localhost:5173>。
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+在 `frontend` 目录执行 `npm install`、`npm run build`，再回到 `backend` 启动：
+
+```powershell
+.\.venv\Scripts\python.exe -m sheetmate
+```
+
+AI Python 脚本在所有平台固定使用 `backend/.venv`：Windows 为 `.venv\Scripts\python.exe`，macOS / Linux 为 `.venv/bin/python`。无需将 Python 加入系统 PATH；虚拟环境不存在时直接提示错误，不回退到系统 Python 或 Conda。
 
 ---
 
@@ -117,7 +135,7 @@ Pro / Flash 在「设置」页提供「开启思考」开关，默认关闭以�
 
 ```
 sheetmate/
-├── start.sh / dev.sh              一键启动 / 开发模式
+├── start.sh / start.bat           macOS/Linux / Windows 一键启动
 ├── .env.example                   配置模板
 ├── docs/                          设计文档（原有的 4 份）
 ├── backend/
@@ -246,7 +264,7 @@ Python 源码独立保存在 `data/scripts/scr_<UUID>.py`，每个脚本版本�
 - 所有数据（SQLite、上传文件、输出文件、DuckDB 工作区）都在 `backend/data/`，唯一的外部连接是你配置的模型接口。
 - 源文件只读，结果永远写成新文件。
 - DuckDB 连接一打开就关闭外部访问并锁定配置：SQL 读不了本机文件、连不了网、装不了扩展；用户和 AI 写的 SQL 只允许单条 SELECT；列名表名一律转义。
-- Python 脚本在独立子进程与临时目录执行，只接收选定的表和工作簿副本，运行环境不继承 API Key 等宿主凭据。使用 macOS `sandbox-exec` 或 Linux `bwrap` 限制文件访问和网络，配合执行超时、取消和结果大小限制；隔离设施不可用时不裸跑脚本，会返回明确错误。正常完成、失败或停止后清理临时文件，只有显式列入 `deliver_files` 且通过输出检查的正式文件进入下载列表，临时测试文件不会登记为用户文件；脚本返回的内部数据表单独保存为运行快照，供执行明细排查。
+- Python 脚本固定由 `backend/.venv` 的解释器在独立子进程与临时目录执行，只传入选定的表和工作簿副本，运行环境不继承 API Key 等宿主凭据。macOS 使用 `sandbox-exec`、Linux 使用 `bwrap` 限制文件访问和网络，隔离设施不可用时返回明确错误；Windows 使用普通子进程，不提供操作系统级文件或网络隔离。各平台均保留执行超时、取消和结果大小限制，Windows 停止时通过 `taskkill` 结束进程树。正常完成、失败或停止后清理临时文件，只有显式列入 `deliver_files` 且通过输出检查的正式文件进入下载列表，临时测试文件不会登记为用户文件；脚本返回的内部数据表单独保存为运行快照，供执行明细排查。
 - 登录令牌是签名的 httpOnly Cookie；成员只能看到自己创建或被分配的客户，管理员能看到全部。
 - API Key 保存在 `backend/data/settings.json`（本机明文，页面上只显示首尾几位）。
 

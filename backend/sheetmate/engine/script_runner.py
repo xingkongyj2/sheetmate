@@ -1,4 +1,4 @@
-"""操作系统隔离的 Python 表格脚本执行器；没有可用沙箱时拒绝裸跑。"""
+"""使用项目 .venv 执行 Python 表格脚本；macOS / Linux 使用系统沙箱。"""
 
 from __future__ import annotations
 
@@ -138,32 +138,58 @@ def _selected_names(payload: Any, *, field_name: str, maximum: int) -> list[str]
     return payload
 
 
+def _venv_python() -> Path:
+    venv = Path(__file__).resolve().parents[2] / ".venv"
+    python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+    if not python.is_file():
+        raise RuntimeError(f"未找到项目虚拟环境 Python：{python}；请先在 backend 目录创建 .venv 并安装 requirements.txt 中的依赖")
+    return python
+
+
+def _venv_base(python: Path) -> Path:
+    """沙箱放行目标 venv 的基础运行库，不依赖后端进程使用哪个 Python。"""
+    config = python.parent.parent / "pyvenv.cfg"
+    if config.is_file():
+        for line in config.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if separator and key.strip() == "home" and value.strip():
+                home = Path(value.strip()).resolve()
+                return home.parent if home.name == "bin" else home
+    return python.resolve().parent.parent
+
+
 def _sandbox_command(root: Path) -> list[str]:
-    python = Path(sys.executable).absolute()
+    python = _venv_python()
     real_python = python.resolve()
+    venv = python.parent.parent
     worker = root / "worker.py"
-    command = [str(python), "-I", "-B", str(worker), str(root)]
+    command = [str(python), "-I", "-B", "-X", "utf8", str(worker), str(root)]
+    if sys.platform == "win32":
+        return command
+    base = _venv_base(python)
     if sys.platform == "darwin" and Path("/usr/bin/sandbox-exec").is_file():
+        def literal(path):
+            return json.dumps(str(path), ensure_ascii=False)
+
         allowed = ["/System", "/usr", "/Library", "/bin", "/sbin", "/dev", "/private/preboot",
-                   "/private/var/db", "/private/etc", sys.base_prefix,
-                   str(Path(sys.prefix) / "lib"), str(Path(sys.prefix) / "bin"), str(root)]
-        reads = " ".join(f"(subpath {json.dumps(str(Path(path).resolve()))})" for path in allowed)
+                   "/private/var/db", "/private/etc", str(base),
+                   str(venv / "lib"), str(venv / "bin"), str(root)]
+        reads = " ".join(f"(subpath {literal(Path(path).resolve())})" for path in allowed)
         profile = ("(version 1) (deny default) "
-                   f"(allow file-read* (literal \"/\") (literal {json.dumps(str(Path(sys.prefix) / 'pyvenv.cfg'))}) {reads}) "
-                   f"(allow file-write* (subpath {json.dumps(str(root))}) (literal \"/dev/null\")) "
-                   f"(allow process-exec (literal {json.dumps(str(python))}) (literal {json.dumps(str(real_python))})) "
+                   f"(allow file-read* (literal \"/\") (literal {literal(venv / 'pyvenv.cfg')}) {reads}) "
+                   f"(allow file-write* (subpath {literal(root)}) (literal \"/dev/null\")) "
+                   f"(allow process-exec (literal {literal(python)}) (literal {literal(real_python)})) "
                    "(allow sysctl-read)")
         return ["/usr/bin/sandbox-exec", "-p", profile, *command]
     if sys.platform.startswith("linux") and shutil.which("bwrap"):
         # 保留 venv 入口，才能发现同一环境内已安装的 pandas/openpyxl。
-        command = [str(python), "-I", "-B", str(worker), str(root)]
         args = [shutil.which("bwrap"), "--die-with-parent", "--unshare-all", "--new-session", "--proc", "/proc", "--dev", "/dev"]
-        mounts = {"/usr", "/bin", "/sbin", "/lib", "/lib64", sys.base_prefix, str(Path(sys.prefix) / "lib"), str(Path(sys.prefix) / "bin")}
+        mounts = {"/usr", "/bin", "/sbin", "/lib", "/lib64", str(base), str(venv / "lib"), str(venv / "bin")}
         for path in sorted(mounts):
             if Path(path).exists():
                 args.extend(["--ro-bind", path, path])
-        if (Path(sys.prefix) / "pyvenv.cfg").exists():
-            config = str(Path(sys.prefix) / "pyvenv.cfg")
+        if (venv / "pyvenv.cfg").exists():
+            config = str(venv / "pyvenv.cfg")
             args.extend(["--ro-bind", config, config])
         args.extend(["--bind", str(root), str(root), "--chdir", str(root), "--", *command])
         return args
@@ -172,10 +198,22 @@ def _sandbox_command(root: Path) -> list[str]:
 
 def _stop(process: subprocess.Popen) -> None:
     if process.poll() is None:
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            process.kill()
+        if sys.platform == "win32":
+            windows = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+            taskkill = Path(windows) / "System32" / "taskkill.exe"
+            try:
+                subprocess.run([str(taskkill), "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            if process.poll() is None:
+                process.kill()
+        else:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                process.kill()
     process.wait(timeout=3)
 
 
@@ -241,7 +279,7 @@ def _validate_output(path: Path) -> None:
 
 def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, Path], output_dir: Path, *,
                    timeout_seconds: float = 30, cancel_event: threading.Event | None = None) -> ScriptResult:
-    """脚本在临时 OS 沙箱中执行；只有全程成功且结构合法的输出才复制到 output_dir。"""
+    """脚本在临时目录中执行；只有全程成功且结构合法的输出才复制到 output_dir。"""
     started = time.monotonic()
     outcome = ScriptResult()
     copied: list[Path] = []
@@ -281,10 +319,17 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
             command = _sandbox_command(root)
             environment = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"), "TMPDIR": str(root), "LANG": "en_US.UTF-8",
                            "PYTHONIOENCODING": "utf-8", "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+            options = {"start_new_session": True}
+            if sys.platform == "win32":
+                windows = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+                environment.update(SystemRoot=windows, WINDIR=windows, TEMP=str(root), TMP=str(root),
+                                   USERPROFILE=str(root / "home"),
+                                   PATH=os.pathsep.join((str(Path(command[0]).parent), str(Path(windows) / "System32"))))
+                options = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
             stdout_path, stderr_path = root / "stdout.log", root / "stderr.log"
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
                 process = subprocess.Popen(command, cwd=root, env=environment, stdin=subprocess.DEVNULL,
-                                           stdout=stdout, stderr=stderr, start_new_session=True)
+                                           stdout=stdout, stderr=stderr, **options)
                 deadline = time.monotonic() + timeout_seconds
                 try:
                     while process.poll() is None:
