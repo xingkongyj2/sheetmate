@@ -148,15 +148,14 @@ async function load(silent = false) {
     if (!streaming.value) {
       messages.value = fromStoredMessages(data.messages, data.running_job?.message_id).map((m) => reactive(m) as UiMessage)
       scrollToBottom(true) // 打开会话（包括后台任务跑完刷新）都停在最新一条
-    }
-    if (!streaming.value) {
       reconnecting.value = false
       store.patchConversation(props.id, { running: data.running, title: data.title })
-      if (data.running_job) {
+      const job = data.running_job
+      if (job) {
         const assistant = reactive(newAssistant()) as UiMessage
         messages.value.push(assistant)
         selectedKey.value = assistant.key
-        void receiveStream(assistant, (onEvent) => conversationApi.events(props.id, data.running_job!.id, onEvent), true)
+        void receiveStream(assistant, (onEvent) => conversationApi.events(props.id, job.id, onEvent), true)
       }
     }
   } catch (err) {
@@ -316,23 +315,25 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
   let retry = false
   let retryDelay = 1000
   const currentHandle = open((event) => {
-      if (disposed) return
-      received = true
-      applyEvent(assistant, event)
-      if (event.type === 'recipe_deleted') markRecipeDeleted(messages.value, event.recipe_id)
-      if (event.type === 'title' && detail.value) {
-        detail.value.title = event.title
-        store.patchConversation(props.id, { title: event.title })
-      }
-      if (event.type === 'table' || event.type === 'file' || event.type === 'recipes_changed' || event.type === 'recipe_deleted') refreshSide()
+    if (disposed) return
+    received = true
+    applyEvent(assistant, event)
+    if (event.type === 'recipe_deleted') markRecipeDeleted(messages.value, event.recipe_id)
+    if (event.type === 'title' && detail.value) {
+      detail.value.title = event.title
+      store.patchConversation(props.id, { title: event.title })
+    }
+    if (event.type === 'table' || event.type === 'file' || event.type === 'recipes_changed' || event.type === 'recipe_deleted') refreshSide()
   })
   handle = currentHandle
   try {
     await currentHandle.done
   } catch (err) {
     if ((err as Error).name !== 'AbortError') {
-      retry = resuming || received || !(err instanceof ApiError) || err.status === 0 || err.status === 409
-      if (resuming && err instanceof ApiError && [404, 409].includes(err.status)) retryDelay = 0
+      const status = err instanceof ApiError ? err.status : 0
+      retry = received || status === 409 || (resuming && (status === 0 || status >= 500 || status === 404))
+      if ([401, 403].includes(status)) retry = false
+      if (resuming && [404, 409].includes(status)) retryDelay = 0
       if (!retry) assistant.error = errorText(err)
     }
   } finally {
