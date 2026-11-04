@@ -23,7 +23,11 @@ from sheetmate.services.errors import ServiceError
 _CAPTURING: ContextVar[tuple[str, ...]] = ContextVar("legacy_workflow_capture", default=())
 
 
-def _scoped(host, record) -> bool:
+def _scoped(db, host, record) -> bool:
+    if isinstance(record, FileRecord):
+        return file_service.can_access_in_conversation(
+            db, record, conversation_id=host.conversation_id, customer_id=host.customer_id,
+        )
     return record.conversation_id == host.conversation_id or bool(host.customer_id and record.customer_id == host.customer_id)
 
 
@@ -48,20 +52,25 @@ def _code_names(code: str) -> tuple[set[str], set[str]]:
 
 
 def _original_filename(item: dict[str, Any], record: FileRecord, candidates: set[str]) -> str:
+    # 展示名可能因重名自动编号；脚本内部仍按登记时的原名生成文件。
+    recorded_name = record.filename
+    original = (record.profile or {}).get("original_filename")
+    if isinstance(original, str) and original and Path(original).name == original:
+        recorded_name = file_service.safe_filename(original)
     ref = item.get("ref")
     if isinstance(ref, str) and "/" in ref:
         name = ref.split("/", 1)[1]
-        if Path(name).name == name and file_service.safe_filename(name) == record.filename:
+        if Path(name).name == name and file_service.safe_filename(name) == recorded_name:
             return name
-    matches = {name for name in candidates if file_service.safe_filename(name) == record.filename}
+    matches = {name for name in candidates if file_service.safe_filename(name) == recorded_name}
     if len(matches) == 1:
         return matches.pop()
     if len(matches) > 1:
         raise ServiceError(f"历史输出「{record.filename}」的原始文件名不明确，无法可靠保存")
     # 普通输出沿用审计文件名；出现规范化痕迹且代码没有可核对字面量时拒绝猜测。
-    if file_service.safe_filename(record.filename) != record.filename or "_" in record.filename:
+    if file_service.safe_filename(recorded_name) != recorded_name or "_" in recorded_name:
         raise ServiceError(f"历史输出「{record.filename}」缺少可核对的原始文件名，无法可靠保存")
-    return record.filename
+    return recorded_name
 
 
 def _restore_table(ws: Workspace, name: str, originals: list[FileRecord]) -> None:
@@ -94,7 +103,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
     try:
         with session_scope() as db:
             run = run_service.get_run(db, run_id)
-            if not _scoped(host, run):
+            if not _scoped(db, host, run):
                 raise ServiceError("这次脚本运行不属于当前客户或会话")
             if run.kind != "script" or run.status != "success":
                 raise ServiceError("只能从成功的 Python 脚本运行保存流程")
@@ -122,7 +131,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
             originals = []
             for file_id in original_ids:
                 record = file_service.get_file(db, file_id)
-                if not _scoped(host, record):
+                if not _scoped(db, host, record):
                     raise ServiceError("历史脚本的输入文件不属于当前客户或会话")
                 if record.kind == "input":
                     originals.append(record)
@@ -132,7 +141,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
                 if not isinstance(item, dict) or not item.get("file_id"):
                     raise ServiceError("历史脚本输出文件记录不完整，不能保存流程")
                 record = file_service.get_file(db, item["file_id"])
-                if not _scoped(host, record) or record.run_id != run_id or record.kind != "output":
+                if not _scoped(db, host, record) or record.run_id != run_id or record.kind != "output":
                     raise ServiceError("历史脚本输出文件来源不一致，不能保存流程")
                 outputs.append((dict(item), record, _original_filename(item, record, filename_literals)))
             if run.output_file_id and run.output_file_id not in {record.id for _, record, _ in outputs}:
@@ -147,7 +156,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
             if info.source == "uploaded" and info.file_id and not (info.step or {}).get("recipe_snapshot"):
                 with session_scope() as db:
                     origin = file_service.get_file(db, info.file_id)
-                    if not _scoped(host, origin) or origin.kind != "input":
+                    if not _scoped(db, host, origin) or origin.kind != "input":
                         # 旧版输出导入曾标成 uploaded/input；缺少生成链时不可编为原始输入。
                         metadata["source"] = "computed"
             ws.put_dataframe(info.name, host.ws.df(info.name), **metadata)
@@ -180,7 +189,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
         def resolve_file(file_id: str):
             with session_scope() as db:
                 record = file_service.get_file(db, file_id)
-                if not _scoped(host, record):
+                if not _scoped(db, host, record):
                     raise ServiceError("历史脚本引用的文件不属于当前客户或会话")
                 generated = record.kind == "output"
             dependency = host.file_dependency(file_id)
@@ -202,7 +211,7 @@ def capture_legacy_script(host, run_id: str) -> Recipe:
             raise ServiceError("历史脚本依赖无法可靠保存：" + "；".join(problems))
         with session_scope() as db:
             run = run_service.get_run(db, run_id)
-            if not _scoped(host, run) or run.status != "success" or (run.validation or {}).get("recipe_deleted"):
+            if not _scoped(db, host, run) or run.status != "success" or (run.validation or {}).get("recipe_deleted"):
                 raise ServiceError("历史脚本状态已变化，不能保存流程")
             current = dict(run.validation or {})
             current["recipe_snapshot"] = recipe.to_dict()

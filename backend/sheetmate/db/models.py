@@ -4,7 +4,7 @@
 
 - users / customers / user_customers   用户、客户、负责关系（多对多，权限隔离）
 - conversations / messages             会话与消息（会话可以绑定客户，也可以不绑定）
-- files                                上传文件与输出文件（按客户或会话隔离）
+- files / file_customers / file_conversations 上传与输出原件、客户与会话的独立引用
 - formulas                             客户专属公式（内置公式在代码里，只读）
 - recipes                              Recipe（流程配方），按版本保存
 - runs                                 任务流水（= TabClaw 的 WorkflowRecord + SheetMate 的 tasks）
@@ -129,6 +129,26 @@ class FileRecord(Base):
     profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # 文件画像（sheet、列、样本）
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class FileConversation(Base):
+    """会话持有的文件引用。客户与多个会话共用同一份原件，互相独立地保留。"""
+
+    __tablename__ = "file_conversations"
+
+    file_id: Mapped[str] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
+class FileCustomer(Base):
+    """会话改绑客户时保留双方的文件归属，原件与文件 ID 仍只有一份。"""
+
+    __tablename__ = "file_customers"
+
+    file_id: Mapped[str] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), primary_key=True, index=True)
 
 
 class FormulaRecord(Base):

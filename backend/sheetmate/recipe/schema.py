@@ -444,6 +444,7 @@ def check_recipe(recipe: Recipe, library: FormulaLibrary) -> list[str]:
 def file_pattern_from_name(filename: str) -> str:
     """从文件名推出匹配规则：去掉扩展名，把日期/月份/数字部分换成 *。例：运费明细_2026-09.xlsx → 运费明细*"""
     stem = re.sub(r"\.(xlsx|xlsm|xls|csv)$", "", filename, flags=re.IGNORECASE)
+    stem = re.sub(r"（[1-9]\d*）$", "", stem)
     stem = re.sub(r"[\s_\-（(]*\d[\d\s_\-.年月日）)]*$", "", stem)
     stem = re.sub(r"\d+", "*", stem)
     stem = stem.strip(" _-")

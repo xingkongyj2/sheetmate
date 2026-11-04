@@ -147,7 +147,14 @@ export const fileApi = {
   preview: async (id: string, sheet?: string, offset = 0, limit = 50) =>
     (await http.get<{ preview: { filename: string; sheet: string; sheets: string[]; total: number; columns: string[]; rows: unknown[][] } }>(
       `/files/${id}/preview`, { params: { sheet, offset, limit } })).data.preview,
-  remove: async (id: string) => http.delete(`/files/${id}`),
+  previewUpload: async (file: File, sheet?: string, offset = 0, limit = 50, signal?: AbortSignal) => {
+    const form = new FormData()
+    form.append('file', file)
+    return (await http.post<{ preview: { filename: string; sheet: string; sheets: string[]; total: number; columns: string[]; rows: unknown[][] } }>(
+      '/files/preview-upload', form, { params: { sheet, offset, limit }, signal })).data.preview
+  },
+  remove: async (id: string, customerId?: string) =>
+    http.delete(`/files/${id}`, { params: { customer_id: customerId } }),
   downloadUrl: (id: string) => `/api/files/${id}/download`,
 }
 

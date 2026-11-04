@@ -3,8 +3,11 @@
  * 输入框：文字 + 附件（要处理的表 / 人工做好的结果）+ 先出计划 + 发送/停止。
  * 中文输入法组字时按回车不会发送；支持把文件直接拖进来。
  */
-import { ArrowUp, FileCheck2, FileSpreadsheet, ListChecks, LoaderCircle, Plus, Square, X } from '@lucide/vue'
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { ArrowUp, Eye, FileCheck2, FileSpreadsheet, ListChecks, LoaderCircle, Plus, Square, X } from '@lucide/vue'
+import { computed, ref } from 'vue'
+
+import type { FileReference, TableReference } from '@/composables/tableReferences'
+import ReferenceEditor from './ReferenceEditor.vue'
 
 export interface Attachment {
   key: string
@@ -20,13 +23,16 @@ const props = withDefaults(
     modelValue: string
     plan?: boolean
     attachments?: Attachment[]
+    tableReferences?: TableReference[]
+    fileReferences?: FileReference[]
     busy?: boolean
+    stoppable?: boolean
     placeholder?: string
     autofocus?: boolean
     large?: boolean
     appearance?: 'outlined' | 'card'
   }>(),
-  { plan: false, attachments: () => [], busy: false, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
+  { plan: false, attachments: () => [], tableReferences: () => [], fileReferences: () => [], busy: false, stoppable: true, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
 )
 
 const emit = defineEmits<{
@@ -34,50 +40,38 @@ const emit = defineEmits<{
   'update:plan': [value: boolean]
   attach: [files: File[], kind: 'input' | 'expected']
   remove: [key: string]
+  preview: [key: string]
   send: []
   stop: []
 }>()
 
-const textarea = ref<HTMLTextAreaElement | null>(null)
+const editor = ref<InstanceType<typeof ReferenceEditor> | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const pendingKind = ref<'input' | 'expected'>('input')
 const menuOpen = ref(false)
 const dragging = ref(false)
-const composing = ref(false)
+const knownFiles = computed(() => {
+  const names = new Set([...props.fileReferences.map((file) => file.filename), ...props.attachments.map((file) => file.name)])
+  return [...names].map((filename) => ({ filename }))
+})
 
-function resize() {
-  const el = textarea.value
-  if (!el) return
-  el.style.height = 'auto'
-  el.style.height = `${Math.min(el.scrollHeight, 240)}px`
+function captureSelection() {
+  editor.value?.captureSelection()
 }
 
-watch(() => props.modelValue, () => nextTick(resize))
+function insertTable(reference: TableReference) {
+  editor.value?.insertReference(reference)
+}
 
-// 挂载时样式可能还没就绪、宽度会变化：宽度一变就重新计算高度，避免空输入框被撑高
-let observer: ResizeObserver | null = null
-let lastWidth = 0
-onMounted(() => {
-  resize()
-  if (textarea.value && typeof ResizeObserver !== 'undefined') {
-    observer = new ResizeObserver((entries) => {
-      const width = entries[0]?.contentRect.width ?? 0
-      if (Math.abs(width - lastWidth) > 1) {
-        lastWidth = width
-        resize()
-      }
-    })
-    observer.observe(textarea.value)
-  }
-  if (props.autofocus) textarea.value?.focus()
-})
-onBeforeUnmount(() => observer?.disconnect())
+function insertFile(name: string) {
+  menuOpen.value = false
+  editor.value?.insertReference({ filename: name })
+}
 
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === 'Enter' && !e.shiftKey && !composing.value && !e.isComposing) {
-    e.preventDefault()
-    if (!props.busy && props.modelValue.trim()) emit('send')
-  }
+function preview(key: string) {
+  captureSelection()
+  menuOpen.value = false
+  emit('preview', key)
 }
 
 function pick(kind: 'input' | 'expected') {
@@ -99,7 +93,7 @@ function onDrop(e: DragEvent) {
   if (files.length) emit('attach', files, 'input')
 }
 
-defineExpose({ focus: () => textarea.value?.focus() })
+defineExpose({ focus: () => editor.value?.focus(), captureSelection, insertTable })
 </script>
 
 <template>
@@ -128,26 +122,42 @@ defineExpose({ focus: () => textarea.value?.focus() })
         <FileCheck2 v-else-if="a.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
         <FileSpreadsheet v-else class="size-4 shrink-0 text-fun-green" />
         <div class="min-w-0">
-          <div class="truncate font-medium text-ink">{{ a.name }}</div>
+          <button
+            type="button"
+            class="block max-w-full cursor-pointer truncate rounded-sm text-left font-medium text-ink transition hover:text-[#42566f] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8fa2ba]"
+            :aria-label="`插入文件名 ${a.name}`"
+            title="点击插入文件名"
+            @pointerdown.prevent="captureSelection"
+            @click="insertFile(a.name)"
+          >{{ a.name }}</button>
           <div class="truncate text-[10px] text-faint">
             {{ a.status === 'error' ? a.error : a.kind === 'expected' ? '人工结果 · 让 AI 照着学' : a.tables?.length ? `已加载：${a.tables.join('、')}` : '要处理的表' }}
           </div>
         </div>
-        <button class="ml-1 rounded p-0.5 text-faint hover:bg-white hover:text-ink" @click="emit('remove', a.key)"><X class="size-3" /></button>
+        <button
+          type="button"
+          class="ml-1 flex size-6 shrink-0 items-center justify-center rounded-lg text-mute transition hover:bg-white hover:text-ink disabled:opacity-40"
+          :aria-label="`查看文件 ${a.name}`"
+          title="查看表格，点击表名插入引用"
+          :disabled="a.status === 'uploading'"
+          @pointerdown.prevent="captureSelection"
+          @click="preview(a.key)"
+        ><Eye class="size-3.5" /></button>
+        <button type="button" class="shrink-0 rounded p-0.5 text-faint hover:bg-white hover:text-ink" :aria-label="`移除文件 ${a.name}`" :disabled="busy" @click="emit('remove', a.key)"><X class="size-3" /></button>
       </div>
     </div>
 
-    <textarea
-      ref="textarea"
-      :value="modelValue"
-      rows="1"
-      class="block w-full resize-none bg-transparent px-5 text-[15px] leading-6 outline-none placeholder:text-faint"
-      :class="large ? 'min-h-[84px] pt-4' : 'min-h-[52px] pt-3.5'"
+    <ReferenceEditor
+      ref="editor"
+      :model-value="modelValue"
+      :table-references="tableReferences"
+      :file-references="knownFiles"
       :placeholder="placeholder"
-      @input="emit('update:modelValue', ($event.target as HTMLTextAreaElement).value)"
-      @keydown="onKeydown"
-      @compositionstart="composing = true"
-      @compositionend="composing = false"
+      :large="large"
+      :autofocus="autofocus"
+      :busy="busy"
+      @update:model-value="emit('update:modelValue', $event)"
+      @send="emit('send')"
     />
 
     <div class="flex items-center gap-1.5 px-3 pb-3 pt-1">
@@ -178,8 +188,11 @@ defineExpose({ focus: () => textarea.value?.focus() })
       </button>
 
       <div class="ml-auto">
-        <button v-if="busy" class="flex size-9 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/80" title="停止" @click="emit('stop')">
+        <button v-if="busy && stoppable" class="flex size-9 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/80" title="停止" @click="emit('stop')">
           <Square class="size-3.5 fill-current" />
+        </button>
+        <button v-else-if="busy" type="button" class="flex size-9 items-center justify-center rounded-full bg-ink text-white opacity-60" aria-label="正在上传并创建对话" disabled>
+          <LoaderCircle class="size-4 animate-spin" />
         </button>
         <button
           v-else
@@ -197,3 +210,4 @@ defineExpose({ focus: () => textarea.value?.focus() })
     </div>
   </div>
 </template>
+

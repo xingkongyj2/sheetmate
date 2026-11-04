@@ -7,18 +7,25 @@ import json
 import threading
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
+
+from sheetmate.engine.script_store import normalize_script_title
 
 
 class ScriptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: StrictStr = Field(min_length=1, max_length=64_000, description="Python 完整脚本。可用 pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、result、check(condition,message)、deliver_files 和 display_tables；后两者默认空列表，只显式列入需要用户查看的最终文件/结果表。")
-    title: StrictStr = Field(default="", max_length=20, description="脚本文件的简短标题，最多 20 个字符；应概括这次处理的目标。")
+    title: StrictStr = Field(default="", max_length=20, description="脚本文件的简短标题，应概括这次处理的目标；超过 20 个字符会自动截断。")
     script_id: StrictStr | None = Field(default=None, pattern=r"^scr_[0-9a-f]{32}$", description="已有脚本文件的唯一 ID；通常由系统自动填写。修改代码后会保存为新的脚本文件。")
     description: StrictStr = Field(min_length=1, max_length=2000, description="本次脚本要完成的用户目标及关键校验。")
     input_tables: list[StrictStr] | None = Field(default=None, max_length=20, description="可选：要传入 tables 的工作区表名；指定 input_files 时默认不传表，否则默认当前可见非期望结果表。建议显式选择实际依赖，[] 表示不传表。")
     input_files: dict[StrictStr, StrictStr] = Field(default_factory=dict, max_length=20, description="需要直接操作工作簿时传 {别名:file_id}，files[别名] 是隔离副本路径。只允许本会话或已授权客户的文件。")
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def _normalize_title(cls, value: str) -> str:
+        return normalize_script_title(value) if value else value
 
 
 def python_script_tools():
@@ -91,7 +98,7 @@ def python_script_tools():
              "无网络、无安装包能力；只能访问隔离副本和运行目录，支持已有的 pandas/numpy/openpyxl 和标准处理库。",
              ScriptRequest.model_json_schema(), stream=run, label=lambda args: "处理表格",
              public_params=lambda args: {"description": args.get("description", "处理表格"),
-                                         "script_title": (args.get("title") or args.get("description") or "Python 脚本")[:20],
+                                         "script_title": normalize_script_title(args.get("title") or args.get("description") or "Python 脚本"),
                                          **({"script_id": args["script_id"], "script_filename": f"{args['script_id']}.py"}
                                             if args.get("script_id") else {})}),
         Tool("inspect_python_script", "读取本会话或客户某次脚本运行的代码、输入绑定、日志、校验及输出文件，用于用户追问时继续调整；run_id 来自脚本结果或文件。",

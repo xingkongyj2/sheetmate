@@ -10,8 +10,11 @@ import DataTable from '@/components/common/DataTable.vue'
 
 import { parseInWorker } from './worker-client'
 
-const props = defineProps<{ file: FileInfo }>()
-const emit = defineEmits<{ close: [] }>()
+const props = withDefaults(defineProps<{ file?: FileInfo; localFile?: File; insertable?: boolean }>(), { insertable: false })
+const emit = defineEmits<{
+  close: []
+  selectTable: [reference: { filename: string; sheet: string; tableName?: string }]
+}>()
 const panel = ref<HTMLElement>()
 const host = ref<HTMLElement>()
 const phase = ref<'download' | 'parse' | 'render' | 'ready'>('download')
@@ -19,7 +22,10 @@ const error = ref('')
 const warnings = ref<string[]>([])
 const showWarnings = ref(false)
 const expanded = ref(false)
-const legacy = computed(() => /\.xls$/i.test(props.file.filename))
+const filename = computed(() => props.localFile?.name ?? props.file?.filename ?? '表格预览')
+const size = computed(() => props.localFile?.size ?? props.file?.size ?? 0)
+const legacy = computed(() => /\.xls$/i.test(filename.value))
+const sheets = ref<string[]>([])
 const legacySheet = ref('')
 const legacySheets = ref<string[]>([])
 const legacyPage = ref<{ columns: string[]; rows: unknown[][]; total: number } | null>(null)
@@ -34,14 +40,20 @@ let previousOverflow = ''
 let loadId = 0
 
 async function loadLegacy(offset = 0) {
+  const file = props.file
+  const localFile = props.localFile
+  if (!file && !localFile) return
   const id = loadId
   legacyBusy.value = true
   error.value = ''
   try {
-    const page = await fileApi.preview(props.file.file_id, legacySheet.value || undefined, offset, 100)
+    const page = localFile
+      ? await fileApi.previewUpload(localFile, legacySheet.value || undefined, offset, 100, controller?.signal)
+      : await fileApi.preview(file!.file_id, legacySheet.value || undefined, offset, 100)
     if (id !== loadId) return
     legacyPage.value = page
     legacySheets.value = page.sheets
+    sheets.value = page.sheets
     legacySheet.value = page.sheet
     legacyOffset.value = offset
     phase.value = 'ready'
@@ -64,25 +76,37 @@ async function load() {
   warnings.value = []
   showWarnings.value = false
   stats.value = null
+  sheets.value = []
   legacyPage.value = null
+  legacySheets.value = []
   legacySheet.value = ''
+  legacyBusy.value = false
   phase.value = 'download'
   if (legacy.value) {
-    warnings.value = ['旧版 .xls 当前提供数据预览；查看原始排版请下载文件，或另存为 .xlsx 后上传。']
+    warnings.value = [props.localFile
+      ? '旧版 .xls 使用临时数据预览，不保留原始排版；文件不会保存到会话。'
+      : '旧版 .xls 当前提供数据预览；查看原始排版请下载文件，或另存为 .xlsx 后上传。']
     await loadLegacy()
     return
   }
   try {
-    if (!/\.(xlsx|xlsm|csv)$/i.test(props.file.filename)) throw new Error('此文件暂不支持在线预览，请下载查看。')
-    if (props.file.size > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，请下载后查看，或拆分文件再上传。')
-    const buffer = await fileApi.content(props.file.file_id, signal)
+    if (!props.localFile && !props.file) throw new Error('没有可预览的文件。')
+    if (!/\.(xlsx|xlsm|csv)$/i.test(filename.value)) throw new Error('此文件暂不支持在线预览，请使用 Excel 查看。')
+    if (size.value > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，请使用 Excel 查看，或拆分文件再添加。')
+    const buffer = props.localFile
+      ? await props.localFile.arrayBuffer()
+      : await fileApi.content(props.file!.file_id, signal)
     if (signal.aborted) return
     if (buffer.byteLength > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，请下载后查看。')
     phase.value = 'parse'
-    const parsed = await parseInWorker(buffer, props.file.filename, signal)
+    const parsed = await parseInWorker(buffer, filename.value, signal)
     if (signal.aborted) return
     warnings.value = parsed.warnings
     stats.value = parsed.stats
+    sheets.value = parsed.workbook.sheetOrder.flatMap((id) => {
+      const name = parsed.workbook.sheets[id]?.name
+      return name ? [name] : []
+    })
     phase.value = 'render'
     await nextTick()
     const { mountWorkbook } = await import('./viewer')
@@ -96,6 +120,10 @@ async function load() {
   } catch (err) {
     if (!signal.aborted && id === loadId) error.value = errorText(err)
   }
+}
+
+function selectTable(sheet: string) {
+  emit('selectTable', { filename: filename.value, sheet })
 }
 
 function onKey(event: KeyboardEvent) {
@@ -119,7 +147,7 @@ function onKey(event: KeyboardEvent) {
   }
 }
 
-watch(() => props.file.file_id, () => load())
+watch([() => props.file?.file_id, () => props.localFile], () => load())
 onMounted(() => {
   previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   previousOverflow = document.body.style.overflow
@@ -145,13 +173,29 @@ onBeforeUnmount(() => {
         <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
           <span class="rounded-xl bg-fun-green/10 p-2 text-fun-green"><FileSpreadsheet class="size-5" /></span>
           <div class="min-w-0 flex-1">
-            <h2 id="workbook-preview-title" class="truncate text-sm font-semibold" :title="file.filename">{{ file.filename }}</h2>
+            <h2 id="workbook-preview-title" class="truncate text-sm font-semibold" :title="filename">{{ filename }}</h2>
             <p class="mt-0.5 text-xs text-mute">只读预览<span v-if="stats"> · {{ stats.sheetCount }} 个工作表</span></p>
           </div>
-          <a :href="file.download_url || fileApi.downloadUrl(file.file_id)" class="btn-line shrink-0 py-1.5 text-xs" title="下载原始文件"><Download class="size-4" /><span class="hidden sm:inline">下载</span></a>
+          <a v-if="file && !localFile" :href="file.download_url || fileApi.downloadUrl(file.file_id)" class="btn-line shrink-0 py-1.5 text-xs" title="下载原始文件"><Download class="size-4" /><span class="hidden sm:inline">下载</span></a>
           <button type="button" class="icon-btn" :aria-label="expanded ? '还原窗口' : '放大窗口'" :title="expanded ? '还原窗口' : '放大窗口'" @click="expanded = !expanded"><Minimize2 v-if="expanded" class="size-4" /><Maximize2 v-else class="size-4" /></button>
           <button type="button" class="icon-btn" aria-label="关闭文件预览" title="关闭（Esc）" @click="emit('close')"><X class="size-5" /></button>
         </header>
+
+        <div v-if="insertable && sheets.length && !error" class="flex max-h-32 shrink-0 flex-wrap items-center gap-2 overflow-y-auto border-b border-line bg-paper/60 px-4 py-2.5 sm:px-5" aria-label="点击工作表名插入到输入框">
+          <span class="text-xs text-mute">点击表名插入</span>
+          <button
+            v-for="sheet in sheets"
+            :key="sheet"
+            type="button"
+            class="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-fun-green/25 bg-fun-green/5 px-2.5 py-1.5 text-xs font-medium text-ink transition hover:border-fun-green/50 hover:bg-fun-green/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fun-green"
+            :title="`将 ${sheet} 插入到输入框光标处`"
+            :aria-label="`插入工作表 ${sheet}`"
+            data-testid="workbook-sheet-reference"
+            @click="selectTable(sheet)"
+          >
+            <FileSpreadsheet class="size-3.5 shrink-0 text-fun-green" /><span class="truncate">{{ sheet }}</span>
+          </button>
+        </div>
 
         <div v-if="warnings.length" class="shrink-0 border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-800">
           <button type="button" class="flex w-full items-center gap-2 text-left" :aria-expanded="showWarnings" @click="showWarnings = !showWarnings">

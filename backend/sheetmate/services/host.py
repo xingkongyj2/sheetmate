@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import FileRecord, Run, User
+from sheetmate.db.models import Conversation, Customer, FileRecord, Run, User
 from sheetmate.engine.file_copies import FileCopies
 from sheetmate.engine.reader import ReadError
 from sheetmate.engine.workbook_builder import write_created_workbook
@@ -66,7 +66,8 @@ class ConversationHost:
                     if run is not None and run.kind == "script":
                         item["script_run_id"] = run.id
                 item["tables"] = loaded.get(r.id, [])
-                item["scope_label"] = "本会话" if r.conversation_id == self.conversation_id else "客户资料"
+                item["scope_label"] = "本会话" if (r.conversation_id == self.conversation_id
+                                                   or r.customer_id != self.customer_id) else "客户资料"
                 result.append(item)
             return result
 
@@ -83,15 +84,24 @@ class ConversationHost:
         """仅供内部 Recipe 定位原件，由执行器复制后读取和写出。"""
         with session_scope() as db:
             try:
-                return Path(file_service.get_file(db, file_id).stored_path)
+                record = file_service.get_file(db, file_id)
+                if not file_service.can_access_in_conversation(
+                    db, record, conversation_id=self.conversation_id, customer_id=self.customer_id,
+                ):
+                    return None
+                file_service.retain_for_conversation(db, record, self.conversation_id)
+                return Path(record.stored_path)
             except NotFound:
                 return None
 
     def load_file(self, file_id: str) -> list[TableInfo]:
         with session_scope() as db:
             record = file_service.get_file(db, file_id)
-            if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
+            if not file_service.can_access_in_conversation(
+                db, record, conversation_id=self.conversation_id, customer_id=self.customer_id,
+            ):
                 raise ServiceError("这个文件不属于当前客户或会话")
+            file_service.retain_for_conversation(db, record, self.conversation_id)
             source = Path(record.stored_path)
             path = self.analysis.file_copy(source) if self.analysis else (self.files.file_copy(source) if self.files else None)
             loaded = file_service.load_into_workspace(self.ws, record, path=path)
@@ -153,8 +163,11 @@ class ConversationHost:
         """保留有输入的处理链；从零生成的文件作为后续处理的可替换输入。"""
         with session_scope() as db:
             record = file_service.get_file(db, file_id)
-            if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
+            if not file_service.can_access_in_conversation(
+                db, record, conversation_id=self.conversation_id, customer_id=self.customer_id,
+            ):
                 raise ServiceError("这个文件不属于当前客户或会话")
+            file_service.retain_for_conversation(db, record, self.conversation_id)
             dependency = FileDependency(record.id, record.filename)
             run = db.get(Run, record.run_id) if record.run_id else None
             snapshot = (run.validation or {}).get("recipe_snapshot") if run else None
@@ -260,8 +273,11 @@ class ConversationHost:
         """仅访问当前会话或已授权客户的建表快照，不把任意上传件当作建表模板。"""
         with session_scope() as db:
             record = file_service.get_file(db, file_id)
-            if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
+            if not file_service.can_access_in_conversation(
+                db, record, conversation_id=self.conversation_id, customer_id=self.customer_id,
+            ):
                 raise ServiceError("这个文件不属于当前客户或会话")
+            file_service.retain_for_conversation(db, record, self.conversation_id)
             run = db.get(run_service.Run, record.run_id) if record.run_id else None
             if record.kind != "output" or run is None or run.kind != "create" or run.output_file_id != record.id:
                 raise ServiceError("这个文件没有本建表技能保存的布局，请读取资料后新建，或用修改流程处理已有表")
@@ -369,6 +385,9 @@ class ConversationHost:
             recipe.metadata["version_note"] = note
         recipe.customer_id = recipe.customer_id or self.customer_id
         with session_scope() as db:
+            if recipe.customer_id and db.get(Customer, recipe.customer_id) is None:
+                conversation = db.get(Conversation, self.conversation_id)
+                recipe.customer_id = conversation.customer_id if conversation else None
             last_run_id = (recipe.metadata.get("last_run") or {}).get("run_id")
             last_run = db.get(Run, last_run_id) if last_run_id else None
             if last_run is not None and (last_run.validation or {}).get("recipe_deleted"):

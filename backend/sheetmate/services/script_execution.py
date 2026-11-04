@@ -29,7 +29,11 @@ from sheetmate.services.errors import ServiceError
 logger = logging.getLogger(__name__)
 
 
-def _scoped(host, record) -> bool:
+def _scoped(db, host, record) -> bool:
+    if isinstance(record, FileRecord):
+        return file_service.can_access_in_conversation(
+            db, record, conversation_id=host.conversation_id, customer_id=host.customer_id,
+        )
     return record.conversation_id == host.conversation_id or bool(host.customer_id and record.customer_id == host.customer_id)
 
 
@@ -55,8 +59,9 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
             if not alias.strip() or len(alias) > 100:
                 raise ValueError("文件别名应为 1~100 个字符")
             record = file_service.get_file(db, file_id)
-            if not _scoped(host, record):
+            if not _scoped(db, host, record):
                 raise ServiceError("这个文件不属于当前客户或会话")
+            file_service.retain_for_conversation(db, record, host.conversation_id)
             source_files[alias] = Path(record.stored_path)
             input_file_ids.append(file_id)
         source_params: dict[str, Any] = {"code": code, "description": description,
@@ -220,7 +225,7 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
 def inspect_for_conversation(host, run_id: str) -> dict[str, Any]:
     with session_scope() as db:
         run = run_service.get_run(db, run_id)
-        if not _scoped(host, run):
+        if not _scoped(db, host, run):
             raise ServiceError("这次脚本运行不属于当前客户或会话")
         if run.kind != "script":
             raise ServiceError("这条记录不是 Python 脚本运行")

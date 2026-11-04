@@ -303,6 +303,8 @@ export interface FormulaTrialInput {
 export interface TableBrief {
   name: string
   label: string
+  filename?: string
+  sheet?: string | null
   rows: number
   cols: number
   columns: string[]

@@ -14,7 +14,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.config import settings
-from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeRecord, Run, User
+from sheetmate.db.models import Conversation, Customer, Message, RecipeRecord, Run, User
 from sheetmate.engine.workspace import Workspace, WorkspaceManager
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.services import customers as customer_service
@@ -51,6 +51,8 @@ def create_conversation(db: Session, user: User, *, customer_id: str | None = No
                         title=title.strip() or "新对话")
     db.add(conv)
     db.flush()
+    if customer_id:
+        file_service.retain_customer_files(db, customer_id, conversation_id=conv.id)
     return conv
 
 
@@ -133,13 +135,15 @@ def message_dict(m: Message, *, recipe_flows: dict[tuple[str, int], dict[str, An
 def detail(db: Session, conv: Conversation) -> dict[str, Any]:
     # 展示范围跟客户绑定一致，但执行仍使用各会话独立的工作区，避免同名表互相覆盖。
     scope = {"customer_id": conv.customer_id} if conv.customer_id else {"conversation_id": conv.id}
-    files = file_service.list_files(db, **scope)
+    files = file_service.list_files(db, customer_id=conv.customer_id, conversation_id=conv.id)
+    available_files = {record.id for record in files}
     recipes = recipe_service.latest_records(db, **scope, include_deprecated=True)
     sources = list(db.scalars(select(Conversation).where(Conversation.customer_id == conv.customer_id)
                              .order_by(Conversation.created_at, Conversation.id))) if conv.customer_id else [conv]
     tables = []
     for source in sources:
-        tables.extend(_table_brief(t, conversation=source) for t in conversation_workspaces.existing_tables(source.id))
+        tables.extend(_table_brief(t, conversation=source) for t in conversation_workspaces.existing_tables(source.id)
+                      if t.source != "uploaded" or not t.file_id or t.file_id in available_files)
     source_by_id = {source.id: source for source in sources}
     # 只读查询不会创建工作区表；保留已展示的有限预览，方便排查本次处理使用过的数据。
     snapshots = db.execute(select(Message.id, Message.conversation_id, Message.events, Message.created_at)
@@ -192,6 +196,7 @@ def detail(db: Session, conv: Conversation) -> dict[str, Any]:
 def _table_brief(t, *, conversation: Conversation | None = None) -> dict[str, Any]:
     data = {"name": t.name, "label": t.label, "rows": t.rows, "cols": len(t.columns), "columns": t.column_names,
             "source": t.source, "role": t.role, "file_id": t.file_id, "description": t.description,
+            "filename": t.filename, "sheet": t.sheet,
             "created_at": datetime.fromtimestamp(t.created_at).isoformat()}
     if conversation is not None:
         data.update({"conversation_id": conversation.id, "conversation_title": conversation.title})
@@ -224,6 +229,7 @@ def update_conversation(db: Session, conv: Conversation, user: User, data: dict[
         if new_customer and new_customer != conv.customer_id:
             bind_to_customer(db, conv, user, customer_id=new_customer)
         elif not new_customer and conv.customer_id:
+            file_service.retain_customer_files(db, conv.customer_id, conversation_id=conv.id)
             conv.customer_id = None
     return conv
 
@@ -238,9 +244,14 @@ def bind_to_customer(db: Session, conv: Conversation, user: User, *, customer_id
         customer = require_customer(db, user, customer_id)
     else:
         raise ServiceError("请选择一个客户，或者填写新客户的名称")
+    previous_customer = conv.customer_id
+    if previous_customer:
+        file_service.retain_customer_files(db, previous_customer, conversation_id=conv.id)
+    records = file_service.list_files(db, conversation_id=conv.id)
     conv.customer_id = customer.id
-    for record in db.scalars(select(FileRecord).where(FileRecord.conversation_id == conv.id, FileRecord.customer_id.is_(None))):
-        record.customer_id = customer.id
+    for record in records:
+        file_service.retain_for_customer(db, record, customer.id)
+    file_service.retain_customer_files(db, customer.id, conversation_id=conv.id)
     for run in db.scalars(select(Run).where(Run.conversation_id == conv.id, Run.customer_id.is_(None))):
         run.customer_id = customer.id
     recipe_service.assign_customer(db, conversation_id=conv.id, customer_id=customer.id)
@@ -250,8 +261,14 @@ def bind_to_customer(db: Session, conv: Conversation, user: User, *, customer_id
 
 
 def delete_conversation(db: Session, conv: Conversation) -> None:
+    records = file_service.list_files(db, conversation_id=conv.id, available_only=False)
     conversation_workspaces.delete(conv.id)
     db.delete(conv)
+    db.flush()
+    for record in records:
+        # 数据库已 SET NULL 原始来源；同步 ORM，避免用到删除前的 customer/conversation 缓存。
+        db.refresh(record)
+        file_service.delete_if_unowned(db, record)
 
 
 def add_message(db: Session, conv: Conversation, role: str, content: str, *, events: list[dict[str, Any]] | None = None,

@@ -24,6 +24,7 @@ import DataTable from '@/components/common/DataTable.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { applyEvent, finishMessage, fromStoredMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
+import { formatFileReference, formatTableReference, parseTableReferences, serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
 import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { pendingStarts } from '@/stores/pending'
@@ -43,7 +44,9 @@ const backgroundRunning = ref(false)
 const text = ref('')
 const planMode = ref(false)
 const attachments = ref<Attachment[]>([])
+const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
 const recentlyUploaded = ref<FileInfo[]>([])
+const uploadedReferences = ref<TableReference[]>([])
 const plan = ref<{ title: string; steps: PlanStep[]; message: string; attachments: string[] } | null>(null)
 const planning = ref(false)
 const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角打开
@@ -72,6 +75,41 @@ const messageFiles = computed(() => {
   for (const file of recentlyUploaded.value) files.set(file.file_id, file)
   return [...files.values()]
 })
+const fileReferences = computed<FileReference[]>(() => [...new Set(messageFiles.value.map((file) => file.filename))].map((filename) => ({ filename })))
+const tableReferences = computed<TableReference[]>(() => {
+  const references = new Map<string, TableReference>()
+  for (const file of messageFiles.value) {
+    for (const sheet of file.sheets) {
+      const table = messageTables.value.find((item) => item.file_id === file.file_id && item.sheet === sheet.sheet)
+      const reference = { filename: file.filename, sheet: sheet.sheet, tableName: table?.name }
+      references.set(JSON.stringify([reference.filename, reference.sheet]), reference)
+    }
+  }
+  for (const reference of uploadedReferences.value) {
+    references.set(JSON.stringify([reference.filename, reference.sheet]), reference)
+  }
+  return [...references.values()]
+})
+
+function editableMessage(message: string) {
+  return parseTableReferences(message, tableReferences.value, fileReferences.value).map((segment) => {
+    if (segment.type === 'table') return formatTableReference(segment.reference)
+    if (segment.type === 'file') return formatFileReference(segment.reference)
+    return segment.text
+  }).join('')
+}
+
+function previewAttachment(key: string) {
+  const file = messageFiles.value.find((item) => item.file_id === key)
+  if (!file) return
+  composer.value?.captureSelection()
+  viewingFile.value = file
+}
+
+function insertTable(reference: TableReference) {
+  viewingFile.value = null
+  void composer.value?.insertTable(reference)
+}
 
 function acknowledgeUploads(files: FileInfo[]) {
   const ids = new Set(files.map((file) => file.file_id))
@@ -194,12 +232,12 @@ async function requestPlan(message: string, ids: string[]) {
   messages.value.push(reactive(newUser(message, { attachments: ids })) as UiMessage)
   scrollToBottom(true)
   try {
-    const result = await conversationApi.plan(props.id, message)
+    const result = await conversationApi.plan(props.id, serializeTableReferences(message, tableReferences.value, fileReferences.value))
     plan.value = { ...result, message, attachments: [...ids] }
   } catch (err) {
     toast.error(errorText(err))
     messages.value.pop()
-    text.value = message
+    text.value = editableMessage(message)
   } finally {
     planning.value = false
     scrollToBottom(true)
@@ -219,12 +257,13 @@ async function runPlan(steps: PlanStep[]) {
 }
 
 function cancelPlan() {
-  if (plan.value) text.value = plan.value.message
+  if (plan.value) text.value = editableMessage(plan.value.message)
   plan.value = null
   messages.value.pop()
 }
 
 async function send(message: string, opts: { attachments?: string[]; planSteps?: PlanStep[] } = {}) {
+  message = serializeTableReferences(message, tableReferences.value, fileReferences.value)
   streaming.value = true
   messages.value.push(reactive(newUser(message, { attachments: opts.attachments ?? [], plan: opts.planSteps })) as UiMessage)
   const assistant = reactive(newAssistant()) as UiMessage
@@ -275,6 +314,9 @@ async function attach(files: File[], kind: 'input' | 'expected') {
       local.key = result.file.file_id
       local.status = 'done'
       local.tables = result.tables.map((t) => t.name)
+      uploadedReferences.value.push(...result.tables.flatMap((table) => table.sheet
+        ? [{ filename: result.file.filename, sheet: table.sheet, tableName: table.name }]
+        : []))
       sideRefreshVersion++
       recentlyUploaded.value = [...recentlyUploaded.value.filter((item) => item.file_id !== result.file.file_id), result.file]
       if (detail.value) detail.value.files = [result.file, ...detail.value.files.filter((item) => item.file_id !== result.file.file_id)]
@@ -419,13 +461,17 @@ function answer(option: string) {
       <div class="shrink-0 px-6 pb-5">
         <div class="sheetmate-content-width mx-auto w-full">
           <ChatComposer
+            ref="composer"
             v-model="text"
             v-model:plan="planMode"
             :attachments="attachments"
+            :table-references="tableReferences"
+            :file-references="fileReferences"
             :busy="streaming"
             placeholder="继续追问、提出修改要求，或上传新的表格…"
             @attach="attach"
             @remove="removeAttachment"
+            @preview="previewAttachment"
             @send="onSend"
             @stop="stop"
           />
@@ -454,7 +500,9 @@ function answer(option: string) {
       v-if="viewingFile"
       :key="viewingFile.file_id"
       :file="viewingFile"
+      insertable
       @close="viewingFile = null"
+      @select-table="insertTable"
     />
     <SaveToCustomerDialog v-if="saveOpen" :conversation-id="id" @close="saveOpen = false" @saved="onSaved" />
   </div>

@@ -4,6 +4,7 @@ import { ref } from 'vue'
 
 import { authApi } from '@/api'
 import type { User } from '@/api/types'
+import { useHomeDraftStore } from '@/stores/homeDraft'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
@@ -33,6 +34,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function logout() {
     await authApi.logout().catch(() => undefined)
+    useHomeDraftStore().clear()
     user.value = null
   }
 
@@ -41,6 +43,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function clear() {
+    useHomeDraftStore().clear()
     user.value = null
     checked.value = true
   }

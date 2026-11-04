@@ -89,7 +89,7 @@ async def generate_formula(db: Session, customer: Customer, llm: Any, *, descrip
     references = []
     for file_id in unique_ids:
         record = file_service.get_file(db, file_id)
-        if record.customer_id != customer.id:
+        if not file_service.can_access_in_customer(db, record, customer.id):
             raise Forbidden("参考文件不属于当前客户，不能用于生成公式。")
         references.append((record.filename, record.stored_path))
     files = await asyncio.gather(*(asyncio.to_thread(_file_context, *item) for item in references))

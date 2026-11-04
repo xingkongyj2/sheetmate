@@ -31,6 +31,7 @@ from sheetmate.db.models import Conversation, Customer, Message, User
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.services import conversations as conv_service
 from sheetmate.services import customers as customer_service
+from sheetmate.services import files as file_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import recipe_deletion
@@ -60,7 +61,14 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
         library = recipe_service.library_for(db, conv.customer_id)
         mode = conv.mode
         customer_info = {"id": customer.id, "name": customer.name, "summary": customer.summary} if customer else None
+        available = {record.id for record in file_service.list_files(
+            db, customer_id=conv.customer_id, conversation_id=conv.id,
+        )}
     ws = conv_service.workspace(conversation_id)
+    # 旧版本删除了原件后可能留下输入表；不能再把它们当作可用原件交给流程。
+    for table in ws.list_tables():
+        if table.source == "uploaded" and table.file_id and table.file_id not in available:
+            ws.drop(table.name)
     host = ConversationHost(user_id=user_id, conversation_id=conversation_id,
                             customer_id=customer_info["id"] if customer_info else None, ws=ws)
     ctx = AgentContext(mode=mode, ws=ws, library=library, host=host, llm=llm, conversation_id=conversation_id,

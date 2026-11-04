@@ -564,34 +564,65 @@ def _result_tables_hint(tables: list[dict[str, Any]]) -> str:
     return f"\n结果已放进当前工作区：{names}，可以直接用这些表名继续查询或分析。"
 
 
+def _input_mapping_hint(recipe: Recipe) -> str:
+    definitions = "；".join(
+        f"{i.alias}（{'完整文件' if i.kind == 'file' else '数据表'}"
+        f"{('，来源：' + i.source_file) if i.source_file else ''}）" for i in recipe.inputs
+    )
+    example = json.dumps({i.alias: "file_id" if i.kind == "file" else "工作区表名" for i in recipe.inputs}, ensure_ascii=False)
+    return f"流程输入：{definitions}。显式指定格式：inputs={example}；键必须使用这里的完整输入名，文件 ID 可用 list_files 查看"
+
+
 def _resolve_inputs(ctx: AgentContext, recipe: Recipe, explicit: Any) -> dict[str, str]:
-    """Recipe 输入 → 工作区里的表。用户指定的优先，其余按列匹配。"""
+    """用户指定 → 当前范围内的原始绑定 → 按文件名或列匹配。"""
     mapping: dict[str, str] = {}
     if isinstance(explicit, dict):
         mapping = {str(k): str(v) for k, v in explicit.items() if v}
     unknown = set(mapping) - set(recipe.input_aliases())
     if unknown:
-        raise ValueError(f"流程没有这些输入：{sorted(unknown)}")
+        raise ValueError(f"流程没有这些输入：{sorted(unknown)}。{_input_mapping_hint(recipe)}")
     available_files = {f["file_id"]: f for f in ctx.host.list_files()} if any(i.kind == "file" for i in recipe.inputs) else {}
+    # 数据库记录可能仍在，但原件已丢失；不能将它当成可执行的绑定或匹配候选。
+    available_files = {fid: item for fid, item in available_files.items()
+                       if (path := ctx.host.original_file_path(fid)) is not None and path.is_file()}
+    tables = [t for t in ctx.ws.list_tables() if t.source == "uploaded" and t.role == "input"]
+    bindings = recipe.learned_from.get("input_bindings")
+    if isinstance(bindings, dict):
+        for inp in recipe.inputs:
+            if inp.alias in mapping:
+                continue
+            binding = bindings.get(inp.alias)
+            if not isinstance(binding, dict) or not binding.get("file_id"):
+                continue
+            file_id = binding["file_id"]
+            if inp.kind == "file":
+                if file_id in available_files:
+                    mapping[inp.alias] = file_id
+            else:
+                sheet = binding.get("sheet") or inp.sheet
+                bound_tables = [t.name for t in tables if t.file_id == file_id and (not sheet or t.sheet == sheet)]
+                if len(bound_tables) == 1:
+                    mapping[inp.alias] = bound_tables[0]
     pending = [i for i in recipe.inputs if i.alias not in mapping]
     if pending:
         candidates = [Candidate(key=t.name, columns=t.column_names, filename=t.filename, sheet=t.sheet, rows=t.rows)
-                      for t in ctx.ws.list_tables() if t.source == "uploaded" and t.role == "input"
-                      and t.name not in mapping.values()]
+                      for t in tables if t.name not in mapping.values()]
         candidates.extend(Candidate(key=f["file_id"], kind="file", columns=[], filename=f["filename"])
                           for f in available_files.values() if f.get("kind") == "input" and f["file_id"] not in mapping.values())
         partial = Recipe(name=recipe.name, inputs=pending)
         for alias, hit in match_inputs(partial, candidates, ctx.host.field_mapping()).items():
             mapping[alias] = hit["key"]
-    missing = [i.alias for i in recipe.inputs if i.alias not in mapping]
+    missing = [f"{i.source_file or i.description or i.alias}（输入名：{i.alias}）" for i in recipe.inputs if i.alias not in mapping]
     if missing:
-        tables = "、".join(_default_inputs(ctx)) or "（没有）"
-        raise ValueError(f"找不到流程需要的输入 {missing}。工作区里的表：{tables}。请用 inputs 参数指定 {{输入名: 表名}}，或先上传对应文件")
+        table_names = "、".join(t.name for t in tables) or "（没有）"
+        file_names = "、".join(f"{item['filename']}（file_id={fid}）" for fid, item in available_files.items()) or "（没有）"
+        raise ValueError(f"找不到流程需要的输入：{'、'.join(missing)}。工作区里的表：{table_names}。"
+                         f"可用文件：{file_names}。{_input_mapping_hint(recipe)}，或先上传对应文件")
     definitions = {i.alias: i for i in recipe.inputs}
     for alias, value in mapping.items():
         if definitions[alias].kind == "file":
             if value not in available_files:
-                raise ValueError("输入文件不属于当前客户或会话")
+                raise ValueError(f"输入文件不存在、已被删除或不属于当前客户或会话。{_input_mapping_hint(recipe)}")
         else:
             _recipe_input(ctx, value)
     return mapping
@@ -863,11 +894,11 @@ def _static_tools() -> list[Tool]:
         Tool("revise_recipe", "按用户的修改意见调整本次处理，重新执行和验证；仅明确要求保存/更新重复流程时才持久保存新版本。",
              _obj({"instruction": {**_STR, "description": "修改要求"},
                    "recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
-                   "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；table 输入对应真实工作区表名，file 输入对应完整文件 file_id"},
+                   "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；键使用 get_recipe 返回的完整输入 alias。table 对应真实工作区表名，file 对应完整文件 file_id；省略时优先沿用当前范围内的已有绑定，再自动匹配"},
                    "expected_tables": _STR_LIST}, ["instruction"]),
              modify, stream=_stream_revise_recipe, label=lambda a: "修订处理流程"),
         Tool("run_recipe", "用已保存的公式、SQL、Python 或混合流程直接处理当前表和文件，不需要重新生成步骤或重写代码，输出正式结果。",
-             _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；table 输入按列匹配，file 输入按文件名匹配"},
+             _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；键使用 get_recipe 返回的完整输入 alias；省略时优先沿用当前范围内的已有绑定，再按列或文件名匹配"},
                    "allow_repair": {"type": "boolean", "description": "出错时是否允许 AI 自动修复，默认 true"}}, ["recipe_id"]),
              modify, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
         Tool("save_as_recipe", "仅用户明确要求保存重复流程时调用。支持公式、SQL、Python 脚本和混合流程；保存实际执行的代码与依赖，不需要重新处理文件。",

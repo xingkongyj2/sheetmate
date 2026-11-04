@@ -169,7 +169,7 @@ def _load_inputs(db: Session, ws: Workspace, customer_id: str, inputs: list[dict
         info: dict[str, Any] = {"table": name}
         if file_id:
             record = file_service.get_file(db, str(file_id))
-            if record.customer_id != customer_id:
+            if not file_service.can_access_in_customer(db, record, customer_id):
                 raise Forbidden("这个文件不属于当前客户，不能用来试运行")
             sheets = read_workbook(Path(record.stored_path))
             wanted = item.get("sheet")

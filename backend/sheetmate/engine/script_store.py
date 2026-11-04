@@ -23,13 +23,12 @@ def _folder() -> Path:
     return folder
 
 
-def _title(value: str) -> str:
+def normalize_script_title(value: str) -> str:
+    """Use the same concise title for explicit names and generated fallbacks."""
     if not isinstance(value, str):
         raise ValueError("脚本标题必须是文字")
     value = " ".join(value.split()) or "Python 脚本"
-    if len(value) > MAX_TITLE_LENGTH:
-        raise ValueError("脚本标题最多 20 个字符")
-    return value
+    return value[:MAX_TITLE_LENGTH]
 
 
 def _source(code: str) -> str:
@@ -40,7 +39,7 @@ def _source(code: str) -> str:
 
 def save_script(code: str, title: str = "") -> dict[str, str]:
     """Create a new source version. Existing files are never overwritten."""
-    code, title = _source(code), _title(title)
+    code, title = _source(code), normalize_script_title(title)
     folder = _folder()
     script_id = f"scr_{uuid4().hex}"
     filename = f"{script_id}.py"
@@ -81,7 +80,7 @@ def read_script(script_id: str) -> dict[str, str]:
             raise ValueError("脚本文件不能是符号链接")
         if source_path.stat().st_size > MAX_SCRIPT_BYTES:
             raise ValueError("脚本文件超过大小限制")
-        return {"script_id": script_id, "script_title": _title(metadata["script_title"]),
+        return {"script_id": script_id, "script_title": normalize_script_title(metadata["script_title"]),
                 "script_filename": f"{script_id}.py", "code": _source(source_path.read_text(encoding="utf-8"))}
     except OSError as exc:
         raise ValueError("脚本文件不存在或无法读取，请重新生成脚本") from exc
@@ -94,7 +93,9 @@ def script_params(params: dict[str, Any], title: str = "") -> dict[str, Any]:
     script_id = result.get("script_id")
     saved = read_script(script_id) if script_id else None
     explicit_title = result.get("script_title") or result.get("title")
-    desired_title = _title(explicit_title) if explicit_title else (saved["script_title"] if saved else _title(" ".join(str(title).split())[:MAX_TITLE_LENGTH]))
+    desired_title = normalize_script_title(explicit_title) if explicit_title else (
+        saved["script_title"] if saved else normalize_script_title(str(title))
+    )
     if code is not None:
         _source(code)
         if saved is None or saved["code"] != code or saved["script_title"] != desired_title:

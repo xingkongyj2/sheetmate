@@ -172,11 +172,11 @@ async function upload(e: Event) {
 
 async function removeFile(f: FileInfo) {
   if (!await confirmDelete({
-    title: '删除这个文件？',
+    title: '从客户资料移除这个文件？',
     target: f.filename,
-    description: '文件将被永久删除，之后无法再预览或下载。此操作无法撤销。',
-    confirmText: '删除文件',
-    action: () => fileApi.remove(f.file_id),
+    description: '已有会话会保留文件，新会话将无法再从客户资料中使用它。',
+    confirmText: '移除文件',
+    action: () => fileApi.remove(f.file_id, props.id),
   })) return
   await load()
 }
@@ -187,7 +187,7 @@ async function removeCustomer() {
   if (!await confirmDelete({
     title: '删除这个客户？',
     target: customer.value.name,
-    description: '客户的流程和记忆会一起删除，文件记录保留。此操作无法撤销。',
+    description: '客户将被删除，已有会话及其文件会保留。此操作无法撤销。',
     confirmText: '删除客户',
     action: () => customerApi.remove(customerId),
   })) return

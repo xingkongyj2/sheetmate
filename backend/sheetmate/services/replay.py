@@ -24,7 +24,7 @@ from sheetmate.services import files as file_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import runs as run_service
-from sheetmate.services.auth import can_access_customer, require_customer
+from sheetmate.services.auth import require_customer
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
 from sheetmate.services.jobs import Job, jobs
 from sheetmate.services.scripts import require_script_references
@@ -42,12 +42,7 @@ def _candidates(records: list[FileRecord]) -> list[Candidate]:
 
 def _file_for_user(db, user: User, file_id: str) -> FileRecord:
     record = file_service.get_file(db, file_id)
-    if user.role == "admin" or record.created_by == user.id:
-        return record
-    if record.customer_id and can_access_customer(db, user, record.customer_id):
-        return record
-    conv = db.get(Conversation, record.conversation_id) if record.conversation_id else None
-    if conv is not None and conv.user_id == user.id:
+    if file_service.can_access_file(db, user, record):
         return record
     raise Forbidden("你没有权限访问这个文件")
 

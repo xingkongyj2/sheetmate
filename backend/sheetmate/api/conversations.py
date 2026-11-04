@@ -117,8 +117,9 @@ async def upload_file(conversation_id: str, file: UploadFile = File(...), kind: 
 def load_file(conversation_id: str, body: LoadFileBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     conv = conv_service.get_conversation(db, user, conversation_id)
     record = file_service.get_file(db, body.file_id)
-    if record.conversation_id != conv.id and (not conv.customer_id or record.customer_id != conv.customer_id):
+    if not file_service.can_access_in_conversation(db, record, conversation_id=conv.id, customer_id=conv.customer_id):
         raise ServiceError("只能加载本会话或当前客户的文件")
+    file_service.retain_for_conversation(db, record, conv.id)
     tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
     return {"ok": True, "tables": [conv_service._table_brief(t, conversation=conv) for t in tables]}
 

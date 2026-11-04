@@ -98,7 +98,7 @@ def delete_customer(customer_id: str, db: Session = Depends(get_db), user: User 
     customer = require_customer(db, user, customer_id)
     if user.role != "admin" and customer.created_by != user.id:
         raise Forbidden("只有创建者或管理员可以删除客户")
-    db.delete(customer)
+    customer_service.delete_customer(db, customer)
     return {"ok": True}
 
 

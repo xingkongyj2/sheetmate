@@ -53,10 +53,29 @@ def update_customer(customer: Customer, data: dict[str, Any]) -> Customer:
     return customer
 
 
+def delete_customer(db: Session, customer: Customer) -> None:
+    """解除客户归属，现存会话继续持有相同的文件原件。"""
+    file_service.retain_customer_files(db, customer.id)
+    records = list(db.scalars(select(FileRecord).where(file_service.customer_file_condition(customer.id))))
+    for record in records:
+        file_service.release_customer_reference(db, record, customer.id)
+    # 运行与执行快照没有外键自动置空；残留客户 ID 会让会话后续保存流程时外键失败。
+    for run in db.scalars(select(Run).where(Run.customer_id == customer.id)):
+        run.customer_id = None
+        validation = run.validation or {}
+        snapshot = validation.get("recipe_snapshot")
+        if isinstance(snapshot, dict) and snapshot.get("customer_id") == customer.id:
+            run.validation = {**validation, "recipe_snapshot": {**snapshot, "customer_id": None}}
+    db.delete(customer)
+    db.flush()
+    for record in records:
+        file_service.delete_if_unowned(db, record)
+
+
 def card(db: Session, customer: Customer) -> dict[str, Any]:
     """客户卡片：名称、IP 形象、文件数、流程数、最近活动、处理逻辑摘要。"""
     file_count = db.scalar(select(func.count()).select_from(FileRecord).where(
-        FileRecord.customer_id == customer.id, FileRecord.kind != "output")) or 0
+        file_service.customer_file_condition(customer.id), FileRecord.kind != "output")) or 0
     recipes = recipe_service.latest_records(db, customer_id=customer.id)
     conv_count = db.scalar(select(func.count()).select_from(Conversation).where(Conversation.customer_id == customer.id)) or 0
     last_run = db.scalars(select(Run).where(Run.customer_id == customer.id).order_by(Run.created_at.desc()).limit(1)).first()
@@ -98,7 +117,7 @@ def _first_paragraph(markdown: str) -> str:
 def detail(db: Session, customer: Customer) -> dict[str, Any]:
     files = file_service.list_files(db, customer_id=customer.id)
     output_count = db.scalar(select(func.count()).select_from(FileRecord).where(
-        FileRecord.customer_id == customer.id, FileRecord.kind == "output")) or 0
+        file_service.customer_file_condition(customer.id), FileRecord.kind == "output")) or 0
     records = recipe_service.latest_records(db, customer_id=customer.id, include_deprecated=True)
     recipes = []
     for record in records:

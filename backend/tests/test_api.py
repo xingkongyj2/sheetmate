@@ -92,14 +92,16 @@ def test_demo_customer_detail(client):
     assert detail["field_mapping"]["运单号"] == ["单号", "运单编号"]
 
 
-def test_customer_detail_counts_all_output_files(client):
+def test_customer_detail_counts_all_output_files(client, tmp_path):
     from sheetmate.db.database import session_scope
     from sheetmate.db.models import FileRecord
 
     customer = client.post("/api/customers", json={"name": "输出文件计数客户"}).json()["customer"]
+    output = tmp_path / "result.xlsx"
+    output.write_bytes(b"output")
     with session_scope() as db:
         db.add_all([
-            FileRecord(customer_id=customer["id"], filename=f"result-{i}.xlsx", stored_path="unused", kind="output")
+            FileRecord(customer_id=customer["id"], filename=f"result-{i}.xlsx", stored_path=str(output), kind="output")
             for i in range(25)
         ])
 
