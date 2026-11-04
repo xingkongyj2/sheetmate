@@ -25,7 +25,7 @@ Windows 双击项目根目录的 `start.bat`，或在终端运行：
 start.bat
 ```
 
-两个脚本执行相同流程：生成缺失的 `.env` → 强制结束占用后端端口（默认 `8000`，可通过 `PORT` 配置）和前端开发端口 `5173` 的进程 → 用已有的 `backend/.venv` 安装根目录 `requirements.txt` 中的依赖 → 安装、构建前端 → 启动后端。请提前准备好 `.venv`；如果缺少 pip，脚本会通过该环境的 `ensurepip` 补齐。端口空闲时直接继续；端口无法释放或安装、构建失败时停止并显示错误。每次启动都会检查两个端口，包括上次异常退出后留下的进程。
+两个脚本执行相同流程：生成缺失的 `.env` → 强制结束占用后端端口（默认 `8000`，可通过 `PORT` 配置）和前端开发端口 `5173` 的进程 → 用已有的 `backend/.venv` 安装 `backend/requirements.txt` 中的依赖 → 安装、构建前端 → 启动后端。请提前准备好 `.venv`；如果缺少 pip，脚本会通过该环境的 `ensurepip` 补齐。端口空闲时直接继续；端口无法释放或安装、构建失败时停止并显示错误。每次启动都会检查两个端口，包括上次异常退出后留下的进程。
 
 打开 <http://127.0.0.1:8000>，用 **admin / admin123** 登录。前端构建结果由后端统一提供页面，配置了其他 `PORT` 时使用启动日志中的地址。
 
@@ -39,7 +39,7 @@ Pro / Flash 在「设置」页提供「开启思考」开关，默认关闭以�
 
 不配置模型也能看效果：首次启动会写入一个示例客户「顺达物流（示例）」，里面有原始文件、人工结果样例、一个已验证的月结账单流程、字段映射和业务规则；客户页的「用新文件执行」不需要 AI。
 
-环境要求：Python 3.10+、Node.js 20+，macOS / Linux 还需提供 `lsof`。Python 包清单入口为根目录 `requirements.txt`，引用 `backend/requirements.txt`；启动脚本每次自动安装依赖。需要手动安装时，Windows 用户在 `backend` 目录使用 PowerShell 执行：
+环境要求：Python 3.10+、Node.js 20+，macOS / Linux 还需提供 `lsof`。Python 依赖统一维护在 `backend/requirements.txt`；启动脚本每次自动安装。需要手动安装时，Windows 用户在 `backend` 目录使用 PowerShell 执行：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -136,7 +136,6 @@ AI Python 脚本在所有平台固定使用 `backend/.venv`：Windows 为 `.venv
 ```
 sheetmate/
 ├── start.sh / start.bat           macOS/Linux / Windows 一键启动
-├── requirements.txt              启动时安装的 Python 依赖入口
 ├── .env.example                   配置模板
 ├── docs/                          设计文档（原有的 4 份）
 ├── backend/

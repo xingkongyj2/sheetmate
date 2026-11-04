@@ -85,7 +85,7 @@ echo "安装后端依赖…"
 if ! "$PYTHON" -m pip --version >/dev/null 2>&1; then
   "$PYTHON" -m ensurepip --upgrade
 fi
-"$PYTHON" -m pip install --disable-pip-version-check -r "$ROOT/requirements.txt"
+"$PYTHON" -m pip install --disable-pip-version-check -r "$ROOT/backend/requirements.txt"
 
 # 3. 同步前端依赖并重新构建，确保配置和依赖修改也生效。
 command -v node >/dev/null 2>&1 || { echo "请先安装 Node.js 20+。" >&2; exit 1; }

@@ -1,2 +1,0 @@
-# Startup dependency entry point; keep package versions in the backend manifest.
--r backend/requirements.txt

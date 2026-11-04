@@ -78,7 +78,7 @@ try {
     $pipReady = $false
     try { & $python -m pip --version *> $null; $pipReady = $LASTEXITCODE -eq 0 } catch {}
     if (-not $pipReady) { Invoke-Step $python @('-m', 'ensurepip', '--upgrade') }
-    Invoke-Step $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', (Join-Path $root 'requirements.txt'))
+    Invoke-Step $python @('-m', 'pip', 'install', '--disable-pip-version-check', '-r', (Join-Path $backend 'requirements.txt'))
     Set-Location -LiteralPath (Join-Path $root 'frontend')
     $npm = (Get-Command npm.cmd -CommandType Application -ErrorAction Stop).Source
     Write-Host '安装前端依赖…'
