@@ -353,6 +353,7 @@ export interface StoredMessage {
 }
 
 export interface ConversationDetail extends ConversationBrief {
+  running_job: { id: string; message_id: number } | null
   messages: StoredMessage[]
   tables: TableBrief[]
   files: FileInfo[]

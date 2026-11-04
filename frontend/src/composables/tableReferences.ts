@@ -1,12 +1,20 @@
+export type ReferenceFileKind = 'input' | 'expected' | 'output'
+
+interface ReferenceSource {
+  sourceId?: string
+  kind?: ReferenceFileKind
+}
+
 /** A selected worksheet keeps its file identity when sent to the assistant. */
-export interface TableReference {
+export interface TableReference extends ReferenceSource {
   filename: string
   sheet: string
   tableName?: string
 }
 
-export interface FileReference {
+export interface FileReference extends ReferenceSource {
   filename: string
+  resolvedFilename?: string
   sheet?: never
   tableName?: never
 }
@@ -35,12 +43,28 @@ function escapeName(value: string): string {
   return value.replace(/[\\/【】]/g, '\\$&')
 }
 
+export function referenceSourceKey(reference: Pick<ComposerReference, 'filename' | 'sourceId' | 'kind'>): string {
+  return JSON.stringify(reference.sourceId ? ['id', reference.sourceId] : ['name', reference.kind ?? '', reference.filename])
+}
+
+function sourceMetadata(reference: ReferenceSource): ReferenceSource {
+  return {
+    ...(typeof reference.sourceId === 'string' && reference.sourceId ? { sourceId: reference.sourceId } : {}),
+    ...(reference.kind === 'input' || reference.kind === 'expected' || reference.kind === 'output' ? { kind: reference.kind } : {}),
+  }
+}
+
+function formatSource(reference: ReferenceSource): string {
+  const metadata = sourceMetadata(reference)
+  return Object.keys(metadata).length ? ` / ${escapeName(JSON.stringify(metadata))}` : ''
+}
+
 export function formatTableReference(reference: TableReference): string {
-  return `【表格：${escapeName(reference.filename)} / ${escapeName(reference.sheet)}】`
+  return `【表格：${escapeName(reference.filename)} / ${escapeName(reference.sheet)}${formatSource(reference)}】`
 }
 
 export function formatFileReference(reference: FileReference): string {
-  return `【文件：${escapeName(reference.filename)}】`
+  return `【文件：${escapeName(reference.filename)}${formatSource(reference)}】`
 }
 
 function unescapeName(value: string): string {
@@ -51,18 +75,51 @@ function isExplicitReference(text: string): boolean {
   return text.startsWith('【表格：') || text.startsWith('【文件：') || text.startsWith('<table-ref>')
 }
 
-function readHumanReference(body: string): TableReference | null {
+function referenceParts(body: string): string[] {
+  const parts: string[] = []
+  let offset = 0
   for (let index = 0; index < body.length; index++) {
     if (body[index] === '\\') {
       index++
       continue
     }
     if (body.slice(index, index + 3) !== ' / ') continue
-    const filename = unescapeName(body.slice(0, index))
-    const sheet = unescapeName(body.slice(index + 3))
-    return filename && sheet ? { filename, sheet } : null
+    parts.push(unescapeName(body.slice(offset, index)))
+    offset = index + 3
+    index += 2
   }
-  return null
+  parts.push(unescapeName(body.slice(offset)))
+  return parts
+}
+
+function readSource(json: string): ReferenceSource | null {
+  try {
+    const value: unknown = JSON.parse(json)
+    if (!value || typeof value !== 'object') return null
+    const candidate = value as Record<string, unknown>
+    if (candidate.sourceId !== undefined && (typeof candidate.sourceId !== 'string' || !candidate.sourceId)) return null
+    if (candidate.kind !== undefined && candidate.kind !== 'input' && candidate.kind !== 'expected' && candidate.kind !== 'output') return null
+    const source = sourceMetadata(candidate as ReferenceSource)
+    return Object.keys(source).length ? source : null
+  } catch {
+    return null
+  }
+}
+
+function readHumanReference(body: string): TableReference | null {
+  const parts = referenceParts(body)
+  if (parts.length !== 2 && parts.length !== 3) return null
+  const [filename, sheet, metadata] = parts
+  const source = metadata === undefined ? {} : readSource(metadata)
+  return filename && sheet && source ? { filename, sheet, ...source } : null
+}
+
+function readFileReference(body: string): FileReference | null {
+  const parts = referenceParts(body)
+  if (parts.length !== 1 && parts.length !== 2) return null
+  const [filename, metadata] = parts
+  const source = metadata === undefined ? {} : readSource(metadata)
+  return filename && source ? { filename, ...source } : null
 }
 
 function readWireReference(json: string): TableReference | null {
@@ -74,6 +131,7 @@ function readWireReference(json: string): TableReference | null {
     return {
       filename: candidate.filename,
       sheet: candidate.sheet,
+      ...sourceMetadata(candidate as ReferenceSource),
       ...(typeof candidate.tableName === 'string' && candidate.tableName ? { tableName: candidate.tableName } : {}),
     }
   } catch {
@@ -81,23 +139,65 @@ function readWireReference(json: string): TableReference | null {
   }
 }
 
+function matchesSource(reference: ComposerReference, candidate: ComposerReference): boolean {
+  if (reference.kind && candidate.kind && reference.kind !== candidate.kind) return false
+  if (reference.sourceId) return candidate.sourceId === reference.sourceId
+  if (reference.kind && candidate.kind !== reference.kind) return false
+  return candidate.filename === reference.filename
+}
+
 function resolveReference(reference: TableReference, available: TableReference[]): TableReference {
-  const matches = available.filter((item) => item.filename === reference.filename && item.sheet === reference.sheet)
-  const exact = reference.tableName ? matches.find((item) => item.tableName === reference.tableName) : undefined
+  let matches = available.filter((item) => matchesSource(reference, item) && item.sheet === reference.sheet)
+  if (reference.tableName) {
+    const exact = matches.filter((item) => item.tableName === reference.tableName)
+    if (exact.length) matches = exact
+  }
+  const sources = new Set(matches.map(referenceSourceKey))
+  if (sources.size !== 1) return reference
   const names = new Set(matches.map((item) => item.tableName).filter((name): name is string => !!name))
-  const tableName = exact?.tableName ?? (names.size === 1 ? [...names][0] : reference.tableName)
-  return { filename: reference.filename, sheet: reference.sheet, ...(tableName ? { tableName } : {}) }
+  const tableName = names.size === 1 ? [...names][0] : reference.tableName
+  return {
+    filename: reference.filename,
+    sheet: reference.sheet,
+    ...sourceMetadata(matches[0]!),
+    ...sourceMetadata(reference),
+    ...(tableName ? { tableName } : {}),
+  }
+}
+
+function availableFileReferences(available: TableReference[], availableFiles: FileReference[]): FileReference[] {
+  const files = new Map<string, FileReference>()
+  for (const reference of [...available.map(({ filename, sourceId, kind }) => ({ filename, ...sourceMetadata({ sourceId, kind }) })), ...availableFiles]) {
+    const key = referenceSourceKey(reference)
+    files.set(key, { ...files.get(key), ...reference })
+  }
+  const candidates = [...files.values()]
+  return candidates.filter((file) => file.sourceId || !candidates.some((other) => other !== file && other.filename === file.filename &&
+    (!file.kind || file.kind === other.kind) && (other.sourceId || (!file.kind && other.kind))))
+}
+
+function resolveFileReference(reference: FileReference, available: FileReference[]): FileReference {
+  const matches = available.filter((item) => matchesSource(reference, item))
+  if (new Set(matches.map(referenceSourceKey)).size !== 1) return reference
+  const match = matches[0]!
+  const resolvedFilename = match.resolvedFilename || (match.filename !== reference.filename ? match.filename : undefined)
+  return {
+    filename: reference.filename,
+    ...sourceMetadata(match),
+    ...sourceMetadata(reference),
+    ...(resolvedFilename ? { resolvedFilename } : {}),
+  }
 }
 
 function availableAliases(available: TableReference[], availableFiles: FileReference[]): Map<string, ComposerReference> {
   const candidates = new Map<string, Map<string, ComposerReference>>()
-  const files: FileReference[] = [...availableFiles, ...available.map(({ filename }) => ({ filename }))]
+  const files = availableFileReferences(available, availableFiles)
   for (const reference of [...available, ...files]) {
     const aliases = isFileReference(reference) ? [reference.filename] : [reference.tableName, reference.sheet]
     for (const alias of new Set(aliases)) {
       if (!alias || alias.length < 2) continue
       const matches = candidates.get(alias) ?? new Map<string, ComposerReference>()
-      matches.set(JSON.stringify([isFileReference(reference) ? 'file' : 'table', reference.filename, reference.sheet, reference.tableName]), reference)
+      matches.set(JSON.stringify([isFileReference(reference) ? 'file' : 'table', referenceSourceKey(reference), reference.sheet, reference.tableName]), reference)
       candidates.set(alias, matches)
     }
   }
@@ -107,6 +207,7 @@ function availableAliases(available: TableReference[], availableFiles: FileRefer
 /** Explicit mentions and unambiguous, delimited workspace table names. */
 export function parseTableReferences(text: string, available: TableReference[] = [], availableFiles: FileReference[] = []): TableReferenceSegment[] {
   const segments: TableReferenceSegment[] = []
+  const files = availableFileReferences(available, availableFiles)
   const aliases = availableAliases(available, availableFiles)
   const names = [...aliases.keys()].sort((left, right) => right.length - left.length)
   const aliasPattern = names.length ? new RegExp(names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'gu') : null
@@ -132,7 +233,7 @@ export function parseTableReferences(text: string, available: TableReference[] =
           (/[\p{L}\p{N}_]$/u.test(match[0]) && /[\p{L}\p{N}_]/u.test(after))) continue
       appendText(value.slice(offset, start))
       const reference = aliases.get(match[0])!
-      if (isFileReference(reference)) segments.push({ type: 'file', text: match[0], reference })
+      if (isFileReference(reference)) segments.push({ type: 'file', text: match[0], reference: resolveFileReference(reference, files) })
       else segments.push({ type: 'table', text: match[0], reference: resolveReference(reference, available) })
       offset = end
     }
@@ -144,8 +245,8 @@ export function parseTableReferences(text: string, available: TableReference[] =
   for (const match of text.matchAll(explicitPattern)) {
     appendPlain(text.slice(offset, match.index))
     if (match[3] !== undefined) {
-      const filename = unescapeName(match[3])
-      if (filename) segments.push({ type: 'file', text: match[0], reference: { filename } })
+      const reference = readFileReference(match[3])
+      if (reference) segments.push({ type: 'file', text: match[0], reference: resolveFileReference(reference, files) })
       else appendText(match[0])
     } else {
       const reference = match[1] !== undefined ? readHumanReference(match[1]) : readWireReference(match[2]!)
@@ -166,7 +267,7 @@ export function serializeTableReferences(text: string, available: TableReference
     const start = offset
     offset += segment.text.length
     if (segment.type === 'text') return segment.text
-    const quotedName = JSON.stringify(segment.type === 'file' ? segment.reference.filename : segment.reference.tableName || segment.reference.sheet)
+    const quotedName = JSON.stringify(segment.type === 'file' ? segment.reference.resolvedFilename || segment.reference.filename : segment.reference.tableName || segment.reference.sheet)
     const explicit = isExplicitReference(segment.text)
     if (!explicit) {
       const containing = quoted.find((span) => span.start < start && span.end >= offset)

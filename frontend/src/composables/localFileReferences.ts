@@ -9,6 +9,7 @@ import { parseInWorker } from '@/features/workbook-preview/worker-client'
 interface LocalReferenceFile {
   key: string
   file: File
+  kind: 'input' | 'expected'
 }
 
 interface SheetEntry {
@@ -86,7 +87,7 @@ export function useLocalFileReferences(source: MaybeRefOrGetter<LocalReferenceFi
 
   const tableReferences = computed<TableReference[]>(() => {
     void revision.value
-    return toValue(source).flatMap(({ key, file }) => (entries.get(key)?.sheets ?? []).map((sheet) => ({ filename: file.name, sheet })))
+    return toValue(source).flatMap(({ key, file, kind }) => (entries.get(key)?.sheets ?? []).map((sheet) => ({ filename: file.name, sourceId: key, kind, sheet })))
   })
   const referencesLoading = computed(() => {
     void revision.value

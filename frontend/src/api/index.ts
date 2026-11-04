@@ -2,7 +2,7 @@
  * 后端接口封装（按资源分组）。所有函数返回解析好的数据，出错抛 ApiError。
  */
 import { http } from './http'
-import { postStream } from './sse'
+import { getStream, postStream } from './sse'
 import type {
   AgentEvent,
   ConversationBrief,
@@ -137,6 +137,8 @@ export const conversationApi = {
   stop: async (id: string) => http.post(`/conversations/${id}/stop`),
   chat: (id: string, body: { message: string; plan_steps?: PlanStep[]; attachments?: string[] }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/conversations/${id}/chat`, body, onEvent),
+  events: (id: string, jobId: string, onEvent: (e: AgentEvent) => void) =>
+    getStream(`/conversations/${id}/events?job_id=${encodeURIComponent(jobId)}`, onEvent),
 }
 
 // ---------------------------------------------------------------- 文件

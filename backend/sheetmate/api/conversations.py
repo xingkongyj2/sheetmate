@@ -16,7 +16,7 @@ from sheetmate.services import conversations as conv_service
 from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
 from sheetmate.services.auth import require_customer
-from sheetmate.services.errors import ServiceError
+from sheetmate.services.errors import Conflict, ServiceError
 from sheetmate.services.jobs import jobs
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -68,11 +68,26 @@ def create_conversation(body: CreateBody, db: Session = Depends(get_db), user: U
 
 
 @router.get("/{conversation_id}")
-def get_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+async def get_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     conv = conv_service.get_conversation(db, user, conversation_id)
     if conv.customer_id:
         require_customer(db, user, conv.customer_id)
-    return {"ok": True, "conversation": {**conv_service.detail(db, conv), "running": jobs.running(conv.id)}}
+    job = jobs.get(conv.id)
+    running_job = {"id": job.id, "message_id": job.message_id} if job else None
+    return {"ok": True, "conversation": {**conv_service.detail(db, conv), "running": job is not None,
+                                         "running_job": running_job}}
+
+
+@router.get("/{conversation_id}/events")
+async def conversation_events(conversation_id: str, job_id: str, db: Session = Depends(get_db),
+                              user: User = Depends(current_user)):
+    conv = conv_service.get_conversation(db, user, conversation_id)
+    if conv.customer_id:
+        require_customer(db, user, conv.customer_id)
+    job = jobs.get(conv.id)
+    if job is None or job.id != job_id:
+        raise Conflict("任务状态已更新，请重新加载对话")
+    return sse_response(job)
 
 
 @router.put("/{conversation_id}")

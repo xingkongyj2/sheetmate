@@ -96,7 +96,7 @@ def start_chat(user: User, conversation_id: str, message: str, *,
     async def work(job: Job) -> None:
         await _run_chat(job, user_id, conversation_id, text, plan_steps, message_id)
 
-    return jobs.start(conversation_id, work)
+    return jobs.start(conversation_id, work, message_id=message_id)
 
 
 async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,

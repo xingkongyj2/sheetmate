@@ -598,7 +598,7 @@ export function fromStored(stored: StoredMessage): UiMessage {
 }
 
 /** 按消息顺序还原删除状态；之后重新保存的流程保持可用。 */
-export function fromStoredMessages(stored: StoredMessage[]): UiMessage[] {
+export function fromStoredMessages(stored: StoredMessage[], throughMessageId?: number): UiMessage[] {
   const messages: UiMessage[] = []
   for (const item of stored) {
     const message = fromStored(item)
@@ -608,6 +608,7 @@ export function fromStoredMessages(stored: StoredMessage[]): UiMessage[] {
       }
     }
     messages.push(message)
+    if (item.role === 'user' && item.id === throughMessageId) break
   }
   return messages
 }

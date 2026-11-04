@@ -1,4 +1,4 @@
-import type { FileReference, TableReference } from './tableReferences.ts'
+import { referenceSourceKey, type FileReference, type TableReference } from './tableReferences.ts'
 
 export type ReferenceTrigger = '@' | '#'
 
@@ -28,13 +28,13 @@ export function referenceSuggestions(
   const seen = new Set<string>()
   const candidates: ReferenceSuggestion[] = trigger === '@'
     ? files.map((reference) => ({
-      key: JSON.stringify(['file', reference.filename]),
+      key: JSON.stringify(['file', referenceSourceKey(reference)]),
       type: 'file' as const,
       label: reference.filename,
       reference,
     }))
     : tables.map((reference) => ({
-      key: JSON.stringify(['table', reference.filename, reference.sheet]),
+      key: JSON.stringify(['table', referenceSourceKey(reference), reference.sheet]),
       type: 'table' as const,
       label: `${reference.filename} - ${reference.sheet}`,
       reference,

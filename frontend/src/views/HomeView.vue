@@ -38,7 +38,7 @@ let active = true
 onBeforeUnmount(() => { active = false })
 
 const customer = computed(() => store.customers.find((c) => c.id === customerId.value))
-const fileReferences = computed<FileReference[]>(() => attachments.value.map((item) => ({ filename: item.name })))
+const fileReferences = computed<FileReference[]>(() => attachments.value.map((item) => ({ filename: item.name, sourceId: item.key, kind: item.kind })))
 const { tableReferences, referencesLoading, referenceErrors } = useLocalFileReferences(files)
 const referencesError = computed(() => {
   const failures = referenceErrors.value
@@ -104,6 +104,7 @@ async function send() {
     if (generation !== draft.generation) return
     const ids: string[] = []
     const references: TableReference[] = []
+    const uploadedFiles: FileReference[] = []
     for (const item of submittedFiles) {
       const att = attachments.value.find((a) => a.key === item.key)
       if (att) att.status = 'uploading'
@@ -112,12 +113,14 @@ async function send() {
         if (generation !== draft.generation) return
         if (att) att.status = 'done'
         ids.push(result.file.file_id)
+        const source = { filename: item.file.name, sourceId: item.key, kind: item.kind }
+        uploadedFiles.push({ ...source, resolvedFilename: result.file.filename })
         for (const table of result.tables) {
           const sheet = table.sheet || result.file.sheets.find((sheet) => table.label === `${result.file.filename} · ${sheet.sheet}`)?.sheet
-          if (sheet) references.push({ filename: item.file.name, sheet, tableName: table.name })
+          if (sheet) references.push({ ...source, sheet, tableName: table.name })
         }
         if (/\.csv$/i.test(item.file.name) && result.tables.length === 1) {
-          references.push({ filename: item.file.name, sheet: item.file.name.replace(/\.csv$/i, '') || 'CSV', tableName: result.tables[0]!.name })
+          references.push({ ...source, sheet: item.file.name.replace(/\.csv$/i, '') || 'CSV', tableName: result.tables[0]!.name })
         }
       } catch (err) {
         if (att) {
@@ -128,7 +131,7 @@ async function send() {
       }
     }
     pendingStarts.set(conv.id, {
-      message: serializeTableReferences(message, references, submittedFiles.map((item) => ({ filename: item.file.name }))),
+      message: serializeTableReferences(message, references, uploadedFiles),
       plan: submittedPlan,
       attachments: ids,
     })

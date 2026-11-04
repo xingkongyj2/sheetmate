@@ -8,9 +8,9 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, r
 import { useRouter } from 'vue-router'
 
 import { conversationApi, runApi } from '@/api'
-import { errorText } from '@/api/http'
+import { ApiError, errorText } from '@/api/http'
 import type { StreamHandle } from '@/api/sse'
-import type { ConversationDetail, FileInfo, PlanStep, TableBrief } from '@/api/types'
+import type { AgentEvent, ConversationDetail, FileInfo, PlanStep, TableBrief } from '@/api/types'
 import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
@@ -40,7 +40,7 @@ const detail = ref<ConversationDetail | null>(null)
 const messages = ref<UiMessage[]>([])
 const loading = ref(true)
 const streaming = ref(false)
-const backgroundRunning = ref(false)
+const reconnecting = ref(false)
 const text = ref('')
 const planMode = ref(false)
 const attachments = ref<Attachment[]>([])
@@ -62,6 +62,8 @@ const content = ref<HTMLElement | null>(null)
 let handle: StreamHandle | null = null
 let pollTimer = 0
 let sideRefreshVersion = 0
+let loadVersion = 0
+let disposed = false
 
 const selectedMessage = computed(() => {
   const assistants = messages.value.filter((m) => m.role === 'assistant')
@@ -80,7 +82,11 @@ const referenceFiles = computed(() => messageFiles.value.map((file, index) => ({
   const second = Date.parse(right.file.created_at ?? '')
   return Number.isFinite(first) && Number.isFinite(second) && first !== second ? first - second : left.index - right.index
 }).map(({ file }) => file))
-const fileReferences = computed<FileReference[]>(() => [...new Set(referenceFiles.value.map((file) => file.filename))].map((filename) => ({ filename })))
+const fileReferences = computed<FileReference[]>(() => referenceFiles.value.map((file) => ({
+  filename: file.filename,
+  sourceId: file.file_id,
+  kind: file.kind === 'doc' ? undefined : file.kind,
+})))
 const referencesLoading = computed(() => loading.value || attachments.value.some((attachment) => attachment.status === 'uploading'))
 const referencesError = computed(() => attachments.value.some((attachment) => attachment.status === 'error')
   ? '部分文件上传失败，暂时无法选择其中的工作表。请重新上传文件。'
@@ -90,12 +96,18 @@ const tableReferences = computed<TableReference[]>(() => {
   for (const file of referenceFiles.value) {
     for (const sheet of file.sheets) {
       const table = messageTables.value.find((item) => item.file_id === file.file_id && item.sheet === sheet.sheet)
-      const reference = { filename: file.filename, sheet: sheet.sheet, tableName: table?.name }
-      references.set(JSON.stringify([reference.filename, reference.sheet]), reference)
+      const reference: TableReference = {
+        filename: file.filename,
+        sourceId: file.file_id,
+        kind: file.kind === 'doc' ? undefined : file.kind,
+        sheet: sheet.sheet,
+        tableName: table?.name,
+      }
+      references.set(JSON.stringify([reference.sourceId, reference.sheet]), reference)
     }
   }
   for (const reference of uploadedReferences.value) {
-    references.set(JSON.stringify([reference.filename, reference.sheet]), reference)
+    references.set(JSON.stringify([reference.sourceId, reference.sheet]), reference)
   }
   return [...references.values()]
 })
@@ -123,40 +135,54 @@ function acknowledgeUploads(files: FileInfo[]) {
 // ------------------------------------------------------------------ 加载
 
 async function load(silent = false) {
+  const requestVersion = ++loadVersion
   const version = sideRefreshVersion
+  clearTimeout(pollTimer)
   if (!silent) loading.value = true
   try {
     const data = await conversationApi.get(props.id)
+    if (disposed || requestVersion !== loadVersion) return
     if (detail.value && version !== sideRefreshVersion) data.files = detail.value.files
     detail.value = data
     acknowledgeUploads(data.files)
     if (!streaming.value) {
-      messages.value = fromStoredMessages(data.messages).map((m) => reactive(m) as UiMessage)
+      messages.value = fromStoredMessages(data.messages, data.running_job?.message_id).map((m) => reactive(m) as UiMessage)
       scrollToBottom(true) // 打开会话（包括后台任务跑完刷新）都停在最新一条
     }
-    backgroundRunning.value = data.running && !streaming.value
-    if (backgroundRunning.value) schedulePoll()
+    if (!streaming.value) {
+      reconnecting.value = false
+      store.patchConversation(props.id, { running: data.running, title: data.title })
+      if (data.running_job) {
+        const assistant = reactive(newAssistant()) as UiMessage
+        messages.value.push(assistant)
+        selectedKey.value = assistant.key
+        void receiveStream(assistant, (onEvent) => conversationApi.events(props.id, data.running_job!.id, onEvent), true)
+      }
+    }
   } catch (err) {
-    toast.error(errorText(err))
-    router.replace({ name: 'home' })
+    if (disposed || requestVersion !== loadVersion) return
+    if (silent && !(err instanceof ApiError && [401, 403, 404].includes(err.status))) {
+      reconnecting.value = true
+      schedulePoll()
+    } else {
+      toast.error(errorText(err))
+      router.replace({ name: 'home' })
+    }
   } finally {
-    loading.value = false
+    if (!disposed && requestVersion === loadVersion) loading.value = false
   }
 }
 
-/** 页面刷新时如果上一次的任务还在后台跑，定时刷新直到完成 */
-function schedulePoll() {
+function schedulePoll(delay = 1000) {
   clearTimeout(pollTimer)
-  pollTimer = window.setTimeout(async () => {
-    await load(true)
-  }, 3000)
+  if (!disposed) pollTimer = window.setTimeout(() => { void load(true) }, delay)
 }
 
 async function refreshSide() {
   const version = ++sideRefreshVersion
   try {
     const data = await conversationApi.get(props.id)
-    if (detail.value && version === sideRefreshVersion) {
+    if (!disposed && detail.value && version === sideRefreshVersion) {
       detail.value.tables = data.tables
       detail.value.files = data.files
       detail.value.recipes = data.recipes
@@ -178,13 +204,14 @@ onMounted(async () => {
     resizeObserver.observe(content.value)
   }
   await load()
+  if (disposed) return
   const pending = pendingStarts.get(props.id)
   if (pending) {
     pendingStarts.delete(props.id)
     if (pending.plan) {
       attachments.value = pending.attachments.flatMap((id) => {
         const file = detail.value?.files.find((item) => item.file_id === id)
-        return file ? [{ key: id, name: file.filename, kind: file.kind === 'expected' ? 'expected' as const : 'input' as const, status: 'done' as const }] : []
+        return file ? [{ key: id, sourceId: id, name: file.filename, kind: file.kind === 'expected' ? 'expected' as const : 'input' as const, status: 'done' as const }] : []
       })
       await requestPlan(pending.message, pending.attachments)
     } else await send(pending.message, { attachments: pending.attachments })
@@ -192,6 +219,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
   resizeObserver?.disconnect()
   clearTimeout(pollTimer)
   handle?.abort() // 只是断开连接，后台任务会继续执行并保存结果
@@ -220,7 +248,7 @@ watch(
 
 async function onSend() {
   const message = text.value.trim()
-  if (!message || streaming.value) return
+  if (!message || streaming.value || reconnecting.value) return
   if (attachments.value.some((a) => a.status === 'uploading')) {
     toast.info('文件还在上传，请稍等')
     return
@@ -267,8 +295,8 @@ function cancelPlan() {
 }
 
 async function send(message: string, opts: { attachments?: string[]; planSteps?: PlanStep[] } = {}) {
+  if (disposed || streaming.value || reconnecting.value) return
   message = serializeTableReferences(message, tableReferences.value, fileReferences.value)
-  streaming.value = true
   messages.value.push(reactive(newUser(message, { attachments: opts.attachments ?? [], plan: opts.planSteps })) as UiMessage)
   const assistant = reactive(newAssistant()) as UiMessage
   messages.value.push(assistant)
@@ -277,10 +305,19 @@ async function send(message: string, opts: { attachments?: string[]; planSteps?:
   scrollToBottom(true)
   store.patchConversation(props.id, { running: true })
 
-  handle = conversationApi.chat(
-    props.id,
-    { message, plan_steps: opts.planSteps, attachments: opts.attachments },
-    (event) => {
+  await receiveStream(assistant, (onEvent) => conversationApi.chat(
+    props.id, { message, plan_steps: opts.planSteps, attachments: opts.attachments }, onEvent,
+  ))
+}
+
+async function receiveStream(assistant: UiMessage, open: (onEvent: (event: AgentEvent) => void) => StreamHandle, resuming = false) {
+  streaming.value = true
+  let received = false
+  let retry = false
+  let retryDelay = 1000
+  const currentHandle = open((event) => {
+      if (disposed) return
+      received = true
       applyEvent(assistant, event)
       if (event.type === 'recipe_deleted') markRecipeDeleted(messages.value, event.recipe_id)
       if (event.type === 'title' && detail.value) {
@@ -288,18 +325,27 @@ async function send(message: string, opts: { attachments?: string[]; planSteps?:
         store.patchConversation(props.id, { title: event.title })
       }
       if (event.type === 'table' || event.type === 'file' || event.type === 'recipes_changed' || event.type === 'recipe_deleted') refreshSide()
-    },
-  )
+  })
+  handle = currentHandle
   try {
-    await handle.done
+    await currentHandle.done
   } catch (err) {
-    if ((err as Error).name !== 'AbortError') assistant.error = errorText(err)
+    if ((err as Error).name !== 'AbortError') {
+      retry = resuming || received || !(err instanceof ApiError) || err.status === 0 || err.status === 409
+      if (resuming && err instanceof ApiError && [404, 409].includes(err.status)) retryDelay = 0
+      if (!retry) assistant.error = errorText(err)
+    }
   } finally {
-    finishMessage(assistant)
+    if (disposed || handle !== currentHandle) return
     streaming.value = false
     handle = null
-    store.patchConversation(props.id, { running: false, updated_at: new Date().toISOString() })
-    refreshSide()
+    reconnecting.value = retry
+    if (retry) schedulePoll(retryDelay)
+    else {
+      finishMessage(assistant)
+      store.patchConversation(props.id, { running: false, updated_at: new Date().toISOString() })
+      refreshSide()
+    }
   }
 }
 
@@ -316,10 +362,12 @@ async function attach(files: File[], kind: 'input' | 'expected') {
     try {
       const result = await conversationApi.upload(props.id, file, kind)
       local.key = result.file.file_id
+      local.sourceId = result.file.file_id
+      local.name = result.file.filename
       local.status = 'done'
       local.tables = result.tables.map((t) => t.name)
       uploadedReferences.value.push(...result.tables.flatMap((table) => table.sheet
-        ? [{ filename: result.file.filename, sheet: table.sheet, tableName: table.name }]
+        ? [{ filename: result.file.filename, sourceId: result.file.file_id, kind, sheet: table.sheet, tableName: table.name }]
         : []))
       sideRefreshVersion++
       recentlyUploaded.value = [...recentlyUploaded.value.filter((item) => item.file_id !== result.file.file_id), result.file]
@@ -368,7 +416,7 @@ function openTable(table: TableBrief) {
 }
 
 function answer(option: string) {
-  if (!streaming.value) send(option)
+  if (!streaming.value && !reconnecting.value) send(option)
 }
 </script>
 
@@ -441,7 +489,7 @@ function answer(option: string) {
                 :message="m"
                 :files="messageFiles"
                 :tables="messageTables"
-                :answers-disabled="streaming || messages.at(-1)?.key !== m.key"
+                :answers-disabled="streaming || reconnecting || messages.at(-1)?.key !== m.key"
                 :customer-id="customer?.id"
                 :mascot="customer?.mascot"
                 @answer="answer"
@@ -455,8 +503,8 @@ function answer(option: string) {
             <PlanEditor v-if="plan" :title="plan.title" :steps="plan.steps" @run="runPlan" @cancel="cancelPlan" />
           </div>
 
-          <div v-if="backgroundRunning" class="mt-6 flex items-center gap-2 rounded-xl bg-info/5 px-4 py-3 text-sm text-info">
-            <LoaderCircle class="size-4 animate-spin" />上一条消息还在后台处理中，完成后会自动显示结果…
+          <div v-if="reconnecting" class="mt-6 flex items-center gap-2 rounded-xl bg-info/5 px-4 py-3 text-sm text-info">
+            <LoaderCircle class="size-4 animate-spin" />回复连接已中断，正在重新连接…
           </div>
         </div>
       </div>
@@ -473,7 +521,7 @@ function answer(option: string) {
             :file-references="fileReferences"
             :references-loading="referencesLoading"
             :references-error="referencesError"
-            :busy="streaming"
+            :busy="streaming || reconnecting"
             placeholder="继续追问、提出修改要求，或上传新的表格…"
             @attach="attach"
             @remove="removeAttachment"

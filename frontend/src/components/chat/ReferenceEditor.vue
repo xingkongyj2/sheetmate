@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** Native text editing with atomic file and worksheet labels. */
-import { FileSpreadsheet, Table2 } from '@lucide/vue'
+import { FileCheck2, FileSpreadsheet, Table2 } from '@lucide/vue'
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, render as renderVNode, useId, watch } from 'vue'
 
 import {
@@ -36,22 +36,24 @@ const activeSuggestion = ref(0)
 const suggestions = computed(() => query.value ? referenceSuggestions(query.value.trigger, query.value.query, props.tableReferences, props.fileReferences) : [])
 const loadingSuggestions = computed(() => query.value?.trigger === '#' && props.referencesLoading)
 let dismissed: { start: number; trigger: string } | null = null
-const referenceIcons = new Map<'file' | 'table', SVGSVGElement>()
+const referenceIcons = new Map<string, SVGSVGElement>()
 
-function referenceIcon(kind: 'file' | 'table') {
-  let template = referenceIcons.get(kind)
+function referenceIcon(kind: 'file' | 'table', reference: ComposerReference) {
+  const iconKind = kind === 'file' ? reference.kind === 'expected' ? 'expected' : 'input' : 'table'
+  let template = referenceIcons.get(iconKind)
   if (!template) {
     const host = document.createElement('span')
-    renderVNode(h(kind === 'file' ? FileSpreadsheet : Table2, {
+    const component = iconKind === 'table' ? Table2 : iconKind === 'expected' ? FileCheck2 : FileSpreadsheet
+    renderVNode(h(component, {
       size: 14,
       strokeWidth: 1.8,
-      class: `composer-reference__icon composer-reference__icon--${kind}`,
+      class: `composer-reference__icon composer-reference__icon--${iconKind}`,
       'aria-hidden': 'true',
       focusable: 'false',
     }), host)
     template = host.firstElementChild!.cloneNode(true) as SVGSVGElement
     renderVNode(null, host)
-    referenceIcons.set(kind, template)
+    referenceIcons.set(iconKind, template)
   }
   // Decorative SVGs contain no text, so editor offsets and copied names stay unchanged.
   return template.cloneNode(true)
@@ -143,10 +145,14 @@ function render(value: string) {
     label.className = `composer-reference composer-reference--${segment.type}`
     label.dataset.referenceSource = segment.text
     label.dataset.referenceKind = segment.type
+    if (segment.reference.kind) label.dataset.fileKind = segment.reference.kind
+    if (segment.reference.sourceId) label.dataset.fileSource = segment.reference.sourceId
     const explicit = segment.text.startsWith('【表格：') || segment.text.startsWith('【文件：') || segment.text.startsWith('<table-ref>')
     label.textContent = explicit ? segment.type === 'file' ? segment.reference.filename : segment.reference.sheet : segment.text
-    label.prepend(referenceIcon(segment.type))
-    label.title = segment.type === 'file' ? segment.reference.filename : `${segment.reference.filename} / ${segment.reference.sheet}`
+    label.prepend(referenceIcon(segment.type, segment.reference))
+    const sourceLabel = segment.reference.kind === 'expected' ? '人工结果' : segment.reference.kind === 'input' ? '要处理的表' : ''
+    const name = segment.type === 'file' ? segment.reference.filename : `${segment.reference.filename} / ${segment.reference.sheet}`
+    label.title = sourceLabel ? `${name} · ${sourceLabel}` : name
     // Text caret hosts on both sides keep the cursor visible beside a noneditable label.
     fragment.append(document.createTextNode(CARET_BUFFER), label, document.createTextNode(CARET_BUFFER))
   }
@@ -423,10 +429,13 @@ defineExpose({
           @pointerenter="activeSuggestion = index"
           @click="chooseSuggestion(suggestion)"
         >
-          <span class="flex size-7 shrink-0 items-center justify-center rounded-md" :class="suggestion.type === 'file' ? 'bg-[#e4eaf2] text-[#42566f]' : 'bg-[#e0ece5] text-[#3f6152]'">
-            <FileSpreadsheet v-if="suggestion.type === 'file'" class="size-4" :stroke-width="1.8" /><Table2 v-else class="size-4" :stroke-width="1.8" />
+          <span class="flex size-7 shrink-0 items-center justify-center rounded-md" :class="suggestion.type === 'file' ? suggestion.reference.kind === 'expected' ? 'bg-[#fff5d9] text-[#b7860b]' : 'bg-[#e8f5ee] text-fun-green' : 'bg-[#e0ece5] text-[#3f6152]'">
+            <Table2 v-if="suggestion.type === 'table'" class="size-4" :stroke-width="1.8" />
+            <FileCheck2 v-else-if="suggestion.reference.kind === 'expected'" class="size-4" :stroke-width="1.8" />
+            <FileSpreadsheet v-else class="size-4" :stroke-width="1.8" />
           </span>
           <span class="min-w-0 truncate">{{ suggestion.label }}</span>
+          <span v-if="suggestion.reference.kind === 'input' || suggestion.reference.kind === 'expected'" class="ml-auto shrink-0 text-[10px] text-faint">{{ suggestion.reference.kind === 'expected' ? '人工结果' : '要处理的表' }}</span>
         </button>
         <p v-if="loadingSuggestions" class="px-3 py-3 text-xs text-mute" role="status">正在读取工作表…</p>
         <p v-else-if="!suggestions.length" class="px-3 py-3 text-xs text-mute" role="status">{{ query.trigger === '@' ? fileReferences.length ? '没有匹配的文件' : '请先上传文件' : referencesError || (fileReferences.length ? '没有匹配的工作表' : '请先上传文件') }}</p>
@@ -504,8 +513,11 @@ defineExpose({
   pointer-events: none;
   user-select: none;
 }
-.reference-editor :deep(.composer-reference__icon--file) {
-  color: #52719b;
+.reference-editor :deep(.composer-reference__icon--input) {
+  color: var(--color-fun-green);
+}
+.reference-editor :deep(.composer-reference__icon--expected) {
+  color: #b7860b;
 }
 .reference-editor :deep(.composer-reference__icon--table) {
   color: #4c7e67;

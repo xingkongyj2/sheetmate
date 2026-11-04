@@ -6,11 +6,12 @@
 import { ArrowUp, Eye, FileCheck2, FileSpreadsheet, ListChecks, LoaderCircle, Plus, Square, X } from '@lucide/vue'
 import { computed, ref } from 'vue'
 
-import type { FileReference, TableReference } from '@/composables/tableReferences'
+import { referenceSourceKey, type FileReference, type TableReference } from '@/composables/tableReferences'
 import ReferenceEditor from './ReferenceEditor.vue'
 
 export interface Attachment {
   key: string
+  sourceId?: string
   name: string
   kind: 'input' | 'expected'
   status: 'pending' | 'uploading' | 'done' | 'error'
@@ -52,18 +53,31 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const pendingKind = ref<'input' | 'expected'>('input')
 const menuOpen = ref(false)
 const dragging = ref(false)
-const knownFiles = computed(() => {
-  const names = new Set([...props.fileReferences.map((file) => file.filename), ...props.attachments.map((file) => file.name)])
-  return [...names].map((filename) => ({ filename }))
+const knownFiles = computed<FileReference[]>(() => {
+  const files = new Map<string, FileReference>()
+  for (const reference of props.fileReferences) {
+    files.set(referenceSourceKey(reference), reference)
+  }
+  for (const attachment of props.attachments) {
+    if (attachment.status === 'uploading') continue
+    const reference = attachmentReference(attachment)
+    const key = referenceSourceKey(reference)
+    if (!files.has(key)) files.set(key, reference)
+  }
+  return [...files.values()]
 })
+
+function attachmentReference(attachment: Attachment): FileReference {
+  return { filename: attachment.name, kind: attachment.kind, sourceId: attachment.sourceId ?? attachment.key }
+}
 
 function captureSelection() {
   editor.value?.captureSelection()
 }
 
-function insertFile(name: string) {
+function insertFile(attachment: Attachment) {
   menuOpen.value = false
-  editor.value?.insertReference({ filename: name })
+  editor.value?.insertReference(attachmentReference(attachment))
 }
 
 function preview(key: string) {
@@ -125,8 +139,9 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
             class="block max-w-full cursor-pointer truncate rounded-sm text-left font-medium text-ink transition hover:text-[#42566f] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8fa2ba]"
             :aria-label="`插入文件名 ${a.name}`"
             title="点击插入文件名"
+            :disabled="a.status === 'uploading'"
             @pointerdown.prevent="captureSelection"
-            @click="insertFile(a.name)"
+            @click="insertFile(a)"
           >{{ a.name }}</button>
           <div class="truncate text-[10px] text-faint">
             {{ a.status === 'error' ? a.error : a.kind === 'expected' ? '人工结果 · 让 AI 照着学' : a.tables?.length ? `已加载：${a.tables.join('、')}` : '要处理的表' }}
