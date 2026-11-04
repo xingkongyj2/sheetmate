@@ -274,7 +274,7 @@ Python 源码独立保存在 `data/scripts/scr_<UUID>.py`，每个脚本版本�
 
 ```bash
 cd backend
-.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/python -m pip install -r requirements.txt
 .venv/bin/python -m pytest -q
 ```
 
