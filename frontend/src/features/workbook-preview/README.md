@@ -2,7 +2,7 @@
 
 `WorkbookPreview.vue` 是文件预览的统一入口，接收已上传文件的 `file: FileInfo`，或首页待发送附件的 `localFile: File`，关闭时发出 `close`。本地 XLSX/XLSM/CSV 直接读取文件内容；旧 XLS 使用鉴权临时解析接口，所有预览均不创建会话或文件记录。
 
-开启 `insertable` 后，预览顶部显示工作表名称按钮；点击发出 `selectTable({ filename, sheet })`。父组件负责把引用插入输入框保存的光标位置，并按需要关闭预览。默认不显示引用操作，原有只读查看入口不受影响。
+预览顶部仅保留文件信息和窗口操作，工作表通过底部原生 Sheet 标签切换。需要插入表名时，在聊天输入框中输入 `#` 筛选并选择工作表。
 
 - XLSX / XLSM：原始文件经现有鉴权下载接口获取，在 Web Worker 中由 ExcelJS 解析并映射为 Univer 快照。
 - CSV：在同一 Worker 中解码、识别分隔符，按文本值显示，保留前导零和原始坐标。

@@ -25,6 +25,8 @@ const props = withDefaults(
     attachments?: Attachment[]
     tableReferences?: TableReference[]
     fileReferences?: FileReference[]
+    referencesLoading?: boolean
+    referencesError?: string
     busy?: boolean
     stoppable?: boolean
     placeholder?: string
@@ -32,7 +34,7 @@ const props = withDefaults(
     large?: boolean
     appearance?: 'outlined' | 'card'
   }>(),
-  { plan: false, attachments: () => [], tableReferences: () => [], fileReferences: () => [], busy: false, stoppable: true, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
+  { plan: false, attachments: () => [], tableReferences: () => [], fileReferences: () => [], referencesLoading: false, referencesError: '', busy: false, stoppable: true, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
 )
 
 const emit = defineEmits<{
@@ -57,10 +59,6 @@ const knownFiles = computed(() => {
 
 function captureSelection() {
   editor.value?.captureSelection()
-}
-
-function insertTable(reference: TableReference) {
-  editor.value?.insertReference(reference)
 }
 
 function insertFile(name: string) {
@@ -93,7 +91,7 @@ function onDrop(e: DragEvent) {
   if (files.length) emit('attach', files, 'input')
 }
 
-defineExpose({ focus: () => editor.value?.focus(), captureSelection, insertTable })
+defineExpose({ focus: () => editor.value?.focus(), captureSelection })
 </script>
 
 <template>
@@ -138,7 +136,7 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection, insertTable
           type="button"
           class="ml-1 flex size-6 shrink-0 items-center justify-center rounded-lg text-mute transition hover:bg-white hover:text-ink disabled:opacity-40"
           :aria-label="`查看文件 ${a.name}`"
-          title="查看表格，点击表名插入引用"
+          title="查看表格"
           :disabled="a.status === 'uploading'"
           @pointerdown.prevent="captureSelection"
           @click="preview(a.key)"
@@ -152,6 +150,8 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection, insertTable
       :model-value="modelValue"
       :table-references="tableReferences"
       :file-references="knownFiles"
+      :references-loading="referencesLoading"
+      :references-error="referencesError"
       :placeholder="placeholder"
       :large="large"
       :autofocus="autofocus"

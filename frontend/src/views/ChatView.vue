@@ -75,10 +75,19 @@ const messageFiles = computed(() => {
   for (const file of recentlyUploaded.value) files.set(file.file_id, file)
   return [...files.values()]
 })
-const fileReferences = computed<FileReference[]>(() => [...new Set(messageFiles.value.map((file) => file.filename))].map((filename) => ({ filename })))
+const referenceFiles = computed(() => messageFiles.value.map((file, index) => ({ file, index })).sort((left, right) => {
+  const first = Date.parse(left.file.created_at ?? '')
+  const second = Date.parse(right.file.created_at ?? '')
+  return Number.isFinite(first) && Number.isFinite(second) && first !== second ? first - second : left.index - right.index
+}).map(({ file }) => file))
+const fileReferences = computed<FileReference[]>(() => [...new Set(referenceFiles.value.map((file) => file.filename))].map((filename) => ({ filename })))
+const referencesLoading = computed(() => loading.value || attachments.value.some((attachment) => attachment.status === 'uploading'))
+const referencesError = computed(() => attachments.value.some((attachment) => attachment.status === 'error')
+  ? '部分文件上传失败，暂时无法选择其中的工作表。请重新上传文件。'
+  : '')
 const tableReferences = computed<TableReference[]>(() => {
   const references = new Map<string, TableReference>()
-  for (const file of messageFiles.value) {
+  for (const file of referenceFiles.value) {
     for (const sheet of file.sheets) {
       const table = messageTables.value.find((item) => item.file_id === file.file_id && item.sheet === sheet.sheet)
       const reference = { filename: file.filename, sheet: sheet.sheet, tableName: table?.name }
@@ -104,11 +113,6 @@ function previewAttachment(key: string) {
   if (!file) return
   composer.value?.captureSelection()
   viewingFile.value = file
-}
-
-function insertTable(reference: TableReference) {
-  viewingFile.value = null
-  void composer.value?.insertTable(reference)
 }
 
 function acknowledgeUploads(files: FileInfo[]) {
@@ -467,6 +471,8 @@ function answer(option: string) {
             :attachments="attachments"
             :table-references="tableReferences"
             :file-references="fileReferences"
+            :references-loading="referencesLoading"
+            :references-error="referencesError"
             :busy="streaming"
             placeholder="继续追问、提出修改要求，或上传新的表格…"
             @attach="attach"
@@ -500,9 +506,7 @@ function answer(option: string) {
       v-if="viewingFile"
       :key="viewingFile.file_id"
       :file="viewingFile"
-      insertable
       @close="viewingFile = null"
-      @select-table="insertTable"
     />
     <SaveToCustomerDialog v-if="saveOpen" :conversation-id="id" @close="saveOpen = false" @saved="onSaved" />
   </div>

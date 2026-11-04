@@ -14,6 +14,7 @@ import Mascot from '@/components/brand/Mascot.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import CustomerPicker from '@/components/chat/CustomerPicker.vue'
 import { uid } from '@/composables/chatModel'
+import { useLocalFileReferences } from '@/composables/localFileReferences'
 import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
@@ -38,6 +39,13 @@ onBeforeUnmount(() => { active = false })
 
 const customer = computed(() => store.customers.find((c) => c.id === customerId.value))
 const fileReferences = computed<FileReference[]>(() => attachments.value.map((item) => ({ filename: item.name })))
+const { tableReferences, referencesLoading, referenceErrors } = useLocalFileReferences(files)
+const referencesError = computed(() => {
+  const failures = referenceErrors.value
+  if (!failures.length) return ''
+  const first = failures[0]!
+  return `部分文件的工作表名称未能读取：${first.filename}（${first.error}）${failures.length > 1 ? `，另有 ${failures.length - 1} 个文件` : ''}。请检查文件后重新添加。`
+})
 
 async function restoreDraft() {
   if (!auth.user) return
@@ -64,11 +72,6 @@ function preview(key: string) {
   if (!item) return
   composer.value?.captureSelection()
   viewingFile.value = item.file
-}
-
-function insertTable(reference: TableReference) {
-  viewingFile.value = null
-  composer.value?.insertTable(reference)
 }
 
 async function send() {
@@ -169,6 +172,9 @@ async function send() {
             v-model:plan="plan"
             :attachments="attachments"
             :file-references="fileReferences"
+            :table-references="tableReferences"
+            :references-loading="referencesLoading"
+            :references-error="referencesError"
             :busy="busy"
             :stoppable="false"
             large
@@ -196,6 +202,6 @@ async function send() {
         <p v-else-if="ready && savingFiles" class="mt-3 text-center text-xs text-slate-400" role="status">正在保存附件…</p>
       </div>
     </div>
-    <WorkbookPreview v-if="viewingFile" :local-file="viewingFile" insertable @close="viewingFile = null" @select-table="insertTable" />
+    <WorkbookPreview v-if="viewingFile" :local-file="viewingFile" @close="viewingFile = null" />
   </div>
 </template>

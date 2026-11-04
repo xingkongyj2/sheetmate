@@ -1,37 +1,68 @@
 <script setup lang="ts">
 /** Native text editing with atomic file and worksheet labels. */
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { FileSpreadsheet, Table2 } from '@lucide/vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, render as renderVNode, useId, watch } from 'vue'
 
 import {
   formatFileReference, formatTableReference, isFileReference, parseTableReferences,
   projectTableReferences, updateTableReferenceText,
   type ComposerReference, type FileReference, type TableReference,
 } from '@/composables/tableReferences'
+import { findReferenceQuery, referenceSuggestions, type ReferenceSuggestion } from '@/composables/referenceSuggestions'
 
 const props = withDefaults(defineProps<{
   modelValue: string
   tableReferences?: TableReference[]
   fileReferences?: FileReference[]
+  referencesLoading?: boolean
+  referencesError?: string
   placeholder?: string
   autofocus?: boolean
   large?: boolean
   busy?: boolean
-}>(), { tableReferences: () => [], fileReferences: () => [], placeholder: '', autofocus: false, large: false, busy: false })
+}>(), { tableReferences: () => [], fileReferences: () => [], referencesLoading: false, referencesError: '', placeholder: '', autofocus: false, large: false, busy: false })
 const emit = defineEmits<{ 'update:modelValue': [value: string]; send: [] }>()
 const editor = ref<HTMLDivElement | null>(null)
 const empty = ref(!props.modelValue)
 let composing = false
+const CARET_BUFFER = '\u200b'
 let selection = { start: 0, end: 0 }
 type Snapshot = { value: string; selection: typeof selection }
 let history: Snapshot[] = []
 let historyIndex = 0
+const listId = useId()
+const query = ref<ReturnType<typeof findReferenceQuery>>(null)
+const activeSuggestion = ref(0)
+const suggestions = computed(() => query.value ? referenceSuggestions(query.value.trigger, query.value.query, props.tableReferences, props.fileReferences) : [])
+const loadingSuggestions = computed(() => query.value?.trigger === '#' && props.referencesLoading)
+let dismissed: { start: number; trigger: string } | null = null
+const referenceIcons = new Map<'file' | 'table', SVGSVGElement>()
+
+function referenceIcon(kind: 'file' | 'table') {
+  let template = referenceIcons.get(kind)
+  if (!template) {
+    const host = document.createElement('span')
+    renderVNode(h(kind === 'file' ? FileSpreadsheet : Table2, {
+      size: 14,
+      strokeWidth: 1.8,
+      class: `composer-reference__icon composer-reference__icon--${kind}`,
+      'aria-hidden': 'true',
+      focusable: 'false',
+    }), host)
+    template = host.firstElementChild!.cloneNode(true) as SVGSVGElement
+    renderVNode(null, host)
+    referenceIcons.set(kind, template)
+  }
+  // Decorative SVGs contain no text, so editor offsets and copied names stay unchanged.
+  return template.cloneNode(true)
+}
 
 function chip(node: Node): node is HTMLSpanElement {
   return node instanceof HTMLElement && node.hasAttribute('data-reference-source')
 }
 
 function contents(node: Node, canonical = false): string {
-  if (node.nodeType === Node.TEXT_NODE) return node.textContent ?? ''
+  if (node.nodeType === Node.TEXT_NODE) return (node.textContent ?? '').replaceAll(CARET_BUFFER, '')
   if (chip(node)) return canonical ? node.dataset.referenceSource! : node.textContent ?? ''
   if (node instanceof HTMLBRElement) return '\n'
   let value = ''
@@ -70,7 +101,15 @@ function pointAt(offset: number): { node: Node; offset: number } {
       if (offset <= position) return { node: root, offset: [...root.childNodes].indexOf(node) }
       if (offset < position + length) return { node: root, offset: [...root.childNodes].indexOf(node) + 1 }
     } else if (node.nodeType === Node.TEXT_NODE && offset <= position + length) {
-      return { node, offset: Math.max(0, offset - position) }
+      const target = Math.max(0, offset - position)
+      const text = node.textContent ?? ''
+      let raw = 0
+      let visible = 0
+      while (raw < text.length && (visible < target || text[raw] === CARET_BUFFER)) {
+        if (text[raw] !== CARET_BUFFER) visible++
+        raw++
+      }
+      return { node, offset: raw }
     }
     position += length
   }
@@ -104,9 +143,12 @@ function render(value: string) {
     label.className = `composer-reference composer-reference--${segment.type}`
     label.dataset.referenceSource = segment.text
     label.dataset.referenceKind = segment.type
-    label.textContent = segment.type === 'file' ? segment.reference.filename : segment.reference.sheet
+    const explicit = segment.text.startsWith('【表格：') || segment.text.startsWith('【文件：') || segment.text.startsWith('<table-ref>')
+    label.textContent = explicit ? segment.type === 'file' ? segment.reference.filename : segment.reference.sheet : segment.text
+    label.prepend(referenceIcon(segment.type))
     label.title = segment.type === 'file' ? segment.reference.filename : `${segment.reference.filename} / ${segment.reference.sheet}`
-    fragment.append(label)
+    // Text caret hosts on both sides keep the cursor visible beside a noneditable label.
+    fragment.append(document.createTextNode(CARET_BUFFER), label, document.createTextNode(CARET_BUFFER))
   }
   root.replaceChildren(fragment)
   empty.value = !contents(root)
@@ -169,8 +211,39 @@ function replaceSelection(text: string, visibleLength = text.length) {
 }
 
 function insertReference(reference: ComposerReference) {
+  query.value = null
+  dismissed = null
   const file = isFileReference(reference)
   replaceSelection(file ? formatFileReference(reference) : formatTableReference(reference), file ? reference.filename.length : reference.sheet.length)
+  const caret = { ...selection }
+  // Closing a preview restores its previous focus during unmount, so focus after it closes.
+  void nextTick(() => { editor.value?.focus(); restoreSelection(caret) })
+}
+
+function chooseSuggestion(suggestion: ReferenceSuggestion) {
+  if (!query.value) return
+  selection = { start: query.value.start, end: query.value.end }
+  restoreSelection()
+  insertReference(suggestion.reference)
+}
+
+function refreshSuggestions(automatic = false) {
+  if (composing || !editor.value || document.activeElement !== editor.value) return
+  captureSelection()
+  if (selection.start !== selection.end) { query.value = null; return }
+  const projection = projectTableReferences(read(), props.tableReferences, props.fileReferences)
+  const next = findReferenceQuery(projection.text, selection.start, projection.ranges)
+  if (!next) { query.value = null; dismissed = null; return }
+  if (dismissed?.start === next.start && dismissed.trigger === next.trigger) return
+  if (query.value?.start !== next.start || query.value.query !== next.query || query.value.trigger !== next.trigger) activeSuggestion.value = 0
+  query.value = next
+  const incomplete = next.trigger === '#' && (props.referencesLoading || !!props.referencesError)
+  if (automatic && !incomplete && suggestions.value.length === 1) chooseSuggestion(suggestions.value[0]!)
+}
+
+function dismissSuggestions() {
+  if (query.value) dismissed = { start: query.value.start, trigger: query.value.trigger }
+  query.value = null
 }
 
 function deleteReference(backward: boolean) {
@@ -197,6 +270,7 @@ function onInput() {
   if (composing) { emit('update:modelValue', value); return }
   captureSelection()
   commit(value)
+  refreshSuggestions(true)
 }
 
 function onBeforeInput(event: InputEvent) {
@@ -211,12 +285,36 @@ function onBeforeInput(event: InputEvent) {
   } else if (event.inputType === 'deleteContentBackward' || event.inputType === 'deleteContentForward') {
     if (deleteReference(event.inputType === 'deleteContentBackward')) event.preventDefault()
   } else if (selection.start !== selection.end) {
-    restoreSelection(atomicSelection())
+    const current = atomicSelection()
+    if (event.inputType === 'insertText' && (current.start !== selection.start || current.end !== selection.end)) {
+      event.preventDefault()
+      replaceSelection(event.data ?? '')
+      refreshSuggestions(true)
+    } else restoreSelection(current)
   }
 }
 
 function onKeydown(event: KeyboardEvent) {
   if (composing || event.isComposing) return
+  if (query.value) {
+    if (event.key === 'Escape') { event.preventDefault(); dismissSuggestions(); return }
+    if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && suggestions.value.length) {
+      event.preventDefault()
+      activeSuggestion.value = (activeSuggestion.value + (event.key === 'ArrowDown' ? 1 : -1) + suggestions.value.length) % suggestions.value.length
+      void nextTick(() => document.getElementById(`${listId}-${activeSuggestion.value}`)?.scrollIntoView({ block: 'nearest' }))
+      return
+    }
+    if (event.key === 'Tab' && (event.shiftKey || !suggestions.value.length)) {
+      dismissSuggestions()
+      return
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      event.preventDefault()
+      const suggestion = suggestions.value[activeSuggestion.value]
+      if (suggestion) chooseSuggestion(suggestion)
+      return
+    }
+  }
   if ((event.metaKey || event.ctrlKey) && !event.altKey) {
     if (event.key.toLowerCase() === 'z' || event.key.toLowerCase() === 'y') {
       event.preventDefault()
@@ -237,6 +335,7 @@ function onKeydown(event: KeyboardEvent) {
 function onPaste(event: ClipboardEvent) {
   event.preventDefault()
   replaceSelection(event.clipboardData?.getData('text/plain') ?? '')
+  refreshSuggestions(true)
 }
 
 function onCopy(event: ClipboardEvent, cut = false) {
@@ -273,7 +372,9 @@ watch([() => props.tableReferences, () => props.fileReferences], () => {
   captureSelection()
   render(read())
   if (focused) restoreSelection()
+  if (focused) refreshSuggestions(true)
 }, { deep: true })
+watch(() => props.referencesLoading, () => refreshSuggestions(true))
 
 function onCompositionEnd() {
   composing = false
@@ -297,12 +398,50 @@ defineExpose({
 </script>
 
 <template>
+  <div class="relative">
+    <div
+      v-if="query"
+      class="absolute bottom-full left-4 right-4 z-50 mb-1 overflow-hidden rounded-xl border border-[#dfe4e8] bg-white shadow-[0_8px_32px_rgba(30,41,59,0.12)]"
+      @pointerdown.prevent
+    >
+      <div class="flex items-center justify-between border-b border-line px-3 py-2 text-xs text-mute">
+        <span>{{ query.trigger === '@' ? '选择文件' : '选择工作表' }}</span>
+        <span class="text-[10px] text-faint">↑↓ 选择 · Enter 确认 · Esc 关闭</span>
+      </div>
+      <div :id="listId" role="listbox" :aria-label="query.trigger === '@' ? '已上传文件' : '已上传工作表'" class="max-h-60 overflow-y-auto p-1">
+        <button
+          v-for="(suggestion, index) in suggestions"
+          :id="`${listId}-${index}`"
+          :key="suggestion.key"
+          type="button"
+          role="option"
+          tabindex="-1"
+          :aria-selected="index === activeSuggestion"
+          :title="suggestion.label"
+          class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] text-ink transition"
+          :class="index === activeSuggestion ? 'bg-[#edf1f4]' : 'hover:bg-paper'"
+          @pointerenter="activeSuggestion = index"
+          @click="chooseSuggestion(suggestion)"
+        >
+          <span class="flex size-7 shrink-0 items-center justify-center rounded-md" :class="suggestion.type === 'file' ? 'bg-[#e4eaf2] text-[#42566f]' : 'bg-[#e0ece5] text-[#3f6152]'">
+            <FileSpreadsheet v-if="suggestion.type === 'file'" class="size-4" :stroke-width="1.8" /><Table2 v-else class="size-4" :stroke-width="1.8" />
+          </span>
+          <span class="min-w-0 truncate">{{ suggestion.label }}</span>
+        </button>
+        <p v-if="loadingSuggestions" class="px-3 py-3 text-xs text-mute" role="status">正在读取工作表…</p>
+        <p v-else-if="!suggestions.length" class="px-3 py-3 text-xs text-mute" role="status">{{ query.trigger === '@' ? fileReferences.length ? '没有匹配的文件' : '请先上传文件' : referencesError || (fileReferences.length ? '没有匹配的工作表' : '请先上传文件') }}</p>
+      </div>
+    </div>
   <div
     ref="editor"
     contenteditable="true"
     role="textbox"
     aria-multiline="true"
     :aria-label="placeholder"
+    aria-haspopup="listbox"
+    :aria-expanded="!!query"
+    :aria-controls="query ? listId : undefined"
+    :aria-activedescendant="query && suggestions.length ? `${listId}-${activeSuggestion}` : undefined"
     :data-placeholder="placeholder"
     :data-empty="empty"
     spellcheck="false"
@@ -312,9 +451,9 @@ defineExpose({
     @input="onInput"
     @beforeinput="onBeforeInput($event as InputEvent)"
     @keydown="onKeydown"
-    @blur="captureSelection"
-    @pointerup="captureSelection"
-    @keyup="captureSelection"
+    @blur="captureSelection(); query = null"
+    @pointerup="captureSelection(); refreshSuggestions()"
+    @keyup="captureSelection(); refreshSuggestions()"
     @paste="onPaste"
     @copy="onCopy($event)"
     @cut="onCopy($event, true)"
@@ -322,6 +461,7 @@ defineExpose({
     @compositionstart="composing = true"
     @compositionend="onCompositionEnd"
   />
+  </div>
 </template>
 
 <style scoped>
@@ -330,6 +470,7 @@ defineExpose({
   overflow-wrap: anywhere;
   font-variant-ligatures: none;
   cursor: text;
+  caret-color: var(--color-ink);
 }
 .reference-editor[data-empty='true']::before {
   content: attr(data-placeholder);
@@ -340,10 +481,12 @@ defineExpose({
 .reference-editor :deep(.composer-reference) {
   display: inline-block;
   max-width: 100%;
-  margin: 1px 3px;
-  padding: 1px 7px;
-  border: 1px solid;
-  border-radius: 7px;
+  margin: 0 4px;
+  padding: 0 3px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: rgb(0 0 0 / 8%);
+  color: #242424;
   font-size: 14px;
   font-weight: 500;
   line-height: 23px;
@@ -352,14 +495,19 @@ defineExpose({
   overflow-wrap: anywhere;
   cursor: default;
 }
-.reference-editor :deep(.composer-reference--file) {
-  background: #e4eaf2;
-  border-color: #cbd5e2;
-  color: #42566f;
+.reference-editor :deep(.composer-reference__icon) {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  margin-right: 4px;
+  vertical-align: -2px;
+  pointer-events: none;
+  user-select: none;
 }
-.reference-editor :deep(.composer-reference--table) {
-  background: #e0ece5;
-  border-color: #c6d9ce;
-  color: #3f6152;
+.reference-editor :deep(.composer-reference__icon--file) {
+  color: #52719b;
+}
+.reference-editor :deep(.composer-reference__icon--table) {
+  color: #4c7e67;
 }
 </style>

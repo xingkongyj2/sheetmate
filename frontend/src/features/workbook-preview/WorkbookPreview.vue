@@ -10,11 +10,8 @@ import DataTable from '@/components/common/DataTable.vue'
 
 import { parseInWorker } from './worker-client'
 
-const props = withDefaults(defineProps<{ file?: FileInfo; localFile?: File; insertable?: boolean }>(), { insertable: false })
-const emit = defineEmits<{
-  close: []
-  selectTable: [reference: { filename: string; sheet: string; tableName?: string }]
-}>()
+const props = defineProps<{ file?: FileInfo; localFile?: File }>()
+const emit = defineEmits<{ close: [] }>()
 const panel = ref<HTMLElement>()
 const host = ref<HTMLElement>()
 const phase = ref<'download' | 'parse' | 'render' | 'ready'>('download')
@@ -25,7 +22,6 @@ const expanded = ref(false)
 const filename = computed(() => props.localFile?.name ?? props.file?.filename ?? '表格预览')
 const size = computed(() => props.localFile?.size ?? props.file?.size ?? 0)
 const legacy = computed(() => /\.xls$/i.test(filename.value))
-const sheets = ref<string[]>([])
 const legacySheet = ref('')
 const legacySheets = ref<string[]>([])
 const legacyPage = ref<{ columns: string[]; rows: unknown[][]; total: number } | null>(null)
@@ -53,7 +49,6 @@ async function loadLegacy(offset = 0) {
     if (id !== loadId) return
     legacyPage.value = page
     legacySheets.value = page.sheets
-    sheets.value = page.sheets
     legacySheet.value = page.sheet
     legacyOffset.value = offset
     phase.value = 'ready'
@@ -76,7 +71,6 @@ async function load() {
   warnings.value = []
   showWarnings.value = false
   stats.value = null
-  sheets.value = []
   legacyPage.value = null
   legacySheets.value = []
   legacySheet.value = ''
@@ -103,10 +97,6 @@ async function load() {
     if (signal.aborted) return
     warnings.value = parsed.warnings
     stats.value = parsed.stats
-    sheets.value = parsed.workbook.sheetOrder.flatMap((id) => {
-      const name = parsed.workbook.sheets[id]?.name
-      return name ? [name] : []
-    })
     phase.value = 'render'
     await nextTick()
     const { mountWorkbook } = await import('./viewer')
@@ -120,10 +110,6 @@ async function load() {
   } catch (err) {
     if (!signal.aborted && id === loadId) error.value = errorText(err)
   }
-}
-
-function selectTable(sheet: string) {
-  emit('selectTable', { filename: filename.value, sheet })
 }
 
 function onKey(event: KeyboardEvent) {
@@ -180,22 +166,6 @@ onBeforeUnmount(() => {
           <button type="button" class="icon-btn" :aria-label="expanded ? '还原窗口' : '放大窗口'" :title="expanded ? '还原窗口' : '放大窗口'" @click="expanded = !expanded"><Minimize2 v-if="expanded" class="size-4" /><Maximize2 v-else class="size-4" /></button>
           <button type="button" class="icon-btn" aria-label="关闭文件预览" title="关闭（Esc）" @click="emit('close')"><X class="size-5" /></button>
         </header>
-
-        <div v-if="insertable && sheets.length && !error" class="flex max-h-32 shrink-0 flex-wrap items-center gap-2 overflow-y-auto border-b border-line bg-paper/60 px-4 py-2.5 sm:px-5" aria-label="点击工作表名插入到输入框">
-          <span class="text-xs text-mute">点击表名插入</span>
-          <button
-            v-for="sheet in sheets"
-            :key="sheet"
-            type="button"
-            class="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-fun-green/25 bg-fun-green/5 px-2.5 py-1.5 text-xs font-medium text-ink transition hover:border-fun-green/50 hover:bg-fun-green/10 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fun-green"
-            :title="`将 ${sheet} 插入到输入框光标处`"
-            :aria-label="`插入工作表 ${sheet}`"
-            data-testid="workbook-sheet-reference"
-            @click="selectTable(sheet)"
-          >
-            <FileSpreadsheet class="size-3.5 shrink-0 text-fun-green" /><span class="truncate">{{ sheet }}</span>
-          </button>
-        </div>
 
         <div v-if="warnings.length" class="shrink-0 border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-800">
           <button type="button" class="flex w-full items-center gap-2 text-left" :aria-expanded="showWarnings" @click="showWarnings = !showWarnings">
