@@ -37,6 +37,7 @@ def bootstrap() -> None:
     settings.ensure_dirs()
     init_db()
     with session_scope() as db:
+        recipe_service.migrate_recipe_statuses(db)
         admin = auth_service.ensure_admin(db)
         admin_id = admin.id
         has_demo = db.scalar(select(Customer).where(Customer.name == DEMO_NAME)) is not None

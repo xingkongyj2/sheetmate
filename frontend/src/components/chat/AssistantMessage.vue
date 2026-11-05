@@ -3,7 +3,7 @@
  * 助手消息：阶段回复与折叠的思考细节按发生顺序穿插，最后展示回答和交付结果。
  */
 import { Check, ChevronRight, CircleAlert, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 
 import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
@@ -11,14 +11,15 @@ import type { FileInfo, TableBrief } from '@/api/types'
 import Mascot from '@/components/brand/Mascot.vue'
 import MarkdownView from '@/components/common/MarkdownView.vue'
 import RecipeProgressCard from '@/components/recipe/RecipeProgressCard.vue'
-import { assistantStages, type AssistantStage } from '@/composables/assistantTimeline'
+import { assistantDisplayBlocks, groupAssistantBlocks, type AssistantStage } from '@/composables/assistantTimeline'
 import type { UiMessage } from '@/composables/chatModel'
 import { fileKindLabel, standaloneFiles } from '@/composables/filePresentation'
 import { missingLLMKeyPresentation } from '@/composables/llmErrorPresentation'
 import { copyMarkdown } from '@/composables/markdown'
 import { lastResultTable, messageMarkdown, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
 import { recipeViewReply } from '@/composables/recipeViewPresentation'
-import { toolPresentation, userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
+import { recipeDeliveries } from '@/composables/recipeDeliveries'
+import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
 
 import RecipeStageDetails from './RecipeStageDetails.vue'
@@ -26,7 +27,7 @@ import RecipeViewCard from './RecipeViewCard.vue'
 import TableCard from './TableCard.vue'
 import TimelineList from './TimelineList.vue'
 
-const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean }>()
+const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean; answersClosed?: boolean }>()
 const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo] }>()
 const toast = useToast()
 const openingFile = ref<string | null>(null)
@@ -45,19 +46,20 @@ async function previewFile(fileId: string) {
 const copying = ref(false)
 const copied = ref<'formatted' | 'markdown' | null>(null)
 let copiedTimer = 0
-const stages = computed(() => assistantStages(props.message))
+const blocks = computed(() => assistantDisplayBlocks(props.message))
+const groups = computed(() => groupAssistantBlocks(blocks.value))
+const stages = computed(() => blocks.value.flatMap((block) => block.kind === 'process' ? [block.stage] : []))
 const fileContext = computed(() => ({ files: props.files, tables: props.tables }))
 const missingKeyError = computed(() => missingLLMKeyPresentation(props.message))
 const markdown = computed(() => missingKeyError.value?.duplicateContent ? missingKeyError.value.text
   : messageMarkdown(props.message, stages.value.map((stage) => ({ title: stage.title, summary: stageSummary(stage) })), fileContext.value))
 const attempts = computed(() => recipeAttempts(props.message))
-const recipeViews = computed(() => props.message.artifacts.flatMap((artifact) => artifact.kind === 'recipe_view' ? [artifact] : []))
-const deliveries = computed(() => {
-  const available = attempts.value.filter((attempt) => attempt.progress.file || attempt.progress.saved)
-  return [...new Map(available.map((attempt) => [attempt.progress.file?.file_id ?? `${attempt.progress.saved?.recipe_id}:${attempt.progress.saved?.version}`, attempt])).values()]
-})
-const reply = computed(() => {
+const workflows = computed(() => recipeDeliveries(props.message))
+const recipeViews = computed(() => workflows.value.views)
+const deliveries = computed(() => workflows.value.deliveries)
+const fallbackReply = computed(() => {
   if (missingKeyError.value?.duplicateContent) return ''
+  if (blocks.value.some((block) => block.kind === 'text' && block.text.trim())) return ''
   const content = recipeViewReply(props.message)
   return content.trim() ? content : recipeOutcomeSummary(props.message)
 })
@@ -71,27 +73,6 @@ function stageSummary(stage: AssistantStage): string {
     else if (attempt.progress.status === 'done') summaries.push(userFacingText(attempt.progress.runSummary, '本次处理已完成。', 800))
   }
   return [...new Set(summaries.filter(Boolean))].join('\n\n')
-}
-
-function stageActivity(stage: AssistantStage): string {
-  const activeTool = stage.items.find((item) => item.kind === 'tool' && item.status === 'running')
-  if (activeTool?.kind === 'tool') return `正在${toolPresentation(activeTool).label}…`
-  const progress = stage.attempts.find((attempt) => ['thinking', 'running', 'verifying', 'refining'].includes(attempt.progress.status))?.progress
-  if (progress) {
-    if (progress.status === 'verifying') return '正在核对处理结果…'
-    if (progress.status === 'refining') return '正在调整处理步骤…'
-    const step = progress.steps.find((item) => item.status === 'running' || item.status === 'repairing')
-    if (step) return `正在${userFacingText(step.name, '处理数据', 80)}…`
-  }
-  if (stage.status === 'running') return '正在思考…'
-  if (stage.plan) return userFacingText(stage.plan.description, '处理过程', 120)
-  if (stage.attempts.length) return stage.attempts[0]!.label
-  const labels = [...new Set(stage.items.flatMap((item) => item.kind === 'tool' ? [toolPresentation(item).label] : []))]
-  return labels.slice(0, 2).join('、') || '分析需求'
-}
-
-function hasProcess(stage: AssistantStage): boolean {
-  return stage.items.some((item) => item.kind !== 'thinking') || stage.attempts.length > 0 || !!stage.plan || stage.status === 'running'
 }
 
 async function copyReply(format: 'formatted' | 'markdown') {
@@ -121,40 +102,26 @@ const mood = computed(() => {
 const lastTable = computed(() => lastResultTable(props.message))
 const fileCards = computed(() => standaloneFiles(props.message, fileContext.value))
 const questions = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'clarify' ? [a] : [])))
+const answerDrafts = ref<Record<string, string>>({})
+const answersLocked = computed(() => props.message.streaming || props.answersDisabled || props.answersClosed)
 
-// 回答正文逐字显示：后端把最终回答整段给过来，这里做一个很快的打字动画；打开历史消息时直接整段显示
-const animate = props.message.streaming
-const shown = ref(animate ? '' : reply.value)
-let timer = 0
-function tick() {
-  const full = reply.value
-  if (!full.startsWith(shown.value)) {
-    // 过滤重复流程图或撤回过程说明时，保留仍然有效的前文，避免从头打字。
-    let shared = 0
-    while (shared < shown.value.length && shared < full.length && shown.value[shared] === full[shared]) shared++
-    shown.value = full.slice(0, shared)
-  }
-  const remaining = full.length - shown.value.length
-  if (remaining <= 0) {
-    window.clearInterval(timer)
-    timer = 0
-    return
-  }
-  shown.value = full.slice(0, shown.value.length + Math.max(3, Math.ceil(remaining / 14)))
+function submitAnswer(key: string) {
+  const answer = answerDrafts.value[key]?.trim()
+  if (answersLocked.value || !answer) return
+  emit('answer', answer)
+  answerDrafts.value[key] = ''
 }
-watch(
-  reply,
-  (full) => {
-    if (!animate) shown.value = full
-    else if (!timer) timer = window.setInterval(tick, 30)
-  },
-  { immediate: true },
-)
+
+function onAnswerKeydown(event: KeyboardEvent, key: string) {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return
+  event.preventDefault()
+  submitAnswer(key)
+}
+
 onBeforeUnmount(() => {
-  window.clearInterval(timer)
   window.clearTimeout(copiedTimer)
 })
-const typing = computed(() => props.message.streaming || shown.value !== reply.value)
+const typing = computed(() => props.message.streaming)
 </script>
 
 <template>
@@ -163,31 +130,29 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
     <div class="assistant-content w-full min-w-0 space-y-3">
-      <!-- 回复文字留在原位，思考细节穿插在对应阶段，不能集中到正文之前。 -->
-      <section v-for="stage in stages" :key="stage.key" class="assistant-stage space-y-2" :aria-label="stageActivity(stage)" :data-stage="stage.number">
-        <details v-if="hasProcess(stage)" class="assistant-process group/process">
-          <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
-            <LoaderCircle v-if="message.streaming && stage.status === 'running'" class="size-3.5 shrink-0 animate-spin" />
-            <ChevronRight v-else class="size-3.5 shrink-0 transition group-open/process:rotate-90" />
-            <span class="min-w-0 break-words">思考细节：{{ stageActivity(stage) }}</span>
-          </summary>
-          <div class="mb-3 ml-1.5 mt-2 space-y-2 border-l-2 border-line py-1 pl-3.5">
-            <div v-if="stage.plan || stage.attempts.length" class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 text-xs leading-5">
-              <p class="font-medium text-mute">{{ stage.plan ? `${stage.plan.num}. ${userFacingText(stage.plan.description, '处理数据', 120)}` : stage.attempts[0]?.label }}</p>
-              <span :class="stage.status === 'error' ? 'text-error' : 'text-faint'">{{ stage.statusLabel }}</span>
+      <!-- 两段回复间的连续处理记录共用一个折叠项，正文保持原位。 -->
+      <template v-for="group in groups" :key="group.key">
+        <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" aria-label="处理过程" :data-stage="group.stages[0]?.number">
+          <details class="assistant-process group/process">
+            <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
+              <LoaderCircle v-if="message.streaming && group.running" class="size-3.5 shrink-0 animate-spin" />
+              <ChevronRight v-else class="size-3.5 shrink-0 transition group-open/process:rotate-90" />
+              <span>处理过程</span>
+            </summary>
+            <div class="mb-3 ml-1.5 mt-2 space-y-3 border-l-2 border-line py-1 pl-3.5">
+              <div v-for="stage in group.stages" :key="stage.key" class="space-y-2">
+                <TimelineList v-if="stage.items.some((item) => item.kind !== 'thinking')" :items="stage.items" parent-title="处理过程" />
+                <RecipeStageDetails v-for="attempt in stage.attempts" :key="attempt.key" :progress="attempt.progress" />
+                <p v-if="stage.items.every((item) => item.kind === 'thinking') && !stage.attempts.length" class="text-xs leading-5 text-mute">根据你的描述和前文，确认本次要处理的内容。</p>
+              </div>
             </div>
-            <TimelineList v-if="stage.items.some((item) => item.kind !== 'thinking')" :items="stage.items" />
-            <RecipeStageDetails v-for="attempt in stage.attempts" :key="attempt.key" :progress="attempt.progress" />
-            <p v-if="stage.items.every((item) => item.kind === 'thinking') && !stage.attempts.length && !stageSummary(stage)" class="text-xs leading-5 text-mute">{{ stage.status === 'running' ? '正在分析需求，整理处理步骤。' : stage.status === 'pending' ? '尚未开始处理。' : stage.statusLabel }}</p>
-          </div>
-        </details>
-        <div v-if="stageSummary(stage)" class="assistant-stage-summary">
-          <MarkdownView :source="stageSummary(stage)" class="!text-[14px] !leading-6" />
-        </div>
-      </section>
+          </details>
+        </section>
+        <MarkdownView v-else-if="group.text" :source="group.text" :streaming="!group.closed && typing" stable />
+      </template>
 
       <!-- 简单回答直接显示正文；文件卡片收到后即可操作。 -->
-      <MarkdownView v-if="shown" :source="shown" :streaming="typing" />
+      <MarkdownView v-if="fallbackReply" :source="fallbackReply" :streaming="typing" />
       <!-- 表格和流程结果等正文接收和打字都结束后再展示。 -->
       <template v-if="!typing">
         <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" />
@@ -216,7 +181,7 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
             <div class="min-w-0 flex-1">
               <div class="text-[11px] font-semibold tracking-wide text-[#9a6b20]">需要你确认</div>
               <h3 class="mt-1 whitespace-pre-line break-words text-[15px] font-semibold leading-6 [overflow-wrap:anywhere]">{{ a.question }}</h3>
-              <p class="mt-1 text-xs leading-5 text-mute">{{ answersDisabled ? '该问题已结束，可在下方继续对话' : '请选择一项，点击后将继续处理' }}</p>
+              <p class="mt-1 text-xs leading-5 text-mute">{{ answersClosed ? '该问题已结束，可在下方继续对话' : message.streaming || answersDisabled ? '请稍等，正在更新回复' : '选择或直接输入回答' }}</p>
             </div>
           </div>
           <ol class="space-y-2 px-3 pb-3 sm:px-4 sm:pb-4" :aria-label="a.question">
@@ -224,7 +189,7 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
               <button
                 type="button"
                 class="group/option flex min-h-12 w-full items-center gap-3 rounded-xl border border-[#eee9df] bg-white px-3.5 py-3 text-left text-[13px] leading-5 text-ink shadow-[0_1px_2px_rgba(28,25,17,0.03)] transition enabled:hover:border-[#d6bf8d] enabled:hover:bg-[#fffdf8] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d7a337] disabled:cursor-not-allowed disabled:opacity-50"
-                :disabled="message.streaming || answersDisabled"
+                :disabled="answersLocked"
                 @click="emit('answer', opt)"
               >
                 <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center rounded-lg bg-paper text-[11px] font-semibold text-mute transition group-hover/option:bg-[#fff1d2] group-hover/option:text-[#9a6b20]">{{ index + 1 }}</span>
@@ -233,6 +198,21 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
               </button>
             </li>
           </ol>
+          <form class="border-t border-[#eadfc9] px-3 py-3 sm:px-4 sm:py-4" @submit.prevent="submitAnswer(a.key)">
+            <label class="mb-2 block text-xs font-medium text-mute">
+              自定义回答
+              <textarea
+                v-model="answerDrafts[a.key]"
+                rows="2"
+                class="mt-2 block w-full min-w-0 resize-y rounded-xl border border-[#eee9df] bg-white px-3.5 py-3 text-[13px] leading-5 text-ink outline-none transition focus:border-[#d6bf8d] focus:ring-2 focus:ring-[#d7a337]/15 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="answersLocked"
+                @keydown="onAnswerKeydown($event, a.key)"
+              />
+            </label>
+            <div class="flex justify-end">
+              <button type="submit" class="btn-ink h-9 px-4 py-0 text-xs disabled:cursor-not-allowed disabled:opacity-50" :disabled="answersLocked || !answerDrafts[a.key]?.trim()">发送</button>
+            </div>
+          </form>
         </section>
       </template>
 

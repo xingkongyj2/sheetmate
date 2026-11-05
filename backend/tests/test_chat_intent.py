@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from pathlib import Path
 
@@ -44,6 +45,118 @@ def test_invalid_intent_does_not_execute_tools(client, fake_llm):
     assert events[-1]["type"] == "done"
 
 
+@pytest.mark.parametrize(("message", "answer"), [
+    ("1", "你好，想让我帮你做什么？"),
+    ("你好", "你好！有什么需要我帮忙的吗？"),
+    ("？？", "想问什么？可以再说具体一点。"),
+    ("要给1", "你想让我帮你做什么？可以再说具体一点。"),
+])
+def test_ambiguous_input_uses_conversation_without_task_artifacts(client, fake_llm, monkeypatch, message, answer):
+    conversation = _new_conversation(client)
+    llm = fake_llm(script=[{"text": answer}],
+                   json_handlers=[("处理意图判断助手", {"mode": "analyze", "action": "chat"})])
+    stream_chat = llm.stream_chat
+    requested_tools = []
+
+    async def capture_tools(messages, tools=None, **kwargs):
+        requested_tools.append(tools)
+        async for chunk in stream_chat(messages, tools=tools, **kwargs):
+            yield chunk
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("普通对话不应进入任务执行或流程保存判断")
+
+    monkeypatch.setattr(llm, "stream_chat", capture_tools)
+    monkeypatch.setattr(chat_service, "infer_recipe_persistence", unexpected)
+    monkeypatch.setattr(chat_service, "analysis_workspace", unexpected)
+    monkeypatch.setattr(chat_service, "should_activate", unexpected)
+    events = _chat(client, conversation, message)
+
+    assert requested_tools == [None]
+    assert _visible_answer(events) == answer
+    assert not any(event["type"] in {"clarify", "tool_call", "file", "error", "plan_start", "agent_pool_start"} for event in events)
+    assert events[-1]["type"] == "done"
+    stored = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"]
+    assert stored[0]["meta"]["action"] == "chat"
+    assert stored[-1]["content"] == answer and stored[-1]["meta"]["run_id"] is None
+
+
+def test_chat_with_existing_files_ignores_stale_plan_and_does_not_copy_workspace(client, samples, fake_llm, monkeypatch):
+    conversation = _new_conversation(client)
+    _upload(client, conversation, samples["fees_sep"])
+    llm = fake_llm(script=[{"text": "不客气！"}],
+                   json_handlers=[("处理意图判断助手", {"mode": "analyze", "action": "chat"})])
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("本轮致谢不应执行历史计划或复制文件")
+
+    monkeypatch.setattr(chat_service, "analysis_workspace", unexpected)
+    monkeypatch.setattr(AgentExecutor, "execute_plan", unexpected)
+    events = _chat(client, conversation, "谢谢", plan_steps=[{"id": 1, "description": "汇总表格"}])
+
+    assert _visible_answer(events) == "不客气！"
+    assert not any(event["type"] in {"error", "tool_call", "clarify", "plan_start"} for event in events)
+    prompt = next(prompt for prompt in llm.json_prompts if "处理意图判断助手" in prompt)
+    assert samples["fees_sep"].name in prompt
+
+
+def test_chat_does_not_execute_unoffered_tool_calls(client, fake_llm):
+    conversation = _new_conversation(client)
+    answer = "想让我帮你做什么？"
+    llm = fake_llm(script=[{"text": answer, "tools": [("ask_user", {
+        "question": "请选择任务", "options": ["分析", "修改"],
+    })]}], json_handlers=[("处理意图判断助手", {"mode": "analyze", "action": "chat"})])
+    events = _chat(client, conversation, "1")
+
+    assert _visible_answer(events) == answer and len(llm.calls) == 1
+    assert not any(event["type"] in {"clarify", "tool_call", "tool_result", "error"} for event in events)
+
+
+def test_number_reply_resolves_saved_question_options_and_can_execute_task(client, fake_llm):
+    conversation = _new_conversation(client)
+    request = "新建一张登记模板"
+    question = "登记个人费用还是公司费用？"
+    llm = fake_llm(script=[
+        {"tools": [("ask_user", {"question": question, "options": ["个人费用", "公司费用"]})]},
+        {"tools": [("create_workbook", {"filename": "个人费用登记", "sheets": [
+            {"name": "费用", "rows": [["日期", "用途", "金额"]]},
+        ]})]},
+        {"text": "个人费用登记表已生成。"},
+    ], json_handlers=[("处理意图判断助手", {"mode": "create", "action": "process"})])
+
+    first = _chat(client, conversation, request)
+    assert any(event["type"] == "clarify" for event in first)
+    second = _chat(client, conversation, "1")
+    assert any(event["type"] == "file" for event in second)
+    assert not any(event["type"] in {"clarify", "error"} for event in second)
+    prompts = [prompt for prompt in llm.json_prompts if "处理意图判断助手" in prompt]
+    context = json.loads(prompts[1].split("\n")[-1])
+    history = "\n".join(item["content"] for item in context["history"])
+    assert context["message"] == "1"
+    assert request in history and question in history
+    assert "1. 个人费用" in history and "2. 公司费用" in history
+    execution_history = "\n".join(item["content"] or "" for item in llm.calls[1][1:-1])
+    assert "1. 个人费用" in execution_history and "2. 公司费用" in execution_history
+
+
+def test_followup_after_intent_question_can_start_a_real_task(client, fake_llm):
+    conversation = _new_conversation(client)
+    answer = "想让我帮你做什么？"
+    llm = fake_llm(script=[{"text": answer}, {"tools": [("create_workbook", {
+        "filename": "登记表", "sheets": [{"name": "登记", "rows": [["姓名", "部门"]]}],
+    })]}, {"text": "登记表已生成。"}], json_handlers=[("处理意图判断助手", [
+        {"mode": "analyze", "action": "chat"}, {"mode": "create", "action": "process"},
+    ])])
+
+    _chat(client, conversation, "1")
+    events = _chat(client, conversation, "新建姓名和部门两列的登记表")
+    assert any(event["type"] == "file" for event in events)
+    assert not any(event["type"] == "error" for event in events)
+    prompt = [prompt for prompt in llm.json_prompts if "处理意图判断助手" in prompt][1]
+    context = json.loads(prompt.split("\n")[-1])
+    assert [item["content"] for item in context["history"]] == ["1", answer]
+
+
 def test_create_intent_without_upload_uses_creation_context_and_can_change_next_turn(client, fake_llm):
     conversation = _new_conversation(client)
     request = "按这段口述转写新建费用申请表：标题合并居中，姓名、部门、用途、金额四列，真实数据先留空"
@@ -71,13 +184,49 @@ def test_create_intent_without_upload_uses_creation_context_and_can_change_next_
 
 
 def _visible_answer(events):
-    parts = []
-    for event in events:
-        if event["type"] == "note":
-            parts.clear()
-        elif event["type"] == "text_chunk":
-            parts.append(event["content"])
-    return "".join(parts).strip()
+    return "".join(event["content"] for event in events if event["type"] == "text_chunk").strip()
+
+
+def test_reply_blocks_keep_their_order_when_more_process_details_arrive(client, fake_llm, monkeypatch):
+    conversation = _new_conversation(client)
+    fake_llm()
+
+    async def interleaved(self, ctx, message, history):
+        yield {"type": "text_chunk", "content": "先确认金额范围。"}
+        yield {"type": "final_text", "content": "先确认金额范围。"}
+        yield {"type": "note", "content": "已核对金额字段，继续检查缺失记录。"}
+        yield {"type": "text_chunk", "content": "金额"}
+        yield {"type": "text_chunk", "content": "没有缺失。"}
+        yield {"type": "final_text", "content": "金额没有缺失。"}
+
+    monkeypatch.setattr(AgentExecutor, "execute", interleaved)
+    events = _chat(client, conversation, "检查金额")
+    expected = [("reply", "先确认金额范围。"), ("note", "已核对金额字段，继续检查缺失记录。"),
+                ("reply", "金额没有缺失。")]
+    assert [(event["type"], event["content"]) for event in events if event["type"] in {"reply", "note"}] == expected
+    stored = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"][-1]
+    assert stored["content"] == "先确认金额范围。金额没有缺失。"
+    assert [(event["type"], event["content"]) for event in stored["events"] if event["type"] in {"reply", "note"}] == expected
+
+
+def test_stop_preserves_finished_reply_and_appends_partial_reply_once(client, fake_llm, monkeypatch):
+    conversation = _new_conversation(client)
+    fake_llm()
+
+    async def interrupted(self, ctx, message, history):
+        yield {"type": "text_chunk", "content": "已确认金额范围。"}
+        yield {"type": "final_text", "content": "已确认金额范围。"}
+        yield {"type": "note", "content": "接下来检查缺失记录。"}
+        yield {"type": "text_chunk", "content": "已经检查"}
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(AgentExecutor, "execute", interrupted)
+    events = _chat(client, conversation, "检查金额")
+    replies = [event["content"] for event in events if event["type"] == "reply"]
+    assert replies == ["已确认金额范围。", "已经检查\n\n（已停止）"]
+    stored = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"][-1]
+    assert stored["content"] == "".join(replies)
+    assert [event["content"] for event in stored["events"] if event["type"] == "reply"] == replies
 
 
 def test_creation_cannot_report_success_without_a_delivered_file(client, fake_llm):
@@ -88,9 +237,11 @@ def test_creation_cannot_report_success_without_a_delivered_file(client, fake_ll
     assert not any(event["type"] == "file" for event in events)
     answer = _visible_answer(events)
     assert "本轮尚未生成可下载的 Excel 工作簿" in answer and "已建好" not in answer
-    assert any(event["type"] == "note" and event["content"] == claimed for event in events)
+    assert any(event["type"] == "note" and event.get("retracted") and event["content"] == claimed for event in events)
+    assert not any(claimed in event["content"] for event in events if event["type"] in {"text_chunk", "reply"})
     stored = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"][-1]
     assert stored["content"] == answer
+    assert [event["content"] for event in stored["events"] if event["type"] == "reply"] == [answer]
 
 
 @pytest.mark.parametrize("recovered", [False, True])

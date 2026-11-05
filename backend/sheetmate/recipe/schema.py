@@ -143,7 +143,7 @@ class Recipe(BaseModel):
     description: str = ""
     scope: Literal["customer", "global"] = "customer"
     customer_id: str | None = None
-    status: Literal["draft", "active", "deprecated"] = "draft"
+    status: Literal["active", "deprecated"] = "active"
     created_by: Literal["ai", "human"] = "ai"
     learned_from: dict[str, Any] = Field(default_factory=dict)
     inputs: list[RecipeInput] = Field(default_factory=list)
@@ -154,6 +154,11 @@ class Recipe(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _legacy_status(cls, value: Any) -> Any:
+        return "active" if value == "draft" else value
 
     # ------------------------------------------------------------------
 

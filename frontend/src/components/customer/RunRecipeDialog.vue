@@ -17,6 +17,7 @@ import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
 import { addProgressFile, applyRecipeEvent, newProgress, type FileArtifact, type RecipeProgress, type StepState } from '@/composables/chatModel'
 import { progressFlow } from '@/composables/recipeFlow'
+import { recipeStatus } from '@/composables/recipeStatus'
 import { useToast } from '@/composables/useToast'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
@@ -26,7 +27,7 @@ const emit = defineEmits<{ close: []; done: [] }>()
 const toast = useToast()
 
 const stage = ref<'pick' | 'match' | 'run'>('pick')
-const recipeId = ref(props.initialRecipeId ?? props.recipes.find((r) => r.status === 'active')?.recipe_id ?? props.recipes[0]?.recipe_id ?? '')
+const recipeId = ref(props.initialRecipeId ?? props.recipes.find((r) => recipeStatus(r.status) === 'active')?.recipe_id ?? props.recipes[0]?.recipe_id ?? '')
 const localFiles = ref<FileInfo[]>([...props.files.filter((f) => f.kind === 'input')])
 const chosen = ref<string[]>([])
 const uploading = ref(false)
@@ -133,7 +134,7 @@ const flow = computed(() => {
             :class="recipeId === r.recipe_id ? 'border-ink' : 'border-line hover:bg-paper'"
             @click="recipeId = r.recipe_id"
           >
-            <div class="flex items-center gap-2"><span class="font-medium">{{ r.name }}</span><span class="tag">v{{ r.version }}</span><StatusPill :status="r.status" class="ml-auto" /></div>
+            <div class="flex items-center gap-2"><span class="font-medium">{{ r.name }}</span><span class="tag">v{{ r.version }}</span><StatusPill :status="recipeStatus(r.status)" class="ml-auto" /></div>
             <div class="mt-1 line-clamp-2 text-xs text-mute">{{ r.description }}</div>
             <div class="mt-2 text-[11px] text-faint">需要：{{ r.input_patterns.map((i) => `${i.alias}（${i.file_pattern || '任意文件'}）`).join('、') }}</div>
           </button>
@@ -207,7 +208,7 @@ const flow = computed(() => {
           <a :href="file.download_url" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
         </div>
       </div>
-      <div v-if="progress.saved" class="rounded-xl bg-fun-purple/10 px-3 py-2 text-xs text-fun-purple">流程已保存为 v{{ progress.saved.version }}（草稿）。</div>
+      <div v-if="progress.saved" class="rounded-xl bg-fun-purple/10 px-3 py-2 text-xs text-fun-purple">流程已保存为 v{{ progress.saved.version }}。</div>
     </div>
 
     <template #footer>

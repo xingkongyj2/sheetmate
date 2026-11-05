@@ -117,7 +117,7 @@ def _historical_recipe_flows(db: Session, conv: Conversation) -> dict[tuple[str,
 
 
 def message_dict(m: Message, *, recipe_flows: dict[tuple[str, int], dict[str, Any]] | None = None) -> dict[str, Any]:
-    migrated = externalize_script_references(m.events or [])
+    migrated = recipe_service.normalize_recipe_statuses(externalize_script_references(m.events or []))
     if migrated != m.events:
         m.events = migrated
     bind_script_references(migrated, conversation_id=m.conversation_id)

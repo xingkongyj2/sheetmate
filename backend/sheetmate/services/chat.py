@@ -51,7 +51,7 @@ from sheetmate.services.jobs import Job, jobs
 _registry = ToolRegistry()
 _background: set[asyncio.Task] = set()  # 持有后台任务的引用，防止被垃圾回收
 _KEEP_EVENTS = {
-    "note", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
+    "note", "reply", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
@@ -110,23 +110,44 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     recorder = WorkflowRecorder(message)
     stored: list[dict[str, Any]] = []
     text_parts: list[str] = []
+    reply_parts: list[str] = []
+    candidate_parts: list[str] = []
+    candidate_final = ""
     final_text = ""
     analysis: AnalysisWorkspace | None = None
+
+    async def finish_reply() -> None:
+        if not reply_parts:
+            return
+        event = {"type": "reply", "content": "".join(reply_parts)}
+        reply_parts.clear()
+        stored.append(_slim(event))
+        await job.emit(event)
 
     async def emit(event: dict[str, Any]) -> None:
         nonlocal final_text
         event = externalize_script_references(event)
         bind_script_references(event, user_id=user_id, conversation_id=conversation_id)
         recorder.observe(event)
+        if event["type"] not in {"text_chunk", "final_text"}:
+            # 在下一个过程块之前保存已经展示的正文，历史恢复时保持同样顺序。
+            await finish_reply()
         if event["type"] == "text_chunk":
             text_parts.append(event["content"])
+            reply_parts.append(event["content"])
         elif event["type"] == "note":
-            text_parts.clear()
-            final_text = ""
+            if event.get("retracted"):
+                text_parts.clear()
+                final_text = ""
             stored.append(_slim(event))
         elif event["type"] == "final_text":
-            final_text = event.get("content", "")
-            return  # 文本已经以 text_chunk 推送过
+            content = event.get("content", "")
+            if content and not text_parts:
+                text_parts.append(content)
+                reply_parts.append(content)
+            final_text = "".join(text_parts).strip()
+            await finish_reply()
+            return  # reply 结束当前正文块，兼顾实时展示与历史恢复。
         elif event["type"] in _KEEP_EVENTS:
             stored.append(_slim(event))
         if analysis is not None and event["type"] == "table":
@@ -199,8 +220,9 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             _save_assistant(conversation_id, answer, stored, recorder, None)
             await job.emit({"type": "done"})
             return
-        ctx.save_recipe_requested = await infer_recipe_persistence(llm, message, history)
-        host.save_recipe_requested = ctx.save_recipe_requested
+        if intent.action == "process":
+            ctx.save_recipe_requested = await infer_recipe_persistence(llm, message, history)
+            host.save_recipe_requested = ctx.save_recipe_requested
     except asyncio.CancelledError:
         recorder.error = "用户停止了生成"
         _save_assistant(conversation_id, "（已停止，尚未处理文件）", stored, recorder, None)
@@ -220,37 +242,52 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             conv.mode = ctx.mode
         request = db.get(Message, message_id)
         if request is not None:
-            request.meta = {**(request.meta or {}), "mode": ctx.mode}
+            request.meta = {**(request.meta or {}), "mode": ctx.mode, "action": intent.action}
     executor = AgentExecutor(llm, _registry, max_iterations=settings.agent_max_iterations)
     run_id = None
 
     async def guard_creation_delivery(*, interrupted: bool = False) -> str:
+        nonlocal candidate_final
         summary = (_creation_fallback(stored, interrupted=interrupted) if ctx.mode == "create" else "")
         summary = summary or _script_fallback(stored, mode=ctx.mode, interrupted=interrupted)
         if not summary:
             return ""
-        previous = final_text or "".join(text_parts).strip()
+        previous = candidate_final or "".join(candidate_parts).strip() or final_text or "".join(text_parts).strip()
+        candidate_parts.clear()
+        candidate_final = ""
         if previous:
-            # 撤回模型尚未交付文件时的回答，避免界面和保存的最终结果宣称建表成功。
-            await emit({"type": "note", "content": previous})
+            # 候选正文从未展示；仅保留诊断记录，不让未经交付检查的声明进入用户过程。
+            await emit({"type": "note", "content": previous, "retracted": True})
         await emit({"type": "text_chunk", "content": summary})
         await emit({"type": "final_text", "content": summary})
         return summary
 
+    async def publish_candidate() -> None:
+        nonlocal candidate_final
+        content = candidate_final or "".join(candidate_parts)
+        candidate_parts.clear()
+        candidate_final = ""
+        if content:
+            await emit({"type": "text_chunk", "content": content})
+            await emit({"type": "final_text", "content": content})
+
     try:
         with ExitStack() as resources:
-            analysis = resources.enter_context(analysis_workspace(ctx.ws))
-            ctx.ws = host.ws = analysis.ws
-            host.analysis = analysis
-            for table in ctx.ws.list_tables():
-                if table.file_id:
-                    host.file_path(table.file_id)
-            if ctx.mode == "analyze":
-                with session_scope() as db:
-                    run_id = run_service.create_run(db, kind="analysis", user_id=user_id, customer_id=ctx.host.customer_id,
-                                                    conversation_id=conversation_id, request_text=message).id
+            if intent.action == "process":
+                analysis = resources.enter_context(analysis_workspace(ctx.ws))
+                ctx.ws = host.ws = analysis.ws
+                host.analysis = analysis
+                for table in ctx.ws.list_tables():
+                    if table.file_id:
+                        host.file_path(table.file_id)
+                if ctx.mode == "analyze":
+                    with session_scope() as db:
+                        run_id = run_service.create_run(db, kind="analysis", user_id=user_id, customer_id=ctx.host.customer_id,
+                                                        conversation_id=conversation_id, request_text=message).id
             await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None})
-            if plan_steps:
+            if intent.action == "chat":
+                stream = executor.converse(ctx, message, history)
+            elif plan_steps:
                 stream = executor.execute_plan(ctx, message, plan_steps, history)
             elif should_activate(ctx, message):
                 stream = execute_multi(executor, ctx, message, history)
@@ -258,11 +295,21 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 stream = executor.execute(ctx, message, history)
             async with aclosing(stream):
                 async for event in stream:
-                    await emit(event)
+                    # 新建/修改的完成声明要先核对实际交付，再作为固定正文发布。
+                    # 分析中的脚本失败也需要同样保护，避免事后替换已经显示的结论。
+                    guarded_reply = intent.action == "process" and (ctx.mode in {"create", "modify"}
+                        or bool(_script_fallback(stored, mode=ctx.mode)))
+                    if guarded_reply and event["type"] == "text_chunk":
+                        candidate_parts.append(event["content"])
+                    elif guarded_reply and event["type"] == "final_text":
+                        candidate_final = event.get("content", "")
+                    else:
+                        await emit(event)
     except asyncio.CancelledError:
         recorder.error = "用户停止了生成"
         answer = await guard_creation_delivery(interrupted=True)
         if not answer:
+            await publish_candidate()
             summary = _recipe_fallback(stored, interrupted=True) or "（已停止）"
             separator = "\n\n" if text_parts else ""
             await emit({"type": "text_chunk", "content": separator + summary})
@@ -275,7 +322,10 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     except Exception as exc:
         await emit({"type": "error", "content": f"处理出错：{exc}"})
 
-    answer = await guard_creation_delivery() or final_text or "".join(text_parts).strip()
+    answer = await guard_creation_delivery()
+    if not answer:
+        await publish_candidate()
+        answer = final_text or "".join(text_parts).strip()
     if not answer or recorder.error:
         summary = _recipe_fallback(stored, interrupted=bool(recorder.error))
         if summary:
@@ -285,6 +335,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             await emit({"type": "final_text", "content": answer})
     if not answer and recorder.error:
         answer = f"⚠️ {recorder.error}"
+    await finish_reply()
     _save_assistant(conversation_id, answer, stored, recorder, run_id)
     title = await _maybe_title(conversation_id, llm, message, answer)
     if title:
@@ -294,6 +345,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                         "deleted_recipe_ids": [item["recipe_id"] for item in host.deleted_recipes]})
         customer_service.schedule_summary_refresh(ctx.host.customer_id)  # 流程变了：后台更新客户的整体处理逻辑
     await job.emit({"type": "done"})
+    if intent.action == "chat":
+        return
     # 记忆抽取放到独立的后台任务里，不占用这次请求的连接
     task = asyncio.create_task(_learn_memories(llm, user_id, conversation_id, ctx.host.customer_id, message, answer))
     _background.add(task)
@@ -490,8 +543,7 @@ async def _history(conversation_id: str, llm: Any, emit: Any) -> list[dict[str, 
             conv.summary_until = 0
         rows = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id, Message.id > summary_until)
                                .order_by(Message.id)))[:-1]
-    items = [{"id": m.id, "role": m.role, "content": (m.content or "") + (
-        "\n" + (m.meta or {}).get("digest", "") if m.role == "assistant" and (m.meta or {}).get("digest") else "")}
+    items = [{"id": m.id, "role": m.role, "content": _history_content(m)}
         for m in rows if not is_llm_not_configured_message(m.role, m.content, m.events)]
     if len(items) > COMPACT_THRESHOLD:
         older, recent = items[:-8], items[-8:]
@@ -507,6 +559,22 @@ async def _history(conversation_id: str, llm: Any, emit: Any) -> list[dict[str, 
     history = [{"role": "assistant", "content": summary}] if summary else []
     history += [{"role": m["role"], "content": m["content"]} for m in items if m["content"].strip()]
     return history
+
+
+def _history_content(message: Message) -> str:
+    content = message.content or ""
+    if message.role != "assistant":
+        return content
+    digest = (message.meta or {}).get("digest")
+    if digest:
+        content += "\n" + digest
+    # 澄清卡的选项不在正文或工具摘要中；保留它们才能理解下一轮的数字回答。
+    for event in message.events or []:
+        if event.get("type") != "clarify":
+            continue
+        options = "\n".join(f"{index}. {option}" for index, option in enumerate(event.get("options") or [], 1))
+        content += f"\n助手提问：{event.get('question', '')}" + (f"\n{options}" if options else "")
+    return content
 
 
 async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str) -> str | None:

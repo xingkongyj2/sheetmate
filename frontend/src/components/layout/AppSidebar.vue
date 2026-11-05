@@ -32,7 +32,7 @@ const stopTrackingSettings = router.afterEach((to, from, failure) => {
   }
 })
 
-const username = computed(() => auth.user?.display_name || auth.user?.account || '')
+const username = computed(() => auth.user?.account || '')
 const initial = computed(() => (username.value || '?').slice(0, 1).toUpperCase())
 
 function collapseOnNarrowScreen(event: MediaQueryListEvent) {

@@ -39,7 +39,7 @@ from sheetmate.recipe.schema import Recipe
 MAX_TOOL_TEXT = 6000
 PREVIEW_ROWS = 50
 RUN_STATUS_LABELS = {"success": "成功", "warning": "完成（有提示）", "failed": "失败", "escalated": "需要人工处理", "running": "运行中"}
-RECIPE_STATUS_LABELS = {"draft": "草稿", "active": "已启用", "deprecated": "已停用"}
+RECIPE_STATUS_LABELS = {"active": "已启用", "deprecated": "已停用"}
 
 
 def _status_label(status: str) -> str:
@@ -676,30 +676,51 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
     yield ToolResult(_clip(text), ok=ok, summary=f"执行「{recipe.name}」：{_status_label(runner.report['status'])}", tables=tables)
 
 
+def _recipe_for_saved_outputs(ctx: AgentContext, targets: list[str]) -> Recipe | None:
+    """完整保存已有流程的输出时复用原定义，避免再次编译成第二个流程。"""
+    snapshots = []
+    refs = []
+    for table in targets:
+        info = ctx.ws.require(table)
+        provenance = info.step or {}
+        snapshot = provenance.get("recipe_snapshot")
+        if info.role != "result" or not isinstance(snapshot, dict) or not provenance.get("table_ref"):
+            return None
+        snapshots.append(Recipe.model_validate(snapshot))
+        refs.append(provenance["table_ref"])
+    recipe = snapshots[0]
+    run_id = (recipe.metadata.get("last_run") or {}).get("run_id")
+    if any(item.id != recipe.id or (item.metadata.get("last_run") or {}).get("run_id") != run_id for item in snapshots):
+        return None
+    if len(refs) != len(recipe.output_spec) or set(refs) != {output.source for output in recipe.output_spec}:
+        return None
+    return recipe
+
+
 def _tool_save_as_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     if not ctx.save_recipe_requested:
         raise ValueError("用户没有要求保存重复流程；只完成本次处理，不要主动保存或追问保存。")
     targets = [str(t) for t in (args.get("output_tables") or [])]
     if targets:
-        recipe = compile_from_workspace(
+        recipe = _recipe_for_saved_outputs(ctx, targets) or compile_from_workspace(
             ctx.ws, targets, ctx.library, name=str(args.get("name") or "分析流程"), description=str(args.get("description") or ""),
             customer_id=(ctx.customer or {}).get("id"), conversation_id=ctx.conversation_id, field_mapping=ctx.host.field_mapping(),
             file_resolver=ctx.host.file_dependency,
         )
-        saved = ctx.host.store_recipe(recipe, note="按用户要求保存分析流程")
     else:
         recipe = (ctx.host.executed_recipe(str(args["run_id"])) if args.get("run_id") else
                   ctx.host.get_recipe(str(args["recipe_id"])) if args.get("recipe_id") else ctx.host.latest_conversation_recipe())
         if recipe is None:
             raise ValueError("没有找到可保存的执行记录；请指定已执行的 run_id 或最终结果表。公式、SQL 和 Python 脚本均可保存。")
-        if args.get("name"):
-            recipe.name = str(args["name"])
-        if args.get("description"):
-            recipe.description = str(args["description"])
-        recipe.status = "active" if (recipe.metadata.get("last_run") or {}).get("status") in {"success", "warning"} else "draft"
-        saved = ctx.host.store_recipe(recipe, note="按用户要求保存本次处理流程")
+    if args.get("name"):
+        recipe.name = str(args["name"])
+    if args.get("description"):
+        recipe.description = str(args["description"])
+    recipe.status = "active"
+    saved = ctx.host.store_recipe(recipe, note="按用户要求保存本次处理流程")
     steps = "；".join(f"{s.id}. {s.name}（{s.formula}）" for s in recipe.ordered_steps())
-    return ToolResult(f"已保存流程「{recipe.name}」v{saved['version']}（recipe_id={saved['recipe_id']}），共 {len(recipe.steps)} 步：{steps}",
+    return ToolResult(f"已保存并启用流程「{recipe.name}」v{saved['version']}（recipe_id={saved['recipe_id']}），共 {len(recipe.steps)} 步：{steps}。"
+                      "界面已展示这一个正式流程，无需再调用 get_recipe 展示，或再次保存相同流程。",
                       summary=f"保存流程「{recipe.name}」", events=[{"type": "recipe_saved", **saved, "flow": recipe.flow()}])
 
 
@@ -901,7 +922,8 @@ def _static_tools() -> list[Tool]:
              _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；键使用 get_recipe 返回的完整输入 alias；省略时优先沿用当前范围内的已有绑定，再按列或文件名匹配"},
                    "allow_repair": {"type": "boolean", "description": "出错时是否允许 AI 自动修复，默认 true"}}, ["recipe_id"]),
              modify, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
-        Tool("save_as_recipe", "仅用户明确要求保存重复流程时调用。支持公式、SQL、Python 脚本和混合流程；保存实际执行的代码与依赖，不需要重新处理文件。",
+        Tool("save_as_recipe", "仅用户明确要求保存重复流程时调用，直接保存并启用正式流程。支持公式、SQL、Python 脚本和混合流程；保存实际执行的代码与依赖，不需要重新处理文件。"
+             "若 build_recipe、revise_recipe 或 run_recipe 已返回 recipe_saved，则同一流程已经保存，不要再次调用本工具。保存后界面自动展示流程图，无需再调用 get_recipe。",
              _obj({"output_tables": {**_STR_LIST, "description": "可选：公式、SQL 或脚本生成的最终结果表。不填则保存指定或最近已执行流程"}, "name": _STR,
                    "run_id": {**_STR, "description": "可选：明确指定脚本或混合流程的运行 ID，优先于 recipe_id"},
                    "recipe_id": {**_STR, "description": "可选：指定本会话已执行的流程 ID，不填用最近的"},

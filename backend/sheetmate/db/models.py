@@ -186,7 +186,7 @@ class RecipeRecord(Base):
         ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
     )
     conversation_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # 来源会话
-    status: Mapped[str] = mapped_column(String(16), default="draft")
+    status: Mapped[str] = mapped_column(String(16), default="active")
     created_by: Mapped[str] = mapped_column(String(16), default="ai")
     body: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # 完整 Recipe JSON
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

@@ -19,6 +19,60 @@ export interface AssistantStage {
   plan?: PlanItem
 }
 
+export type AssistantDisplayBlock =
+  | { kind: 'text'; key: string; text: string; closed: boolean }
+  | { kind: 'process'; key: string; stage: AssistantStage }
+
+export type AssistantDisplayGroup =
+  | Extract<AssistantDisplayBlock, { kind: 'text' }>
+  | { kind: 'process'; key: string; stages: AssistantStage[]; running: boolean }
+
+/** Adjacent operations share one disclosure; every text block keeps its original boundary. */
+export function groupAssistantBlocks(blocks: AssistantDisplayBlock[]): AssistantDisplayGroup[] {
+  const groups: AssistantDisplayGroup[] = []
+  for (const block of blocks) {
+    if (block.kind === 'text') {
+      groups.push(block)
+      continue
+    }
+    const previous = groups.at(-1)
+    if (previous?.kind === 'process') {
+      previous.stages.push(block.stage)
+      previous.running ||= block.stage.status === 'running'
+    } else {
+      groups.push({ kind: 'process', key: block.key, stages: [block.stage], running: block.stage.status === 'running' })
+    }
+  }
+  return groups
+}
+
+/** Keep every displayed section at the anchor created by its first event. */
+export function assistantDisplayBlocks(message: UiMessage): AssistantDisplayBlock[] {
+  if (!message.blocks) {
+    return [
+      ...assistantStages(message).map((stage): AssistantDisplayBlock => ({ kind: 'process', key: stage.key, stage })),
+      ...(message.content ? [{ kind: 'text' as const, key: `${message.key}_reply`, text: message.content, closed: !message.streaming }] : []),
+    ]
+  }
+  const items = new Map(message.timeline.map((item) => [item.key, item]))
+  const attempts = new Map(recipeAttempts(message).map((attempt) => [attempt.key, attempt]))
+  let number = 0
+  return message.blocks.map((block): AssistantDisplayBlock => {
+    if (block.kind === 'text') return block
+    const stage: AssistantStage = {
+      key: block.key, number: ++number, title: block.title,
+      status: 'done', statusLabel: '',
+      items: block.itemKeys.flatMap((key) => items.has(key) ? [items.get(key)!] : []),
+      attempts: block.recipeKeys.flatMap((key) => attempts.has(key) ? [attempts.get(key)!] : []),
+      summary: '', toolCount: 0,
+    }
+    stage.toolCount = stage.items.filter((item) => item.kind === 'tool').length
+    stage.status = !block.closed && message.streaming ? 'running' : stageStatus(stage)
+    stage.statusLabel = PLAN_STATUS_LABELS[stage.status]
+    return { kind: 'process', key: block.key, stage }
+  })
+}
+
 const ACTIVE_RECIPE_STATUSES = new Set(['thinking', 'running', 'verifying', 'refining'])
 const RECIPE_TOOLS = new Set(['build_recipe', 'revise_recipe', 'run_recipe'])
 
@@ -32,6 +86,8 @@ function stageStatus(stage: AssistantStage): PlanStatus {
       stage.attempts.some((attempt) => ACTIVE_RECIPE_STATUSES.has(attempt.progress.status))) return 'running'
   if (stage.items.some((item) => (item.kind === 'tool' || item.kind === 'agent') && item.status === 'error') ||
       stage.attempts.some((attempt) => recipeFailure(attempt.progress))) return 'error'
+  const plan = stage.items.find((item) => item.kind === 'plan')
+  if (plan?.kind === 'plan') return plan.status
   return 'done'
 }
 
@@ -41,6 +97,8 @@ function actionSummary(stage: AssistantStage): string {
   if (!tools.length || tools.some((tool) => tool.status === 'running')) return ''
   const failed = tools.filter((tool) => tool.status === 'error').length
   if (failed) return `本阶段完成 ${tools.length - failed} 项操作，${failed} 项未完成。`
+  // The clarification card already contains the question and its options.
+  if (tools.every((tool) => tool.tool === 'ask_user')) return ''
   return userFacingText(tools.at(-1)?.summary, `本阶段已完成 ${tools.length} 项操作。`)
 }
 

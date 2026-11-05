@@ -209,15 +209,17 @@ def test_text_before_tool_call_is_process_note_not_answer(client, samples, fake_
     ])
     events = _chat(client, conv, "按店铺统计金额")
     answer = "".join(e["content"] for e in events if e["type"] == "text_chunk")
-    # 被撤回的实时输出之后，剩下的文字只能是最终回答
     notes = [e["content"] for e in events if e["type"] == "note" and e["content"]]
     assert "先看一下表。" in notes and any("我先看一下这张表" in n for n in notes)
     last_note = max(i for i, e in enumerate(events) if e["type"] == "note")
     final_answer = "".join(e["content"] for e in events[last_note + 1 :] if e["type"] == "text_chunk")
     assert final_answer.startswith("共 8 家店铺") and "先看一下表" not in final_answer
-    assert answer.endswith(final_answer)
+    # 过程说明从未作为正文流出，无需撤回用户已经看到的文字。
+    assert answer == final_answer
+    assert [e["content"] for e in events if e["type"] == "reply"] == [final_answer]
     stored = client.get(f"/api/conversations/{conv}").json()["conversation"]["messages"][-1]
     assert stored["content"].startswith("共 8 家店铺") and "我先看一下" not in stored["content"]
+    assert [e["content"] for e in stored["events"] if e["type"] == "reply"] == [final_answer]
 
 
 def test_tool_error_is_returned_to_llm(client, samples, fake_llm):
@@ -241,6 +243,20 @@ def test_ask_user_ends_turn(client, samples, fake_llm):
     events = _chat(client, conv, "统计一下")
     clarify = next(e for e in events if e["type"] == "clarify")
     assert clarify["options"] == ["金额", "重量"]
+
+
+def test_explanation_before_clarification_is_only_shown_once(client, samples, fake_llm):
+    conv = _new_conversation(client)
+    _upload(client, conv, samples["fees_sep"])
+    lead = "表内有金额和重量两个统计口径，需要先确定本次使用哪个。"
+    fake_llm(script=[{"text": lead, "tools": [("ask_user", {
+        "question": "按哪个金额统计？", "options": ["金额", "重量"],
+    })]}])
+    events = _chat(client, conv, "统计一下")
+    assert [event["content"] for event in events if event["type"] == "note"] == [lead]
+    assert not any(event["type"] in {"text_chunk", "reply"} for event in events)
+    stored = client.get(f"/api/conversations/{conv}").json()["conversation"]["messages"][-1]
+    assert stored["content"] == "" and not any(event["type"] == "reply" for event in stored["events"])
 
 
 def test_multi_table_compare(client, samples, fake_llm):
@@ -433,7 +449,7 @@ def test_rerun_from_step_with_new_params(client, save_recipe):
     assert stored_recipe["version"] == after["recipe_version"]
     if save_recipe:
         saved = next(e for e in events if e["type"] == "recipe_saved")
-        assert saved["status"] == "draft"
+        assert saved["status"] == "active"
         assert saved["version"] == after["recipe_version"] == run["run"]["recipe_version"] + 1
         assert stored_recipe["steps"][2]["params"]["missing_fill"] == missing_fill
     else:

@@ -392,12 +392,18 @@ class ConversationHost:
             last_run = db.get(Run, last_run_id) if last_run_id else None
             if last_run is not None and (last_run.validation or {}).get("recipe_deleted"):
                 raise ServiceError("这个流程已删除，不能从历史快照重新保存。")
-            record = recipe_service.save_recipe(db, recipe, conversation_id=self.conversation_id)
+            if last_run is not None and last_run.status not in {"success", "warning"}:
+                raise ServiceError("本次执行未完成，尚不能保存流程。")
+            original_id = recipe.id
+            recipe.status = "active"
+            record = recipe_service.save_recipe_if_changed(db, recipe, conversation_id=self.conversation_id)
             brief = recipe_service.recipe_brief(record)
-            if last_run is not None and last_run.conversation_id == self.conversation_id and last_run.recipe_id == recipe.id:
+            if last_run is not None and last_run.conversation_id == self.conversation_id and last_run.recipe_id == original_id:
+                last_run.recipe_id = recipe.id
                 last_run.recipe_version = recipe.version
                 last_run.validation = {**(last_run.validation or {}), "recipe_snapshot": recipe.to_dict()}
         self._last_recipe = recipe.model_copy(deep=True)
+        self.saved_recipes = [item for item in self.saved_recipes if item["recipe_id"] != brief["recipe_id"]]
         self.saved_recipes.append(brief)
         return brief
 
@@ -502,10 +508,10 @@ class ConversationHost:
             return {**public[-1], "files": public} if public else None
 
     def save_recipe(self, recipe: Recipe, *, verification: dict[str, Any] | None, run_report: dict[str, Any]) -> dict[str, Any]:
-        """流程闭环结束后保存：执行成功且（有人工结果时）验证通过 → active，否则 draft。"""
-        ok = run_report.get("status") in {"success", "warning"}
-        verified = verification is None or verification.get("status") in {"pass", "warn"}
-        recipe.status = "active" if ok and verified else "draft"  # type: ignore[assignment]
+        """用户要求保存时直接启用；未通过的执行不保存为可复用流程。"""
+        if run_report.get("status") not in {"success", "warning"}:
+            raise ServiceError("本次执行未完成，尚不能保存流程。")
+        recipe.status = "active"
         recipe.customer_id = recipe.customer_id or self.customer_id
         note = "AI 生成" if recipe.version <= 1 else "AI 修订"
         return self.store_recipe(recipe, note=note)

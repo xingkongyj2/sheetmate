@@ -9,6 +9,8 @@
  */
 import type { AgentEvent, DiffCard, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
 import { scriptReferences } from './scriptPresentation.ts'
+import { recipeProcessDetails, type RecipeProcessDetail } from './recipeProcessDetails'
+import { recipeStatus, recipeStatusLabel } from './recipeStatus'
 
 export type ToolStatus = 'running' | 'ok' | 'error'
 export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' | 'error' | 'stopped'
@@ -66,6 +68,7 @@ export interface RecipeProgress {
   recipeVersion?: number
   deleted?: boolean
   steps: StepState[]
+  details?: RecipeProcessDetail[]
   inputs: { alias: string; kind?: 'table' | 'file'; filename: string; sheet: string | null; rows: number; renames: Record<string, string>; warnings: string[] }[]
   outputs?: { sheet: string; rows: number }[]
   validation?: { status: string; summary: string; checks: { status: string; description: string; message: string }[] }
@@ -138,17 +141,23 @@ export interface UiMessage {
   streaming: boolean
   timeline: TimelineItem[]
   artifacts: Artifact[]
+  blocks?: AssistantBlock[]
   /** 开发者日志保留诊断事件；主聊天仍使用 timeline / artifacts 的用户视图。 */
   events?: AgentEvent[]
   error?: string
   createdAt?: string
 }
 
+export type AssistantBlock =
+  | { kind: 'process'; key: string; title: string; itemKeys: string[]; recipeKeys: string[]; closed: boolean }
+  | { kind: 'text'; key: string; text: string; source: 'note' | 'reply'; closed: boolean }
+
 let seq = 0
 export const uid = (prefix = 'k') => `${prefix}_${Date.now().toString(36)}_${(seq++).toString(36)}`
 
 export function newAssistant(): UiMessage {
-  return { key: uid('m'), role: 'assistant', content: '', meta: {}, streaming: true, timeline: [], artifacts: [] }
+  return { key: uid('m'), role: 'assistant', content: '', meta: {}, streaming: true, timeline: [], artifacts: [],
+    blocks: [{ kind: 'process', key: uid('b'), title: '理解需求', itemKeys: [], recipeKeys: [], closed: false }] }
 }
 
 export function newUser(content: string, meta: Record<string, unknown> = {}): UiMessage {
@@ -176,6 +185,12 @@ function stepOf(p: RecipeProgress, id: number): StepState | undefined {
 
 /** 把一个 recipe_* 事件归并进进度对象，返回 true 表示已处理 */
 export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
+  const handled = mergeRecipeEvent(p, e)
+  if (handled) (p.details ??= []).push(...recipeProcessDetails(p, e))
+  return handled
+}
+
+function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
   switch (e.type) {
     case 'recipe_learn_start':
       p.mode = e.mode === 'revise' ? 'revise' : 'learn'
@@ -289,7 +304,9 @@ export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       return true
     case 'recipe_completed':
     case 'recipe_saved':
-      p.saved = e.type === 'recipe_saved' ? e as unknown as RecipeProgress['saved'] : undefined
+      p.saved = e.type === 'recipe_saved'
+        ? { ...e, status: recipeStatus(e.status), status_label: recipeStatusLabel(e.status) } as unknown as RecipeProgress['saved']
+        : undefined
       if (e.type === 'recipe_saved') p.deleted = false
       p.recipeId = e.recipe_id ?? p.recipeId
       if (e.flow) p.flow = e.flow
@@ -344,6 +361,13 @@ const RECIPE_TOOLS = new Set(['build_recipe', 'revise_recipe', 'run_recipe'])
 
 /** 把一个事件归并进助手消息（recipe_* 事件交给流程进度对象处理）。 */
 export function applyEvent(msg: UiMessage, e: AgentEvent): void {
+  const timelineStart = msg.timeline.length
+  const artifactStart = msg.artifacts.length
+  mergeEvent(msg, e)
+  appendBlocks(msg, e, timelineStart, artifactStart)
+}
+
+function mergeEvent(msg: UiMessage, e: AgentEvent): void {
   // 文本增量与模型思考不属于执行诊断，避免日志里堆积流式碎片。
   if (e.type !== 'text_chunk' && e.type !== 'thinking') (msg.events ??= []).push({ ...e })
   if (e.type === 'recipe_view') {
@@ -352,7 +376,7 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
         !Array.isArray(e.flow.inputs) || !Array.isArray(e.flow.steps) || !Array.isArray(e.flow.outputs)) return
     const view: RecipeViewArtifact = {
       recipe_id: e.recipe_id, name: e.name ?? '处理流程', description: e.description ?? '',
-      version: e.version ?? 1, status: e.status ?? 'draft', status_label: e.status_label ?? '',
+      version: e.version ?? 1, status: recipeStatus(e.status), status_label: recipeStatusLabel(e.status),
       toolCallId: e.tool_call_id,
       // 只接收流程图公开字段，快照不依赖后续 API 请求，也不携带执行参数或 SQL。
       flow: {
@@ -398,8 +422,7 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       msg.content += e.content
       break
     case 'note':
-      // 后端判定：刚才这一轮文字后面跟着工具调用，是过程说明——撤回已经实时输出的部分，挪进「执行过程」
-      msg.content = ''
+      if (e.retracted) break
       if (typeof e.content === 'string' && e.content.trim()) {
         msg.timeline.push({ kind: 'note', key: uid('t'), text: e.content.trim(), step: e.step_num ?? activePlan(msg)?.num })
       }
@@ -412,7 +435,6 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'tool_call':
-      flushNote(msg)
       msg.timeline.push({ kind: 'tool', key: uid('t'), id: e.id, tool: e.tool, label: e.label, params: e.params ?? {}, status: 'running', step: activePlan(msg)?.num })
       if (RECIPE_TOOLS.has(e.tool)) {
         const progress = newProgress(e.tool === 'run_recipe' ? 'replay' : e.tool === 'revise_recipe' ? 'revise' : 'learn', e.id)
@@ -472,7 +494,6 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
       }
       break
     case 'step_start': {
-      flushNote(msg)
       const item = msg.timeline.find((entry) => entry.kind === 'plan' && entry.num === e.step_num)
       if (item?.kind === 'plan') item.status = 'running'
       else msg.timeline.push({ kind: 'plan', key: uid('t'), num: e.step_num, total: e.total, description: e.description, status: 'running' })
@@ -480,7 +501,6 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     }
     case 'step_done': {
       const item = [...msg.timeline].reverse().find((t) => t.kind === 'plan' && t.num === e.step_num)
-      flushNote(msg)
       if (item && item.kind === 'plan') {
         item.status = ['done', 'warning', 'waiting', 'error', 'stopped'].includes(e.status) ? e.status : 'done'
         if (typeof e.summary === 'string') item.summary = e.summary
@@ -519,6 +539,94 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
   }
 }
 
+function closeBlock(msg: UiMessage) {
+  const last = msg.blocks?.at(-1)
+  if (last) last.closed = true
+}
+
+function processBlock(msg: UiMessage, title = '处理过程'): Extract<AssistantBlock, { kind: 'process' }> {
+  const blocks = msg.blocks ??= []
+  const last = blocks.at(-1)
+  if (last?.kind === 'process' && !last.closed) return last
+  closeBlock(msg)
+  const block: Extract<AssistantBlock, { kind: 'process' }> = {
+    kind: 'process', key: uid('b'), title, itemKeys: [], recipeKeys: [], closed: false,
+  }
+  blocks.push(block)
+  return block
+}
+
+function appendText(msg: UiMessage, text: string, source: 'note' | 'reply', closed: boolean) {
+  if (!text) return
+  const blocks = msg.blocks ??= []
+  const last = blocks.at(-1)
+  if (source === 'reply' && last?.kind === 'text' && last.source === source && !last.closed) {
+    last.text += text
+    last.closed = closed
+    return
+  }
+  closeBlock(msg)
+  blocks.push({ kind: 'text', key: uid('b'), text, source, closed })
+}
+
+/** Render anchors are created once at arrival time; later events only extend the active block. */
+function appendBlocks(msg: UiMessage, e: AgentEvent, timelineStart: number, artifactStart: number) {
+  if (e.type === 'text_chunk') {
+    appendText(msg, e.content, 'reply', false)
+    return
+  }
+  if (e.type === 'reply') {
+    const last = msg.blocks?.at(-1)
+    if (last?.kind === 'text' && last.source === 'reply' && last.text === e.content) last.closed = true
+    else if (e.content?.trim() && !(last?.kind === 'text' && last.text.trim() === e.content.trim())) {
+      appendText(msg, e.content, 'reply', true)
+      msg.content += e.content
+    }
+    return
+  }
+  if (e.type === 'note') {
+    if (e.retracted) return
+    const last = msg.blocks?.at(-1)
+    // Older servers may have streamed a paragraph before marking it as a note.
+    // Keep that paragraph at its original anchor instead of moving or retyping it.
+    if (last?.kind === 'text' && last.text.trim() === e.content?.trim()) last.closed = true
+    else appendText(msg, e.content?.trim(), 'note', true)
+    return
+  }
+  if (e.type === 'done') {
+    closeBlock(msg)
+    return
+  }
+  if (e.type === 'step_start') {
+    closeBlock(msg)
+    const plan = msg.timeline.find((item) => item.kind === 'plan' && item.num === e.step_num)
+    const block = processBlock(msg, e.description || (plan?.kind === 'plan' ? plan.description : '处理过程'))
+    if (plan) block.itemKeys.push(plan.key)
+    return
+  }
+  if (e.type === 'step_done') {
+    const summary = e.summary?.trim()
+    const lastText = [...(msg.blocks ?? [])].reverse().find((block) => block.kind === 'text')
+    if (summary && lastText?.kind === 'text' && lastText.text.trim() === summary) closeBlock(msg)
+    else if (summary && e.status !== 'waiting') appendText(msg, summary, 'note', true)
+    else closeBlock(msg)
+    return
+  }
+  const items = msg.timeline.slice(timelineStart).filter((item) => !['note', 'plan', 'thinking', 'script'].includes(item.kind))
+  const recipes = msg.artifacts.slice(artifactStart).flatMap((artifact) => artifact.kind === 'recipe' ? [artifact.key] : [])
+  if (!items.length && !recipes.length) return
+  // Model reasoning only marks a phase. Public detail comes from actual operations and results.
+  const firstTool = items.find((item) => item.kind === 'tool')
+  const last = msg.blocks?.at(-1)
+  if (last?.kind === 'process' && (firstTool && (last.title === '理解需求' || last.itemKeys.length || last.recipeKeys.length) ||
+      items.length && last.recipeKeys.length)) {
+    closeBlock(msg)
+  }
+  const block = processBlock(msg, firstTool?.kind === 'tool' ? firstTool.label : '处理过程')
+  block.itemKeys.push(...items.map((item) => item.key))
+  block.recipeKeys.push(...recipes)
+}
+
 /** 删除流程后保留历史执行和文件，撤下已保存标记与流程入口。 */
 export function markRecipeDeleted(messages: UiMessage[], recipeId: string): void {
   for (const message of messages) {
@@ -536,19 +644,13 @@ export function markRecipeDeleted(messages: UiMessage[], recipeId: string): void
   }
 }
 
-/** 工具调用前已经输出的文字，挪到过程里作为「中间说明」 */
-function flushNote(msg: UiMessage) {
-  const text = msg.content.trim()
-  if (text) msg.timeline.push({ kind: 'note', key: uid('t'), text, step: activePlan(msg)?.num })
-  msg.content = ''
-}
-
 function activePlan(msg: UiMessage) {
   return msg.timeline.find((item): item is Extract<TimelineItem, { kind: 'plan' }> => item.kind === 'plan' && item.status === 'running')
 }
 
 export function finishMessage(msg: UiMessage): void {
   msg.streaming = false
+  closeBlock(msg)
   for (const item of msg.timeline) {
     if (item.kind === 'tool' && item.status === 'running') item.status = 'error'
     if (item.kind === 'plan' && item.status === 'running') {
@@ -587,12 +689,20 @@ type StoredMessage = { id: number; role: 'user' | 'assistant'; content: string; 
 export function fromStored(stored: StoredMessage): UiMessage {
   const msg: UiMessage = {
     key: `db_${stored.id}`, id: stored.id, role: stored.role, content: '', meta: stored.meta ?? {}, streaming: false,
-    timeline: [], artifacts: [], createdAt: stored.created_at,
+    timeline: [], artifacts: [], blocks: stored.role === 'assistant' ? newAssistant().blocks : [], createdAt: stored.created_at,
   }
   if (stored.role === 'assistant') {
     for (const e of stored.events ?? []) applyEvent(msg, e)
   }
   msg.content = stored.content
+  if (stored.role === 'assistant' && stored.content.trim()) {
+    const replies = (msg.blocks ?? []).flatMap((block) => block.kind === 'text' && block.source === 'reply' ? [block.text] : [])
+    const lastText = [...(msg.blocks ?? [])].reverse().find((block) => block.kind === 'text')
+    if (replies.join('').trim() !== stored.content.trim() && replies.join('\n\n').trim() !== stored.content.trim() &&
+        (lastText?.kind !== 'text' || lastText.text.trim() !== stored.content.trim())) {
+      appendText(msg, stored.content, 'reply', true)
+    }
+  }
   finishMessage(msg)
   return msg
 }

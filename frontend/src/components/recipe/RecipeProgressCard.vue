@@ -26,18 +26,18 @@ import VerifyBadge from './VerifyBadge.vue'
 const props = defineProps<{ progress: RecipeProgress; customerId?: string | null }>()
 const emit = defineEmits<{ previewFile: [file: FileInfo] }>()
 const toast = useToast()
-const openingFile = ref(false)
+const openingFile = ref<string | null>(null)
+const resultFiles = computed(() => props.progress.files?.length ? props.progress.files : props.progress.file ? [props.progress.file] : [])
 
-async function previewFile() {
-  const file = props.progress.file
-  if (!file || openingFile.value) return
-  openingFile.value = true
+async function previewFile(fileId: string) {
+  if (openingFile.value) return
+  openingFile.value = fileId
   try {
-    emit('previewFile', await fileApi.get(file.file_id))
+    emit('previewFile', await fileApi.get(fileId))
   } catch (error) {
     toast.error(errorText(error))
   } finally {
-    openingFile.value = false
+    openingFile.value = null
   }
 }
 
@@ -183,9 +183,12 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
     </div>
 
     <!-- 操作 -->
-    <div v-if="progress.file || progress.saved" class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
-      <button v-if="progress.file" type="button" class="btn-line py-2" :disabled="openingFile" @click="previewFile"><LoaderCircle v-if="openingFile" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果</button>
-      <a v-if="progress.file" :href="progress.file.download_url" class="btn-ink py-2"><Download class="size-4" />下载结果 Excel</a>
+    <div v-if="resultFiles.length || progress.saved" class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
+      <div v-for="file in resultFiles" :key="file.file_id" class="flex max-w-full flex-wrap items-center gap-2">
+        <span v-if="resultFiles.length > 1" class="min-w-0 break-words text-xs text-mute">{{ file.filename }}</span>
+        <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果</button>
+        <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载结果 Excel</a>
+      </div>
       <span v-if="progress.saved" class="flex items-center gap-1.5 text-xs text-mute">
         流程已保存为 v{{ progress.saved.version }} · <StatusPill :status="progress.saved.status" />
       </span>

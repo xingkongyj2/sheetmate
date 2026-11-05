@@ -2,7 +2,9 @@ import type { PlanStatus, RecipeProgress, RecipeViewArtifact, TableArtifact, Tim
 import { deliveredFiles, standaloneFiles, type FilePresentationContext } from './filePresentation'
 import { lastInlineTable } from './tablePresentation'
 import { recipeViewReply } from './recipeViewPresentation'
-import { userFacingSummary, userFacingText } from './timelinePresentation'
+import { recipeDeliveries } from './recipeDeliveries'
+import { progressFlow } from './recipeFlow'
+import { toolPresentation, userFacingSummary, userFacingText } from './timelinePresentation'
 
 export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
   pending: '待执行', running: '执行中', done: '已完成', warning: '需核对', waiting: '待确认', error: '失败', stopped: '已停止',
@@ -136,18 +138,51 @@ function recipeViewMarkdown(view: RecipeViewArtifact): string {
 export function messageMarkdown(message: UiMessage, stages?: { title: string; summary: string }[], context: FilePresentationContext = {}): string {
   const blocks: string[] = []
   const steps = planSteps(message)
-  if (stages?.length) {
+  const ordered = !!message.blocks?.length
+  if (ordered) {
+    let stageIndex = 0
+    for (const block of message.blocks!) {
+      if (block.kind === 'text') {
+        if (block.text.trim()) blocks.push(block.text)
+        continue
+      }
+      const stage = stages?.[stageIndex++]
+      const items = message.timeline.filter((item) => block.itemKeys.includes(item.key))
+      const details = items.flatMap((item) => {
+        if (item.kind === 'tool') {
+          const action = toolPresentation(item)
+          return [`- ${[action.label, ...action.details, action.summary].filter(Boolean).join('；')}`]
+        }
+        if (item.kind === 'info') return [`- ${userFacingText(item.text)}`]
+        return []
+      })
+      if (details.length || stage?.summary) blocks.push(`### ${inline(block.title)}\n\n${[...details, stage?.summary].filter(Boolean).join('\n\n')}`)
+    }
+  } else if (stages?.length) {
     blocks.push('## 处理经过', ...stages.map((stage) =>
       `### ${inline(stage.title)}${stage.summary ? `\n\n${stage.summary}` : ''}`))
   } else if (!stages && steps.length) {
     blocks.push('## 执行计划', ...steps.map((step) =>
       `### ${step.num}. ${inline(step.description)}\n\n**状态：${step.statusLabel}**${step.summary ? `\n\n${step.summary}` : ''}`))
   }
-  const answer = recipeViewReply(message).trim() || recipeOutcomeSummary(message)
+  const answer = ordered && message.blocks!.some((block) => block.kind === 'text' && block.text.trim())
+    ? '' : recipeViewReply(message).trim() || recipeOutcomeSummary(message)
   const attempts = recipeAttempts(message)
   const attemptsByKey = new Map(attempts.map((attempt) => [attempt.key, attempt]))
+  const workflows = recipeDeliveries(message)
+  const workflowViews = new Set(workflows.views.map((artifact) => artifact.key))
+  const workflowDeliveries = new Map(workflows.deliveries.map((artifact) => [artifact.key, artifact.progress]))
   const recipeBlocks = message.artifacts.flatMap((artifact) => {
-    if (artifact.kind === 'recipe_view') return [recipeViewMarkdown(artifact.view)]
+    if (artifact.kind === 'recipe_view') return workflowViews.has(artifact.key) ? [recipeViewMarkdown(artifact.view)] : []
+    const delivery = workflowDeliveries.get(artifact.key)
+    if (delivery) return [recipeViewMarkdown({
+      recipe_id: delivery.saved?.recipe_id || delivery.recipeId || '',
+      name: delivery.recipeName || delivery.saved?.name || '处理流程', description: delivery.recipe?.description || '',
+      version: delivery.saved?.version || delivery.recipeVersion || 1,
+      status: delivery.saved?.status || '', status_label: delivery.saved?.status_label || '',
+      deleted: delivery.deleted, flow: progressFlow(delivery),
+    })]
+    if (artifact.kind === 'recipe' && (artifact.progress.file || artifact.progress.saved)) return []
     const attempt = !stages && artifact.kind === 'recipe' ? attemptsByKey.get(artifact.key) : undefined
     if (attempt) {
       const failure = recipeFailure(attempt.progress)

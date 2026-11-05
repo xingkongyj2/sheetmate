@@ -24,6 +24,7 @@ from sheetmate.agent.prompts import (
     AGENT_TABLE_LINE,
     APPROACH_SWITCH_MESSAGE,
     AUTONOMOUS_RECOVERY_MESSAGE,
+    CHAT_SYSTEM,
     FINAL_ROUND_MESSAGE,
     MODE_RULES,
     MODIFY_NUDGE,
@@ -53,7 +54,6 @@ _DIAGNOSTIC_TOOLS = (_EXPLORE_TOOLS - {"run_sql"}) | {
     "remember", "save_field_mapping", "save_as_recipe", "delete_recipe", "delete_recipes", "ask_user",
 }
 _NUDGE_AFTER = 4  # 修改模式下查看数据超过这么多次还没生成流程，就提醒一次
-_LIVE_AFTER_CHARS = 140  # 一轮文字超过这么长、且还没出现工具调用，就当作最终回答开始实时输出
 
 
 @dataclass
@@ -78,6 +78,13 @@ class AgentExecutor:
     # ------------------------------------------------------------------
     # 入口
     # ------------------------------------------------------------------
+
+    async def converse(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+        """普通对话和意图询问，不提供任务执行工具。"""
+        messages = [{"role": "system", "content": CHAT_SYSTEM}, *history[-12:],
+                    {"role": "user", "content": message}]
+        async for event in self.agent_stream(messages, [], ctx):
+            yield event
 
     async def execute(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """直接执行（不带计划）。"""
@@ -187,7 +194,9 @@ class AgentExecutor:
             content, reasoning = "", ""
             calls_acc: dict[int, dict[str, str]] = {}
             suppress = False
-            live = False  # 已经开始向用户实时输出这一轮的文字
+            # 允许工具的轮次，只有收齐本轮内容后才能确定文字属于过程还是回答。
+            # 不能根据长度提前展示，否则后到的工具调用会迫使界面撤回已显示文字。
+            live = not definitions or final_round
             try:
                 async for chunk in self.llm.stream_chat(msgs, tools=definitions, tool_choice="none" if final_round else None):
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
@@ -202,13 +211,7 @@ class AgentExecutor:
                         content += delta.content
                         if _TOOL_MARKER in delta.content:
                             suppress = True
-                        # 先把文字攒着：后面跟着工具调用的话，这段只是「我先看一下表结构」之类的过程说明，不该出现在回答里。
-                        # 只有确定是最终回答（没出现工具调用、文字已经比较长）才开始实时输出
-                        if (not live and not calls_acc and not suppress and len(content) >= _LIVE_AFTER_CHARS
-                                and (final_round or recovery.may_finish)):
-                            live = True
-                            yield {"type": "text_chunk", "content": content}
-                        elif live and not suppress:
+                        if live and not suppress:
                             yield {"type": "text_chunk", "content": delta.content}
                     for tc in delta.tool_calls or []:
                         slot = calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
@@ -227,17 +230,15 @@ class AgentExecutor:
             reply: dict[str, Any] = {"role": "assistant", "content": display}
             if reasoning:
                 reply["reasoning_content"] = reasoning
-            if not calls_acc or final_round:
+            if not definitions or not calls_acc or final_round:
                 if not final_round and definitions and not recovery.may_finish:
                     # 单一路径失败时先自主恢复；不同方法确实尝试后由 AI 决定是否收尾。
-                    # 不保留要求用户批准重试的正文；空 note 也会撤回已流出的文字。
-                    if live:
-                        yield {"type": "note", "content": ""}
+                    # 候选文字尚未展示，可以直接继续恢复，不改变已有内容。
                     if display:
                         msgs.append(reply)
                     msgs.append({"role": "user", "content": AUTONOMOUS_RECOVERY_MESSAGE})
                     continue
-                if display and not live:  # 短回答：攒到最后一次性给出，前端会做逐字显示的动画
+                if display and not live:
                     yield {"type": "text_chunk", "content": display}
                 if transcript is not None:
                     transcript.extend(m for m in msgs[start:] if m.get("content") != FINAL_ROUND_MESSAGE)
@@ -245,8 +246,8 @@ class AgentExecutor:
                         transcript.append(reply)
                 yield {"type": "final_text", "content": display}
                 return
-            if display or live:
-                # 这段文字后面跟着工具调用：是过程说明，归到「执行过程」里，并让前端把已经显示的部分撤回
+            if display:
+                # 先确定这段文字是过程说明，再按顺序展示一次。
                 yield {"type": "note", "content": display}
 
             calls = [
@@ -389,7 +390,8 @@ class AgentExecutor:
             if end_turn:
                 if transcript is not None:
                     transcript.extend(msgs[start:])
-                yield {"type": "final_text", "content": display}
+                # 工具前的说明已经作为 note 交付；确认问题由 clarify 卡片展示。
+                yield {"type": "final_text", "content": ""}
                 return
             if ctx.mode == "modify" and not built and not nudged and explored >= _NUDGE_AFTER:
                 # 收束没有产出修改文件的探索；由模型选择 Recipe 或 Python 完成交付。

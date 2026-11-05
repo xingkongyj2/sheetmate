@@ -95,7 +95,7 @@ export interface RecipeBrief {
   version: number
   name: string
   description: string
-  status: 'draft' | 'active' | 'deprecated'
+  status: 'active' | 'deprecated'
   status_label: string
   customer_id: string | null
   conversation_id: string | null

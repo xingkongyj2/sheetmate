@@ -64,6 +64,10 @@ let pollTimer = 0
 let sideRefreshVersion = 0
 let loadVersion = 0
 let disposed = false
+let scrollFrame = 0
+let forceScroll = false
+let followOutput = true
+let previousScrollTop = 0
 
 const selectedMessage = computed(() => {
   const assistants = messages.value.filter((m) => m.role === 'assistant')
@@ -221,20 +225,36 @@ onBeforeUnmount(() => {
   disposed = true
   resizeObserver?.disconnect()
   clearTimeout(pollTimer)
+  cancelAnimationFrame(scrollFrame)
   handle?.abort() // 只是断开连接，后台任务会继续执行并保存结果
 })
 
 // ------------------------------------------------------------------ 发送
 
 function scrollToBottom(force = false) {
+  forceScroll ||= force
+  if (scrollFrame) return
   nextTick(() => {
-    const el = scroller.value
-    if (!el) return
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 240
-    if (force || nearBottom) el.scrollTo({ top: el.scrollHeight, behavior: force ? 'auto' : 'smooth' })
-    // 强制滚动时 Markdown / 表格可能还没排完版，下一帧再贴底一次
-    if (force) requestAnimationFrame(() => el.scrollTo({ top: el.scrollHeight, behavior: 'auto' }))
+    if (scrollFrame || disposed) return
+    scrollFrame = requestAnimationFrame(() => {
+      scrollFrame = 0
+      const el = scroller.value
+      if (el && (forceScroll || followOutput)) {
+        el.scrollTop = el.scrollHeight
+        previousScrollTop = el.scrollTop
+        followOutput = true
+      }
+      forceScroll = false
+    })
   })
+}
+
+function onChatScroll() {
+  const el = scroller.value
+  if (!el) return
+  if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) followOutput = true
+  else if (el.scrollTop < previousScrollTop - 1) followOutput = false
+  previousScrollTop = el.scrollTop
 }
 
 watch(
@@ -464,7 +484,7 @@ function answer(option: string) {
       </header>
 
       <!-- 消息 -->
-      <div ref="scroller" class="min-h-0 flex-1 overflow-y-auto">
+      <div ref="scroller" class="min-h-0 flex-1 overflow-y-auto" @scroll.passive="onChatScroll">
         <div ref="content" class="chat-messages pb-6 pt-8">
           <div v-if="loading" class="flex justify-center py-20 text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
 
@@ -490,7 +510,8 @@ function answer(option: string) {
                 :message="m"
                 :files="messageFiles"
                 :tables="messageTables"
-                :answers-disabled="streaming || reconnecting || messages.at(-1)?.key !== m.key"
+                :answers-disabled="streaming || reconnecting"
+                :answers-closed="messages.at(-1)?.key !== m.key"
                 :customer-id="customer?.id"
                 :mascot="customer?.mascot"
                 @answer="answer"

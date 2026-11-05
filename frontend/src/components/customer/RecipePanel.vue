@@ -14,6 +14,7 @@ import ScriptFile from '@/components/common/ScriptFile.vue'
 import RecipeRunsDialog from '@/components/customer/RecipeRunsDialog.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { percent, timeAgo } from '@/composables/chatModel'
+import { recipeStatus } from '@/composables/recipeStatus'
 import { scriptReferences } from '@/composables/scriptPresentation'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
@@ -30,13 +31,13 @@ const showJson = ref(false)
 const showDetails = ref(false)
 const showRuns = ref(false)
 const versions = ref<Awaited<ReturnType<typeof recipeApi.get>>['versions'] | null>(null)
-const displayedStatus = ref(props.recipe.status)
+const displayedStatus = ref(recipeStatus(props.recipe.status))
 const toggling = ref(false)
 const toggleFeedback = ref(0)
 const isActive = computed(() => displayedStatus.value === 'active')
 
 watch(() => props.recipe.status, (status) => {
-  if (!toggling.value) displayedStatus.value = status
+  if (!toggling.value) displayedStatus.value = recipeStatus(status)
 })
 
 async function toggleStatus() {
@@ -48,7 +49,7 @@ async function toggleStatus() {
   toggleFeedback.value += 1
   try {
     const updated = await recipeApi.setStatus(props.recipe.recipe_id, next)
-    displayedStatus.value = updated.status
+    displayedStatus.value = recipeStatus(updated.status)
     toast.success(next === 'active' ? '已启用' : '已停用')
     emit('changed')
   } catch (err) {
@@ -202,7 +203,7 @@ function openStep(id: number) {
           <span class="tag">v{{ v.version }}</span>
           <span class="min-w-0 flex-1 truncate">{{ v.note || '—' }}</span>
           <span class="text-xs text-faint">{{ v.steps }} 步 · {{ v.created_at.slice(0, 16).replace('T', ' ') }}</span>
-          <StatusPill :status="v.status" />
+          <StatusPill :status="recipeStatus(v.status)" />
         </li>
       </ol>
     </BaseModal>

@@ -67,7 +67,7 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
     if (e.type === 'recipe_step_done') log.value.push(`第 ${e.step_id} 步完成：${e.rows_out} 行`)
     if (e.type === 'recipe_step_error') log.value.push(`第 ${e.step_id} 步出错：${e.error}`)
     if (e.type === 'recipe_run_done') log.value.push(`结束：${e.summary}`)
-    if (e.type === 'recipe_saved') log.value.push(`参数修改已保存为流程 v${e.version}（草稿）`)
+    if (e.type === 'recipe_saved') log.value.push(`参数修改已保存为流程 v${e.version}`)
   })
   try {
     await handle.done

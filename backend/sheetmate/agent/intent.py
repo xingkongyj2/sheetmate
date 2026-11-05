@@ -20,6 +20,7 @@ class FileSelection:
 class RequestIntent:
     mode: str
     files: FileSelection | None = None
+    action: str = "process"
 
 
 def _file_selection(value: Any) -> FileSelection:
@@ -54,8 +55,10 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
     if not isinstance(mode, str) or mode not in {"analyze", "modify", "create"}:
         raise LLMError("暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。")
     action = result.get("action", "process")
+    if action == "chat":
+        return RequestIntent("analyze", action="chat")
     if action == "show_files":
-        return RequestIntent("analyze", _file_selection(result.get("files")))
+        return RequestIntent("analyze", _file_selection(result.get("files")), action="show_files")
     if action != "process":
         raise LLMError("暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。")
     return RequestIntent(mode)

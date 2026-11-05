@@ -176,7 +176,7 @@ async function remove(f: LibraryFormula) {
           <select v-model="customerFilter" aria-label="按客户筛选" class="select ml-auto w-auto rounded-full bg-white text-xs">
             <option value="">全部客户</option><option v-for="c in customers" :key="c.id" :value="c.id">{{ c.name }}</option>
           </select>
-          <select v-model="statusFilter" aria-label="按状态筛选" class="select w-auto rounded-full bg-white text-xs"><option value="">全部状态</option><option value="active">已启用</option><option value="deprecated">已停用</option><option value="draft">草稿</option></select>
+          <select v-model="statusFilter" aria-label="按状态筛选" class="select w-auto rounded-full bg-white text-xs"><option value="">全部状态</option><option value="active">已启用</option><option value="deprecated">已停用</option></select>
         </template>
         <select v-else v-model="categoryFilter" aria-label="按类别筛选" class="select ml-auto w-auto rounded-full bg-white text-xs"><option value="">全部类别</option><option v-for="c in categories" :key="c" :value="c">{{ c }}</option></select>
       </div>
