@@ -207,7 +207,7 @@ async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, 
         saved = None
         if save_recipe and runner.recipe_changed and report["status"] in {"success", "warning"} and not (run.validation or {}).get("recipe_deleted"):
             runner.recipe.metadata["version_note"] = note
-            saved = recipe_service.recipe_brief(recipe_service.save_recipe(db, runner.recipe, status="active"))
+            saved = recipe_service.recipe_brief(recipe_service.save_recipe(db, runner.recipe))
             report["recipe_version"] = saved["version"]
         metrics = None
         file_infos: list[dict[str, Any]] = []

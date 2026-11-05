@@ -6,7 +6,7 @@
 - formula_kind 标明这一步用的是内置公式还是客户独有公式
 - 步骤可以挂断言（row_count_range / match_rate_min / no_duplicate_keys …），不通过就触发修复
 - field_mapping 记录这个流程依赖的字段别名（标准字段 → 别名）
-- 带 scope / customer_id / status / version，客户专属覆盖公共，版本只升不改
+- 带 scope / customer_id / version，客户专属覆盖公共，版本只升不改
 """
 
 from __future__ import annotations
@@ -143,7 +143,6 @@ class Recipe(BaseModel):
     description: str = ""
     scope: Literal["customer", "global"] = "customer"
     customer_id: str | None = None
-    status: Literal["active", "deprecated"] = "active"
     created_by: Literal["ai", "human"] = "ai"
     learned_from: dict[str, Any] = Field(default_factory=dict)
     inputs: list[RecipeInput] = Field(default_factory=list)
@@ -154,11 +153,6 @@ class Recipe(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
-
-    @field_validator("status", mode="before")
-    @classmethod
-    def _legacy_status(cls, value: Any) -> Any:
-        return "active" if value == "draft" else value
 
     # ------------------------------------------------------------------
 

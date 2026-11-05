@@ -183,7 +183,7 @@ class RecipePipeline:
         recipe.metadata["last_run"] = {"run_id": report["run_id"], "status": report["status"]}
         saved = None
         if save_recipe and ok:
-            # 用户要求保存时直接启用；比对结果独立记录，不再创建草稿状态。
+            # 用户要求保存时直接保存正式流程，比对结果独立记录。
             saved = self.host.save_recipe(recipe, verification=None if revising else verification, run_report=report)
             recipe.version = saved.get("version", recipe.version)
         yield {"type": "recipe_saved" if saved else "recipe_completed", **(saved or {}),

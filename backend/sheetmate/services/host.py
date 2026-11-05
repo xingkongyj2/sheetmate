@@ -306,10 +306,10 @@ class ConversationHost:
     # Recipe
     # ------------------------------------------------------------------
 
-    def list_recipes(self, *, include_deprecated: bool = False) -> list[dict[str, Any]]:
+    def list_recipes(self) -> list[dict[str, Any]]:
         with session_scope() as db:
-            records = recipe_service.latest_records(db, customer_id=self.customer_id, include_deprecated=include_deprecated) if self.customer_id else []
-            records += [r for r in recipe_service.latest_records(db, conversation_id=self.conversation_id, include_deprecated=include_deprecated)
+            records = recipe_service.latest_records(db, customer_id=self.customer_id) if self.customer_id else []
+            records += [r for r in recipe_service.latest_records(db, conversation_id=self.conversation_id)
                         if r.recipe_id not in {x.recipe_id for x in records}]
             briefs = [recipe_service.recipe_brief(r) for r in records]
             recipes = [recipe_service.record_to_recipe(r) for r in records]
@@ -395,7 +395,6 @@ class ConversationHost:
             if last_run is not None and last_run.status not in {"success", "warning"}:
                 raise ServiceError("本次执行未完成，尚不能保存流程。")
             original_id = recipe.id
-            recipe.status = "active"
             record = recipe_service.save_recipe_if_changed(db, recipe, conversation_id=self.conversation_id)
             brief = recipe_service.recipe_brief(record)
             if last_run is not None and last_run.conversation_id == self.conversation_id and last_run.recipe_id == original_id:
@@ -508,10 +507,9 @@ class ConversationHost:
             return {**public[-1], "files": public} if public else None
 
     def save_recipe(self, recipe: Recipe, *, verification: dict[str, Any] | None, run_report: dict[str, Any]) -> dict[str, Any]:
-        """用户要求保存时直接启用；未通过的执行不保存为可复用流程。"""
+        """用户要求保存时保存正式流程；未通过的执行不保存为可复用流程。"""
         if run_report.get("status") not in {"success", "warning"}:
             raise ServiceError("本次执行未完成，尚不能保存流程。")
-        recipe.status = "active"
         recipe.customer_id = recipe.customer_id or self.customer_id
         note = "AI 生成" if recipe.version <= 1 else "AI 修订"
         return self.store_recipe(recipe, note=note)

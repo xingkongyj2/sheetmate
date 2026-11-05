@@ -1,4 +1,4 @@
-"""Recipe：列表、详情、版本、编辑（存为新版本）、状态、匹配输入、用新文件执行（SSE）、删除；公式目录。"""
+"""Recipe：列表、详情、版本、编辑（存为新版本）、匹配输入、用新文件执行（SSE）、删除；公式目录。"""
 
 from __future__ import annotations
 
@@ -24,10 +24,6 @@ from sheetmate.services.scripts import require_script_references
 router = APIRouter(prefix="/api", tags=["recipes"])
 
 
-class StatusBody(BaseModel):
-    status: str
-
-
 class MatchBody(BaseModel):
     file_ids: list[str]
 
@@ -50,7 +46,7 @@ def list_recipes(customer_id: str | None = None, conversation_id: str | None = N
                  db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     if customer_id:
         require_customer(db, user, customer_id)
-    records = recipe_service.latest_records(db, customer_id=customer_id, conversation_id=conversation_id, include_deprecated=True)
+    records = recipe_service.latest_records(db, customer_id=customer_id, conversation_id=conversation_id)
     return {"ok": True, "recipes": [recipe_service.recipe_brief(r) for r in records]}
 
 
@@ -79,18 +75,8 @@ def update_recipe(recipe_id: str, body: dict[str, Any], background: BackgroundTa
     if problems:
         raise ServiceError("；".join(problems))
     recipe.metadata["version_note"] = body.get("metadata", {}).get("version_note") or "手动编辑"
-    record = recipe_service.save_recipe(db, recipe, status=body.get("status") or current.status)
+    record = recipe_service.save_recipe(db, recipe)
     _refresh_later(db, background, current.customer_id)
-    return {"ok": True, "recipe": recipe_service.recipe_brief(record)}
-
-
-@router.post("/recipes/{recipe_id}/status")
-def set_status(recipe_id: str, body: StatusBody, background: BackgroundTasks, db: Session = Depends(get_db),
-               user: User = Depends(current_user)) -> dict[str, Any]:
-    recipe = recipe_service.get_recipe(db, recipe_id)
-    _check(db, user, recipe)
-    record = recipe_service.set_status(db, recipe_id, body.status)
-    _refresh_later(db, background, recipe.customer_id)
     return {"ok": True, "recipe": recipe_service.recipe_brief(record)}
 
 

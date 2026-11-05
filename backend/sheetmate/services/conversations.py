@@ -117,7 +117,7 @@ def _historical_recipe_flows(db: Session, conv: Conversation) -> dict[tuple[str,
 
 
 def message_dict(m: Message, *, recipe_flows: dict[tuple[str, int], dict[str, Any]] | None = None) -> dict[str, Any]:
-    migrated = recipe_service.normalize_recipe_statuses(externalize_script_references(m.events or []))
+    migrated = recipe_service.strip_recipe_statuses(externalize_script_references(m.events or []))
     if migrated != m.events:
         m.events = migrated
     bind_script_references(migrated, conversation_id=m.conversation_id)
@@ -137,7 +137,7 @@ def detail(db: Session, conv: Conversation) -> dict[str, Any]:
     scope = {"customer_id": conv.customer_id} if conv.customer_id else {"conversation_id": conv.id}
     files = file_service.list_files(db, customer_id=conv.customer_id, conversation_id=conv.id)
     available_files = {record.id for record in files}
-    recipes = recipe_service.latest_records(db, **scope, include_deprecated=True)
+    recipes = recipe_service.latest_records(db, **scope)
     sources = list(db.scalars(select(Conversation).where(Conversation.customer_id == conv.customer_id)
                              .order_by(Conversation.created_at, Conversation.id))) if conv.customer_id else [conv]
     tables = []

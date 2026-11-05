@@ -190,7 +190,7 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
         <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载结果 Excel</a>
       </div>
       <span v-if="progress.saved" class="flex items-center gap-1.5 text-xs text-mute">
-        流程已保存为 v{{ progress.saved.version }} · <StatusPill :status="progress.saved.status" />
+        流程已保存为 v{{ progress.saved.version }}
       </span>
       <RouterLink v-if="progress.saved && customerId" :to="{ name: 'customer', params: { id: customerId }, query: { tab: 'recipes' } }" class="btn-text ml-auto">
         在客户页查看<ExternalLink class="size-3.5" />

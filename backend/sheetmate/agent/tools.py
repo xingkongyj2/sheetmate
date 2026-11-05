@@ -39,7 +39,6 @@ from sheetmate.recipe.schema import Recipe
 MAX_TOOL_TEXT = 6000
 PREVIEW_ROWS = 50
 RUN_STATUS_LABELS = {"success": "成功", "warning": "完成（有提示）", "failed": "失败", "escalated": "需要人工处理", "running": "运行中"}
-RECIPE_STATUS_LABELS = {"active": "已启用", "deprecated": "已停用"}
 
 
 def _status_label(status: str) -> str:
@@ -76,7 +75,7 @@ class ToolHost(Protocol):
     def run_python_script(self, *, code: str, description: str, input_tables: list[str], input_files: dict[str, str], cancel_event: Any,
                           title: str = "", script_id: str | None = None) -> dict[str, Any]: ...
     def inspect_python_script(self, run_id: str) -> dict[str, Any]: ...
-    def list_recipes(self, *, include_deprecated: bool = False) -> list[dict[str, Any]]: ...
+    def list_recipes(self) -> list[dict[str, Any]]: ...
     def get_recipe(self, recipe_id: str) -> Recipe | None: ...
     def latest_conversation_recipe(self) -> Recipe | None: ...
     def executed_recipe(self, run_id: str) -> Recipe | None: ...
@@ -716,21 +715,20 @@ def _tool_save_as_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         recipe.name = str(args["name"])
     if args.get("description"):
         recipe.description = str(args["description"])
-    recipe.status = "active"
     saved = ctx.host.store_recipe(recipe, note="按用户要求保存本次处理流程")
     steps = "；".join(f"{s.id}. {s.name}（{s.formula}）" for s in recipe.ordered_steps())
-    return ToolResult(f"已保存并启用流程「{recipe.name}」v{saved['version']}（recipe_id={saved['recipe_id']}），共 {len(recipe.steps)} 步：{steps}。"
+    return ToolResult(f"已保存流程「{recipe.name}」v{saved['version']}（recipe_id={saved['recipe_id']}），共 {len(recipe.steps)} 步：{steps}。"
                       "界面已展示这一个正式流程，无需再调用 get_recipe 展示，或再次保存相同流程。",
                       summary=f"保存流程「{recipe.name}」", events=[{"type": "recipe_saved", **saved, "flow": recipe.flow()}])
 
 
 def _tool_list_recipes(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
-    recipes = ctx.host.list_recipes(include_deprecated=True)
+    recipes = ctx.host.list_recipes()
     if not recipes:
         return ToolResult("当前客户或会话没有已保存的流程。", summary="没有已保存的流程")
-    lines = [f"- recipe_id={item['recipe_id']}「{item['name']}」v{item['version']}（{item['status_label']}）"
+    lines = [f"- recipe_id={item['recipe_id']}「{item['name']}」v{item['version']}"
              for item in recipes]
-    return ToolResult("当前可访问的已保存流程（含已停用）：\n" + "\n".join(lines), summary=f"找到 {len(recipes)} 个已保存流程")
+    return ToolResult("当前可访问的已保存流程：\n" + "\n".join(lines), summary=f"找到 {len(recipes)} 个已保存流程")
 
 
 def _tool_delete_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -742,7 +740,7 @@ def _tool_delete_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
 
 def _tool_delete_recipes(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     if args.get("all") is True:
-        targets = [item["recipe_id"] for item in ctx.host.list_recipes(include_deprecated=True)]
+        targets = [item["recipe_id"] for item in ctx.host.list_recipes()]
         if not targets:
             return ToolResult("当前客户或会话没有已保存的流程，无需删除。", summary="没有需要删除的流程")
     else:
@@ -775,7 +773,7 @@ def _tool_get_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     if sum((show_all, recipe_id is not None, recipe_ids is not None)) != 1:
         raise ValueError("请选择一种查看范围：单个 recipe_id、多个 recipe_ids，或全部流程 all=true。")
     if show_all:
-        targets = [item["recipe_id"] for item in ctx.host.list_recipes(include_deprecated=True)]
+        targets = [item["recipe_id"] for item in ctx.host.list_recipes()]
     elif recipe_ids is not None:
         if not isinstance(recipe_ids, list) or not recipe_ids or not all(isinstance(item, str) and item.strip() for item in recipe_ids):
             raise ValueError("recipe_ids 必须是非空的流程 ID 列表。")
@@ -800,7 +798,7 @@ def _tool_get_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     ]
     events = []
     for recipe in recipes:
-        lines.extend([f"流程「{recipe.name}」v{recipe.version}（{recipe.status}）：{recipe.description}", "输入："])
+        lines.extend([f"流程「{recipe.name}」v{recipe.version}：{recipe.description}", "输入："])
         for inp in recipe.inputs:
             lines.append(f"- {inp.alias}：{inp.description}；文件规则 {inp.file_pattern or '无'}；必需列 {inp.required_columns}")
         lines.append("步骤：")
@@ -810,7 +808,6 @@ def _tool_get_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         events.append({
             "type": "recipe_view", "recipe_id": recipe.id, "name": recipe.name,
             "description": recipe.description, "version": recipe.version,
-            "status": recipe.status, "status_label": RECIPE_STATUS_LABELS.get(recipe.status, recipe.status),
             "flow": recipe.flow(),
         })
     summary = f"查看流程「{recipes[0].name}」" if len(recipes) == 1 else f"查看 {len(recipes)} 个流程的流程图"
@@ -922,25 +919,25 @@ def _static_tools() -> list[Tool]:
              _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；键使用 get_recipe 返回的完整输入 alias；省略时优先沿用当前范围内的已有绑定，再按列或文件名匹配"},
                    "allow_repair": {"type": "boolean", "description": "出错时是否允许 AI 自动修复，默认 true"}}, ["recipe_id"]),
              modify, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
-        Tool("save_as_recipe", "仅用户明确要求保存重复流程时调用，直接保存并启用正式流程。支持公式、SQL、Python 脚本和混合流程；保存实际执行的代码与依赖，不需要重新处理文件。"
+        Tool("save_as_recipe", "仅用户明确要求保存重复流程时调用，直接保存正式流程。支持公式、SQL、Python 脚本和混合流程；保存实际执行的代码与依赖，不需要重新处理文件。"
              "若 build_recipe、revise_recipe 或 run_recipe 已返回 recipe_saved，则同一流程已经保存，不要再次调用本工具。保存后界面自动展示流程图，无需再调用 get_recipe。",
              _obj({"output_tables": {**_STR_LIST, "description": "可选：公式、SQL 或脚本生成的最终结果表。不填则保存指定或最近已执行流程"}, "name": _STR,
                    "run_id": {**_STR, "description": "可选：明确指定脚本或混合流程的运行 ID，优先于 recipe_id"},
                    "recipe_id": {**_STR, "description": "可选：指定本会话已执行的流程 ID，不填用最近的"},
                    "description": {**_STR, "description": "流程说明"}}),
              both, run=_tool_save_as_recipe, label=lambda a: f"保存流程 · {a.get('name', '')}"),
-        Tool("get_recipe", "在本轮对话中展示客户页同款原生流程图：单个用 recipe_id，多个用 recipe_ids，查看所有流程图直接用 all=true（含已停用流程）。界面自动绘制输入、步骤和输出，模型只需简短说明，不要画字符图或 Mermaid。只读，不执行、修改或保存流程。",
+        Tool("get_recipe", "在本轮对话中展示客户页同款原生流程图：单个用 recipe_id，多个用 recipe_ids，查看所有流程图直接用 all=true。界面自动绘制输入、步骤和输出，模型只需简短说明，不要画字符图或 Mermaid。只读，不执行、修改或保存流程。",
              _obj({"recipe_id": {**_STR, "description": "查看单个流程时指定 ID，与 recipe_ids、all=true 三选一"},
                    "recipe_ids": {**_STR_LIST, "description": "查看指定多个流程的 ID 列表"},
-                   "all": {"type": "boolean", "description": "true 表示展示当前客户或会话全部已保存流程的原生流程图，包含已停用流程，无需先查 ID"}}),
+                   "all": {"type": "boolean", "description": "true 表示展示当前客户或会话全部已保存流程的原生流程图，无需先查 ID"}}),
              both, run=_tool_get_recipe, label=lambda a: "查看全部流程图" if a.get("all") is True else "查看流程"),
-        Tool("list_recipes", "查看当前客户或会话已保存的流程，包含已停用流程及准确 ID。查找待删除流程或区分同名流程时使用。",
+        Tool("list_recipes", "查看当前客户或会话已保存的流程及准确 ID。查找待删除流程或区分同名流程时使用。",
              _obj({}), both, run=_tool_list_recipes, label=lambda a: "查看已保存流程"),
         Tool("delete_recipe", "删除指定的已保存流程及全部版本。调用后由系统列出目标，请用户确认一次；确认后系统直接删除，无需额外授权。删除表格行或文件不等于删除流程。",
              _obj({"recipe_id": {**_STR, "description": "要删除的已保存流程 ID"}}, ["recipe_id"]),
              both, run=_tool_delete_recipe, label=lambda a: "删除已保存流程"),
         Tool("delete_recipes", "批量删除已保存流程及全部版本。用户说删除全部流程时使用 all=true；指定多条时提供 recipe_ids。系统列出清单并请用户确认一次，确认后直接执行。",
-             _obj({"all": {"type": "boolean", "description": "true表示当前客户或会话的全部已保存流程，含已停用流程"},
+             _obj({"all": {"type": "boolean", "description": "true表示当前客户或会话的全部已保存流程"},
                    "recipe_ids": {**_STR_LIST, "description": "指定要删除的流程 ID 列表；all=true时无需提供"}}),
              both, run=_tool_delete_recipes, label=lambda a: "删除全部流程" if a.get("all") is True else "批量删除流程"),
         Tool("remember", "记住用户的偏好或业务规则（绑定客户时记到客户名下）。",

@@ -212,14 +212,14 @@ def test_formula_in_use_cannot_be_disabled(client):
     url = f"/api/customers/{cid}/formulas"
     client.post(url, json=GOOD)
     recipe = Recipe(
-        name="大额费用流程", customer_id=cid, created_by="human", status="active",
+        name="大额费用流程", customer_id=cid, created_by="human",
         inputs=[RecipeInput(alias="明细")],
         steps=[RecipeStep(id=1, name="筛大额", formula="big_fee", formula_kind="customer", output="大额",
                           params={"table": "明细", "amount_col": "金额", "threshold": 20})],
         output_spec=[OutputSheet(name="大额", source="大额")],
     )
     with session_scope() as db:
-        recipe_service.save_recipe(db, recipe, status="active")
+        recipe_service.save_recipe(db, recipe)
     used = client.get(url).json()["formulas"][0]["used_by"]
     assert [(u["name"], [s["id"] for s in u["steps"]], u["problems"]) for u in used] == [("大额费用流程", [1], [])]
 
@@ -232,8 +232,8 @@ def test_formula_in_use_cannot_be_disabled(client):
     problems = client.post(url, json=v2).json()["formula"]["used_by"][0]["problems"]
     assert len(problems) == 1 and "第 1 步" in problems[0] and "region" in problems[0]
 
-    # 流程停用以后，公式就能停用、删除了
-    assert client.post(f"/api/recipes/{recipe.id}/status", json={"status": "deprecated"}).status_code == 200
+    # 先删除引用流程，再停用公式。
+    assert client.delete(f"/api/recipes/{recipe.id}").status_code == 200
     assert client.put(f"{url}/big_fee/status", json={"status": "deprecated"}).status_code == 200
     assert client.delete(f"{url}/big_fee").status_code == 200
 
@@ -246,14 +246,14 @@ def test_delete_formula_in_use_clears_all_versions_and_keeps_recipe_and_other_cu
         assert client.post(f"/api/customers/{customer_id}/formulas", json=GOOD).status_code == 200
     assert client.post(url, json=_variant(intent="大额费用第二版")).json()["formula"]["version"] == 2
     recipe = Recipe(
-        name="仍要保留的大额费用流程", customer_id=cid, status="active",
+        name="仍要保留的大额费用流程", customer_id=cid,
         inputs=[RecipeInput(alias="明细")],
         steps=[RecipeStep(id=1, name="筛大额", formula="big_fee", formula_kind="customer", output="大额",
                           params={"table": "明细", "amount_col": "金额", "threshold": 20})],
         output_spec=[OutputSheet(name="大额", source="大额")],
     )
     with session_scope() as db:
-        recipe_service.save_recipe(db, recipe, status="active")
+        recipe_service.save_recipe(db, recipe)
     before = client.get(f"/api/recipes/{recipe.id}").json()["recipe"]
     used = client.get(url).json()["formulas"][0]["used_by"]
     assert [item["name"] for item in used] == [recipe.name]
@@ -274,12 +274,12 @@ def test_delete_formula_override_restores_builtin_without_changing_recipe(client
     cid = _new_customer(client)["id"]
     url = f"/api/customers/{cid}/formulas"
     assert client.post(url, json=_variant(id="top_n")).json()["formula"]["overrides_builtin"] is True
-    recipe = Recipe(name="使用客户覆盖公式", customer_id=cid, status="active",
+    recipe = Recipe(name="使用客户覆盖公式", customer_id=cid,
                     inputs=[RecipeInput(alias="明细")],
                     steps=[RecipeStep(id=1, name="客户筛选", formula="top_n", formula_kind="customer", output="筛选",
                                       params={"table": "明细", "amount_col": "金额", "threshold": 20})])
     with session_scope() as db:
-        recipe_service.save_recipe(db, recipe, status="active")
+        recipe_service.save_recipe(db, recipe)
         assert recipe_service.library_for(db, cid).resolve("top_n").kind == "customer"
     assert client.delete(f"{url}/top_n").status_code == 200
     with session_scope() as db:

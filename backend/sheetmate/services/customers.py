@@ -91,7 +91,7 @@ def card(db: Session, customer: Customer) -> dict[str, Any]:
         "file_count": int(file_count),
         "recipe_count": len(recipes),
         "conversation_count": int(conv_count),
-        "recipes": [{"recipe_id": r.recipe_id, "name": r.name, "version": r.version, "status": r.status,
+        "recipes": [{"recipe_id": r.recipe_id, "name": r.name, "version": r.version,
                      "steps": len((r.body or {}).get("steps", []))} for r in recipes[:3]],
         "last_activity": (last_run.created_at if last_run else customer.updated_at).isoformat(),
         "has_summary": bool(summary),
@@ -118,7 +118,7 @@ def detail(db: Session, customer: Customer) -> dict[str, Any]:
     files = file_service.list_files(db, customer_id=customer.id)
     output_count = db.scalar(select(func.count()).select_from(FileRecord).where(
         file_service.customer_file_condition(customer.id), FileRecord.kind == "output")) or 0
-    records = recipe_service.latest_records(db, customer_id=customer.id, include_deprecated=True)
+    records = recipe_service.latest_records(db, customer_id=customer.id)
     recipes = []
     for record in records:
         recipe = recipe_service.record_to_recipe(record)

@@ -85,7 +85,7 @@ def test_demo_customer_detail(client):
     assert demo["recipe_count"] == 1 and demo["file_count"] == 4
     detail = client.get(f"/api/customers/{demo['id']}").json()["customer"]
     recipe = detail["recipes"][0]
-    assert recipe["status"] == "active"
+    assert "status" not in recipe and "status_label" not in recipe
     assert recipe["verification"]["match_rate"] == 1.0
     assert [s["formula"] for s in recipe["flow"]["steps"]] == ["pivot_wide", "compute_column", "lookup", "group_aggregate"]
     assert "### 这项工作做什么" in detail["summary"]
@@ -339,7 +339,7 @@ def test_modify_mode_builds_verified_recipe(client, samples, fake_llm):
     verify = next(e for e in events if e["type"] == "recipe_verify")["report"]
     assert verify["status"] == "pass"
     saved = next(e for e in events if e["type"] == "recipe_saved")
-    assert saved["status"] == "active"
+    assert "status" not in saved and "status_label" not in saved
     # 学习提示词里包含 diff 证据
     assert any("长转宽" in p for p in llm.json_prompts)
     detail = client.get(f"/api/conversations/{conv}").json()["conversation"]
@@ -449,7 +449,7 @@ def test_rerun_from_step_with_new_params(client, save_recipe):
     assert stored_recipe["version"] == after["recipe_version"]
     if save_recipe:
         saved = next(e for e in events if e["type"] == "recipe_saved")
-        assert saved["status"] == "active"
+        assert "status" not in saved and "status_label" not in saved
         assert saved["version"] == after["recipe_version"] == run["run"]["recipe_version"] + 1
         assert stored_recipe["steps"][2]["params"]["missing_fill"] == missing_fill
     else:
@@ -524,7 +524,7 @@ def test_revise_recipe_creates_new_version(client, samples, fake_llm):
     wb = openpyxl.load_workbook(io.BytesIO(client.get(file_event["download_url"]).content))
     header = [c.value for c in wb["归属汇总"][1]]
     assert header == ["归属", "票数", "合计", "运费合计"]
-    assert v2["status"] == "active"
+    assert "status" not in v2 and "status_label" not in v2
     versions = client.get(f"/api/recipes/{v1['recipe_id']}").json()["versions"]
     assert [v["version"] for v in versions][:2] == [v2["version"], v1["version"]]
 

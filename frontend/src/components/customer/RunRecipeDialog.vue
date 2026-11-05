@@ -17,7 +17,6 @@ import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
 import { addProgressFile, applyRecipeEvent, newProgress, type FileArtifact, type RecipeProgress, type StepState } from '@/composables/chatModel'
 import { progressFlow } from '@/composables/recipeFlow'
-import { recipeStatus } from '@/composables/recipeStatus'
 import { useToast } from '@/composables/useToast'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
@@ -27,7 +26,7 @@ const emit = defineEmits<{ close: []; done: [] }>()
 const toast = useToast()
 
 const stage = ref<'pick' | 'match' | 'run'>('pick')
-const recipeId = ref(props.initialRecipeId ?? props.recipes.find((r) => recipeStatus(r.status) === 'active')?.recipe_id ?? props.recipes[0]?.recipe_id ?? '')
+const recipeId = ref(props.initialRecipeId ?? props.recipes[0]?.recipe_id ?? '')
 const localFiles = ref<FileInfo[]>([...props.files.filter((f) => f.kind === 'input')])
 const chosen = ref<string[]>([])
 const uploading = ref(false)
@@ -134,7 +133,7 @@ const flow = computed(() => {
             :class="recipeId === r.recipe_id ? 'border-ink' : 'border-line hover:bg-paper'"
             @click="recipeId = r.recipe_id"
           >
-            <div class="flex items-center gap-2"><span class="font-medium">{{ r.name }}</span><span class="tag">v{{ r.version }}</span><StatusPill :status="recipeStatus(r.status)" class="ml-auto" /></div>
+            <div class="flex items-center gap-2"><span class="font-medium">{{ r.name }}</span><span class="tag">v{{ r.version }}</span></div>
             <div class="mt-1 line-clamp-2 text-xs text-mute">{{ r.description }}</div>
             <div class="mt-2 text-[11px] text-faint">需要：{{ r.input_patterns.map((i) => `${i.alias}（${i.file_pattern || '任意文件'}）`).join('、') }}</div>
           </button>

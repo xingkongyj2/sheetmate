@@ -95,8 +95,6 @@ export interface RecipeBrief {
   version: number
   name: string
   description: string
-  status: 'active' | 'deprecated'
-  status_label: string
   customer_id: string | null
   conversation_id: string | null
   inputs: string[]
@@ -135,7 +133,6 @@ export interface RecipeJSON {
   version: number
   name: string
   description: string
-  status: string
   customer_id: string | null
   inputs: {
     alias: string
@@ -168,7 +165,7 @@ export interface CustomerCard {
   file_count: number
   recipe_count: number
   conversation_count: number
-  recipes: { recipe_id: string; name: string; version: number; status: string; steps: number }[]
+  recipes: { recipe_id: string; name: string; version: number; steps: number }[]
   last_activity: string
   has_summary: boolean
 }

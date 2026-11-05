@@ -3,18 +3,15 @@ import { ref } from 'vue'
 
 import type { FlowStep, RecipeFlowData } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
-import StatusPill from '@/components/common/StatusPill.vue'
 import ScriptFile from '@/components/common/ScriptFile.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { scriptReferences } from '@/composables/scriptPresentation'
-import { recipeStatus } from '@/composables/recipeStatus'
 
 const props = defineProps<{
   view: {
     name: string
     description: string
-    status: string
     flow: RecipeFlowData
     deleted?: boolean
   }
@@ -31,7 +28,6 @@ function openStep(id: number) {
     <header class="flex flex-wrap items-center gap-x-3 gap-y-1 px-1">
       <h3 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ view.name }}</h3>
       <span v-if="view.deleted" class="text-xs text-faint">流程已删除</span>
-      <StatusPill v-else :status="recipeStatus(view.status)" />
     </header>
     <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
       <p v-if="view.description" class="mb-5 whitespace-pre-line break-words text-[13px] leading-[1.8] text-mute">{{ userFacingSummary(view.description) }}</p>

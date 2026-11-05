@@ -1,7 +1,6 @@
 """Recipe 与客户公式的存取。
 
 - Recipe 按版本保存：同一个 recipe_id 改一次升一版，旧版本保留（历史运行可以追溯到当时的版本）
-- 状态：active（已启用）/ deprecated（已停用）
 - 客户公式：scope=customer，同 id 覆盖内置公式
 """
 
@@ -10,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import String, cast, delete, func, or_, select
+from sqlalchemy import String, cast, delete, func, select, update
 from sqlalchemy.orm import Session
 
 from sheetmate.db.models import Conversation, FormulaRecord, Message, RecipeRecord, Run, User, now
@@ -18,9 +17,7 @@ from sheetmate.engine.formulas import BUILTIN_FORMULAS, Formula, FormulaError, F
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.recipe.schema import Recipe
 from sheetmate.services.auth import require_customer
-from sheetmate.services.errors import Forbidden, NotFound, ServiceError
-
-STATUS_LABELS = {"active": "已启用", "deprecated": "已停用"}
+from sheetmate.services.errors import Forbidden, NotFound
 
 
 # ---------------------------------------------------------------------------
@@ -28,18 +25,14 @@ STATUS_LABELS = {"active": "已启用", "deprecated": "已停用"}
 # ---------------------------------------------------------------------------
 
 
-def save_recipe(db: Session, recipe: Recipe, *, status: str | None = None, conversation_id: str | None = None) -> RecipeRecord:
+def save_recipe(db: Session, recipe: Recipe, *, conversation_id: str | None = None) -> RecipeRecord:
     """保存为新版本（recipe_id 不存在时就是第 1 版）。"""
-    if (status or recipe.status) not in STATUS_LABELS:
-        raise ServiceError("状态只能是 active / deprecated")
     latest = db.scalar(select(func.max(RecipeRecord.version)).where(RecipeRecord.recipe_id == recipe.id)) or 0
     recipe.version = latest + 1
     recipe.updated_at = now().isoformat()
-    if status:
-        recipe.status = status  # type: ignore[assignment]
     record = RecipeRecord(
         recipe_id=recipe.id, version=recipe.version, name=recipe.name, scope=recipe.scope, customer_id=recipe.customer_id,
-        conversation_id=conversation_id or (recipe.learned_from or {}).get("conversation_id"), status=recipe.status,
+        conversation_id=conversation_id or (recipe.learned_from or {}).get("conversation_id"),
         created_by=recipe.created_by, body=recipe.to_dict(),
     )
     db.add(record)
@@ -68,7 +61,7 @@ def _definition(recipe: Recipe) -> dict[str, Any]:
 def save_recipe_if_changed(db: Session, recipe: Recipe, *, conversation_id: str) -> RecipeRecord:
     """同一会话重复保存相同流程时复用记录，实际修改才增加版本。"""
     definition = _definition(recipe)
-    candidates = latest_records(db, conversation_id=conversation_id, include_deprecated=True)
+    candidates = latest_records(db, conversation_id=conversation_id)
     same_id = next((record for record in candidates if record.recipe_id == recipe.id), None)
     # 客户的既有流程可以在另一个会话中更新，但不与其他流程按名称合并。
     if same_id is None:
@@ -76,8 +69,6 @@ def save_recipe_if_changed(db: Session, recipe: Recipe, *, conversation_id: str)
                              .order_by(RecipeRecord.version.desc()).limit(1)).first()
     matches = [same_id] if same_id is not None else [record for record in candidates if record.name == recipe.name]
     for record in matches:
-        if record is None or record.status != recipe.status:
-            continue
         saved = record_to_recipe(record)
         if same_id is None and saved.learned_from.get("input_bindings") != recipe.learned_from.get("input_bindings"):
             continue
@@ -88,35 +79,38 @@ def save_recipe_if_changed(db: Session, recipe: Recipe, *, conversation_id: str)
     return save_recipe(db, recipe, conversation_id=conversation_id)
 
 
-def normalize_recipe_statuses(value: Any, *, recipe: bool = False) -> Any:
-    """兼容旧流程快照和消息事件；不改变公式和执行状态。"""
+def strip_recipe_statuses(value: Any, *, recipe: bool = False) -> Any:
+    """移除旧流程快照和消息事件中的状态，保留公式、步骤和执行状态。"""
     if isinstance(value, list):
-        return [normalize_recipe_statuses(item) for item in value]
+        return [strip_recipe_statuses(item, recipe=recipe) for item in value]
     if not isinstance(value, dict):
         return value
-    item = {key: normalize_recipe_statuses(field, recipe=key in {"recipe", "recipe_snapshot"})
+    item = {key: strip_recipe_statuses(field, recipe=key in {"recipe", "recipe_snapshot"})
             for key, field in value.items()}
     is_recipe = recipe or item.get("type") in {"recipe_saved", "recipe_view"} or (
         "steps" in item and "inputs" in item and "output_spec" in item)
-    if is_recipe and item.get("status") == "draft":
-        item["status"] = "active"
-        if "status_label" in item:
-            item["status_label"] = STATUS_LABELS["active"]
+    if is_recipe:
+        item.pop("status", None)
+        item.pop("status_label", None)
     return item
 
 
-def migrate_recipe_statuses(db: Session) -> None:
-    """升级已有草稿，不创建新流程或新版本；重复启动可安全执行。"""
-    for record in db.scalars(select(RecipeRecord).where(or_(
-        RecipeRecord.status == "draft", cast(RecipeRecord.body, String).contains('"draft"'),
-    ))):
-        if record.status == "draft":
-            record.status = "active"
-        record.body = {**normalize_recipe_statuses(record.body, recipe=True), "status": record.status}
-    for run in db.scalars(select(Run).where(cast(Run.validation, String).contains('"draft"'))):
-        run.validation = normalize_recipe_statuses(run.validation)
-    for message in db.scalars(select(Message).where(cast(Message.events, String).contains('"draft"'))):
-        message.events = normalize_recipe_statuses(message.events)
+def migrate_legacy_recipe_statuses(db: Session) -> None:
+    """清理历史流程状态，不创建流程或版本；重复启动可安全执行。"""
+    for record in db.scalars(select(RecipeRecord).where(cast(RecipeRecord.body, String).contains('"status'))):
+        body = strip_recipe_statuses(record.body, recipe=True)
+        if body != record.body:
+            # 字段清理不代表用户修改流程，保留原更新时间和列表顺序。
+            db.execute(update(RecipeRecord).where(RecipeRecord.id == record.id)
+                       .values(body=body, updated_at=record.updated_at))
+    for run in db.scalars(select(Run).where(cast(Run.validation, String).contains('"status'))):
+        validation = strip_recipe_statuses(run.validation)
+        if validation != run.validation:
+            run.validation = validation
+    for message in db.scalars(select(Message).where(cast(Message.events, String).contains('"status'))):
+        events = strip_recipe_statuses(message.events)
+        if events != message.events:
+            message.events = events
 
 
 def get_recipe(db: Session, recipe_id: str, version: int | None = None) -> Recipe:
@@ -138,11 +132,10 @@ def get_record(db: Session, recipe_id: str, version: int | None = None) -> Recip
 
 
 def record_to_recipe(record: RecipeRecord) -> Recipe:
-    data = dict(record.body or {})
-    data.update({"id": record.recipe_id, "version": record.version, "status": record.status,
+    data = strip_recipe_statuses(record.body or {}, recipe=True)
+    data.update({"id": record.recipe_id, "version": record.version,
                  "customer_id": record.customer_id, "scope": record.scope})
     recipe = Recipe(**data)
-    record.status = recipe.status
     body = recipe.to_dict()
     if record.body != body:
         record.body = body
@@ -150,8 +143,7 @@ def record_to_recipe(record: RecipeRecord) -> Recipe:
     return recipe
 
 
-def latest_records(db: Session, *, customer_id: str | None = None, conversation_id: str | None = None,
-                   include_deprecated: bool = False) -> list[RecipeRecord]:
+def latest_records(db: Session, *, customer_id: str | None = None, conversation_id: str | None = None) -> list[RecipeRecord]:
     """每个 recipe_id 只取最新版本。"""
     sub = select(RecipeRecord.recipe_id, func.max(RecipeRecord.version).label("v")).group_by(RecipeRecord.recipe_id).subquery()
     stmt = select(RecipeRecord).join(sub, (RecipeRecord.recipe_id == sub.c.recipe_id) & (RecipeRecord.version == sub.c.v))
@@ -159,30 +151,17 @@ def latest_records(db: Session, *, customer_id: str | None = None, conversation_
         stmt = stmt.where(RecipeRecord.customer_id == customer_id)
     if conversation_id is not None:
         stmt = stmt.where(RecipeRecord.conversation_id == conversation_id)
-    if not include_deprecated:
-        stmt = stmt.where(RecipeRecord.status != "deprecated")
     return list(db.scalars(stmt.order_by(RecipeRecord.updated_at.desc())))
 
 
 def versions(db: Session, recipe_id: str) -> list[dict[str, Any]]:
     records = db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id).order_by(RecipeRecord.version.desc()))
     return [
-        {"version": r.version, "status": r.status, "status_label": STATUS_LABELS.get(r.status, r.status),
+        {"version": r.version,
          "created_at": r.created_at.isoformat(), "steps": len((r.body or {}).get("steps", [])),
          "note": (r.body or {}).get("metadata", {}).get("version_note", "")}
         for r in records
     ]
-
-
-def set_status(db: Session, recipe_id: str, status: str) -> RecipeRecord:
-    if status not in STATUS_LABELS:
-        raise ServiceError("状态只能是 active / deprecated")
-    record = get_record(db, recipe_id)
-    record.status = status
-    body = dict(record.body or {})
-    body["status"] = status
-    record.body = body
-    return record
 
 
 def delete_recipe(db: Session, recipe_id: str, *, user: User) -> dict[str, Any]:
@@ -214,9 +193,7 @@ def assign_customer(db: Session, *, conversation_id: str, customer_id: str) -> i
 
 
 def recipe_brief(record: RecipeRecord) -> dict[str, Any]:
-    if record.status == "draft":
-        record.status = "active"
-    body = normalize_recipe_statuses(externalize_script_references(record.body or {}), recipe=True)
+    body = strip_recipe_statuses(externalize_script_references(record.body or {}), recipe=True)
     if body != record.body:
         record.body = body
     _bind_scripts(record)
@@ -227,8 +204,6 @@ def recipe_brief(record: RecipeRecord) -> dict[str, Any]:
         "version": record.version,
         "name": record.name,
         "description": body.get("description", ""),
-        "status": record.status,
-        "status_label": STATUS_LABELS.get(record.status, record.status),
         "customer_id": record.customer_id,
         "conversation_id": record.conversation_id,
         "inputs": [i.get("alias") for i in body.get("inputs", [])],

@@ -37,7 +37,7 @@ def bootstrap() -> None:
     settings.ensure_dirs()
     init_db()
     with session_scope() as db:
-        recipe_service.migrate_recipe_statuses(db)
+        recipe_service.migrate_legacy_recipe_statuses(db)
         admin = auth_service.ensure_admin(db)
         admin_id = admin.id
         has_demo = db.scalar(select(Customer).where(Customer.name == DEMO_NAME)) is not None
@@ -63,7 +63,7 @@ def seed_demo(user_id: int) -> None:
         memory_service.set_memory(db, category="preferences", key="金额格式", value="金额保留两位小数", customer_id=customer.id, source="human")
         memory_service.set_memory(db, category="user_context", key="对账周期", value="每月 5 号前出上个月的账单", customer_id=customer.id, source="human")
 
-        recipe = Recipe(**demo_recipe_body(), customer_id=customer.id, created_by="human", status="active")
+        recipe = Recipe(**demo_recipe_body(), customer_id=customer.id, created_by="human")
         recipe.learned_from = {"input_files": [paths["fees_sep"].name, paths["owners"].name], "expected_file": paths["expected_sep"].name,
                                "requirement": "示例流程"}
         customer_id = customer.id
@@ -97,7 +97,7 @@ def seed_demo(user_id: int) -> None:
         run_service.finish_run(db, run_id, runner.report, verification=verification, output_file_id=record.id,
                                outputs_metrics=run_service.metrics_of(runner.collect_outputs()))
         recipe.metadata["version_note"] = "示例流程"
-        recipe_service.save_recipe(db, recipe, status="active")
+        recipe_service.save_recipe(db, recipe)
         customer = db.get(Customer, customer_id)
         asyncio.run(customer_service.refresh_summary(db, customer, None))
     shutil.rmtree(tmp, ignore_errors=True)

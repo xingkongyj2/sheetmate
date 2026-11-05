@@ -524,7 +524,7 @@ def build_system_prompt(ctx: AgentContext, message: str) -> str:
     recipes = ctx.host.list_recipes()
     recipes_block = ""
     if recipes:
-        lines = [f"- recipe_id={r['recipe_id']}「{r['name']}」v{r['version']}（{r['status_label']}）：{r['description'][:80]} "
+        lines = [f"- recipe_id={r['recipe_id']}「{r['name']}」v{r['version']}：{r['description'][:80]} "
                  f"输入 {r['inputs']}，{r['step_count']} 步" + (f"；与当前表匹配：{r['match']}" if r.get("match") else "")
                  for r in recipes[:10]]
         recipes_block = "\n## 已有的处理流程（Recipe，优先复用）\n" + "\n".join(lines) + "\n"

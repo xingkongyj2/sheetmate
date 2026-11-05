@@ -41,7 +41,7 @@ STATUSES = {"active": "已启用", "deprecated": "已停用"}  # 草稿状态不
 
 
 def formula_usage(db: Session, customer_id: str) -> dict[str, list[dict[str, Any]]]:
-    """每个公式 id 被这个客户的哪些流程（最新版本、未停用）用到，用在第几步，以及这些步骤现在有没有问题。"""
+    """每个公式 id 被这个客户的哪些流程（最新版本）用到，用在第几步，以及这些步骤现在有没有问题。"""
     library = recipe_service.library_for(db, customer_id)
     usage: dict[str, list[dict[str, Any]]] = {}
     for record in recipe_service.latest_records(db, customer_id=customer_id):
@@ -55,7 +55,7 @@ def formula_usage(db: Session, customer_id: str) -> dict[str, list[dict[str, Any
         for formula_id, steps in by_formula.items():
             labels = [f"第 {s.id} 步「{s.name}」" for s in steps]
             usage.setdefault(formula_id, []).append({
-                "recipe_id": record.recipe_id, "name": record.name, "version": record.version, "status": record.status,
+                "recipe_id": record.recipe_id, "name": record.name, "version": record.version,
                 "steps": [{"id": s.id, "name": s.name} for s in steps],
                 "problems": [p for p in problems if any(p.startswith(label) for label in labels)],
             })
@@ -73,7 +73,7 @@ def list_with_usage(db: Session, customer_id: str) -> list[dict[str, Any]]:
         item = recipe_service.formula_dict(spec, "customer")
         builtin = BUILTIN_FORMULAS.get(spec.id)
         item.update(
-            status_label=STATUSES.get(spec.status, recipe_service.STATUS_LABELS.get(spec.status, spec.status)),
+            status_label=STATUSES.get(spec.status, spec.status),
             overrides_name=builtin.spec.name if builtin else None,
             used_by=usage.get(spec.id, []),
             created_by=record.created_by,

@@ -122,7 +122,6 @@ function inline(value: unknown): string {
 function recipeViewMarkdown(view: RecipeViewArtifact): string {
   const blocks = [`### ${inline(userFacingText(view.name, '处理流程'))} · v${view.version}`]
   if (view.deleted) blocks.push('流程已删除，以下为查看时的记录。')
-  else if (view.status_label) blocks.push(`状态：${inline(userFacingText(view.status_label))}`)
   const description = userFacingSummary(view.description)
   if (description) blocks.push(description)
   if (view.flow.inputs.length) blocks.push(`输入：${view.flow.inputs.map((input) => inline(userFacingText(input.alias, '输入表'))).join('、')}`)
@@ -179,7 +178,6 @@ export function messageMarkdown(message: UiMessage, stages?: { title: string; su
       recipe_id: delivery.saved?.recipe_id || delivery.recipeId || '',
       name: delivery.recipeName || delivery.saved?.name || '处理流程', description: delivery.recipe?.description || '',
       version: delivery.saved?.version || delivery.recipeVersion || 1,
-      status: delivery.saved?.status || '', status_label: delivery.saved?.status_label || '',
       deleted: delivery.deleted, flow: progressFlow(delivery),
     })]
     if (artifact.kind === 'recipe' && (artifact.progress.file || artifact.progress.saved)) return []

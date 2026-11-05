@@ -15,7 +15,6 @@ import type { RecipeProgress, StepState, UiMessage } from '@/composables/chatMod
 import { executionFileGroups, executionTableKey, executionTables } from '@/composables/executionPresentation'
 import { progressFlow } from '@/composables/recipeFlow'
 import { recipeToolLabel } from '@/composables/recipeTools'
-import { recipeStatus } from '@/composables/recipeStatus'
 import { scriptReferences } from '@/composables/scriptPresentation'
 import { useConfirm } from '@/composables/useConfirm'
 
@@ -127,7 +126,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
             <h3 class="min-w-0 flex-1 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h3>
             <span class="tag">v{{ recipe.version }}</span>
-            <StatusPill class="shrink-0" :status="recipeStatus(recipe.status)" />
           </header>
           <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
             <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>

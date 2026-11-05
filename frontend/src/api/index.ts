@@ -166,11 +166,9 @@ export const recipeApi = {
   list: async (params: { customer_id?: string; conversation_id?: string }) =>
     (await http.get<{ recipes: RecipeBrief[] }>('/recipes', { params })).data.recipes,
   get: async (id: string, version?: number) =>
-    (await http.get<{ recipe: RecipeJSON; flow: RecipeFlowData; versions: { version: number; status: string; status_label: string; created_at: string; steps: number; note: string }[]; runs: RunBrief[] }>(
+    (await http.get<{ recipe: RecipeJSON; flow: RecipeFlowData; versions: { version: number; created_at: string; steps: number; note: string }[]; runs: RunBrief[] }>(
       `/recipes/${id}`, { params: { version } })).data,
   update: async (id: string, recipe: RecipeJSON) => (await http.put<{ recipe: RecipeBrief }>(`/recipes/${id}`, recipe)).data.recipe,
-  setStatus: async (id: string, status: string) =>
-    (await http.post<{ recipe: RecipeBrief }>(`/recipes/${id}/status`, { status })).data.recipe,
   remove: async (id: string) => http.delete(`/recipes/${id}`),
   match: async (id: string, fileIds: string[]) =>
     (await http.post<{ inputs: { alias: string; kind?: 'table' | 'file'; description: string; file_pattern: string; required_columns: string[]; match: { key: string; score: number; filename: string; sheet: string | null } | null }[]; candidates: { key: string; kind?: 'table' | 'file'; filename: string; sheet: string | null; rows: number }[] }>(

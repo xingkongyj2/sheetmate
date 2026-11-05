@@ -10,7 +10,6 @@
 import type { AgentEvent, DiffCard, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
 import { scriptReferences } from './scriptPresentation.ts'
 import { recipeProcessDetails, type RecipeProcessDetail } from './recipeProcessDetails'
-import { recipeStatus, recipeStatusLabel } from './recipeStatus'
 
 export type ToolStatus = 'running' | 'ok' | 'error'
 export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' | 'error' | 'stopped'
@@ -78,7 +77,7 @@ export interface RecipeProgress {
   runStatus?: string
   runSummary?: string
   escalation?: string
-  saved?: { recipe_id: string; version: number; name: string; status: string; status_label: string; verification?: unknown; flow?: RecipeFlowData }
+  saved?: { recipe_id: string; version: number; name: string; verification?: unknown; flow?: RecipeFlowData }
   file?: FileArtifact
   files?: FileArtifact[]
   failed?: string
@@ -101,8 +100,6 @@ export interface RecipeViewArtifact {
   name: string
   description: string
   version: number
-  status: string
-  status_label: string
   flow: RecipeFlowData
   toolCallId?: string
   deleted?: boolean
@@ -183,6 +180,15 @@ function stepOf(p: RecipeProgress, id: number): StepState | undefined {
   return p.steps.find((s) => s.step_id === id)
 }
 
+/** 旧消息中的流程可能带有已移除的启停字段，恢复时不再保留。 */
+function recipeSnapshot(recipe: RecipeJSON | undefined): RecipeJSON | undefined {
+  if (!recipe) return undefined
+  const snapshot = { ...recipe } as RecipeJSON & { status?: unknown; status_label?: unknown }
+  delete snapshot.status
+  delete snapshot.status_label
+  return snapshot
+}
+
 /** 把一个 recipe_* 事件归并进进度对象，返回 true 表示已处理 */
 export function applyRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
   const handled = mergeRecipeEvent(p, e)
@@ -203,7 +209,7 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.thinking = e.message
       return true
     case 'recipe_generated':
-      p.recipe = e.recipe
+      p.recipe = recipeSnapshot(e.recipe)
       p.recipeId = e.recipe?.id
       p.flow = e.flow
       p.questions = e.questions
@@ -305,7 +311,7 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
     case 'recipe_completed':
     case 'recipe_saved':
       p.saved = e.type === 'recipe_saved'
-        ? { ...e, status: recipeStatus(e.status), status_label: recipeStatusLabel(e.status) } as unknown as RecipeProgress['saved']
+        ? { recipe_id: e.recipe_id, version: e.version, name: e.name, verification: e.verification, flow: e.flow }
         : undefined
       if (e.type === 'recipe_saved') p.deleted = false
       p.recipeId = e.recipe_id ?? p.recipeId
@@ -316,7 +322,7 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
         const reports = report.steps as StepReport[]
         p.runId = selected.run_id
         p.round = selected.round
-        p.recipe = selected.recipe
+        p.recipe = recipeSnapshot(selected.recipe)
         p.recipeId = selected.recipe?.id ?? p.recipeId
         p.recipeName = selected.recipe?.name ?? p.recipeName
         p.recipeVersion = selected.recipe?.version ?? e.version
@@ -376,7 +382,7 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
         !Array.isArray(e.flow.inputs) || !Array.isArray(e.flow.steps) || !Array.isArray(e.flow.outputs)) return
     const view: RecipeViewArtifact = {
       recipe_id: e.recipe_id, name: e.name ?? '处理流程', description: e.description ?? '',
-      version: e.version ?? 1, status: recipeStatus(e.status), status_label: recipeStatusLabel(e.status),
+      version: e.version ?? 1,
       toolCallId: e.tool_call_id,
       // 只接收流程图公开字段，快照不依赖后续 API 请求，也不携带执行参数或 SQL。
       flow: {
