@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from dataclasses import replace
 from typing import Any
 
+from sheetmate.agent.content import model_history, user_content
 from sheetmate.agent.executor import AgentExecutor, build_system_prompt
 from sheetmate.agent.llm import LLMError
 from sheetmate.agent.prompts import AGGREGATOR_PROMPT, MULTI_AGENT_KEYWORDS, SPECIALIST_MESSAGE
@@ -77,8 +78,8 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
         scoped = replace(ctx, table_filter={table_name})
         try:
             await queue.put({"type": "agent_start", "agent_id": table_name, "table_name": table_name})
-            messages = [{"role": "system", "content": build_system_prompt(scoped, message)}, *history[-6:],
-                        {"role": "user", "content": SPECIALIST_MESSAGE.format(table=table_name, message=message)}]
+            messages = [{"role": "system", "content": build_system_prompt(scoped, message)}, *model_history(history[-6:]),
+                        {"role": "user", "content": user_content(SPECIALIST_MESSAGE.format(table=table_name, message=message), scoped.image_parts)}]
             tools = executor.registry.for_context(scoped)
             conclusion = ""
             async for event in executor.agent_stream(messages, tools, scoped):
@@ -117,7 +118,8 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
     prompt = AGGREGATOR_PROMPT.format(count=len(conclusions), message=message, conclusions="\n\n---\n\n".join(parts) or "（无）")
     full = ""
     try:
-        async for chunk in executor.llm.stream_chat([{"role": "user", "content": prompt}]):
+        image_parts = [part for item in history[-6:] for part in item.get("image_parts", [])] + ctx.image_parts
+        async for chunk in executor.llm.stream_chat([{"role": "user", "content": user_content(prompt, image_parts)}]):
             choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
             if choice is None or not choice.delta.content:
                 continue

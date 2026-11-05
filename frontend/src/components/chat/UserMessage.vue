@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Download, FileCheck2, FileSpreadsheet } from '@lucide/vue'
+import { Download, FileCheck2, FileSpreadsheet, Image } from '@lucide/vue'
 import { computed } from 'vue'
 
 import type { FileInfo, PlanStep } from '@/api/types'
 import type { UiMessage } from '@/composables/chatModel'
+import { isImageFile } from '@/composables/attachmentFiles'
 import { parseTableReferences } from '@/composables/tableReferences'
 
 const props = defineProps<{ message: UiMessage; files: FileInfo[] }>()
@@ -40,7 +41,9 @@ function fileDetails(file: FileInfo) {
               @click="emit('preview', attachment.file)"
             >
               <span class="flex size-10 shrink-0 items-center justify-center rounded-xl" :class="attachment.file.kind === 'expected' ? 'bg-fun-yellow/15 text-[#b7860b]' : 'bg-fun-green/10 text-fun-green'">
-                <FileCheck2 v-if="attachment.file.kind === 'expected'" class="size-5" />
+                <img v-if="isImageFile(attachment.file.filename, attachment.file.media_type) && attachment.file.preview_url" :src="attachment.file.preview_url" alt="" loading="lazy" class="size-10 rounded-xl object-cover" />
+                <Image v-else-if="isImageFile(attachment.file.filename, attachment.file.media_type)" class="size-5" />
+                <FileCheck2 v-else-if="attachment.file.kind === 'expected'" class="size-5" />
                 <FileSpreadsheet v-else class="size-5" />
               </span>
               <span class="min-w-0 flex-1">

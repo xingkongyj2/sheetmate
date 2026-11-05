@@ -45,6 +45,7 @@ class ChatBody(BaseModel):
 
 class MessageBody(BaseModel):
     message: str
+    attachments: list[str] | None = None
 
 
 class LoadFileBody(BaseModel):
@@ -176,7 +177,7 @@ async def chat(conversation_id: str, body: ChatBody, user: User = Depends(curren
 
 @router.post("/{conversation_id}/plan")
 async def plan(conversation_id: str, body: MessageBody, user: User = Depends(current_user)) -> dict[str, Any]:
-    return {"ok": True, "plan": await chat_service.plan(user, conversation_id, body.message)}
+    return {"ok": True, "plan": await chat_service.plan(user, conversation_id, body.message, attachments=body.attachments)}
 
 
 @router.post("/{conversation_id}/clarify")

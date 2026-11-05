@@ -15,6 +15,7 @@ from sheetmate.api.deps import current_user
 from sheetmate.config import settings
 from sheetmate.db.database import get_db
 from sheetmate.db.models import FileRecord, User
+from sheetmate.engine.images import image_profile
 from sheetmate.engine.reader import ReadError, read_workbook
 from sheetmate.engine.sqlutil import frame_rows
 from sheetmate.services import files as file_service
@@ -80,7 +81,23 @@ def download(file_id: str, db: Session = Depends(get_db), user: User = Depends(c
     _check(db, user, record)
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(record.filename)}"}
     return FileResponse(record.stored_path, headers=headers,
-                        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                        media_type=file_service.file_media_type(record))
+
+
+@router.get("/{file_id}/image")
+def image_preview(file_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> FileResponse:
+    record = file_service.get_file(db, file_id)
+    _check(db, user, record)
+    try:
+        profile = image_profile(Path(record.stored_path))
+    except ReadError as exc:
+        raise ServiceError(str(exc)) from exc
+    headers = {
+        "Content-Disposition": f"inline; filename*=UTF-8''{quote(record.filename)}",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+    }
+    return FileResponse(record.stored_path, headers=headers, media_type=profile["media_type"])
 
 
 @router.delete("/{file_id}")

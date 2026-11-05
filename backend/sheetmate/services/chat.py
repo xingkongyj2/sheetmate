@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import ExitStack, aclosing
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from sheetmate.agent.executor import AgentExecutor
 from sheetmate.agent.intent import infer_request
@@ -33,7 +35,9 @@ from sheetmate.agent.summarizer import COMPACT_THRESHOLD, compact_history, fallb
 from sheetmate.agent.tools import AgentContext, ToolRegistry
 from sheetmate.config import settings
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import Conversation, Customer, Message, User
+from sheetmate.db.models import Conversation, Customer, FileRecord, Message, User
+from sheetmate.engine.images import model_image_data_url
+from sheetmate.engine.reader import ReadError
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.services import conversations as conv_service
 from sheetmate.services import customers as customer_service
@@ -44,12 +48,15 @@ from sheetmate.services import recipe_deletion
 from sheetmate.services import runs as run_service
 from sheetmate.services.file_view import file_references, file_view_answer, select_files
 from sheetmate.services.analysis import AnalysisWorkspace, analysis_workspace
-from sheetmate.services.errors import Conflict
+from sheetmate.services.errors import Conflict, ServiceError
 from sheetmate.services.host import ConversationHost
 from sheetmate.services.jobs import Job, jobs
 
 _registry = ToolRegistry()
 _background: set[asyncio.Task] = set()  # 持有后台任务的引用，防止被垃圾回收
+_MAX_MESSAGE_IMAGES = 10
+_MAX_HISTORY_IMAGES = 8
+_MAX_IMAGE_REQUEST_BYTES = 20 * 1024 * 1024
 _KEEP_EVENTS = {
     "note", "reply", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
@@ -57,6 +64,35 @@ _KEEP_EVENTS = {
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
     "recipe_verify", "recipe_refine", "recipe_diff", "recipe_completed", "recipe_saved", "recipe_deleted", "recipe_failed", "recipe_view",
 }
+
+
+def _attachment_records(db: Session, conv: Conversation, attachments: list[str]) -> list[FileRecord]:
+    records = []
+    for file_id in dict.fromkeys(attachments):
+        record = file_service.get_file(db, file_id)
+        if not file_service.can_access_in_conversation(db, record, conversation_id=conv.id, customer_id=conv.customer_id):
+            raise ServiceError("只能发送本会话或当前客户的附件")
+        records.append(record)
+    if sum(((record.profile or {}).get("media_type") or "").startswith("image/") for record in records) > _MAX_MESSAGE_IMAGES:
+        raise ServiceError(f"每条消息最多发送 {_MAX_MESSAGE_IMAGES} 张图片")
+    return records
+
+
+def _image_parts(records: list[FileRecord]) -> list[dict[str, Any]]:
+    parts = []
+    encoded_size = 0
+    for record in records:
+        if not ((record.profile or {}).get("media_type") or "").startswith("image/"):
+            continue
+        url = model_image_data_url(Path(record.stored_path))
+        encoded_size += len(url)
+        if encoded_size > _MAX_IMAGE_REQUEST_BYTES:
+            raise ServiceError("本条消息的图片内容过大，请减少图片数量或压缩后重试")
+        parts.extend([
+            {"type": "text", "text": f"附件图片：{record.filename}（file_id={record.id}）"},
+            {"type": "image_url", "image_url": {"url": url}},
+        ])
+    return parts
 
 
 def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentContext, ConversationHost]:
@@ -86,14 +122,15 @@ def start_chat(user: User, conversation_id: str, message: str, *,
                plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None) -> Job:
     text = (message or "").strip()
     if not text:
-        from sheetmate.services.errors import ServiceError
-
         raise ServiceError("消息不能为空")
     with session_scope() as db:
         conv = conv_service.get_conversation(db, user, conversation_id)
         if jobs.running(conversation_id):
             raise Conflict("上一个任务还在处理中，请稍等它完成")
-        meta = {"attachments": attachments or []}
+        submitted = list(dict.fromkeys(attachments or []))
+        for record in _attachment_records(db, conv, submitted):
+            file_service.retain_for_conversation(db, record, conv.id)
+        meta = {"attachments": submitted}
         if plan_steps:
             meta["plan"] = plan_steps
         message_id = conv_service.add_message(db, conv, "user", text, meta=meta).id
@@ -194,7 +231,14 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             return
         llm = get_llm()
         ctx, host = build_context(user_id, conversation_id, llm)
+        with session_scope() as db:
+            conv = db.get(Conversation, conversation_id)
+            request = db.get(Message, message_id)
+            assert conv is not None and request is not None
+            records = _attachment_records(db, conv, (request.meta or {}).get("attachments", []))
+            ctx.image_parts = _image_parts(records)
         history = await _history(conversation_id, llm, emit)
+        _limit_history_images(history, ctx.image_parts)
         files = host.list_files()
         references = file_references(conversation_id, message_id, files)
         intent = await infer_request(llm, ctx, message, history, plan_steps, files=files, file_references=references)
@@ -211,7 +255,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             await job.emit({"type": "start", "mode": "analyze", "customer": ctx.customer["name"] if ctx.customer else None})
             for file in selected_files:
                 await emit({"type": "file", **{key: file[key] for key in (
-                    "file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets", "download_url",
+                    "file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets", "download_url", "media_type", "preview_url",
                 ) if key in file}})
             answer = await file_view_answer(llm, message, intent.files, selected_files)
             if answer:
@@ -527,6 +571,20 @@ def _contains_unconfigured_llm_error(text: str) -> bool:
     return contains_llm_not_configured_text(text)
 
 
+def _limit_history_images(history: list[dict[str, Any]], current: list[dict[str, Any]]) -> None:
+    """Prioritize current attachments and recent turns within the combined request budget."""
+    remaining = _MAX_IMAGE_REQUEST_BYTES - sum(
+        len(part["image_url"]["url"]) for part in current if part["type"] == "image_url"
+    )
+    for item in reversed(history):
+        parts = item.get("image_parts", [])
+        size = sum(len(part["image_url"]["url"]) for part in parts if part["type"] == "image_url")
+        if size <= remaining:
+            remaining -= size
+        else:
+            item.pop("image_parts", None)
+
+
 async def _history(conversation_id: str, llm: Any, emit: Any) -> list[dict[str, Any]]:
     """组装历史：压缩摘要 + 之后的消息（不含刚保存的这条用户消息）。助手消息附上本轮执行摘要，方便追问。"""
     with session_scope() as db:
@@ -557,7 +615,43 @@ async def _history(conversation_id: str, llm: Any, emit: Any) -> list[dict[str, 
             items = recent
             await emit({"type": "compacted", "old_count": len(older), "summary": text[:120]})
     history = [{"role": "assistant", "content": summary}] if summary else []
-    history += [{"role": m["role"], "content": m["content"]} for m in items if m["content"].strip()]
+    history += [{"role": m["role"], "content": m["content"], "message_id": m["id"]} for m in items if m["content"].strip()]
+    # Reattach only recent, still-accessible images after text compaction. Never embed
+    # base64 in summaries, persistence prompts, database messages, or diagnostic text.
+    remaining = _MAX_HISTORY_IMAGES
+    encoded_size = 0
+    with session_scope() as db:
+        conv = db.get(Conversation, conversation_id)
+        assert conv is not None
+        for item in reversed(history):
+            message_id = item.pop("message_id", None)
+            if item["role"] != "user" or message_id is None or remaining <= 0:
+                continue
+            stored = db.get(Message, message_id)
+            records = []
+            for file_id in dict.fromkeys((stored.meta or {}).get("attachments", []) if stored else []):
+                record = db.get(FileRecord, file_id)
+                if record is None or not ((record.profile or {}).get("media_type") or "").startswith("image/"):
+                    continue
+                if (not Path(record.stored_path).is_file() or not file_service.can_access_in_conversation(
+                    db, record, conversation_id=conv.id, customer_id=conv.customer_id,
+                )):
+                    continue
+                records.append(record)
+            if records:
+                item["content"] += "\n（图片附件：" + "、".join(record.filename for record in records) + "）"
+                chosen = records[-remaining:]
+                try:
+                    parts = _image_parts(chosen)
+                except (OSError, ReadError, ServiceError):
+                    # A missing/corrupted older attachment must not prevent a text reply.
+                    item["content"] += "（原图片暂时无法读取）"
+                else:
+                    image_bytes = sum(len(part["image_url"]["url"]) for part in parts if part["type"] == "image_url")
+                    if encoded_size + image_bytes <= _MAX_IMAGE_REQUEST_BYTES:
+                        item["image_parts"] = parts
+                        encoded_size += image_bytes
+                        remaining -= len(chosen)
     return history
 
 
@@ -611,11 +705,13 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
 # ---------------------------------------------------------------------------
 
 
-async def plan(user: User, conversation_id: str, message: str) -> dict[str, Any]:
+async def plan(user: User, conversation_id: str, message: str, *, attachments: list[str] | None = None) -> dict[str, Any]:
     with session_scope() as db:
-        conv_service.get_conversation(db, user, conversation_id)
+        conv = conv_service.get_conversation(db, user, conversation_id)
+        image_parts = _image_parts(_attachment_records(db, conv, attachments or []))
     llm = get_llm()
     ctx, _ = build_context(user.id, conversation_id, llm)
+    ctx.image_parts = image_parts
     return await generate_plan(llm, ctx, message)
 
 

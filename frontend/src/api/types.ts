@@ -34,6 +34,8 @@ export interface FileInfo {
   created_at: string | null
   sheets: SheetBrief[]
   download_url: string
+  media_type?: string
+  preview_url?: string | null
 }
 
 export type RecipeToolKind = 'formula' | 'sql' | 'python'

@@ -14,6 +14,7 @@ from typing import Any
 import openai
 from openai import AsyncOpenAI
 
+from sheetmate.agent.content import user_content
 from sheetmate.config import LLMSettings, get_llm_settings, is_deepseek_url
 
 
@@ -70,6 +71,13 @@ def translate_error(exc: Exception) -> LLMError:
     if isinstance(exc, openai.APITimeoutError):
         return LLMError("模型响应超时，请稍后再试。")
     if isinstance(exc, openai.APIStatusError):
+        if exc.status_code in {400, 422} and re.search(
+            r"(?:image|vision|multimodal).{0,100}(?:not supported|unsupported|not support)|"
+            r"(?:not supported|unsupported|not support).{0,100}(?:image|vision|multimodal)|"
+            r"content.{0,100}expected.{0,30}string.{0,60}(?:array|list)",
+            str(exc.message), re.IGNORECASE,
+        ):
+            return LLMError("当前模型或接口不支持图片输入，请在「设置」中切换为支持图片的模型后重试。")
         if exc.status_code == 402:
             return LLMError("模型账户余额不足，请充值后再试。")
         if exc.status_code == 404:
@@ -178,7 +186,8 @@ class LLMClient:
         except Exception as exc:
             raise translate_error(exc) from exc
 
-    async def complete_json(self, prompt: str, system: str | None = None, retries: int = 1) -> Any:
+    async def complete_json(self, prompt: str, system: str | None = None, retries: int = 1, *,
+                            image_parts: list[dict[str, Any]] | None = None) -> Any:
         """要求模型只输出 JSON，解析失败时带着错误重试。"""
         messages: list[dict[str, Any]] = []
         if system:
@@ -186,7 +195,7 @@ class LLMClient:
         # DeepSeek 的 JSON 模式要求提示词里出现小写的 "json"，否则会报错
         if "json" not in f"{system or ''}{prompt}":
             prompt = f"{prompt}\n\n（请输出 json）"
-        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": user_content(prompt, image_parts)})
         use_json_mode = True
         last_error = ""
         for _ in range(retries + 1):

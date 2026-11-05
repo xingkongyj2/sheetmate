@@ -44,13 +44,15 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
                     "file_id": table.file_id, "filename": table.filename, "created_by": table.created_by}
                    for table in ctx.visible_tables()],
         "plan_steps": plan_steps or [],
-        "files": [{key: file.get(key) for key in ("file_id", "filename", "kind", "created_at", "scope_label", "tables")}
+        "files": [{key: file.get(key) for key in ("file_id", "filename", "kind", "created_at", "scope_label", "tables", "media_type")}
                   | {"sheets": [sheet.get("sheet") for sheet in file.get("sheets", [])]}
                   for file in files or []],
         "file_references": file_references or [],
         "message": message,
     }
-    result = await llm.complete_json(json.dumps(context, ensure_ascii=False), system=INTENT_PROMPT)
+    image_parts = [part for item in history[-8:] for part in item.get("image_parts", [])] + ctx.image_parts
+    image_kwargs = {"image_parts": image_parts} if image_parts else {}
+    result = await llm.complete_json(json.dumps(context, ensure_ascii=False), system=INTENT_PROMPT, **image_kwargs)
     mode = result.get("mode") if isinstance(result, dict) else None
     if not isinstance(mode, str) or mode not in {"analyze", "modify", "create"}:
         raise LLMError("暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。")

@@ -20,7 +20,8 @@ const props = withDefaults(defineProps<{
   autofocus?: boolean
   large?: boolean
   busy?: boolean
-}>(), { tableReferences: () => [], fileReferences: () => [], referencesLoading: false, referencesError: '', placeholder: '', autofocus: false, large: false, busy: false })
+  canSend?: boolean
+}>(), { tableReferences: () => [], fileReferences: () => [], referencesLoading: false, referencesError: '', placeholder: '', autofocus: false, large: false, busy: false, canSend: false })
 const emit = defineEmits<{ 'update:modelValue': [value: string]; send: [] }>()
 const editor = ref<HTMLDivElement | null>(null)
 const empty = ref(!props.modelValue)
@@ -332,15 +333,18 @@ function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Enter') {
     event.preventDefault()
     if (event.shiftKey) replaceSelection('\n')
-    else if (!props.busy && read().trim()) emit('send')
+    else if (!props.busy && props.canSend) emit('send')
   } else if (event.key === 'Backspace' || event.key === 'Delete') {
     if (deleteReference(event.key === 'Backspace')) event.preventDefault()
   }
 }
 
 function onPaste(event: ClipboardEvent) {
+  if (event.defaultPrevented) return
   event.preventDefault()
-  replaceSelection(event.clipboardData?.getData('text/plain') ?? '')
+  const text = event.clipboardData?.getData('text/plain') ?? ''
+  if (!text) return
+  replaceSelection(text)
   refreshSuggestions(true)
 }
 

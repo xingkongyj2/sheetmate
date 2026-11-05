@@ -22,6 +22,7 @@ import UserMessage from '@/components/chat/UserMessage.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
+import { attachmentMessage } from '@/composables/attachmentFiles'
 import { applyEvent, finishMessage, fromStoredMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
 import { formatFileReference, formatTableReference, parseTableReferences, serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
@@ -214,7 +215,7 @@ onMounted(async () => {
     if (pending.plan) {
       attachments.value = pending.attachments.flatMap((id) => {
         const file = detail.value?.files.find((item) => item.file_id === id)
-        return file ? [{ key: id, sourceId: id, name: file.filename, kind: file.kind === 'expected' ? 'expected' as const : 'input' as const, status: 'done' as const }] : []
+        return file ? [{ key: id, sourceId: id, name: file.filename, kind: file.kind === 'expected' ? 'expected' as const : 'input' as const, status: 'done' as const, mediaType: file.media_type, previewUrl: file.preview_url ?? undefined }] : []
       })
       await requestPlan(pending.message, pending.attachments)
     } else await send(pending.message, { attachments: pending.attachments })
@@ -266,12 +267,17 @@ watch(
 )
 
 async function onSend() {
-  const message = text.value.trim()
-  if (!message || streaming.value || reconnecting.value) return
+  if (streaming.value || reconnecting.value || planning.value) return
   if (attachments.value.some((a) => a.status === 'uploading')) {
     toast.info('文件还在上传，请稍等')
     return
   }
+  if (attachments.value.some((a) => a.status === 'error')) {
+    toast.error('请移除上传失败的附件后重新添加')
+    return
+  }
+  const message = attachmentMessage(text.value, attachments.value.filter((a) => a.status === 'done'))
+  if (!message) return
   const ids = attachments.value.filter((a) => a.status === 'done').map((a) => a.key)
   text.value = ''
   if (planMode.value) await requestPlan(message, ids)
@@ -283,7 +289,7 @@ async function requestPlan(message: string, ids: string[]) {
   messages.value.push(reactive(newUser(message, { attachments: ids })) as UiMessage)
   scrollToBottom(true)
   try {
-    const result = await conversationApi.plan(props.id, serializeTableReferences(message, tableReferences.value, fileReferences.value))
+    const result = await conversationApi.plan(props.id, serializeTableReferences(message, tableReferences.value, fileReferences.value), ids)
     plan.value = { ...result, message, attachments: [...ids] }
   } catch (err) {
     toast.error(errorText(err))
@@ -377,14 +383,17 @@ async function stop() {
 // ------------------------------------------------------------------ 附件 / 标题
 
 async function attach(files: File[], kind: 'input' | 'expected') {
-  for (const file of files) {
-    const local: Attachment = reactive({ key: uid('f'), name: file.name, kind, status: 'uploading' })
-    attachments.value.push(local)
+  // Register the entire batch before uploading so Send cannot omit later files.
+  const batch = files.map((file) => ({ file, local: reactive<Attachment>({ key: uid('f'), name: file.name, kind, status: 'uploading', mediaType: file.type }) }))
+  attachments.value.push(...batch.map(({ local }) => local))
+  for (const { file, local } of batch) {
     try {
       const result = await conversationApi.upload(props.id, file, kind)
       local.key = result.file.file_id
       local.sourceId = result.file.file_id
       local.name = result.file.filename
+      local.mediaType = result.file.media_type ?? file.type
+      local.previewUrl = result.file.preview_url ?? undefined
       local.status = 'done'
       local.tables = result.tables.map((t) => t.name)
       uploadedReferences.value.push(...result.tables.flatMap((table) => table.sheet
@@ -543,8 +552,9 @@ function answer(option: string) {
             :file-references="fileReferences"
             :references-loading="referencesLoading"
             :references-error="referencesError"
-            :busy="streaming || reconnecting"
-            placeholder="继续追问、提出修改要求，或上传新的表格…"
+            :busy="streaming || reconnecting || planning"
+            :stoppable="!planning"
+            placeholder="继续追问、提出修改要求，或粘贴表格和图片…"
             @attach="attach"
             @remove="removeAttachment"
             @preview="previewAttachment"

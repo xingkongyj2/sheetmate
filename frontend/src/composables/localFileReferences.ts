@@ -24,10 +24,10 @@ interface SheetEntry {
 const sheetCache = new WeakMap<File, string[]>()
 
 async function readSheets(file: File, signal: AbortSignal): Promise<string[]> {
+  if (!/\.(xlsx|xlsm|xls|csv)$/i.test(file.name)) return []
   if (/\.csv$/i.test(file.name)) return [file.name.replace(/\.csv$/i, '') || 'CSV']
   if (file.size > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂时无法读取工作表名称。')
   if (/\.xls$/i.test(file.name)) return (await fileApi.previewUpload(file, undefined, 0, 1, signal)).sheets
-  if (!/\.(xlsx|xlsm)$/i.test(file.name)) return []
   const buffer = await file.arrayBuffer()
   if (signal.aborted) throw new DOMException('已取消读取工作表', 'AbortError')
   const parsed = await parseInWorker(buffer, file.name, signal)

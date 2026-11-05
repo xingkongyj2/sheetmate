@@ -18,6 +18,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from sheetmate.agent.content import model_history, user_content
 from sheetmate.agent.llm import LLMError
 from sheetmate.agent.prompts import (
     AGENT_SYSTEM,
@@ -81,15 +82,15 @@ class AgentExecutor:
 
     async def converse(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """普通对话和意图询问，不提供任务执行工具。"""
-        messages = [{"role": "system", "content": CHAT_SYSTEM}, *history[-12:],
-                    {"role": "user", "content": message}]
+        messages = [{"role": "system", "content": CHAT_SYSTEM}, *model_history(history[-12:]),
+                    {"role": "user", "content": user_content(message, ctx.image_parts)}]
         async for event in self.agent_stream(messages, [], ctx):
             yield event
 
     async def execute(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """直接执行（不带计划）。"""
-        messages = [{"role": "system", "content": build_system_prompt(ctx, message)}, *history[-12:],
-                    {"role": "user", "content": message}]
+        messages = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history[-12:]),
+                    {"role": "user", "content": user_content(message, ctx.image_parts)}]
         async for event in self.agent_stream(messages, self.registry.for_context(ctx), ctx):
             yield event
 
@@ -97,8 +98,8 @@ class AgentExecutor:
                            history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """按用户确认的计划逐步执行，每步一次 ReAct，最后自检（TabClaw execute_plan）。"""
         tools = self.registry.for_context(ctx)
-        conversation = [{"role": "system", "content": build_system_prompt(ctx, message)}, *history[-12:],
-                        {"role": "user", "content": f"原始需求：{message}\n下面按计划逐步执行。"}]
+        conversation = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history[-12:]),
+                        {"role": "user", "content": user_content(f"原始需求：{message}\n下面按计划逐步执行。", ctx.image_parts)}]
         budget = _ToolBudget()
         executed_steps = 0
         yield {"type": "plan_start", "steps": [{"id": index, "description": str(step.get("description") or f"第 {index} 步")}
@@ -511,6 +512,7 @@ def build_system_prompt(ctx: AgentContext, message: str) -> str:
                                                    tag=tag, columns=cols))
     files = [f for f in ctx.host.list_files() if not f.get("tables")]
     file_lines = [f"- file_id={f['file_id']}「{f['filename']}」（{f.get('scope_label', '')}）"
+                  + ("，图片附件（非工作簿，无工作表）" if (f.get("media_type") or "").startswith("image/") else "")
                   + (f"，脚本 run_id={f['script_run_id']}（可查看脚本后继续调整）" if f.get("script_run_id") else "")
                   for f in files[:15]]
     if ctx.customer:

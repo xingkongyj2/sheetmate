@@ -106,6 +106,7 @@ class AgentContext:
     table_filter: set[str] | None = None  # 多表并行时，每个专员只看自己的表
     save_recipe_requested: bool = False  # 仅来自用户明确的保存意图，模型工具参数不能授权
     delete_recipe_ids: set[str] = field(default_factory=set)  # 用户对持久化待删除清单确认后，允许本轮删除的流程
+    image_parts: list[dict[str, Any]] = field(default_factory=list)  # 当前消息的图片，仅放入多模态请求，不写入提示词文本
 
     def visible_tables(self) -> list[TableInfo]:
         tables = self.ws.list_tables()
@@ -350,7 +351,7 @@ def _tool_show_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     if not files:
         return ToolResult("没有找到符合范围的文件。", summary="没有可查看的文件")
 
-    public_fields = {"file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets"}
+    public_fields = {"file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets", "media_type", "preview_url"}
     events = [{"type": "file", **{key: value for key, value in item.items() if key in public_fields},
                "download_url": f"/api/files/{item['file_id']}/download"} for item in files]
     summary = f"可查看和下载 {len(files)} 个文件。"

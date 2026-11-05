@@ -13,6 +13,7 @@ import LogoMark from '@/components/brand/LogoMark.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import ChatComposer from '@/components/chat/ChatComposer.vue'
 import CustomerPicker from '@/components/chat/CustomerPicker.vue'
+import { attachmentMessage } from '@/composables/attachmentFiles'
 import { uid } from '@/composables/chatModel'
 import { useLocalFileReferences } from '@/composables/localFileReferences'
 import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
@@ -58,7 +59,7 @@ function attach(list: File[], kind: 'input' | 'expected') {
   for (const file of list) {
     const key = uid('f')
     files.value.push({ key, file, kind })
-    attachments.value.push({ key, name: file.name, kind, status: 'pending' })
+    attachments.value.push({ key, name: file.name, kind, status: 'pending', mediaType: file.type })
   }
 }
 
@@ -75,7 +76,7 @@ function preview(key: string) {
 }
 
 async function send() {
-  const message = text.value.trim()
+  const message = attachmentMessage(text.value, attachments.value)
   if (!message || busy.value || !ready.value) return
   if (draft.hasMissingFiles) {
     toast.error('请先恢复附件，或移除后重新选择')
@@ -174,6 +175,7 @@ async function send() {
             v-model="text"
             v-model:plan="plan"
             :attachments="attachments"
+            :local-files="files"
             :file-references="fileReferences"
             :table-references="tableReferences"
             :references-loading="referencesLoading"

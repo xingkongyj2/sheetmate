@@ -133,8 +133,8 @@ export const conversationApi = {
     http.delete(`/conversations/${id}/tables/${encodeURIComponent(name)}`, { params: { source_conversation_id: sourceConversationId } }),
   setTableRole: async (id: string, name: string, role: 'input' | 'expected', sourceConversationId?: string) =>
     (await http.put<{ table: TableBrief }>(`/conversations/${id}/tables/${encodeURIComponent(name)}/role`, { role }, { params: { source_conversation_id: sourceConversationId } })).data.table,
-  plan: async (id: string, message: string) =>
-    (await http.post<{ plan: { title: string; steps: PlanStep[] } }>(`/conversations/${id}/plan`, { message })).data.plan,
+  plan: async (id: string, message: string, attachments?: string[]) =>
+    (await http.post<{ plan: { title: string; steps: PlanStep[] } }>(`/conversations/${id}/plan`, { message, attachments })).data.plan,
   stop: async (id: string) => http.post(`/conversations/${id}/stop`),
   chat: (id: string, body: { message: string; plan_steps?: PlanStep[]; attachments?: string[] }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/conversations/${id}/chat`, body, onEvent),

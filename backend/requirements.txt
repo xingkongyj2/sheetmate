@@ -7,6 +7,7 @@ duckdb>=1.1
 pandas>=2.2
 numpy>=1.26
 openpyxl>=3.1
+Pillow>=11.3
 xlrd>=2.0
 openai>=1.40
 python-dotenv>=1.0

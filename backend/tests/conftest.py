@@ -46,6 +46,7 @@ class FakeLLM:
         self.json_handlers = list(json_handlers or [])
         self.calls: list[list[dict[str, Any]]] = []
         self.json_prompts: list[str] = []
+        self.json_image_parts: list[list[dict[str, Any]]] = []
         self.intent_mode = intent_mode
         self.save_recipe_requested = save_recipe_requested
         self.delete_recipe_ids = list(delete_recipe_ids or [])
@@ -72,9 +73,10 @@ class FakeLLM:
                 yield _chunk(content=text[i : i + 12])
             yield _chunk(finish="stop")
 
-    async def complete_json(self, prompt: str, system: str | None = None, retries: int = 1):
+    async def complete_json(self, prompt: str, system: str | None = None, retries: int = 1, *, image_parts=None):
         blob = f"{system or ''}\n{prompt}"
         self.json_prompts.append(blob)
+        self.json_image_parts.append(list(image_parts or []))
         for i, (keyword, value) in enumerate(self.json_handlers):
             if keyword in blob:
                 if isinstance(value, list):  # 列表：依次弹出

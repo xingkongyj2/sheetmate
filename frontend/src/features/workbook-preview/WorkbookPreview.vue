@@ -1,12 +1,13 @@
 <script setup lang="ts">
-/** Unified original-file preview. XLSX/XLSM/CSV are parsed entirely in a Worker. */
-import { ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, FileSpreadsheet, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from '@lucide/vue'
+/** Unified original-file preview. Images bypass the workbook parser. */
+import { ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, FileSpreadsheet, Image, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo } from '@/api/types'
 import DataTable from '@/components/common/DataTable.vue'
+import { isImageFile } from '@/composables/attachmentFiles'
 
 import { parseInWorker } from './worker-client'
 
@@ -22,6 +23,9 @@ const expanded = ref(false)
 const filename = computed(() => props.localFile?.name ?? props.file?.filename ?? '表格预览')
 const size = computed(() => props.localFile?.size ?? props.file?.size ?? 0)
 const legacy = computed(() => /\.xls$/i.test(filename.value))
+const image = computed(() => isImageFile(filename.value, props.localFile?.type ?? props.file?.media_type))
+const imageSrc = ref('')
+let localImageUrl = ''
 const legacySheet = ref('')
 const legacySheets = ref<string[]>([])
 const legacyPage = ref<{ columns: string[]; rows: unknown[][]; total: number } | null>(null)
@@ -66,6 +70,9 @@ async function load() {
   const signal = controller.signal
   viewer?.dispose()
   viewer = null
+  if (localImageUrl) URL.revokeObjectURL(localImageUrl)
+  localImageUrl = ''
+  imageSrc.value = ''
   host.value?.replaceChildren()
   error.value = ''
   warnings.value = []
@@ -76,6 +83,13 @@ async function load() {
   legacySheet.value = ''
   legacyBusy.value = false
   phase.value = 'download'
+  if (image.value) {
+    if (props.localFile) {
+      localImageUrl = URL.createObjectURL(props.localFile)
+      imageSrc.value = localImageUrl
+    } else if (props.file) imageSrc.value = props.file.preview_url || `/api/files/${encodeURIComponent(props.file.file_id)}/image`
+    return
+  }
   if (legacy.value) {
     warnings.value = [props.localFile
       ? '旧版 .xls 使用临时数据预览，不保留原始排版；文件不会保存到会话。'
@@ -146,6 +160,7 @@ onBeforeUnmount(() => {
   ++loadId
   controller?.abort()
   viewer?.dispose()
+  if (localImageUrl) URL.revokeObjectURL(localImageUrl)
   window.removeEventListener('keydown', onKey, true)
   document.body.style.overflow = previousOverflow
   if (previousFocus?.isConnected) previousFocus.focus()
@@ -157,7 +172,7 @@ onBeforeUnmount(() => {
     <div class="fixed inset-0 z-[6000] flex items-center justify-center bg-black/35 backdrop-blur-sm" @click.self="emit('close')">
       <section ref="panel" role="dialog" aria-modal="true" aria-labelledby="workbook-preview-title" tabindex="-1" class="workbook-preview flex min-h-0 flex-col overflow-hidden border border-line bg-white shadow-2xl outline-none" :class="expanded ? 'h-[100dvh] w-full' : 'h-[90dvh] w-[96vw] max-w-[1600px] rounded-2xl'">
         <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
-          <span class="rounded-xl bg-fun-green/10 p-2 text-fun-green"><FileSpreadsheet class="size-5" /></span>
+          <span class="rounded-xl bg-fun-green/10 p-2 text-fun-green"><Image v-if="image" class="size-5" /><FileSpreadsheet v-else class="size-5" /></span>
           <div class="min-w-0 flex-1">
             <h2 id="workbook-preview-title" class="truncate text-sm font-semibold" :title="filename">{{ filename }}</h2>
             <p class="mt-0.5 text-xs text-mute">只读预览<span v-if="stats"> · {{ stats.sheetCount }} 个工作表</span></p>
@@ -177,6 +192,10 @@ onBeforeUnmount(() => {
         <div v-if="error" class="flex min-h-0 flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
           <CircleAlert class="size-8 text-mute" /><p role="alert" class="max-w-lg text-sm leading-6 text-mute">{{ error }}</p>
           <button type="button" class="btn-line" @click="load"><RotateCw class="size-4" />重新加载</button>
+        </div>
+        <div v-else-if="image" class="relative flex min-h-0 flex-1 items-center justify-center overflow-auto bg-paper p-4">
+          <img v-if="imageSrc" :key="imageSrc" :src="imageSrc" :alt="filename" class="max-h-full max-w-full object-contain" data-testid="image-preview" @load="phase = 'ready'" @error="error = '图片加载失败，请重新加载或下载查看。'" />
+          <div v-if="phase !== 'ready'" class="absolute inset-0 flex items-center justify-center gap-3 bg-paper" role="status"><LoaderCircle class="size-7 animate-spin text-mute" /><span class="text-sm text-mute">正在加载图片…</span></div>
         </div>
         <template v-else-if="legacy && legacyPage">
           <div class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-2 text-xs text-mute">

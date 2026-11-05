@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 from sheetmate.config import settings
 from sheetmate.db.models import Conversation, FileConversation, FileCustomer, FileRecord, User
 from sheetmate.engine.file_copies import temporary_file_copies
+from sheetmate.engine.images import IMAGE_SUFFIXES, image_profile
 from sheetmate.engine.profile import profile_workbook
 from sheetmate.engine.reader import SUPPORTED_SUFFIXES, ReadError, SheetData, read_workbook
 from sheetmate.engine.sqlutil import frame_rows, sanitize_table_name
@@ -124,8 +125,8 @@ def save_upload(
 ) -> FileRecord:
     original_name = safe_filename(filename)
     suffix = Path(original_name).suffix.lower()
-    if suffix not in SUPPORTED_SUFFIXES:
-        raise ServiceError(f"不支持的文件类型 {suffix or '(无扩展名)'}，请上传 xlsx / xls / csv")
+    if suffix not in SUPPORTED_SUFFIXES | IMAGE_SUFFIXES:
+        raise ServiceError(f"不支持的文件类型 {suffix or '(无扩展名)'}，请上传 xlsx / xlsm / xls / csv 或 PNG / JPG / JPEG / WebP / GIF 图片")
     if len(data) > settings.max_upload_mb * 1024 * 1024:
         raise ServiceError(f"文件超过 {settings.max_upload_mb} MB")
     if not data:
@@ -180,6 +181,8 @@ def register_output(db: Session, *, path: Path, filename: str, customer_id: str 
 
 def profile_file(path: Path) -> dict[str, Any]:
     """文件画像（不含数据预览，预览按需读取）。"""
+    if path.suffix.lower() in IMAGE_SUFFIXES:
+        return image_profile(path)
     try:
         sheets = _read_file_copy(path)
     except ReadError as exc:
@@ -206,6 +209,7 @@ def _read_file_copy(path: Path) -> list[SheetData]:
 
 def file_dict(record: FileRecord) -> dict[str, Any]:
     sheets = (record.profile or {}).get("sheets", [])
+    image_type = (record.profile or {}).get("media_type")
     return {
         "file_id": record.id,
         "filename": record.filename,
@@ -222,7 +226,23 @@ def file_dict(record: FileRecord) -> dict[str, Any]:
             for s in sheets
         ],
         "download_url": f"/api/files/{record.id}/download",
+        "media_type": file_media_type(record),
+        "preview_url": f"/api/files/{record.id}/image" if image_type in {
+            "image/png", "image/jpeg", "image/webp", "image/gif",
+        } else None,
     }
+
+
+def file_media_type(record: FileRecord) -> str:
+    media_type = (record.profile or {}).get("media_type")
+    if media_type in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+        return media_type
+    return {
+        ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ".xlsm": "application/vnd.ms-excel.sheet.macroEnabled.12",
+        ".xls": "application/vnd.ms-excel",
+        ".csv": "text/csv",
+    }.get(Path(record.filename).suffix.lower(), "application/octet-stream")
 
 
 def get_file(db: Session, file_id: str) -> FileRecord:
@@ -362,6 +382,8 @@ def remove_from_conversation(db: Session, record: FileRecord, user: User, conver
 
 
 def preview(record: FileRecord, sheet: str | None = None, offset: int = 0, limit: int = 50) -> dict[str, Any]:
+    if Path(record.stored_path).suffix.lower() in IMAGE_SUFFIXES:
+        raise ServiceError("图片不支持表格预览，请使用图片预览")
     sheets = _read_file_copy(Path(record.stored_path))
     chosen = next((s for s in sheets if s.name == sheet), sheets[0]) if sheet else sheets[0]
     part = chosen.df.iloc[offset : offset + limit]

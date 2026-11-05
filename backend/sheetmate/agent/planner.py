@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from sheetmate.agent.llm import LLMError
 from sheetmate.agent.prompts import CLARIFY_PROMPT, PLAN_PROMPT
 from sheetmate.agent.tools import AgentContext
 
@@ -23,14 +24,18 @@ def _tables_text(ctx: AgentContext, max_cols: int = 10) -> str:
 async def generate_plan(llm: Any, ctx: AgentContext, message: str) -> dict[str, Any]:
     prompt = PLAN_PROMPT.format(tables=_tables_text(ctx), memory=ctx.host.memory_text(message) or "（无）", message=message)
     try:
-        plan = await llm.complete_json(prompt)
+        image_kwargs = {"image_parts": ctx.image_parts} if ctx.image_parts else {}
+        plan = await llm.complete_json(prompt, **image_kwargs)
         steps = [s for s in plan.get("steps", []) if isinstance(s, dict) and s.get("description")]
         if not steps:
             raise ValueError("没有步骤")
         for i, step in enumerate(steps, start=1):
             step["id"] = i
         return {"title": str(plan.get("title") or "执行计划"), "steps": steps}
-    except Exception:
+    except Exception as exc:
+        if ctx.image_parts and isinstance(exc, LLMError):
+            # Do not silently offer a plan based on an image the model could not read.
+            raise
         # 兜底计划（与 TabClaw 一致）
         return {
             "title": "执行需求",
