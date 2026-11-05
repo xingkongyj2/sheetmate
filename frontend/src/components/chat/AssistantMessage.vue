@@ -11,7 +11,7 @@ import type { FileInfo, TableBrief } from '@/api/types'
 import Mascot from '@/components/brand/Mascot.vue'
 import MarkdownView from '@/components/common/MarkdownView.vue'
 import RecipeProgressCard from '@/components/recipe/RecipeProgressCard.vue'
-import { assistantDisplayBlocks, groupAssistantBlocks, type AssistantStage } from '@/composables/assistantTimeline'
+import { assistantDisplayBlocks, groupAssistantBlocks, type AssistantDisplayGroup, type AssistantStage } from '@/composables/assistantTimeline'
 import type { UiMessage } from '@/composables/chatModel'
 import { fileKindLabel, standaloneFiles } from '@/composables/filePresentation'
 import { missingLLMKeyPresentation } from '@/composables/llmErrorPresentation'
@@ -21,6 +21,7 @@ import { recipeViewReply } from '@/composables/recipeViewPresentation'
 import { recipeDeliveries } from '@/composables/recipeDeliveries'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
+import { useProgressiveReply } from '@/composables/useProgressiveReply'
 
 import RecipeStageDetails from './RecipeStageDetails.vue'
 import RecipeViewCard from './RecipeViewCard.vue'
@@ -63,6 +64,16 @@ const fallbackReply = computed(() => {
   const content = recipeViewReply(props.message)
   return content.trim() ? content : recipeOutcomeSummary(props.message)
 })
+const replyGroups = computed<AssistantDisplayGroup[]>(() => [
+  ...groups.value,
+  ...(fallbackReply.value ? [{ kind: 'text' as const, key: `${props.message.key}_fallback`, text: fallbackReply.value, closed: !props.message.streaming }] : []),
+])
+// Stored replies render immediately; a new reply can already be complete before its first render.
+const { groups: displayGroups, pending: revealing } = useProgressiveReply(
+  () => replyGroups.value,
+  (props.message.streaming || props.message.id == null) && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+)
+const typing = computed(() => props.message.streaming || revealing.value)
 const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
 
 function stageSummary(stage: AssistantStage): string {
@@ -93,7 +104,7 @@ async function copyReply(format: 'formatted' | 'markdown') {
 
 const runningTool = computed(() => [...props.message.timeline].reverse().find((t) => t.kind === 'tool' && t.status === 'running'))
 const mood = computed(() => {
-  if (props.message.streaming) return runningTool.value ? 'working' : 'thinking'
+  if (typing.value) return runningTool.value ? 'working' : 'thinking'
   const latest = attempts.value.at(-1)
   return props.message.error || (latest && recipeFailure(latest.progress)) ? 'idle' : 'happy'
 })
@@ -103,7 +114,7 @@ const lastTable = computed(() => lastResultTable(props.message))
 const fileCards = computed(() => standaloneFiles(props.message, fileContext.value))
 const questions = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'clarify' ? [a] : [])))
 const answerDrafts = ref<Record<string, string>>({})
-const answersLocked = computed(() => props.message.streaming || props.answersDisabled || props.answersClosed)
+const answersLocked = computed(() => typing.value || props.answersDisabled || props.answersClosed)
 
 function submitAnswer(key: string) {
   const answer = answerDrafts.value[key]?.trim()
@@ -121,7 +132,6 @@ function onAnswerKeydown(event: KeyboardEvent, key: string) {
 onBeforeUnmount(() => {
   window.clearTimeout(copiedTimer)
 })
-const typing = computed(() => props.message.streaming)
 </script>
 
 <template>
@@ -131,7 +141,7 @@ const typing = computed(() => props.message.streaming)
     </div>
     <div class="assistant-content w-full min-w-0 space-y-3">
       <!-- 两段回复间的连续处理记录共用一个折叠项，正文保持原位。 -->
-      <template v-for="group in groups" :key="group.key">
+      <template v-for="group in displayGroups" :key="group.key">
         <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" aria-label="处理过程" :data-stage="group.stages[0]?.number">
           <details class="assistant-process group/process">
             <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
@@ -151,27 +161,25 @@ const typing = computed(() => props.message.streaming)
         <MarkdownView v-else-if="group.text" :source="group.text" :streaming="!group.closed && typing" stable />
       </template>
 
-      <!-- 简单回答直接显示正文；文件卡片收到后即可操作。 -->
-      <MarkdownView v-if="fallbackReply" :source="fallbackReply" :streaming="typing" />
-      <!-- 表格和流程结果等正文接收和打字都结束后再展示。 -->
+      <!-- 文件、表格和流程结果等回复接收和渐进展示都完成后再显示。 -->
       <template v-if="!typing">
         <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" />
         <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :customer-id="customerId" @preview-file="(file) => emit('previewFile', file)" />
 
         <TableCard v-if="lastTable" :table="lastTable" />
-      </template>
-      <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft flex flex-wrap items-center gap-3 px-4 py-3" data-testid="file-delivery">
-        <FileSpreadsheet class="size-5 text-fun-green" />
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2">
-            <div class="min-w-0 truncate text-[13px] font-semibold" :title="file.filename">{{ file.filename }}</div>
-            <span v-if="fileKindLabel(file.kind)" class="tag shrink-0">{{ fileKindLabel(file.kind) }}</span>
+        <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft flex flex-wrap items-center gap-3 px-4 py-3" data-testid="file-delivery">
+          <FileSpreadsheet class="size-5 text-fun-green" />
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2">
+              <div class="min-w-0 truncate text-[13px] font-semibold" :title="file.filename">{{ file.filename }}</div>
+              <span v-if="fileKindLabel(file.kind)" class="tag shrink-0">{{ fileKindLabel(file.kind) }}</span>
+            </div>
+            <div class="text-[11px] text-faint">{{ (file.sheets ?? []).map((s) => `${s.sheet} ${s.rows} 行`).join(' · ') }}</div>
           </div>
-          <div class="text-[11px] text-faint">{{ (file.sheets ?? []).map((s) => `${s.sheet} ${s.rows} 行`).join(' · ') }}</div>
+          <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看</button>
+          <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载</a>
         </div>
-        <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看</button>
-        <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载</a>
-      </div>
+      </template>
       <template v-if="!typing">
         <section v-for="a in questions" :key="`b${a.key}`" class="overflow-hidden rounded-2xl border border-[#eadfc9] bg-[#fffcf6]">
           <div class="flex items-start gap-3 px-4 pb-3 pt-4 sm:px-5 sm:pt-5">
@@ -181,7 +189,7 @@ const typing = computed(() => props.message.streaming)
             <div class="min-w-0 flex-1">
               <div class="text-[11px] font-semibold tracking-wide text-[#9a6b20]">需要你确认</div>
               <h3 class="mt-1 whitespace-pre-line break-words text-[15px] font-semibold leading-6 [overflow-wrap:anywhere]">{{ a.question }}</h3>
-              <p class="mt-1 text-xs leading-5 text-mute">{{ answersClosed ? '该问题已结束，可在下方继续对话' : message.streaming || answersDisabled ? '请稍等，正在更新回复' : '选择或直接输入回答' }}</p>
+              <p class="mt-1 text-xs leading-5 text-mute">{{ answersClosed ? '该问题已结束，可在下方继续对话' : typing || answersDisabled ? '请稍等，正在更新回复' : '选择或直接输入回答' }}</p>
             </div>
           </div>
           <ol class="space-y-2 px-3 pb-3 sm:px-4 sm:pb-4" :aria-label="a.question">
