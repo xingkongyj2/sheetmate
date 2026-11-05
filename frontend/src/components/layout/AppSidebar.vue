@@ -23,6 +23,14 @@ const { confirmDelete } = useConfirm()
 const narrowScreen = window.matchMedia('(max-width: 767px)')
 const collapsed = ref(narrowScreen.matches)
 const menuOpen = ref(false)
+const settingsReturnPath = ref('/')
+const settingsDestination = computed(() => route.name === 'settings' ? settingsReturnPath.value : { name: 'settings' })
+
+const stopTrackingSettings = router.afterEach((to, from, failure) => {
+  if (!failure && to.name === 'settings' && from.name !== 'settings' && from.matched[0]?.path === '/') {
+    settingsReturnPath.value = from.fullPath
+  }
+})
 
 const username = computed(() => auth.user?.display_name || auth.user?.account || '')
 const initial = computed(() => (username.value || '?').slice(0, 1).toUpperCase())
@@ -32,7 +40,10 @@ function collapseOnNarrowScreen(event: MediaQueryListEvent) {
 }
 
 onMounted(() => narrowScreen.addEventListener('change', collapseOnNarrowScreen))
-onBeforeUnmount(() => narrowScreen.removeEventListener('change', collapseOnNarrowScreen))
+onBeforeUnmount(() => {
+  narrowScreen.removeEventListener('change', collapseOnNarrowScreen)
+  stopTrackingSettings()
+})
 
 async function remove(id: string, title: string) {
   if (!await confirmDelete({
@@ -138,7 +149,7 @@ async function logout() {
         <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="username">{{ username }}</span>
         <div class="flex shrink-0 items-center gap-1">
           <RouterLink
-            :to="{ name: 'settings' }"
+            :to="settingsDestination"
             class="icon-btn"
             :class="route.name === 'settings' ? 'bg-black/[0.05] text-ink' : ''"
             title="设置"
@@ -167,7 +178,7 @@ async function logout() {
         class="absolute bottom-16 left-3 z-30 w-52 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl"
         @mouseleave="menuOpen = false"
       >
-        <RouterLink :to="{ name: 'settings' }" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
+        <RouterLink :to="settingsDestination" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
           <Settings class="size-4" />设置
         </RouterLink>
         <button class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
