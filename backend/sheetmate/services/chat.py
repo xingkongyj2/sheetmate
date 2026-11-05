@@ -17,7 +17,13 @@ from sqlalchemy import select
 
 from sheetmate.agent.executor import AgentExecutor
 from sheetmate.agent.intent import infer_request
-from sheetmate.agent.llm import LLMError, get_llm
+from sheetmate.agent.llm import (
+    LLMError,
+    LLMNotConfigured,
+    contains_llm_not_configured_text,
+    get_llm,
+    is_llm_not_configured_message,
+)
 from sheetmate.agent.memory import extract_memories
 from sheetmate.agent.multi_agent import execute_multi, should_activate
 from sheetmate.agent.planner import check_clarification, generate_plan
@@ -200,7 +206,10 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         _save_assistant(conversation_id, "（已停止，尚未处理文件）", stored, recorder, None)
         raise
     except Exception as exc:
-        await emit({"type": "error", "content": str(exc)})
+        event = {"type": "error", "content": str(exc)}
+        if isinstance(exc, LLMNotConfigured):
+            event["code"] = exc.code
+        await emit(event)
         _save_assistant(conversation_id, f"⚠️ {exc}", stored, recorder, None)
         await job.emit({"type": "done"})
         return
@@ -461,16 +470,29 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
                     db.delete(run)
 
 
+def _contains_unconfigured_llm_error(text: str) -> bool:
+    return contains_llm_not_configured_text(text)
+
+
 async def _history(conversation_id: str, llm: Any, emit: Any) -> list[dict[str, Any]]:
     """组装历史：压缩摘要 + 之后的消息（不含刚保存的这条用户消息）。助手消息附上本轮执行摘要，方便追问。"""
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
         assert conv is not None
-        rows = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id, Message.id > conv.summary_until)
-                               .order_by(Message.id)))[:-1]
         summary = conv.context_summary
+        summary_until = conv.summary_until
+        if _contains_unconfigured_llm_error(summary):
+            # Old summaries may have absorbed a setup failure. Rebuild them from messages,
+            # where the obsolete assistant error can be identified without dropping user text.
+            summary = ""
+            summary_until = 0
+            conv.context_summary = ""
+            conv.summary_until = 0
+        rows = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id, Message.id > summary_until)
+                               .order_by(Message.id)))[:-1]
     items = [{"id": m.id, "role": m.role, "content": (m.content or "") + (
-        "\n" + (m.meta or {}).get("digest", "") if m.role == "assistant" and (m.meta or {}).get("digest") else "")} for m in rows]
+        "\n" + (m.meta or {}).get("digest", "") if m.role == "assistant" and (m.meta or {}).get("digest") else "")}
+        for m in rows if not is_llm_not_configured_message(m.role, m.content, m.events)]
     if len(items) > COMPACT_THRESHOLD:
         older, recent = items[:-8], items[-8:]
         text = await compact_history(llm, ([{"role": "assistant", "content": summary}] if summary else []) + older)

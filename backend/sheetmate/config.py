@@ -1,11 +1,7 @@
 """全局配置。
 
-配置来源（优先级从高到低）：
-1. data/settings.json —— 在页面「设置」里保存的 LLM 配置（运行时可改，不用重启）
-2. 环境变量 / 项目根目录的 .env 文件
-3. 代码里的默认值（默认对接 DeepSeek）
-
-只要在 .env 里写上 DEEPSEEK_API_KEY=sk-xxx 就能直接使用。
+应用运行参数从环境变量或 .env 读取；模型服务配置只从设置页保存的
+data/settings.json 读取，运行时可改且无需重启。
 """
 
 from __future__ import annotations
@@ -15,6 +11,7 @@ import os
 import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import RLock
 
 from dotenv import load_dotenv
 
@@ -28,7 +25,11 @@ load_dotenv(BACKEND_DIR / ".env")
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro"
 DEEPSEEK_THINKING_MODELS = (DEEPSEEK_DEFAULT_MODEL, "deepseek-flash")
-DEEPSEEK_MODELS = (*DEEPSEEK_THINKING_MODELS, "deepseek-chat")
+DEEPSEEK_MODELS = DEEPSEEK_THINKING_MODELS
+QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+QWEN_DEFAULT_MODEL = "qwen-plus"
+QWEN_MODELS = (QWEN_DEFAULT_MODEL, "qwen-max", "deepseek-v3")
+LLM_PROVIDER_PRIORITY = ("deepseek", "qwen", "custom")
 
 
 def is_deepseek_url(base_url: str) -> bool:
@@ -140,17 +141,20 @@ class LLMSettings:
     model: str
     temperature: float = 0.1
     timeout: float = 120.0
-    max_tokens: int = 8192  # Recipe JSON 较长，默认预留 8K，可通过 LLM_MAX_TOKENS 调整
+    max_tokens: int = 8192  # Recipe JSON 较长，默认预留 8K
     extra_body: dict = field(default_factory=dict)
     thinking_enabled: bool = False
+    provider_id: str = "deepseek"
 
     @property
     def thinking_supported(self) -> bool:
+        if self.provider_id == "qwen":
+            return True
         return is_deepseek_url(self.base_url) and self.model in DEEPSEEK_THINKING_MODELS
 
     @property
     def configured(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key and self.base_url and self.model)
 
     def key_hint(self) -> str:
         """只展示 Key 的首尾几位，避免在页面泄露完整 Key。"""
@@ -166,66 +170,151 @@ def _read_settings_file() -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
 
 
-def get_llm_settings() -> LLMSettings:
-    """合并 .env 默认值与设置页覆盖值，每次调用都重新读取（文件很小）。"""
-    overrides = _read_settings_file().get("llm", {})
-    extra_raw = _env("LLM_EXTRA_JSON", "")
+def _write_settings_file(data: dict) -> None:
+    """Atomically replace settings.json without exposing a partially written key file."""
+    settings.ensure_dirs()
+    path = settings.settings_file
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
-        extra = json.loads(extra_raw) if extra_raw else {}
-    except json.JSONDecodeError:
-        extra = {}
-    extra_body = overrides.get("extra_body", extra) or {}
+        stream = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with stream:
+            stream.write(json.dumps(data, ensure_ascii=False, indent=2))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+_LLM_FIELDS = {
+    "api_key", "base_url", "model", "temperature", "timeout", "max_tokens", "extra_body", "thinking_enabled",
+}
+_llm_settings_lock = RLock()
+
+
+def _provider_defaults(provider_id: str) -> tuple[str, str]:
+    if provider_id == "deepseek":
+        return DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL
+    if provider_id == "qwen":
+        return QWEN_BASE_URL, QWEN_DEFAULT_MODEL
+    if provider_id == "custom":
+        return "", ""
+    raise ValueError(f"Unknown LLM provider: {provider_id}")
+
+
+def _legacy_provider_id(overrides: dict) -> str:
+    base_url = str(overrides.get("base_url") or DEEPSEEK_BASE_URL).strip().rstrip("/")
+    if is_deepseek_url(base_url):
+        return "deepseek"
+    if base_url == QWEN_BASE_URL.rstrip("/"):
+        return "qwen"
+    return "custom"
+
+
+def _provider_overrides(llm: object) -> dict[str, dict]:
+    """Read the multi-provider schema and fold in the legacy single config."""
+    if not isinstance(llm, dict):
+        return {}
+    result: dict[str, dict] = {}
+    providers = llm.get("providers")
+    if isinstance(providers, dict):
+        for provider_id in LLM_PROVIDER_PRIORITY:
+            value = providers.get(provider_id)
+            if isinstance(value, dict):
+                result[provider_id] = dict(value)
+    legacy = {key: value for key, value in llm.items() if key in _LLM_FIELDS}
+    if legacy:
+        provider_id = _legacy_provider_id(legacy)
+        result.setdefault(provider_id, legacy)
+    return result
+
+
+def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
+    """Build a provider config from a single saved snapshot."""
+    default_base_url, default_model = _provider_defaults(provider_id)
+    extra_body = overrides.get("extra_body", {}) or {}
     if not isinstance(extra_body, dict):
         extra_body = {}
     thinking_enabled = overrides.get("thinking_enabled")
     if not isinstance(thinking_enabled, bool):
-        # 保留已有额外参数中的明确选择；未配置时默认关闭思考。
-        thinking = extra_body.get("thinking", {})
-        thinking_enabled = isinstance(thinking, dict) and thinking.get("type") == "enabled"
-    env_key = _env("LLM_API_KEY") or _env("DEEPSEEK_API_KEY")
-    base_url = overrides.get("base_url") or _env("LLM_BASE_URL") or DEEPSEEK_BASE_URL
-    model = overrides.get("model") or _env("LLM_MODEL") or DEEPSEEK_DEFAULT_MODEL
-    # deepseek-chat 仍可显式选择；已移除的 reasoner 沿用新默认模型。
-    if is_deepseek_url(base_url) and model == "deepseek-reasoner":
-        model = DEEPSEEK_DEFAULT_MODEL
-    return LLMSettings(
-        api_key=overrides.get("api_key") or env_key,
+        thinking_enabled = False
+    base_url = str(overrides.get("base_url") or default_base_url).strip()
+    model = str(overrides.get("model") or default_model).strip()
+    cfg = LLMSettings(
+        api_key=str(overrides.get("api_key") or "").strip(),
         base_url=base_url,
         model=model,
-        temperature=float(overrides.get("temperature", _env("LLM_TEMPERATURE", "0.1") or 0.1)),
-        timeout=float(_env("LLM_TIMEOUT", "120") or 120),
-        max_tokens=_env_int("LLM_MAX_TOKENS", 8192),
+        temperature=float(overrides.get("temperature", 0.1)),
+        timeout=float(overrides.get("timeout", 120)),
+        max_tokens=int(overrides.get("max_tokens", 8192)),
         extra_body=extra_body,
-        thinking_enabled=thinking_enabled and is_deepseek_url(base_url) and model in DEEPSEEK_THINKING_MODELS,
+        thinking_enabled=thinking_enabled,
+        provider_id=provider_id,
     )
+    cfg.thinking_enabled = thinking_enabled and cfg.thinking_supported
+    return cfg
 
 
-def save_llm_settings(api_key: str | None, base_url: str | None, model: str | None,
+def get_llm_provider_settings(provider_id: str) -> LLMSettings:
+    """Read one provider config from disk so changes apply without a restart."""
+    providers = _provider_overrides(_read_settings_file().get("llm", {}))
+    return _build_provider_settings(provider_id, providers.get(provider_id, {}))
+
+
+def get_all_llm_settings() -> dict[str, LLMSettings]:
+    providers = _provider_overrides(_read_settings_file().get("llm", {}))
+    return {provider_id: _build_provider_settings(provider_id, providers.get(provider_id, {}))
+            for provider_id in LLM_PROVIDER_PRIORITY}
+
+
+def get_llm_settings() -> LLMSettings:
+    """Return the first configured provider using the fixed priority order."""
+    providers = get_all_llm_settings()
+    return next((providers[provider_id] for provider_id in LLM_PROVIDER_PRIORITY if providers[provider_id].configured),
+                providers["deepseek"])
+
+
+def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | None, model: str | None,
                       thinking_enabled: bool | None = None) -> LLMSettings:
-    """保存设置页提交的 LLM 配置。api_key 传 None 表示保持原值，传空串表示清除。"""
-    data = _read_settings_file()
-    llm = data.get("llm", {})
-    if api_key is not None:
-        llm["api_key"] = api_key.strip()
-    if base_url is not None:
-        llm["base_url"] = base_url.strip()
-    if model is not None:
-        llm["model"] = model.strip()
-    if thinking_enabled is not None:
-        llm["thinking_enabled"] = thinking_enabled
-    data["llm"] = {k: v for k, v in llm.items() if v or k == "thinking_enabled"}
-    settings.ensure_dirs()
-    settings.settings_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    try:
-        os.chmod(settings.settings_file, 0o600)  # 里面有 API Key：只允许当前用户读写
-    except OSError:
-        pass
-    return get_llm_settings()
+    """Save one provider. None keeps a field; an empty API key clears it."""
+    _provider_defaults(provider_id)  # validate before touching the file
+    # FastAPI runs sync handlers in separate threads. Keep saves to different
+    # providers from replacing one another's changes during read/modify/write.
+    with _llm_settings_lock:
+        data = _read_settings_file()
+        providers = _provider_overrides(data.get("llm", {}))
+        llm = dict(providers.get(provider_id, {}))
+        if api_key is not None:
+            llm["api_key"] = api_key.strip()
+        if base_url is not None:
+            llm["base_url"] = base_url.strip()
+        if model is not None:
+            llm["model"] = model.strip()
+        if thinking_enabled is not None:
+            llm["thinking_enabled"] = thinking_enabled
+        providers[provider_id] = {k: v for k, v in llm.items() if v or k == "thinking_enabled"}
+        data["llm"] = {"providers": {
+            current_id: providers[current_id] for current_id in LLM_PROVIDER_PRIORITY if providers.get(current_id)
+        }}
+        _write_settings_file(data)
+        return _build_provider_settings(provider_id, providers[provider_id])
 
 
 def get_secret_key() -> bytes:

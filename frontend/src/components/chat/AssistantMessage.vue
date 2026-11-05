@@ -14,6 +14,7 @@ import RecipeProgressCard from '@/components/recipe/RecipeProgressCard.vue'
 import { assistantStages, type AssistantStage } from '@/composables/assistantTimeline'
 import type { UiMessage } from '@/composables/chatModel'
 import { fileKindLabel, standaloneFiles } from '@/composables/filePresentation'
+import { missingLLMKeyPresentation } from '@/composables/llmErrorPresentation'
 import { copyMarkdown } from '@/composables/markdown'
 import { lastResultTable, messageMarkdown, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
 import { recipeViewReply } from '@/composables/recipeViewPresentation'
@@ -46,7 +47,9 @@ const copied = ref<'formatted' | 'markdown' | null>(null)
 let copiedTimer = 0
 const stages = computed(() => assistantStages(props.message))
 const fileContext = computed(() => ({ files: props.files, tables: props.tables }))
-const markdown = computed(() => messageMarkdown(props.message, stages.value.map((stage) => ({ title: stage.title, summary: stageSummary(stage) })), fileContext.value))
+const missingKeyError = computed(() => missingLLMKeyPresentation(props.message))
+const markdown = computed(() => missingKeyError.value?.duplicateContent ? missingKeyError.value.text
+  : messageMarkdown(props.message, stages.value.map((stage) => ({ title: stage.title, summary: stageSummary(stage) })), fileContext.value))
 const attempts = computed(() => recipeAttempts(props.message))
 const recipeViews = computed(() => props.message.artifacts.flatMap((artifact) => artifact.kind === 'recipe_view' ? [artifact] : []))
 const deliveries = computed(() => {
@@ -54,10 +57,11 @@ const deliveries = computed(() => {
   return [...new Map(available.map((attempt) => [attempt.progress.file?.file_id ?? `${attempt.progress.saved?.recipe_id}:${attempt.progress.saved?.version}`, attempt])).values()]
 })
 const reply = computed(() => {
+  if (missingKeyError.value?.duplicateContent) return ''
   const content = recipeViewReply(props.message)
   return content.trim() ? content : recipeOutcomeSummary(props.message)
 })
-const errorMessage = computed(() => userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
+const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
 
 function stageSummary(stage: AssistantStage): string {
   const summaries = [userFacingSummary(stage.summary, '', 1600)]
@@ -232,11 +236,11 @@ const typing = computed(() => props.message.streaming || shown.value !== reply.v
         </section>
       </template>
 
-      <div v-if="!typing && message.error" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
+      <div v-if="!typing && (message.error || missingKeyError)" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
         <CircleAlert class="mt-0.5 size-4 shrink-0" />
         <span>
           {{ errorMessage }}
-          <RouterLink v-if="message.error.includes('API Key') || message.error.includes('设置')" :to="{ name: 'settings' }" class="ml-1 font-medium underline">去设置</RouterLink>
+          <RouterLink v-if="missingKeyError || message.error?.includes('API Key') || message.error?.includes('设置')" :to="{ name: 'settings' }" class="ml-1 font-medium underline">去设置</RouterLink>
         </span>
       </div>
 

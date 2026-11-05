@@ -21,7 +21,7 @@ try {
     Write-Host '=== SheetMate ==='
     if (-not (Test-Path -LiteralPath '.env')) {
         Copy-Item -LiteralPath '.env.example' -Destination '.env'
-        Write-Host '已生成 .env，也可以启动后在设置页配置模型。'
+        Write-Host '已生成 .env；模型服务请在登录后的设置页配置。'
     }
 
     # 与后端一致：环境变量 > 根目录 .env > backend/.env；空值使用 8000。

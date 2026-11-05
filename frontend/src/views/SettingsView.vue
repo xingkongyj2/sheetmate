@@ -1,193 +1,289 @@
 <script setup lang="ts">
-/** 设置：模型（默认 DeepSeek，填 API Key 就能用）、账号 */
-import { CircleCheck, CircleAlert, KeyRound, LoaderCircle, Save, Zap } from '@lucide/vue'
-import { computed, onMounted, ref, watch } from 'vue'
+/** 设置：多服务商模型配置 */
+import { ArrowUpRight, Eye, EyeOff, LoaderCircle, Save, Zap } from '@lucide/vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 
 import { settingsApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { LLMConfig } from '@/api/types'
-import Mascot from '@/components/brand/Mascot.vue'
+import type { LLMConfig, LLMProviderConfig, LLMProviderId } from '@/api/types'
 import { useToast } from '@/composables/useToast'
-import { useAuthStore } from '@/stores/auth'
 
 const toast = useToast()
-const auth = useAuthStore()
 
 const config = ref<LLMConfig | null>(null)
-const provider = ref('deepseek')
-const apiKey = ref('')
-const baseUrl = ref('')
-const model = ref('')
-const thinkingEnabled = ref(false)
-const saving = ref(false)
-const testing = ref(false)
-const testResult = ref<{ ok: boolean; text: string } | null>(null)
-const displayName = ref(auth.user?.display_name ?? '')
+const selectedProviderId = ref<LLMProviderId>('deepseek')
+const loading = ref(true)
+const loadError = ref('')
+const drafts = reactive<Partial<Record<LLMProviderId, ProviderDraft>>>({})
+const keyVisible = reactive<Record<LLMProviderId, boolean>>({ deepseek: false, qwen: false, custom: false })
+const savingProvider = ref<LLMProviderId | null>(null)
+const testingProvider = ref<LLMProviderId | null>(null)
+const testResults = reactive<Partial<Record<LLMProviderId, { ok: boolean; text: string } | null>>>({})
 
-const providerInfo = computed(() => config.value?.providers.find((p) => p.id === provider.value))
-const thinkingSupported = computed(() => {
-  const url = baseUrl.value.trim().replace(/\/+$/, '')
-  return config.value?.providers.some((p) => {
-    const providerUrl = p.base_url.replace(/\/+$/, '')
-    return !!providerUrl && !!p.thinking_models?.includes(model.value)
-      && (url === providerUrl || url === `${providerUrl}/v1`)
-  }) ?? false
-})
-
-watch([provider, apiKey, baseUrl, model, thinkingEnabled], () => {
-  testResult.value = null
-})
-
-onMounted(async () => {
-  try {
-    config.value = await settingsApi.getLLM()
-    baseUrl.value = config.value.base_url
-    model.value = config.value.model || config.value.default_model
-    thinkingEnabled.value = config.value.thinking_enabled ?? false
-    provider.value = config.value.providers.find((p) => p.base_url && config.value!.base_url.startsWith(p.base_url))?.id ?? 'custom'
-  } catch (err) {
-    toast.error(errorText(err))
-  }
-})
-
-function pickProvider(id: string) {
-  provider.value = id
-  const info = config.value?.providers.find((p) => p.id === id)
-  if (info?.base_url) baseUrl.value = info.base_url
-  if (info?.models.length) model.value = id === 'deepseek' ? config.value!.default_model : info.models[0]
+interface ProviderDraft {
+  api_key: string
+  base_url: string
+  model: string
+  thinking_enabled: boolean
 }
 
-async function save() {
-  saving.value = true
+const PROVIDER_ORDER: LLMProviderId[] = ['deepseek', 'qwen', 'custom']
+const PROVIDER_LABELS: Record<LLMProviderId, string> = { deepseek: 'DeepSeek', qwen: '千问', custom: '自定义' }
+const PROVIDER_KEY_URLS: Partial<Record<LLMProviderId, string>> = {
+  deepseek: 'https://platform.deepseek.com/api_keys',
+  qwen: 'https://bailian.console.aliyun.com/cn-beijing/model/settings/api-key',
+}
+const orderedProviders = computed(() => [...(config.value?.providers ?? [])]
+  .sort((left, right) => PROVIDER_ORDER.indexOf(left.id) - PROVIDER_ORDER.indexOf(right.id)))
+const anyBusy = computed(() => loading.value || !!savingProvider.value || !!testingProvider.value)
+
+function onTabKeydown(event: KeyboardEvent) {
+  const currentIndex = PROVIDER_ORDER.indexOf(selectedProviderId.value)
+  let index: number
+  if (event.key === 'ArrowRight') index = (currentIndex + 1) % PROVIDER_ORDER.length
+  else if (event.key === 'ArrowLeft') index = (currentIndex + PROVIDER_ORDER.length - 1) % PROVIDER_ORDER.length
+  else if (event.key === 'Home') index = 0
+  else if (event.key === 'End') index = PROVIDER_ORDER.length - 1
+  else return
+  event.preventDefault()
+  selectedProviderId.value = PROVIDER_ORDER[index]!
+  document.getElementById(`provider-tab-${selectedProviderId.value}`)?.focus()
+}
+
+function draftFrom(provider: LLMProviderConfig): ProviderDraft {
+  return {
+    api_key: provider.api_key,
+    base_url: provider.base_url,
+    model: provider.model || '',
+    thinking_enabled: provider.thinking_enabled,
+  }
+}
+
+function applyConfig(next: LLMConfig, refreshedProvider?: LLMProviderId) {
+  if (!config.value && next.active_provider_id) selectedProviderId.value = next.active_provider_id
+  config.value = next
+  for (const provider of next.providers) {
+    if (!drafts[provider.id] || !refreshedProvider || provider.id === refreshedProvider) {
+      drafts[provider.id] = draftFrom(provider)
+    }
+  }
+}
+
+async function loadConfig() {
+  loading.value = true
+  loadError.value = ''
   try {
-    config.value = await settingsApi.saveLLM({
-      api_key: apiKey.value || undefined, base_url: baseUrl.value, model: model.value,
-      thinking_enabled: thinkingSupported.value && thinkingEnabled.value,
-    })
-    model.value = config.value.model
-    thinkingEnabled.value = config.value.thinking_enabled
-    apiKey.value = ''
-    toast.success('模型设置已保存，立即生效')
+    applyConfig(await settingsApi.getLLM())
   } catch (err) {
-    toast.error(errorText(err))
+    loadError.value = errorText(err)
   } finally {
-    saving.value = false
+    loading.value = false
   }
 }
 
-async function test() {
-  testing.value = true
-  testResult.value = null
+onMounted(loadConfig)
+
+function isThinkingSupported(provider: LLMProviderConfig) {
+  const draft = drafts[provider.id]
+  return !!draft && (provider.id === 'qwen' || !!provider.thinking_models?.includes(draft.model))
+}
+
+function isComplete(provider: LLMProviderConfig) {
+  const draft = drafts[provider.id]
+  return !!draft?.api_key.trim() && !!draft.base_url.trim() && !!draft.model.trim()
+}
+
+function resetTestResult(id: LLMProviderId) {
+  testResults[id] = null
+}
+
+function onModelChanged(provider: LLMProviderConfig) {
+  const draft = drafts[provider.id]
+  if (draft && !isThinkingSupported(provider)) draft.thinking_enabled = false
+  resetTestResult(provider.id)
+}
+
+async function save(provider: LLMProviderConfig) {
+  if (anyBusy.value || !isComplete(provider)) return
+  const draft = drafts[provider.id]
+  if (!draft) return
+  savingProvider.value = provider.id
   try {
-    const result = await settingsApi.testLLM({
-      api_key: apiKey.value || undefined, base_url: baseUrl.value, model: model.value,
-      thinking_enabled: thinkingSupported.value && thinkingEnabled.value,
+    const next = await settingsApi.saveLLM({
+      provider_id: provider.id,
+      api_key: draft.api_key,
+      base_url: draft.base_url,
+      model: draft.model,
+      thinking_enabled: isThinkingSupported(provider) && draft.thinking_enabled,
     })
-    testResult.value = result.ok ? { ok: true, text: `连接成功（${result.model}）：${result.reply}` } : { ok: false, text: result.error?.message ?? '连接失败' }
-  } catch (err) {
-    testResult.value = { ok: false, text: errorText(err) }
-  } finally {
-    testing.value = false
-  }
-}
-
-async function saveName() {
-  try {
-    await auth.updateProfile({ display_name: displayName.value })
+    applyConfig(next, provider.id)
+    resetTestResult(provider.id)
     toast.success('已保存')
   } catch (err) {
     toast.error(errorText(err))
+  } finally {
+    savingProvider.value = null
   }
 }
+
+async function test(provider: LLMProviderConfig) {
+  if (anyBusy.value || !isComplete(provider)) return
+  const draft = drafts[provider.id]
+  if (!draft) return
+  testingProvider.value = provider.id
+  testResults[provider.id] = null
+  try {
+    const result = await settingsApi.testLLM({
+      provider_id: provider.id,
+      api_key: draft.api_key,
+      base_url: draft.base_url,
+      model: draft.model,
+      thinking_enabled: isThinkingSupported(provider) && draft.thinking_enabled,
+    })
+    testResults[provider.id] = result.ok
+      ? { ok: true, text: '连接成功' }
+      : { ok: false, text: result.error?.message ?? '连接失败' }
+  } catch (err) {
+    testResults[provider.id] = { ok: false, text: errorText(err) }
+  } finally {
+    testingProvider.value = null
+  }
+}
+
 </script>
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[760px] px-8 py-10">
+    <div class="mx-auto max-w-[760px] px-5 py-8 sm:px-8 sm:py-10">
       <h1 class="text-[28px] font-semibold tracking-tight">设置</h1>
 
-      <section class="card-soft mt-8 p-6">
-        <div class="flex items-start gap-4">
-          <Mascot :size="64" :mood="config?.configured ? 'happy' : 'thinking'" />
-          <div class="flex-1">
-            <h2 class="text-[16px] font-semibold">模型</h2>
-            <p class="mt-1 text-sm text-mute">默认使用 {{ config?.default_model ?? 'DeepSeek' }}，可在下方切换模型，填 API Key 就能用；也支持其他 OpenAI 兼容的服务。Key 只保存在本机。</p>
-            <div class="mt-2 text-sm">
-              <span v-if="config?.configured" class="inline-flex items-center gap-1.5 text-success"><CircleCheck class="size-4" />已配置 {{ config.key_hint }}</span>
-              <span v-else class="inline-flex items-center gap-1.5 text-[#b7770c]"><CircleAlert class="size-4" />还没有配置 API Key</span>
+      <section class="card-soft mt-8 overflow-hidden">
+        <div class="px-5 pt-5 sm:px-6 sm:pt-6">
+          <h2 class="text-[16px] font-semibold">大模型提供商</h2>
+          <div class="mt-4 flex gap-1 rounded-xl bg-paper p-1" role="tablist" aria-label="大模型提供商" @keydown="onTabKeydown">
+            <button
+              v-for="id in PROVIDER_ORDER"
+              :id="`provider-tab-${id}`"
+              :key="id"
+              type="button"
+              role="tab"
+              :aria-selected="selectedProviderId === id"
+              :aria-controls="`provider-panel-${id}`"
+              :tabindex="selectedProviderId === id ? 0 : -1"
+              class="min-w-0 flex-1 rounded-lg px-2 py-2 text-sm transition"
+              :class="selectedProviderId === id ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute hover:text-ink'"
+              @click="selectedProviderId = id"
+            >{{ PROVIDER_LABELS[id] }}</button>
+          </div>
+        </div>
+
+        <div v-if="loading" class="flex justify-center p-6" role="status" aria-label="加载中">
+          <LoaderCircle class="size-5 animate-spin text-mute" />
+        </div>
+        <div v-else-if="loadError" class="flex flex-wrap items-center gap-2 p-5 text-sm text-error sm:p-6" role="alert">
+          <span>{{ loadError }}</span>
+          <button type="button" class="font-medium underline" @click="loadConfig">重试</button>
+        </div>
+        <div v-else>
+          <article
+            v-for="provider in orderedProviders"
+            :id="`provider-panel-${provider.id}`"
+            :key="provider.id"
+            v-show="selectedProviderId === provider.id"
+            role="tabpanel"
+            :aria-labelledby="`provider-tab-${provider.id}`"
+            tabindex="0"
+            class="p-5 sm:p-6"
+          >
+            <div v-if="drafts[provider.id]" class="space-y-4">
+              <div>
+                <div class="mb-1.5 flex items-center justify-between gap-3 text-xs">
+                  <label :for="`${provider.id}-api-key`" class="font-medium text-mute">API Key</label>
+                  <a
+                    v-if="PROVIDER_KEY_URLS[provider.id]"
+                    :href="PROVIDER_KEY_URLS[provider.id]"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    :aria-label="`${PROVIDER_LABELS[provider.id]} 获取 API Key`"
+                    class="inline-flex shrink-0 items-center gap-0.5 text-mute transition hover:text-ink"
+                  >获取 API Key<ArrowUpRight class="size-3.5" /></a>
+                </div>
+                <div class="relative">
+                  <input
+                    :id="`${provider.id}-api-key`"
+                    v-model="drafts[provider.id]!.api_key"
+                    :type="keyVisible[provider.id] ? 'text' : 'password'"
+                    class="field pr-11 font-mono"
+                    autocomplete="off"
+                    :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                    @input="resetTestResult(provider.id)"
+                  />
+                  <button
+                    type="button"
+                    class="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-xl text-mute transition hover:text-ink disabled:opacity-50"
+                    :title="keyVisible[provider.id] ? '隐藏 API Key' : '显示 API Key'"
+                    :aria-label="keyVisible[provider.id] ? '隐藏 API Key' : '显示 API Key'"
+                    :aria-pressed="keyVisible[provider.id]"
+                    :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                    @click="keyVisible[provider.id] = !keyVisible[provider.id]"
+                  >
+                    <EyeOff v-if="keyVisible[provider.id]" class="size-4" />
+                    <Eye v-else class="size-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div class="grid gap-4 sm:grid-cols-2">
+                <label class="block">
+                  <span class="mb-1.5 block text-xs font-medium text-mute">API Base URL</span>
+                  <input
+                    v-model="drafts[provider.id]!.base_url"
+                    class="field font-mono text-[13px]"
+                    :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                    @input="resetTestResult(provider.id)"
+                  />
+                </label>
+                <label class="block">
+                  <span class="mb-1.5 block text-xs font-medium text-mute">模型</span>
+                  <input
+                    v-model="drafts[provider.id]!.model"
+                    class="field font-mono text-[13px]"
+                    autocomplete="off"
+                    :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                    @input="onModelChanged(provider)"
+                  />
+                </label>
+              </div>
+
+              <label v-if="isThinkingSupported(provider)" class="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
+                <span class="text-sm font-medium">思考</span>
+                <input
+                  v-model="drafts[provider.id]!.thinking_enabled"
+                  type="checkbox"
+                  role="switch"
+                  class="toggle toggle-sm shrink-0"
+                  :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                  @change="resetTestResult(provider.id)"
+                />
+              </label>
+
+              <div
+                v-if="testResults[provider.id]"
+                class="rounded-xl px-3 py-2 text-sm"
+                :class="testResults[provider.id]!.ok ? 'bg-success/10 text-success' : 'bg-error/5 text-error'"
+              >{{ testResults[provider.id]!.text }}</div>
+
+              <div class="flex flex-wrap justify-end gap-2 pt-1">
+                <button class="btn-line" :disabled="anyBusy || !isComplete(provider)" @click="test(provider)">
+                  <LoaderCircle v-if="testingProvider === provider.id" class="size-4 animate-spin" /><Zap v-else class="size-4" />测试
+                </button>
+                <button class="btn-ink" :disabled="anyBusy || !isComplete(provider)" @click="save(provider)">
+                  <LoaderCircle v-if="savingProvider === provider.id" class="size-4 animate-spin" /><Save v-else class="size-4" />保存
+                </button>
+              </div>
             </div>
-          </div>
+          </article>
         </div>
-
-        <div class="mt-6 space-y-4">
-          <div>
-            <div class="mb-2 text-xs font-medium text-mute">服务商</div>
-            <div class="flex flex-wrap gap-2">
-              <button
-                v-for="p in config?.providers ?? []"
-                :key="p.id"
-                class="rounded-full border px-3.5 py-1.5 text-sm transition"
-                :class="provider === p.id ? 'border-ink bg-ink text-white' : 'border-line hover:border-ink/30'"
-                @click="pickProvider(p.id)"
-              >
-                {{ p.name }}
-              </button>
-            </div>
-          </div>
-          <label class="block">
-            <span class="mb-1.5 flex items-center gap-1.5 text-xs font-medium text-mute"><KeyRound class="size-3.5" />API Key</span>
-            <input v-model="apiKey" type="password" class="field font-mono" :placeholder="config?.configured ? `已配置 ${config.key_hint}，留空表示不修改` : 'sk-...'" autocomplete="off" />
-            <span v-if="provider === 'deepseek'" class="mt-1 block text-xs text-faint">在 platform.deepseek.com 创建 API Key</span>
-          </label>
-          <div class="grid gap-4 sm:grid-cols-2">
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-medium text-mute">接口地址</span>
-              <input v-model="baseUrl" class="field font-mono text-[13px]" placeholder="https://api.deepseek.com" />
-            </label>
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-medium text-mute">模型</span>
-              <select v-if="provider === 'deepseek'" v-model="model" class="field font-mono text-[13px]" :disabled="!config">
-                <option v-for="m in providerInfo?.models ?? []" :key="m" :value="m">{{ m }}{{ m === config?.default_model ? '（默认）' : '' }}</option>
-              </select>
-              <template v-else>
-                <input v-model="model" class="field font-mono text-[13px]" list="model-options" :placeholder="providerInfo?.models[0] ?? '输入模型名称'" />
-                <datalist id="model-options">
-                  <option v-for="m in providerInfo?.models ?? []" :key="m" :value="m" />
-                </datalist>
-              </template>
-            </label>
-          </div>
-          <label v-if="thinkingSupported" class="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
-            <span>
-              <span class="block text-sm font-medium">开启思考</span>
-              <span class="mt-1 block text-xs leading-relaxed text-mute">开启后适合复杂分析，但响应更慢；关闭可更快获得回答。</span>
-            </span>
-            <input v-model="thinkingEnabled" type="checkbox" role="switch" class="toggle toggle-sm shrink-0" :disabled="!config || saving" />
-          </label>
-          <div v-if="testResult" class="rounded-xl px-3 py-2 text-sm" :class="testResult.ok ? 'bg-success/10 text-success' : 'bg-error/5 text-error'">{{ testResult.text }}</div>
-          <div class="flex justify-end gap-2">
-            <button class="btn-line" :disabled="testing" @click="test"><LoaderCircle v-if="testing" class="size-4 animate-spin" /><Zap v-else class="size-4" />测试连接</button>
-            <button class="btn-ink" :disabled="saving" @click="save"><LoaderCircle v-if="saving" class="size-4 animate-spin" /><Save v-else class="size-4" />保存</button>
-          </div>
-        </div>
-      </section>
-
-      <section class="card-soft mt-6 p-6">
-        <h2 class="text-[16px] font-semibold">账号</h2>
-        <div class="mt-4 flex gap-2">
-          <input v-model="displayName" class="field" placeholder="昵称" />
-          <button class="btn-line shrink-0" @click="saveName">保存</button>
-        </div>
-        <p class="mt-3 text-xs text-faint">
-          账号：{{ auth.user?.account }} · {{ auth.user?.role === 'admin' ? '管理员（可以看到所有客户）' : '成员（只能看到自己负责的客户）' }}
-          <template v-if="auth.user?.profile?.job"> · 岗位：{{ auth.user.profile.job }}</template>
-        </p>
-      </section>
-
-      <section class="mt-6 rounded-2xl bg-paper p-6 text-xs leading-relaxed text-mute">
-        <div class="mb-1 font-medium text-ink">关于 SheetMate</div>
-        Agent 框架基于 TabClaw（ReAct 工具循环、计划、多表并行、记忆）；修改与重复执行基于 SheetAgent 的输入输出比对与 Recipe 结构；
-        执行引擎是 SheetMate 的 DuckDB 引擎闭环（公式 → SQL → 校验 → 修复 → 写回）。所有数据保存在本机 backend/data 目录。
       </section>
     </div>
   </div>

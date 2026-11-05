@@ -143,10 +143,18 @@ def test_formulas_and_settings(client):
     assert any(f["id"] == "lookup" for f in data["builtin"])
     cfg = client.get("/api/settings/llm").json()
     assert cfg["configured"] is False and cfg["model"] == "deepseek-v4-pro"
+    assert cfg["active_provider_id"] is None
     assert cfg["default_model"] == "deepseek-v4-pro"
+    assert [provider["id"] for provider in cfg["providers"]] == ["deepseek", "qwen", "custom"]
     deepseek = next(p for p in cfg["providers"] if p["id"] == "deepseek")
-    assert deepseek["models"] == ["deepseek-v4-pro", "deepseek-flash", "deepseek-chat"]
+    assert deepseek["name"] == "DeepSeek"
+    assert deepseek["models"] == ["deepseek-v4-pro", "deepseek-flash"]
     assert deepseek["thinking_models"] == ["deepseek-v4-pro", "deepseek-flash"]
+    qwen = next(p for p in cfg["providers"] if p["id"] == "qwen")
+    custom = next(p for p in cfg["providers"] if p["id"] == "custom")
+    assert qwen["name"] == "千问"
+    assert custom["name"] == "自定义兼容服务" and custom["base_url"] == ""
+    assert all(provider["description"] for provider in cfg["providers"])
     assert cfg["thinking_supported"] is True
 
 

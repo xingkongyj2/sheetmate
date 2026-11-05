@@ -1,7 +1,7 @@
 """LLM 客户端（沿用 TabClaw 的 LLMClient，补充 JSON 输出、错误翻译和用量统计）。
 
-OpenAI 兼容接口，默认连接 DeepSeek（deepseek-v4-pro，可选 deepseek-flash / deepseek-chat）。
-只要配置 DEEPSEEK_API_KEY 就能用；也可以在设置页换成其他兼容服务。
+OpenAI 兼容接口，默认连接 DeepSeek（deepseek-v4-pro 或 deepseek-flash）。
+模型服务配置由设置页分别保存，并按固定优先级选择当前可用服务。
 """
 
 from __future__ import annotations
@@ -22,8 +22,37 @@ class LLMError(RuntimeError):
 
 
 class LLMNotConfigured(LLMError):
+    code = "llm_not_configured"
+    message = "还没有配置模型的 API Key。请在「设置」里填写并保存 API Key。"
+
     def __init__(self) -> None:
-        super().__init__("还没有配置模型的 API Key。请在「设置」里填写 DeepSeek API Key（或在 .env 中设置 DEEPSEEK_API_KEY）。")
+        super().__init__(self.message)
+
+
+_LEGACY_LLM_NOT_CONFIGURED_MESSAGES = (
+    "还没有配置模型的 API Key。请在「设置」里填写 DeepSeek API Key（或在 .env 中设置 DEEPSEEK_API_KEY）。",
+)
+
+
+def contains_llm_not_configured_text(text: str | None) -> bool:
+    """Recognize current and legacy setup failures embedded in stored text."""
+    value = text or ""
+    return LLMNotConfigured.code in value or any(
+        message in value for message in (LLMNotConfigured.message, *_LEGACY_LLM_NOT_CONFIGURED_MESSAGES)
+    )
+
+
+def is_llm_not_configured_message(role: str, content: str | None,
+                                  events: list[dict[str, Any]] | None = None) -> bool:
+    """Recognize setup failures saved by current and legacy versions."""
+    if role != "assistant":
+        return False
+    messages = (LLMNotConfigured.message, *_LEGACY_LLM_NOT_CONFIGURED_MESSAGES)
+    return (content or "").strip() in {f"⚠️ {message}" for message in messages} or any(
+        event.get("type") == "error" and (
+            event.get("code") == LLMNotConfigured.code or event.get("content") in messages
+        ) for event in events or []
+    )
 
 
 def translate_error(exc: Exception) -> LLMError:
@@ -85,8 +114,10 @@ class LLMClient:
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
-        legacy_chat = self.model == "deepseek-chat" and is_deepseek_url(self.cfg.base_url)
-        if tools and self.cfg.thinking_supported:
+        qwen = self.cfg.provider_id == "qwen"
+        deepseek_thinking = not qwen and self.cfg.thinking_supported
+        legacy_chat = not qwen and self.model == "deepseek-chat" and is_deepseek_url(self.cfg.base_url)
+        if tools and deepseek_thinking:
             # 历史摘要没有原始思考字段；新模型携带 tools 时仍要求该字段存在。
             messages = [{"reasoning_content": "", **message} if message.get("role") == "assistant" else message
                         for message in messages]
@@ -102,7 +133,10 @@ class LLMClient:
         if self.cfg.max_tokens > 0:
             kwargs["max_tokens"] = self.cfg.max_tokens
         extra_body = dict(self.cfg.extra_body)
-        if self.cfg.thinking_supported:
+        if qwen:
+            extra_body.pop("thinking", None)
+            extra_body["enable_thinking"] = self.cfg.thinking_enabled
+        elif deepseek_thinking:
             extra_body["thinking"] = {"type": "enabled" if self.cfg.thinking_enabled else "disabled"}
         extra_body.update(extra.pop("extra_body", None) or {})
         if legacy_chat:
@@ -197,7 +231,8 @@ async def test_connection(cfg: LLMSettings) -> dict[str, Any]:
     extra: dict[str, Any] = {}
     if cfg.thinking_supported:
         # 连接探测无需思考，避免极小的输出预算被思考内容耗尽。
-        extra["extra_body"] = {**cfg.extra_body, "thinking": {"type": "disabled"}}
+        extra["extra_body"] = ({"enable_thinking": False} if cfg.provider_id == "qwen"
+                               else {"thinking": {"type": "disabled"}})
     msg = await client.chat([{"role": "user", "content": "回复两个字：你好"}], max_tokens=10, **extra)
     reply = (msg.content or "").strip()[:50]
     if not reply:

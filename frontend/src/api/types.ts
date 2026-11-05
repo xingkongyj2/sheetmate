@@ -437,6 +437,22 @@ export interface AgentEvent {
   [key: string]: any // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
+export type LLMProviderId = 'deepseek' | 'qwen' | 'custom'
+
+export interface LLMProviderConfig {
+  id: LLMProviderId
+  name: string
+  description: string
+  base_url: string
+  models: string[]
+  thinking_models?: string[]
+  configured: boolean
+  api_key: string
+  model: string
+  thinking_supported: boolean
+  thinking_enabled: boolean
+}
+
 export interface LLMConfig {
   configured: boolean
   base_url: string
@@ -445,5 +461,6 @@ export interface LLMConfig {
   thinking_supported: boolean
   key_hint: string
   default_model: string
-  providers: { id: string; name: string; base_url: string; models: string[]; thinking_models?: string[] }[]
+  active_provider_id: LLMProviderId | null
+  providers: LLMProviderConfig[]
 }

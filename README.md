@@ -29,13 +29,12 @@ start.bat
 
 打开 <http://127.0.0.1:8000>，用 **admin / admin123** 登录。前端构建结果由后端统一提供页面，配置了其他 `PORT` 时使用启动日志中的地址。
 
-配置模型（二选一）：
+配置模型：登录后到「设置」页，在 DeepSeek、千问或自定义 Tab 中填写 API Key、接口地址和模型名称，点「测试」确认后保存。接口地址和模型名称均可自行修改，DeepSeek 和千问提供默认接口地址。三项可以同时配置，互不覆盖；每次对话按 DeepSeek → 千问 → 自定义兼容服务的顺序使用第一个完整配置。自定义兼容服务适用于代理、网关和私有部署等 OpenAI Chat Completions 兼容接口。
 
-- 在 `.env` 里填 `DEEPSEEK_API_KEY=sk-...`，重启；
-- 或者登录后到「设置」页填 API Key，点「测试连接」，保存后立即生效（也可以换成硅基流动、阿里云百炼等 OpenAI 兼容服务）。
+设置页保存的 API Key、接口地址和模型会应用于所有会话的下一次对话，无需新建会话或重启。此前因未配置 Key 而失败的请求，可在原会话直接重新发送；历史报错保留供查看，不会作为模型的对话上下文。
+完整 Key 由后端以明文 JSON 写入本机数据目录的 `settings.json`（默认 `backend/data/settings.json`，在支持 POSIX 权限的系统上设置为 `0600`）；设置页默认隐藏已保存 Key，点击眼睛图标后可查看。模型服务配置不再从 `.env` 或进程环境变量读取。
 
-DeepSeek 默认使用 `deepseek-v4-pro`，可在「设置」页切换为 `deepseek-flash` 或旧版 `deepseek-chat`；通过 `.env` 配置时也可设置 `LLM_MODEL=deepseek-flash` 或 `LLM_MODEL=deepseek-chat`。
-Pro / Flash 在「设置」页提供「开启思考」开关，默认关闭以更快获得回答，复杂分析时可开启；保存后立即应用于后续请求。选择 `deepseek-chat` 或其他未声明思考能力的模型时隐藏开关，Chat 请求不发送思考参数。
+模型名称按原样保存并用于请求。千问及 DeepSeek 的 `deepseek-v4-pro`、`deepseek-flash` 提供「思考」开关，默认关闭；保存后应用于后续请求。千问通过 OpenAI 兼容接口的 `enable_thinking` 参数控制思考，需使用支持切换思考模式的模型。
 
 不配置模型也能看效果：首次启动会写入一个示例客户「顺达物流（示例）」，里面有原始文件、人工结果样例、一个已验证的月结账单流程、字段映射和业务规则；客户页的「用新文件执行」不需要 AI。
 
@@ -142,7 +141,7 @@ sheetmate/
 │   ├── requirements.txt
 │   ├── sheetmate/
 │   │   ├── app.py                 FastAPI 入口；托管前端构建产物（单端口）
-│   │   ├── config.py              配置：.env + 设置页覆盖（默认 DeepSeek）
+│   │   ├── config.py              运行配置：.env；模型配置：设置页（默认 DeepSeek）
 │   │   ├── db/                    SQLite 模型：用户、客户、会话、消息、文件、公式、Recipe、运行记录、记忆、字段映射；启动时自动补新增的列
 │   │   ├── engine/                ── SheetMate 引擎闭环 ──
 │   │   │   ├── reader.py          Excel/CSV 读取：表头探测、合并单元格、多行表头、类型推断（编号保持文本）
@@ -269,7 +268,7 @@ Python 源码独立保存在 `data/scripts/scr_<UUID>.py`，每个脚本版本�
 - Python 脚本固定由 `backend/.venv` 的解释器在独立子进程与临时目录执行，只传入选定的表和工作簿副本，运行环境不继承 API Key 等宿主凭据。macOS 使用 `sandbox-exec`、Linux 使用 `bwrap` 限制文件访问和网络，隔离设施不可用时返回明确错误；Windows 使用普通子进程，不提供操作系统级文件或网络隔离。各平台均保留执行超时、取消和结果大小限制，Windows 停止时通过 `taskkill` 结束进程树。正常完成、失败或停止后清理临时文件，只有显式列入 `deliver_files` 且通过输出检查的正式文件进入下载列表，临时测试文件不会登记为用户文件；脚本返回的内部数据表单独保存为运行快照，供执行明细排查。
 - 登录令牌是签名的 httpOnly Cookie；成员只能看到自己创建或被分配的客户，管理员能看到全部。
 - AI 回复过程中切换页面或刷新，回到会话会补齐已生成的回复和执行进度，并继续实时接收后续内容；网络中断后会自动重连。
-- API Key 保存在 `backend/data/settings.json`（本机明文，页面上只显示首尾几位）。
+- API Key 按服务商分别保存在 `backend/data/settings.json`（本机明文），页面默认隐藏，可点击眼睛图标查看。
 
 ---
 
@@ -287,7 +286,7 @@ cd backend
 
 ---
 
-## 用真实 DeepSeek（deepseek-chat）实测过的场景
+## 用真实 DeepSeek 实测过的场景
 
 | 场景 | 结果 | 耗时 |
 |---|---|---|

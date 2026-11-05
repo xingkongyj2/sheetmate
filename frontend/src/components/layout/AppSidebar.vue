@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
- * 侧边栏：新对话、客户、设置，下面是按时间分组的对话列表（显示绑定的客户），底部是账号菜单。
+ * 侧边栏：新对话、客户，下面是按时间分组的对话列表（显示绑定的客户），底部是用户名与账号操作。
  */
 import { LoaderCircle, LogOut, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Settings, Trash2 } from '@lucide/vue'
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
@@ -20,10 +20,19 @@ const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
 const { confirmDelete } = useConfirm()
-const collapsed = ref(false)
+const narrowScreen = window.matchMedia('(max-width: 767px)')
+const collapsed = ref(narrowScreen.matches)
 const menuOpen = ref(false)
 
-const initial = computed(() => (auth.user?.display_name || auth.user?.account || '?').slice(0, 1).toUpperCase())
+const username = computed(() => auth.user?.display_name || auth.user?.account || '')
+const initial = computed(() => (username.value || '?').slice(0, 1).toUpperCase())
+
+function collapseOnNarrowScreen(event: MediaQueryListEvent) {
+  if (event.matches) collapsed.value = true
+}
+
+onMounted(() => narrowScreen.addEventListener('change', collapseOnNarrowScreen))
+onBeforeUnmount(() => narrowScreen.removeEventListener('change', collapseOnNarrowScreen))
 
 async function remove(id: string, title: string) {
   if (!await confirmDelete({
@@ -124,20 +133,42 @@ async function logout() {
 
     <!-- 账号 -->
     <div class="relative border-t border-line p-3">
-      <button class="flex w-full items-center gap-2.5 rounded-xl p-1.5 text-left transition hover:bg-black/[0.04]" @click="menuOpen = !menuOpen">
+      <div v-if="!collapsed" class="flex min-w-0 items-center gap-2 py-1 pl-3 pr-1.5">
+        <span aria-hidden="true" class="flex size-8 shrink-0 items-center justify-center rounded-full bg-ink text-sm font-semibold text-white">{{ initial }}</span>
+        <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="username">{{ username }}</span>
+        <div class="flex shrink-0 items-center gap-1">
+          <RouterLink
+            :to="{ name: 'settings' }"
+            class="icon-btn"
+            :class="route.name === 'settings' ? 'bg-black/[0.05] text-ink' : ''"
+            title="设置"
+            aria-label="设置"
+          >
+            <Settings class="size-4" />
+          </RouterLink>
+          <button type="button" class="icon-btn hover:bg-error/5 hover:text-error" title="退出登录" aria-label="退出登录" @click="logout">
+            <LogOut class="size-4" />
+          </button>
+        </div>
+      </div>
+      <button
+        v-else
+        type="button"
+        class="flex w-full items-center justify-center rounded-xl py-1.5 transition hover:bg-black/[0.04]"
+        :title="username"
+        aria-label="账号菜单"
+        :aria-expanded="menuOpen"
+        @click="menuOpen = !menuOpen"
+      >
         <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-ink text-sm font-semibold text-white">{{ initial }}</span>
-        <span v-if="!collapsed" class="min-w-0 flex-1">
-          <span class="block truncate text-sm font-medium">{{ auth.user?.display_name }}</span>
-          <span class="block truncate text-[11px] text-faint">{{ auth.user?.role === 'admin' ? '管理员' : '成员' }} · {{ auth.user?.account }}</span>
-        </span>
       </button>
       <div
-        v-if="menuOpen"
+        v-if="collapsed && menuOpen"
         class="absolute bottom-16 left-3 z-30 w-52 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl"
         @mouseleave="menuOpen = false"
       >
         <RouterLink :to="{ name: 'settings' }" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
-          <Settings class="size-4" />设置（模型 / 账号）
+          <Settings class="size-4" />设置
         </RouterLink>
         <button class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
           <LogOut class="size-4" />退出登录

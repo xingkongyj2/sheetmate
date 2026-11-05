@@ -9,10 +9,10 @@ trap 'echo "启动失败（第 $LINENO 行），请检查上方错误。" >&2' E
 
 echo "=== SheetMate ==="
 
-# 1. 配置与端口。只读取 PORT，不将含有密钥的 .env 当成 shell 脚本执行。
+# 1. 配置与端口。只读取 PORT，不将 .env 当成 shell 脚本执行。
 if [ ! -f .env ]; then
   cp .env.example .env
-  echo "已生成 .env：填上 DEEPSEEK_API_KEY 即可使用（也可以启动后在页面「设置」里填）"
+  echo "已生成 .env；模型服务请在登录后的「设置」页配置"
 fi
 
 read_env_port() {

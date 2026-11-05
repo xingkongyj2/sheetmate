@@ -14,8 +14,6 @@ from typing import Any
 _DATA = Path(tempfile.mkdtemp(prefix="sheetmate_test_"))
 os.environ["SHEETMATE_DATA_DIR"] = str(_DATA)
 os.environ["SEED_DEMO"] = "1"
-os.environ["DEEPSEEK_API_KEY"] = ""
-os.environ["LLM_API_KEY"] = ""
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest  # noqa: E402

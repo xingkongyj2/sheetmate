@@ -2,6 +2,7 @@
  * 后端接口封装（按资源分组）。所有函数返回解析好的数据，出错抛 ApiError。
  */
 import { http } from './http'
+import { parseLLMConfig } from './llmConfig'
 import { getStream, postStream } from './sse'
 import type {
   AgentEvent,
@@ -15,7 +16,7 @@ import type {
   FormulaInfo,
   FormulaTrialInput,
   FormulaTrialResult,
-  LLMConfig,
+  LLMProviderId,
   MemoryItem,
   PlanStep,
   RecipeBrief,
@@ -48,10 +49,10 @@ export const authApi = {
 
 // ---------------------------------------------------------------- 设置
 export const settingsApi = {
-  getLLM: async () => (await http.get<LLMConfig>('/settings/llm')).data,
-  saveLLM: async (payload: { api_key?: string; base_url?: string; model?: string; thinking_enabled?: boolean }) =>
-    (await http.put<LLMConfig>('/settings/llm', payload)).data,
-  testLLM: async (payload: { api_key?: string; base_url?: string; model?: string; thinking_enabled?: boolean }) =>
+  getLLM: async () => parseLLMConfig((await http.get<unknown>('/settings/llm')).data),
+  saveLLM: async (payload: { provider_id: LLMProviderId; api_key?: string; base_url?: string; model?: string; thinking_enabled?: boolean }) =>
+    parseLLMConfig((await http.put<unknown>('/settings/llm', payload)).data),
+  testLLM: async (payload: { provider_id: LLMProviderId; api_key?: string; base_url?: string; model?: string; thinking_enabled?: boolean }) =>
     (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/llm/test', payload,
       { validateStatus: () => true })).data,
 }

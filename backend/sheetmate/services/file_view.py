@@ -11,7 +11,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sheetmate.agent.intent import FileSelection
-from sheetmate.agent.llm import LLMError
+from sheetmate.agent.llm import LLMError, is_llm_not_configured_message
 from sheetmate.agent.prompts import FILE_VIEW_REPLY_PROMPT
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import Message
@@ -25,6 +25,8 @@ def file_references(conversation_id: str, message_id: int, files: list[dict[str,
                                   .order_by(Message.id.desc()).limit(12)))
         references = []
         for message in reversed(messages):
+            if is_llm_not_configured_message(message.role, message.content, message.events):
+                continue
             ids = [file_id for file_id in (message.meta or {}).get("attachments", []) if file_id in allowed]
             ids += [event["file_id"] for event in message.events or []
                     if event.get("type") == "file" and event.get("file_id") in allowed]
