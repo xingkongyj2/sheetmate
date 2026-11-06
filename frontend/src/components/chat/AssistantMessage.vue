@@ -103,9 +103,6 @@ async function copyReply(format: 'formatted' | 'markdown') {
 }
 
 const runningTool = computed(() => [...props.message.timeline].reverse().find((t) => t.kind === 'tool' && t.status === 'running'))
-const planning = computed(() => props.message.streaming && props.message.timeline.some((item) =>
-  item.kind === 'info' && item.tone === 'planning' && item.status === 'running',
-))
 const mood = computed(() => {
   if (typing.value) return runningTool.value ? 'working' : 'thinking'
   const latest = attempts.value.at(-1)
@@ -150,7 +147,7 @@ onBeforeUnmount(() => {
             <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
               <LoaderCircle v-if="message.streaming && group.running" class="size-3.5 shrink-0 animate-spin" />
               <ChevronRight v-else class="size-3.5 shrink-0 transition group-open/process:rotate-90" />
-              <span>{{ planning && group.running ? '正在规划…' : '处理过程' }}</span>
+              <span>处理过程</span>
             </summary>
             <div class="mb-3 ml-1.5 mt-2 space-y-3 border-l-2 border-line py-1 pl-3.5">
               <div v-for="stage in group.stages" :key="stage.key" class="space-y-2">

@@ -33,7 +33,7 @@ export type TimelineItem =
     }
   | { kind: 'plan'; key: string; num: number; total: number; description: string; status: PlanStatus; summary?: string }
   | { kind: 'agent'; key: string; id: string; table: string; status: 'running' | 'done' | 'error'; conclusion?: string }
-  | { kind: 'info'; key: string; text: string; tone?: 'memory' | 'mapping' | 'compact' | 'planning' | 'reflect' | 'aggregate'; status?: PlanStatus; step?: number }
+  | { kind: 'info'; key: string; text: string; tone?: 'memory' | 'mapping' | 'compact' | 'reflect' | 'aggregate'; step?: number }
 
 export interface StepState {
   step_id: number
@@ -483,7 +483,6 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'clarify':
-      finishPlanning(msg, 'waiting', '已梳理需求，等待补充业务口径')
       msg.artifacts.push({ kind: 'clarify', key: uid('a'), question: e.question, options: e.options ?? [] })
       break
     case 'memory_saved':
@@ -495,11 +494,7 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
     case 'compacted':
       msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'compact', text: `对话较长，已把前 ${e.old_count} 条消息压缩成摘要`, step: activePlan(msg)?.num })
       break
-    case 'planning_start':
-      msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'planning', status: 'running', text: '正在生成全局执行计划…' })
-      break
     case 'plan_start':
-      finishPlanning(msg, 'done', '全局执行计划已生成')
       for (const step of e.steps ?? []) {
         msg.timeline.push({ kind: 'plan', key: uid('t'), num: step.id, total: e.steps.length, description: step.description, status: 'pending' })
       }
@@ -540,8 +535,6 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       break
     case 'error': {
       msg.error = e.content
-      const stopped = e.content?.includes('已停止')
-      finishPlanning(msg, stopped ? 'stopped' : 'error', stopped ? '全局规划已停止' : '全局规划未完成')
       const step = activePlan(msg)
       if (step) step.status = e.content?.includes('已停止') ? 'stopped' : 'error'
       break
@@ -661,18 +654,8 @@ function activePlan(msg: UiMessage) {
   return msg.timeline.find((item): item is Extract<TimelineItem, { kind: 'plan' }> => item.kind === 'plan' && item.status === 'running')
 }
 
-function finishPlanning(msg: UiMessage, status: PlanStatus, text: string): void {
-  for (const item of msg.timeline) {
-    if (item.kind === 'info' && item.tone === 'planning' && item.status === 'running') {
-      item.status = status
-      item.text = text
-    }
-  }
-}
-
 export function finishMessage(msg: UiMessage): void {
   msg.streaming = false
-  finishPlanning(msg, 'stopped', '全局规划未完成')
   closeBlock(msg)
   for (const item of msg.timeline) {
     if (item.kind === 'tool' && item.status === 'running') item.status = 'error'

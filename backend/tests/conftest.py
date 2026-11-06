@@ -38,37 +38,22 @@ def _tool_delta(index: int, call_id: str | None, name: str | None, arguments: st
 
 class FakeLLM:
     """script：stream_chat 的回合列表，每个元素是 {"text": "..."} 或 {"tools": [(name, args), ...]}。
-    json_handlers：complete_json 时依次匹配 (关键词, 返回值或函数)。
-    默认自动计划只有一步，自检重复最后一条执行结论，不消耗下一次请求的剧本。
-    专门测试自检工具调用时设 script_reflection=True；all_calls 始终记录全部模型调用。
-    """
+    json_handlers：complete_json 时依次匹配 (关键词, 返回值或函数)。"""
 
     def __init__(self, script: list[dict[str, Any]] | None = None, json_handlers: list[tuple[str, Any]] | None = None,
-                 intent_mode: str = "analyze", save_recipe_requested: bool = False, delete_recipe_ids: list[str] | None = None,
-                 script_reflection: bool = False):
+                 intent_mode: str = "analyze", save_recipe_requested: bool = False, delete_recipe_ids: list[str] | None = None):
         self.script = list(script or [])
         self.json_handlers = list(json_handlers or [])
         self.calls: list[list[dict[str, Any]]] = []
-        self.all_calls: list[list[dict[str, Any]]] = []
-        self.reflection_calls: list[list[dict[str, Any]]] = []
         self.json_prompts: list[str] = []
         self.json_image_parts: list[list[dict[str, Any]]] = []
         self.intent_mode = intent_mode
         self.save_recipe_requested = save_recipe_requested
         self.delete_recipe_ids = list(delete_recipe_ids or [])
-        self.script_reflection = script_reflection
-        self._last_text: str | None = None
 
     async def stream_chat(self, messages, tools=None, tool_choice=None):
-        self.all_calls.append(messages)
-        reflection = bool(messages and "快速自检" in str(messages[-1].get("content", "")))
-        if reflection:
-            self.reflection_calls.append(messages)
-        if reflection and not self.script_reflection:
-            turn = {"text": self._last_text if self._last_text is not None else "## ✅ 最终结论\n- 完成"}
-        else:
-            self.calls.append(messages)
-            turn = self.script.pop(0) if self.script else {"text": "## ✅ 最终结论\n- 完成"}
+        self.calls.append(messages)
+        turn = self.script.pop(0) if self.script else {"text": "## ✅ 最终结论\n- 完成"}
         if "tools" in turn and tool_choice == "none":
             turn = {"text": "（最后一轮，直接回答）"}
         if "tools" in turn:
@@ -84,7 +69,6 @@ class FakeLLM:
             yield _chunk(finish="tool_calls")
         else:
             text = turn.get("text", "")
-            self._last_text = text
             for i in range(0, len(text), 12):
                 yield _chunk(content=text[i : i + 12])
             yield _chunk(finish="stop")
@@ -106,10 +90,6 @@ class FakeLLM:
             return {"delete_recipe_ids": self.delete_recipe_ids}
         if "处理意图判断助手" in blob:
             return {"mode": self.intent_mode}
-        if "规划助手" in blob:
-            return {"title": "自动执行计划", "steps": [{"id": 1, "description": "执行本次需求"}]}
-        if "真正的歧义" in blob:
-            return {"needs_clarification": False}
         if "长期记住" in blob:
             return {"items": []}
         return {}

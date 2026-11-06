@@ -3,6 +3,7 @@
  */
 export interface PendingStart {
   message: string
+  plan: boolean
   attachments: string[]
 }
 

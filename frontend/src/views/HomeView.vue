@@ -32,7 +32,7 @@ const router = useRouter()
 const route = useRoute()
 const toast = useToast()
 
-const { text, customerId, files, attachments, busy, ready, savingFiles, cacheError } = storeToRefs(draft)
+const { text, plan, customerId, files, attachments, busy, ready, savingFiles, cacheError } = storeToRefs(draft)
 const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
 const viewingFile = ref<File | null>(null)
 let active = true
@@ -84,6 +84,7 @@ async function send() {
   }
   const submittedText = text.value
   const submittedFiles = [...files.value]
+  const submittedPlan = plan.value
   const submittedCustomer = customerId.value
   const generation = draft.generation
   function clearSubmitted() {
@@ -92,6 +93,7 @@ async function send() {
     const submittedKeys = new Set(submittedFiles.map((file) => file.key))
     files.value = files.value.filter((file) => !submittedKeys.has(file.key))
     attachments.value = attachments.value.filter((attachment) => !submittedKeys.has(attachment.key))
+    if (plan.value === submittedPlan) plan.value = false
     if (customerId.value === submittedCustomer) customerId.value = null
     draft.resetInitializationIfEmpty()
   }
@@ -131,6 +133,7 @@ async function send() {
     }
     pendingStarts.set(conv.id, {
       message: serializeTableReferences(message, references, uploadedFiles),
+      plan: submittedPlan,
       attachments: ids,
     })
     store.upsertConversation(conv)
@@ -170,6 +173,7 @@ async function send() {
             v-if="ready"
             ref="composer"
             v-model="text"
+            v-model:plan="plan"
             :attachments="attachments"
             :local-files="files"
             :file-references="fileReferences"
