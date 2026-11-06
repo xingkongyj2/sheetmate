@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 助手消息：阶段回复与折叠的思考细节按发生顺序穿插，最后展示回答和交付结果。
+ * 助手消息：阶段回复与折叠的处理记录按发生顺序穿插，最后展示回答和交付结果。
  */
 import { Check, ChevronRight, CircleAlert, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref } from 'vue'
@@ -151,9 +151,9 @@ onBeforeUnmount(() => {
             </summary>
             <div class="mb-3 ml-1.5 mt-2 space-y-3 border-l-2 border-line py-1 pl-3.5">
               <div v-for="stage in group.stages" :key="stage.key" class="space-y-2">
-                <TimelineList v-if="stage.items.some((item) => item.kind !== 'thinking')" :items="stage.items" parent-title="处理过程" />
+                <TimelineList v-if="stage.plan || stage.items.some((item) => item.kind !== 'thinking')" :items="stage.plan ? [stage.plan, ...stage.items] : stage.items" parent-title="处理过程" />
                 <RecipeStageDetails v-for="attempt in stage.attempts" :key="attempt.key" :progress="attempt.progress" />
-                <p v-if="stage.items.every((item) => item.kind === 'thinking') && !stage.attempts.length" class="text-xs leading-5 text-mute">根据你的描述和前文，确认本次要处理的内容。</p>
+                <MarkdownView v-if="userFacingSummary(stage.summary)" :source="userFacingSummary(stage.summary)" class="!text-xs !leading-5 text-mute" />
               </div>
             </div>
           </details>
@@ -249,18 +249,21 @@ onBeforeUnmount(() => {
   --assistant-avatar-size: 3rem;
 }
 
-.assistant-content > :deep(.prose-sm:first-child > :first-child) {
+.assistant-content > :deep(.prose-sm:first-child) {
   padding-top: max(0px, calc((var(--assistant-avatar-size) - 1lh) / 2));
 }
 
 .assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child),
 .assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child > p:first-child),
-.assistant-content > :deep(.prose-sm:first-child > blockquote:first-child > :first-child) {
+.assistant-content > :deep(.prose-sm:first-child > blockquote:first-child > :first-child),
+.assistant-content > :deep(.prose-sm:first-child > .markdown-block:first-child > :is(ul, ol):first-child > li:first-child),
+.assistant-content > :deep(.prose-sm:first-child > .markdown-block:first-child > :is(ul, ol):first-child > li:first-child > p:first-child),
+.assistant-content > :deep(.prose-sm:first-child > .markdown-block:first-child > blockquote:first-child > :first-child) {
   margin-top: 0;
 }
 
-.assistant-stage:first-child {
-  padding-top: max(0px, calc((var(--assistant-avatar-size) - 1.25rem) / 2));
+.assistant-stage:first-child > .assistant-process > summary {
+  min-height: var(--assistant-avatar-size);
 }
 </style>
 

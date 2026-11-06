@@ -35,6 +35,12 @@ export function groupAssistantBlocks(blocks: AssistantDisplayBlock[]): Assistant
       groups.push(block)
       continue
     }
+    // Only actual public progress gets a disclosure; empty / reasoning-only anchors stay hidden.
+    const visibleItems = block.stage.items.some((item) =>
+      item.kind === 'tool' || item.kind === 'plan' || item.kind === 'agent' ||
+      ((item.kind === 'note' || item.kind === 'info') && !!userFacingText(item.text)),
+    )
+    if (!visibleItems && !block.stage.attempts.length && !block.stage.plan && !userFacingText(block.stage.summary)) continue
     const previous = groups.at(-1)
     if (previous?.kind === 'process') {
       previous.stages.push(block.stage)

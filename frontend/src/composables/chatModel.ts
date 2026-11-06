@@ -153,8 +153,7 @@ let seq = 0
 export const uid = (prefix = 'k') => `${prefix}_${Date.now().toString(36)}_${(seq++).toString(36)}`
 
 export function newAssistant(): UiMessage {
-  return { key: uid('m'), role: 'assistant', content: '', meta: {}, streaming: true, timeline: [], artifacts: [],
-    blocks: [{ kind: 'process', key: uid('b'), title: '理解需求', itemKeys: [], recipeKeys: [], closed: false }] }
+  return { key: uid('m'), role: 'assistant', content: '', meta: {}, streaming: true, timeline: [], artifacts: [], blocks: [] }
 }
 
 export function newUser(content: string, meta: Record<string, unknown> = {}): UiMessage {

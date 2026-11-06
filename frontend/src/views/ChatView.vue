@@ -541,8 +541,8 @@ function answer(option: string) {
       </div>
 
       <!-- 输入框 -->
-      <div class="shrink-0 px-6 pb-5">
-        <div class="sheetmate-content-width mx-auto w-full">
+      <div class="mx-auto w-full max-w-[680px] shrink-0 px-6 pb-5">
+        <div class="w-full">
           <ChatComposer
             ref="composer"
             v-model="text"
@@ -554,7 +554,9 @@ function answer(option: string) {
             :references-error="referencesError"
             :busy="streaming || reconnecting || planning"
             :stoppable="!planning"
-            placeholder="继续追问、提出修改要求，或粘贴表格和图片…"
+            large
+            appearance="card"
+            placeholder="继续追问..."
             @attach="attach"
             @remove="removeAttachment"
             @preview="previewAttachment"
