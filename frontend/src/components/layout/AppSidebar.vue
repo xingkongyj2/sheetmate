@@ -2,11 +2,12 @@
 /**
  * 侧边栏：新对话、客户，下面是按时间分组的对话列表（显示绑定的客户），底部是用户名与账号操作。
  */
-import { LoaderCircle, LogOut, MessageSquare, PanelLeftClose, PanelLeftOpen, Plus, Settings, Trash2 } from '@lucide/vue'
+import { LoaderCircle, LogOut, PanelLeftClose, PanelLeftOpen, Plus, Settings, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
+import ConversationEmptyIcon from '@/components/brand/ConversationEmptyIcon.vue'
 import CustomerLibraryIcon from '@/components/brand/CustomerLibraryIcon.vue'
 import FormulaLibraryIcon from '@/components/brand/FormulaLibraryIcon.vue'
 import LogoMark from '@/components/brand/LogoMark.vue'
@@ -104,7 +105,11 @@ async function logout() {
     </nav>
 
     <!-- 对话列表 -->
-    <div v-if="!collapsed" class="mt-4 min-h-0 flex-1 overflow-y-auto px-3 pb-3">
+    <div
+      v-if="!collapsed"
+      class="mt-4 min-h-0 flex-1 overflow-y-auto px-3 pb-3"
+      :class="{ 'flex items-center justify-center': store.loaded && !store.conversations.length }"
+    >
       <div v-for="group in store.grouped" :key="group.label" class="mb-3">
         <div class="label-mini px-3 pb-1.5 pt-2">{{ group.label }}</div>
         <div v-for="conv in group.items" :key="conv.id" class="group relative">
@@ -135,9 +140,9 @@ async function logout() {
           </button>
         </div>
       </div>
-      <div v-if="store.loaded && !store.conversations.length" class="px-3 py-6 text-center text-xs leading-relaxed text-faint">
-        <MessageSquare class="mx-auto mb-2 size-5 opacity-60" />
-        还没有对话<br />点「新对话」上传一张表试试
+      <div v-if="store.loaded && !store.conversations.length" class="flex flex-col items-center gap-2 px-3 py-6 text-xs leading-relaxed text-faint">
+        <ConversationEmptyIcon class="size-8 shrink-0" />
+        <span>暂无对话</span>
       </div>
     </div>
     <div v-else class="flex-1" />
