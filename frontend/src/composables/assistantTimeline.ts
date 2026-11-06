@@ -73,7 +73,12 @@ export function assistantDisplayBlocks(message: UiMessage): AssistantDisplayBloc
       summary: '', toolCount: 0,
     }
     stage.toolCount = stage.items.filter((item) => item.kind === 'tool').length
-    stage.status = !block.closed && message.streaming ? 'running' : stageStatus(stage)
+    stage.status = stageStatus(stage)
+    // A completed operation must stop animating even while the reply continues streaming.
+    if (stage.status === 'done' && !block.closed && message.streaming &&
+        !stage.toolCount && !stage.attempts.length && stage.items.some((item) => item.kind === 'info')) {
+      stage.status = 'running'
+    }
     stage.statusLabel = PLAN_STATUS_LABELS[stage.status]
     return { kind: 'process', key: block.key, stage }
   })

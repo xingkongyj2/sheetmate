@@ -12,11 +12,12 @@ import Mascot from '@/components/brand/Mascot.vue'
 import MarkdownView from '@/components/common/MarkdownView.vue'
 import RecipeProgressCard from '@/components/recipe/RecipeProgressCard.vue'
 import { assistantDisplayBlocks, groupAssistantBlocks, type AssistantDisplayGroup, type AssistantStage } from '@/composables/assistantTimeline'
+import { processGroupCategories, processGroupHeader } from '@/composables/assistantProcessPresentation'
 import type { UiMessage } from '@/composables/chatModel'
 import { fileKindLabel, standaloneFiles } from '@/composables/filePresentation'
 import { missingLLMKeyPresentation } from '@/composables/llmErrorPresentation'
 import { copyMarkdown } from '@/composables/markdown'
-import { lastResultTable, messageMarkdown, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
+import { lastResultTable, messageMarkdown, PLAN_STATUS_LABELS, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
 import { recipeViewReply } from '@/composables/recipeViewPresentation'
 import { recipeDeliveries } from '@/composables/recipeDeliveries'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
@@ -48,7 +49,10 @@ const copying = ref(false)
 const copied = ref<'formatted' | 'markdown' | null>(null)
 let copiedTimer = 0
 const blocks = computed(() => assistantDisplayBlocks(props.message))
-const groups = computed(() => groupAssistantBlocks(blocks.value))
+const groups = computed(() => groupAssistantBlocks(blocks.value).flatMap((group): AssistantDisplayGroup[] =>
+  group.kind === 'process' ? processGroupCategories(group) : [group]))
+const processHeaders = computed(() => new Map(groups.value.flatMap((group) =>
+  group.kind === 'process' ? [[group.key, processGroupHeader(group)] as const] : [])))
 const stages = computed(() => blocks.value.flatMap((block) => block.kind === 'process' ? [block.stage] : []))
 const fileContext = computed(() => ({ files: props.files, tables: props.tables }))
 const missingKeyError = computed(() => missingLLMKeyPresentation(props.message))
@@ -140,18 +144,19 @@ onBeforeUnmount(() => {
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
     <div class="assistant-content w-full min-w-0 space-y-3">
-      <!-- 两段回复间的连续处理记录共用一个折叠项，正文保持原位。 -->
+      <!-- 按发生顺序只合并相邻同类步骤，正文保持原位。 -->
       <template v-for="group in displayGroups" :key="group.key">
-        <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" aria-label="处理过程" :data-stage="group.stages[0]?.number">
+        <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">
           <details class="assistant-process group/process">
-            <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
-              <LoaderCircle v-if="message.streaming && group.running" class="size-3.5 shrink-0 animate-spin" />
+            <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden" :title="processHeaders.get(group.key)?.title">
+              <LoaderCircle v-if="processHeaders.get(group.key)?.status === 'running'" class="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
               <ChevronRight v-else class="size-3.5 shrink-0 transition group-open/process:rotate-90" />
-              <span>处理过程</span>
+              <span class="min-w-0 break-words [overflow-wrap:anywhere]" :class="{ 'process-title-running': processHeaders.get(group.key)?.status === 'running', 'text-error': processHeaders.get(group.key)?.status === 'error' }" aria-live="polite" aria-atomic="true">{{ processHeaders.get(group.key)?.title }}</span>
+              <span v-if="processHeaders.get(group.key)?.status && !['running', 'done'].includes(processHeaders.get(group.key)!.status)" class="shrink-0 text-[11px]" :class="processHeaders.get(group.key)?.status === 'error' ? 'text-error' : 'text-faint'">{{ PLAN_STATUS_LABELS[processHeaders.get(group.key)!.status] }}</span>
             </summary>
             <div class="mb-3 ml-1.5 mt-2 space-y-3 border-l-2 border-line py-1 pl-3.5">
-              <div v-for="stage in group.stages" :key="stage.key" class="space-y-2">
-                <TimelineList v-if="stage.plan || stage.items.some((item) => item.kind !== 'thinking')" :items="stage.plan ? [stage.plan, ...stage.items] : stage.items" parent-title="处理过程" />
+              <div v-for="(stage, index) in group.stages" :key="stage.key" class="space-y-2" :class="{ 'border-t border-line pt-3': index > 0 }">
+                <TimelineList v-if="stage.plan || stage.items.some((item) => item.kind !== 'thinking')" :items="stage.plan ? [stage.plan, ...stage.items] : stage.items" :parent-title="processHeaders.get(group.key)?.title" />
                 <RecipeStageDetails v-for="attempt in stage.attempts" :key="attempt.key" :progress="attempt.progress" />
                 <MarkdownView v-if="userFacingSummary(stage.summary)" :source="userFacingSummary(stage.summary)" class="!text-xs !leading-5 text-mute" />
               </div>
@@ -264,6 +269,27 @@ onBeforeUnmount(() => {
 
 .assistant-stage:first-child > .assistant-process > summary {
   min-height: var(--assistant-avatar-size);
+}
+
+.process-title-running {
+  background: linear-gradient(100deg, currentColor 30%, #c8c8cf 46%, currentColor 62%);
+  background-size: 240% 100%;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: process-shimmer 2.2s linear infinite;
+}
+
+@keyframes process-shimmer {
+  from { background-position: 160% 0; }
+  to { background-position: -80% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .process-title-running {
+    animation: none;
+    background: none;
+    -webkit-text-fill-color: currentColor;
+  }
 }
 </style>
 

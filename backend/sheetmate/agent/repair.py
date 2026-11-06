@@ -65,11 +65,11 @@ class LLMStepRepairer:
         params = result.get("params")
         if not isinstance(params, dict) or not params:
             return None
-        explanation = str(result.get("explanation") or "调整了参数")
+        explanation = str(result.get("explanation") or "本次修正未提供具体修改说明，将以重新执行与校验结果确认是否生效。")
         return RecipeStep.model_validate({**step.model_dump(),
             "formula": formula, "kind": "python" if formula == "python_script" else "sql" if formula == "custom_sql" else "formula",
             "formula_kind": ctx.library.resolve(formula).kind if ctx.library.has(formula) else "builtin",
-            "params": params, "explanation": f"自动修复：{explanation}",
+            "params": params, "explanation": f"修正方案：{explanation}",
         })
 
 

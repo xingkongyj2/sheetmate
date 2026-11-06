@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any
 
 from sheetmate.agent.tools import Tool, ToolResult
@@ -10,6 +11,31 @@ from sheetmate.agent.tools import Tool, ToolResult
 RECONSIDER_TOOL = "reconsider_approach"
 METHOD_FAILURE_LIMIT = 2
 MAX_METHODS = 3
+
+
+def _public_detail(value: Any, limit: int = 1200) -> str:
+    """Only the declared business explanation belongs in progress feedback."""
+    if not isinstance(value, str):
+        return ""
+    text = re.sub(r"```[\s\S]*?(?:```|$)", "", value)
+    text = re.split(r'Traceback \(most recent call last\):|\n\s*File "', text)[0]
+    text = re.sub(r"\b(?:recipe_id|run_id|file_id|tool_call_id|result_call_id)\s*[=:]\s*[A-Za-z0-9_-]+", "", text)
+    text = re.sub(r"\b(?:rcp|run|scr|script|call)_[A-Za-z0-9_-]+\b", "", text)
+    text = re.sub(r"\b(?:cv|f)_[a-f0-9]{8,}\b", "", text, flags=re.I)
+    # Code and raw parameter dictionaries remain in diagnostics, not the public explanation.
+    sentences = re.split(r"(?<=[。；\n])", text)
+    readable = [part for part in sentences if not re.search(
+        r"\b(?:SELECT\b[\s\S]*\bFROM|INSERT\s+INTO|import\s+\w+|def\s+\w+\(|pd\.|np\.|openpyxl\.)|[\{\[]\s*[\"'][^\"']+[\"']\s*:",
+        part, flags=re.I,
+    )]
+    text = re.sub(r"[ \t]+", " ", "".join(readable)).strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def _public_params(args: dict[str, Any]) -> dict[str, str]:
+    values = {key: _public_detail(args.get(key)) for key in ("method", "evidence", "change", "validation")}
+    return {"action": "use_existing_result" if args.get("action") == "use_existing_result" else "switch_method",
+            **{key: value for key, value in values.items() if value}}
 
 
 @dataclass
@@ -78,10 +104,16 @@ class RecoveryState:
             if source is None or not source.ok or source_id in self.invalid_results:
                 return ToolResult("只能引用真实成功、且未判定业务无效的工具调用 result_call_id；失败或未执行的结果不能作为已完成依据。", ok=False)
             self.pending.clear()
+            public = _public_params(args)
             return ToolResult(
                 f"已根据工具调用 {source_id} 的实际结果重新核对目标。\n依据：{evidence.strip()}\n"
                 f"校验：{validation.strip()}\n按已经确认的结果回答，不能把失败的附加操作说成成功。",
-                summary="已核对已有结果", public_summary="已核对已有结果", public_text="将依据已经核实的结果回复。",
+                summary="已核对已有结果", public_summary="已核对已有结果",
+                public_text="\n".join((
+                    f"结果依据：{public.get('evidence') or '已引用此前成功执行的结果。'}",
+                    f"核对内容：{public.get('validation') or '尚未收到可展示的具体核对说明。'}",
+                    "下一步：依据已核实的结果回复，未完成的附加操作仍按未完成展示。",
+                )),
             )
         values = {key: args.get(key) for key in ("method", "evidence", "change", "validation")}
         if any(not isinstance(value, str) or not value.strip() or len(value) > 2000 for value in values.values()):
@@ -105,12 +137,20 @@ class RecoveryState:
         if len(self.methods) >= MAX_METHODS:
             return ToolResult("本次已达到方法数量上限，请依据实际结果如实收尾，不再启动新方法。", ok=False)
         self.methods.append(_Method(method))
+        public = _public_params(args)
+        public_method = _public_detail(method, 80)
         return ToolResult(
             f"已选择方法 {len(self.methods)}/{MAX_METHODS}：{method}。\n"
             f"失败依据：{values['evidence'].strip()}\n实质变化：{values['change'].strip()}\n"
             f"验证目标：{values['validation'].strip()}\n"
             f"现在执行并校验；该方法最多允许 {METHOD_FAILURE_LIMIT} 次失败，声明方案不代表已经完成。",
-            summary="已调整处理方法", public_summary="已调整处理方法", public_text="将按新的定位或计算方法继续核对。",
+            summary="已选择新方法", public_summary=f"已选择新方法：{public_method}" if public_method else "已选择新的处理方法",
+            public_text="\n".join((
+                f"问题依据：{public.get('evidence') or '尚未收到可展示的具体问题说明。'}",
+                f"调整内容：{public.get('change') or '尚未收到可展示的具体调整说明。'}",
+                f"校验目标：{public.get('validation') or '尚未收到可展示的具体校验说明。'}",
+                "下一步：执行新方法并核对结果；选择方案尚不代表调整已生效。",
+            )),
         )
 
     def tool(self) -> Tool:
@@ -130,5 +170,5 @@ class RecoveryState:
                 "validation": {"type": "string", "description": "执行后如何检查关键字段、样本和汇总是否满足用户目标"},
             }, "required": ["evidence", "validation"], "additionalProperties": False},
             run=lambda args, ctx: self.choose(args), label=lambda args: "调整处理方法",
-            public_params=lambda args: {},
+            public_params=_public_params,
         )

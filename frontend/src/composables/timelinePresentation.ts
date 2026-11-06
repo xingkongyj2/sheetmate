@@ -2,6 +2,12 @@ import type { TimelineItem } from './chatModel'
 
 type ToolItem = Extract<TimelineItem, { kind: 'tool' }>
 
+export interface ToolDetailSection {
+  label: string
+  items: string[]
+  ordered?: boolean
+}
+
 /** Keep progress feedback readable without leaking payloads, code or execution logs. */
 export function userFacingText(value: string | undefined, fallback = '', maxLength = 200): string {
   let text = value?.trim() ?? ''
@@ -28,7 +34,7 @@ export function userFacingText(value: string | undefined, fallback = '', maxLeng
   // An error summary can contain an entire stack trace or a truncated JSON response.
   text = text.split(/Traceback \(most recent call last\):|\n\s*File "/)[0] ?? ''
   text = text.replace(/```[\s\S]*?(?:```|$)/g, '')
-    .replace(/\b(?:recipe_id|run_id|file_id|tool_call_id)\s*[=:]\s*[A-Za-z0-9_-]+/g, '')
+    .replace(/\b(?:recipe_id|run_id|file_id|tool_call_id|result_call_id)\s*[=:]\s*[A-Za-z0-9_-]+/g, '')
     .replace(/\b(?:rcp|run|script|call)_[A-Za-z0-9_-]+\b/g, '')
     .replace(/\b(?:f|cv|scr)_[a-f0-9]{8,}\b/gi, '')
     .replace(/\bRecipe\b/gi, '处理流程')
@@ -53,20 +59,91 @@ function records(value: unknown): Record<string, unknown>[] {
     !!entry && typeof entry === 'object' && !Array.isArray(entry)) : []
 }
 
+function publicToolDetail(value: unknown, maxLength = 600): string {
+  if (typeof value !== 'string') return ''
+  const text = userFacingSummary(value, '', maxLength)
+  // Keep business instructions readable; diagnostics retain implementation details.
+  return text.split(/(?<=[。；\n])/).filter((sentence) =>
+    !/\b(?:Python|pandas|NumPy|openpyxl|DuckDB|SQL|API|JSON|OUTPUT_DIR|deliver_files|result_tables)\b|内置公式|脚本代码|工具参数/i.test(sentence),
+  ).join('').trim()
+}
+
+/** Recover numbered requirements even when a provider puts the whole list on one line. */
+function instructionSections(value: unknown, revise: boolean): ToolDetailSection[] {
+  const text = publicToolDetail(value, 12000).replace(/\r\n?/g, '\n')
+  if (!text) return []
+  const markers = [...text.matchAll(/(?:^|(?<=[\s：:；;。]))(?:(\d{1,2})(?:[.．](?:[ \t]+(?=\S)|(?=[\p{Script=Han}「“"']))|[、)）][ \t]*(?=[^\d\s]))|[（(](\d{1,2})[)）][ \t]*(?=[^\d\s]))/gu)]
+  const first = markers.findIndex((marker) => Number(marker[1] || marker[2]) === 1)
+  const numbered: RegExpMatchArray[] = []
+  if (first >= 0) {
+    for (const marker of markers.slice(first)) {
+      if (Number(marker[1] || marker[2]) !== numbered.length + 1) break
+      numbered.push(marker)
+    }
+  }
+  const heading = /(?:\*\*)?(?:具体要求|处理要求|执行要求|调整要求|要求)(?:\*\*)?\s*[：:]\s*$/u
+  if (numbered.length > 1 || numbered.length === 1 && (numbered[0]!.index === 0 || heading.test(text.slice(0, numbered[0]!.index)))) {
+    const goal = text.slice(0, numbered[0]!.index).trim().replace(heading, '').trim()
+    const items = numbered.map((marker, index) => text.slice(marker.index! + marker[0].length, numbered[index + 1]?.index ?? text.length).trim())
+    return [
+      ...(goal ? [{ label: revise ? '调整目标' : '处理目标', items: [goal] }] : []),
+      { label: revise ? '调整要求' : '具体要求', items, ordered: true },
+    ]
+  }
+  const paragraphs = text.split(/\n\s*\n/).map((paragraph) => paragraph.trim()).filter(Boolean)
+  const bullets = text.split(/(?:^|\n)[ \t]*[-*+][ \t]+/)
+  if (bullets.length > 1) {
+    const goal = bullets.shift()!.trim().replace(heading, '').trim()
+    return [
+      ...(goal ? [{ label: revise ? '调整目标' : '处理目标', items: [goal] }] : []),
+      { label: revise ? '调整要求' : '具体要求', items: bullets.map((bullet) => bullet.trim()).filter(Boolean) },
+    ]
+  }
+  return [{ label: revise ? '调整目标' : '处理目标', items: paragraphs }]
+}
+
+/** Read only declared recovery fields; older records may carry these labels in public feedback. */
+function recoverySections(item: ToolItem): ToolDetailSection[] {
+  const feedback = new Map<string, string>()
+  const aliases: Record<string, string> = {
+    '处理方法': 'method', '问题依据': 'evidence', '失败依据': 'evidence', '结果依据': 'evidence',
+    '调整内容': 'change', '实质变化': 'change', '校验目标': 'validation', '验证目标': 'validation',
+    '核对内容': 'validation', '下一步': 'next',
+  }
+  const source = item.status === 'running' ? '' : item.text?.replace(/\r\n?/g, '\n') ?? ''
+  const labels = [...source.matchAll(/(?:^|\n)[ \t]*(处理方法|问题依据|失败依据|结果依据|调整内容|实质变化|校验目标|验证目标|核对内容|下一步)[ \t]*[：:][ \t]*/g)]
+  for (const [index, label] of labels.entries()) {
+    const key = aliases[label[1]!]!
+    const detail = publicToolDetail(source.slice(label.index! + label[0].length, labels[index + 1]?.index ?? source.length), 2400)
+    if (detail && !feedback.has(key)) feedback.set(key, detail)
+  }
+  const existing = item.params.action === 'use_existing_result' || !item.params.action && labels.some((label) => label[1] === '结果依据')
+  const fields = existing
+    ? [['evidence', '结果依据'], ['validation', '核对内容'], ['next', '下一步']]
+    : [['method', '处理方法'], ['evidence', '问题依据'], ['change', '调整内容'], ['validation', '校验目标'], ['next', '下一步']]
+  return fields.flatMap(([key, label]) => {
+    const value = (key === 'next' ? '' : publicToolDetail(item.params[key!], 2400)) || feedback.get(key!)
+    return value ? [{ label: label!, items: [value] }] : []
+  })
+}
+
+function toolDetailSections(item: ToolItem): ToolDetailSection[] {
+  if (item.tool === 'reconsider_approach') return recoverySections(item)
+  if (item.tool !== 'build_recipe' && item.tool !== 'revise_recipe') return []
+  const sections = instructionSections(item.tool === 'build_recipe' ? item.params.requirement : item.params.instruction, item.tool === 'revise_recipe')
+  const inputs = Array.isArray(item.params.input_tables) ? item.params.input_tables : []
+  const sources = inputs.flatMap((source) => typeof source === 'string' && userFacingText(source, '', 300)
+    ? [`「${userFacingText(source, '', 300)}」`] : [])
+  if (sources.length) sections.push({ label: '处理来源', items: [...new Set(sources)] })
+  return sections
+}
+
 /** Describe declared work in business terms; never render arbitrary parameter values. */
 function toolDetails(item: ToolItem): string[] {
   const p = item.params
   const table = names(p.table)
   const columns = names(p.columns)
-  const detail = (value: unknown) => {
-    if (typeof value !== 'string') return ''
-    const text = userFacingSummary(value, '', 600)
-    // Human-readable descriptions occasionally include a technical method;
-    // retain the business sentences and leave implementation details in diagnostics.
-    return text.split(/(?<=[。；\n])/).filter((sentence) =>
-      !/\b(?:Python|pandas|NumPy|openpyxl|DuckDB|SQL|API|JSON|OUTPUT_DIR|deliver_files|result_tables)\b|内置公式|脚本代码|工具参数/i.test(sentence),
-    ).join('').trim()
-  }
+  const detail = publicToolDetail
   switch (item.tool) {
     case 'table_info':
       return [`检查${table || '表格'}的列名、数据类型、空值和样本记录。`]
@@ -139,7 +216,7 @@ function toolDetails(item: ToolItem): string[] {
   }
 }
 
-export function toolPresentation(item: ToolItem): { label: string; summary: string; details: string[] } {
+export function toolPresentation(item: ToolItem): { label: string; summary: string; details: string[]; sections: ToolDetailSection[] } {
   const label = userFacingText(item.label, '处理数据', 80)
     .replace(/^SQL\s*查询/i, '查询数据')
     .replace(/^长转宽（拆成列）/, '按类别展开数据')
@@ -155,7 +232,11 @@ export function toolPresentation(item: ToolItem): { label: string; summary: stri
     const output = item.summary?.match(/→\s*(「[^」]+」)\s*(\d+)\s*行/)
     summary = output ? `已整理${userFacingText(output[1])}，共 ${output[2]} 行。` : '已完成本次数据整理。'
   }
-  return { label, summary, details: toolDetails(item) }
+  const sections = toolDetailSections(item)
+  if (item.tool === 'reconsider_approach' && sections.length && /^(?:已调整处理方法|已选择新方法|已核对已有结果)[。.]?$/.test(summary)) summary = ''
+  const details = sections.length ? sections.map((section) => `${section.label}：${section.items.map((text, index) =>
+    section.ordered ? `${index + 1}. ${text}` : text).join(section.ordered ? '\n' : '、')}`) : toolDetails(item)
+  return { label, summary, details, sections }
 }
 
 /** Preserve paragraphs and lists in public feedback when no technical content was removed. */

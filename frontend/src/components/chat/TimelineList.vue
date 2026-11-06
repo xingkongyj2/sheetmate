@@ -20,8 +20,9 @@ const tools = computed(() => new Map(props.items.flatMap((item) => item.kind ===
 const recipeTools = new Set(['build_recipe', 'revise_recipe', 'run_recipe'])
 
 function repeatsParentTitle(...titles: (string | undefined)[]): boolean {
-  const parent = userFacingText(props.parentTitle, '', 120)
-  return !props.detailed && !!parent && titles.some((title) => userFacingText(title, '', 120) === parent)
+  const normalize = (title: string | undefined) => userFacingText(title, '', 120).replace(/^正在/, '')
+  const parent = normalize(props.parentTitle)
+  return !props.detailed && !!parent && titles.some((title) => normalize(title) === parent)
 }
 </script>
 
@@ -48,7 +49,23 @@ function repeatsParentTitle(...titles: (string | undefined)[]): boolean {
           <div class="min-w-0 flex-1 space-y-1 break-words leading-5 [overflow-wrap:anywhere]">
             <p v-if="!repeatsParentTitle(item.label, tools.get(item.key)?.label)" class="font-medium text-ink">{{ tools.get(item.key)?.label }}</p>
             <p v-else-if="!tools.get(item.key)?.details.length && (!tools.get(item.key)?.summary || recipeTools.has(item.tool))" class="text-xs leading-5 text-mute">{{ item.status === 'running' ? '正在处理' : item.status === 'ok' ? '已完成' : '未完成' }}</p>
-            <p v-for="detail in tools.get(item.key)?.details" :key="detail" class="text-xs leading-5 text-mute">{{ detail }}</p>
+            <div v-if="tools.get(item.key)?.sections.length" class="space-y-3 pt-1 text-xs leading-5 text-mute">
+              <section v-for="section in tools.get(item.key)?.sections" :key="section.label" class="space-y-1.5">
+                <h4 class="text-[11px] font-medium text-faint">{{ section.label }}</h4>
+                <ol v-if="section.ordered" class="list-decimal space-y-2 pl-4 marker:text-faint">
+                  <li v-for="(text, index) in section.items" :key="index" class="pl-0.5">
+                    <MarkdownView :source="text" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
+                  </li>
+                </ol>
+                <ul v-else-if="section.items.length > 1" class="list-disc space-y-1.5 pl-4 marker:text-faint">
+                  <li v-for="(text, index) in section.items" :key="index" class="pl-0.5">
+                    <MarkdownView :source="text" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
+                  </li>
+                </ul>
+                <MarkdownView v-else :source="section.items[0] ?? ''" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
+              </section>
+            </div>
+            <p v-for="detail in tools.get(item.key)?.sections.length ? [] : tools.get(item.key)?.details" :key="detail" class="whitespace-pre-line text-xs leading-5 text-mute">{{ detail }}</p>
             <p v-if="tools.get(item.key)?.summary && (detailed || !recipeTools.has(item.tool))" class="text-xs leading-5" :class="item.status === 'error' ? 'text-error' : 'text-mute'">{{ tools.get(item.key)?.summary }}</p>
           </div>
           <span v-if="detailed && item.duration_ms" class="ml-auto shrink-0 font-mono text-[10px] text-faint">{{ duration(item.duration_ms) }}</span>

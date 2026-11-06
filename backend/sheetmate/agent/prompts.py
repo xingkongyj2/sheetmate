@@ -603,5 +603,6 @@ REPAIR_PROMPT = """## 失败的步骤（第 {step_id} 步，第 {attempt} 次修
 {recipe}
 
 请返回修好的这一步，只返回 JSON：
-{{"kind": "formula|sql|python", "formula": "公式 id、custom_sql 或 python_script", "params": {{}}, "explanation": "错误原因和修改内容（一句话）"}}
+{{"kind": "formula|sql|python", "formula": "公式 id、custom_sql 或 python_script", "params": {{}}, "explanation": "问题依据：实际错误或校验差异。\\n调整内容：原先如何处理，现改为如何处理，以及涉及的字段、数据来源或计算规则。\\n校验目标：重新执行后检查哪些结果。"}}
+explanation 是面向用户的操作说明，请写明具体问题、相对原方案的实际改动和待执行的校验；不能只写「调整了参数」「优化逻辑」「已修复」。只描述可观察的操作和依据，不输出内部推理、完整代码、SQL、原始参数字典或内部 ID；重新执行前不能声称修正已经成功。
 如果确实修不了（数据本身缺少必要信息），返回 {{"give_up": true, "explanation": "原因"}}。"""

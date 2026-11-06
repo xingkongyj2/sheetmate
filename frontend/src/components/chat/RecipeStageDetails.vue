@@ -3,13 +3,27 @@ import { Check, CircleAlert, FileSpreadsheet, LoaderCircle, ShieldCheck } from '
 import { computed } from 'vue'
 
 import type { RecipeProgress, StepState } from '@/composables/chatModel'
-import { userFacingText } from '@/composables/timelinePresentation'
+import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 
 const props = defineProps<{ progress: RecipeProgress }>()
 const checks = computed(() => props.progress.validation?.checks ?? [])
 const STEP_LABELS: Record<StepState['status'], string> = {
   pending: '待处理', running: '处理中', success: '已完成', warning: '需核对',
   repaired: '已修正', repairing: '正在调整', failed: '未完成',
+}
+
+function stepExplanation(step: StepState): string {
+  return userFacingSummary(props.progress.recipe?.steps.find((item) => item.id === step.step_id)?.explanation, '', 2400)
+}
+
+function repairs(step: StepState) {
+  const records = step.repairs.length ? step.repairs : (step.report?.attempts ?? []).map((attempt) => ({ ...attempt, status: 'recorded' }))
+  return records.map((repair) => ({
+    ...repair,
+    explanation: userFacingSummary(repair.explanation, '', 2400),
+    label: repair.status === 'trying' ? '正在制定修正方案' : repair.status === 'gave_up' ? '调整未完成'
+      : repair.status === 'retry' ? '修正后重新执行' : '已记录的调整',
+  }))
 }
 </script>
 
@@ -19,7 +33,15 @@ const STEP_LABELS: Record<StepState['status'], string> = {
       <Check v-if="detail.status === 'ok'" class="mt-0.5 size-3.5 shrink-0 text-success" />
       <CircleAlert v-else-if="detail.status === 'error' || detail.status === 'warning'" class="mt-0.5 size-3.5 shrink-0" :class="detail.status === 'error' ? 'text-error' : 'text-warning'" />
       <span v-else class="ml-1 mr-0.5 mt-2 size-1.5 shrink-0 rounded-full bg-faint" />
-      <p class="min-w-0 whitespace-pre-line break-words" :class="detail.status === 'error' ? 'text-error' : 'text-mute'">{{ detail.text }}</p>
+      <div class="min-w-0 flex-1 space-y-1.5" :class="detail.status === 'error' ? 'text-error' : 'text-mute'">
+        <p class="whitespace-pre-line break-words" :class="{ 'font-medium text-ink': detail.fields?.length && detail.status !== 'error' }">{{ detail.text }}</p>
+        <dl v-if="detail.fields?.length" class="space-y-2 text-xs leading-5">
+          <div v-for="field in detail.fields" :key="field.label" class="space-y-0.5">
+            <dt class="font-medium text-mute">{{ field.label }}</dt>
+            <dd class="whitespace-pre-line break-words [overflow-wrap:anywhere]">{{ field.text }}</dd>
+          </div>
+        </dl>
+      </div>
     </li>
   </ol>
   <div v-else class="space-y-3 text-[13px]">
@@ -41,9 +63,18 @@ const STEP_LABELS: Record<StepState['status'], string> = {
             <p class="font-medium">{{ userFacingText(step.name, '处理数据', 100) }}</p>
             <span class="text-[11px] text-faint">{{ STEP_LABELS[step.status] }}</span>
           </div>
-          <p v-if="step.description" class="break-words text-mute">{{ userFacingText(step.description) }}</p>
+          <p v-if="step.description" class="whitespace-pre-line break-words text-mute">{{ userFacingSummary(step.description, '', 2400) }}</p>
+          <p v-if="stepExplanation(step)" class="whitespace-pre-line break-words text-xs text-mute">处理依据：{{ stepExplanation(step) }}</p>
           <p v-if="step.report?.rows_out !== undefined" class="text-xs text-mute">整理得到 {{ step.report.rows_out }} 条记录</p>
-          <p v-if="step.repairs.length" class="text-xs text-mute">调整了 {{ step.repairs.length }} 次{{ step.status === 'repaired' ? '，已完成修正' : '' }}</p>
+          <ol v-if="repairs(step).length" class="space-y-2 border-l border-line pl-3 text-xs text-mute" aria-label="调整记录">
+            <li v-for="(repair, index) in repairs(step)" :key="index" class="space-y-0.5">
+              <p class="font-medium">第 {{ repair.attempt }} 次 · {{ repair.label }}</p>
+              <p class="whitespace-pre-line break-words">{{ repair.explanation || (repair.status === 'trying' ? '正在核对问题并制定修正方案，尚未收到具体修改内容。' : '本次未记录具体修改说明。') }}</p>
+            </li>
+          </ol>
+          <ul v-if="step.report?.checks?.length" class="space-y-1 text-xs text-mute" aria-label="步骤校验">
+            <li v-for="(check, index) in step.report.checks" :key="index" :class="{ 'text-warning': !check.ok }">{{ check.ok ? '通过' : '需核对' }}：{{ userFacingText(check.message, '', 1200) }}</li>
+          </ul>
           <p v-if="step.status === 'failed' && step.error" class="text-xs text-error">{{ userFacingText(step.error, '这一步未能完成，需调整处理方式后重试。') }}</p>
         </div>
       </li>
