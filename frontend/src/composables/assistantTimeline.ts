@@ -88,6 +88,8 @@ function stageStatus(stage: AssistantStage): PlanStatus {
       stage.attempts.some((attempt) => recipeFailure(attempt.progress))) return 'error'
   const plan = stage.items.find((item) => item.kind === 'plan')
   if (plan?.kind === 'plan') return plan.status
+  const planning = stage.items.find((item) => item.kind === 'info' && item.tone === 'planning')
+  if (planning?.kind === 'info' && planning.status) return planning.status
   return 'done'
 }
 

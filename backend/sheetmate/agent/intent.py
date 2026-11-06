@@ -34,8 +34,7 @@ def _file_selection(value: Any) -> FileSelection:
     return FileSelection(value["selection"], tuple(dict.fromkeys(file_ids)), tuple(dict.fromkeys(kinds)))
 
 
-async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list[dict[str, Any]],
-                        plan_steps: list[dict[str, Any]] | None = None, *,
+async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list[dict[str, Any]], *,
                         files: list[dict[str, Any]] | None = None,
                         file_references: list[dict[str, Any]] | None = None) -> RequestIntent:
     context = {
@@ -43,7 +42,6 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
         "tables": [{"name": table.name, "role": table.role, "columns": table.column_names,
                     "file_id": table.file_id, "filename": table.filename, "created_by": table.created_by}
                    for table in ctx.visible_tables()],
-        "plan_steps": plan_steps or [],
         "files": [{key: file.get(key) for key in ("file_id", "filename", "kind", "created_at", "scope_label", "tables", "media_type")}
                   | {"sheets": [sheet.get("sheet") for sheet in file.get("sheets", [])]}
                   for file in files or []],
@@ -66,7 +64,6 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
     return RequestIntent(mode)
 
 
-async def infer_mode(llm: Any, ctx: AgentContext, message: str, history: list[dict[str, Any]],
-                     plan_steps: list[dict[str, Any]] | None = None) -> str:
+async def infer_mode(llm: Any, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> str:
     """Compatibility for callers that only need the processing mode."""
-    return (await infer_request(llm, ctx, message, history, plan_steps)).mode
+    return (await infer_request(llm, ctx, message, history)).mode

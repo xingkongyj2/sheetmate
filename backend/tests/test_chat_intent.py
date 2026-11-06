@@ -69,7 +69,8 @@ def test_ambiguous_input_uses_conversation_without_task_artifacts(client, fake_l
     monkeypatch.setattr(llm, "stream_chat", capture_tools)
     monkeypatch.setattr(chat_service, "infer_recipe_persistence", unexpected)
     monkeypatch.setattr(chat_service, "analysis_workspace", unexpected)
-    monkeypatch.setattr(chat_service, "should_activate", unexpected)
+    monkeypatch.setattr(chat_service, "generate_plan", unexpected)
+    monkeypatch.setattr(chat_service, "check_clarification", unexpected)
     events = _chat(client, conversation, message)
 
     assert requested_tools == [None]
@@ -191,7 +192,7 @@ def test_reply_blocks_keep_their_order_when_more_process_details_arrive(client, 
     conversation = _new_conversation(client)
     fake_llm()
 
-    async def interleaved(self, ctx, message, history):
+    async def interleaved(self, ctx, message, steps, history):
         yield {"type": "text_chunk", "content": "先确认金额范围。"}
         yield {"type": "final_text", "content": "先确认金额范围。"}
         yield {"type": "note", "content": "已核对金额字段，继续检查缺失记录。"}
@@ -199,7 +200,7 @@ def test_reply_blocks_keep_their_order_when_more_process_details_arrive(client, 
         yield {"type": "text_chunk", "content": "没有缺失。"}
         yield {"type": "final_text", "content": "金额没有缺失。"}
 
-    monkeypatch.setattr(AgentExecutor, "execute", interleaved)
+    monkeypatch.setattr(AgentExecutor, "execute_plan", interleaved)
     events = _chat(client, conversation, "检查金额")
     expected = [("reply", "先确认金额范围。"), ("note", "已核对金额字段，继续检查缺失记录。"),
                 ("reply", "金额没有缺失。")]
@@ -213,14 +214,14 @@ def test_stop_preserves_finished_reply_and_appends_partial_reply_once(client, fa
     conversation = _new_conversation(client)
     fake_llm()
 
-    async def interrupted(self, ctx, message, history):
+    async def interrupted(self, ctx, message, steps, history):
         yield {"type": "text_chunk", "content": "已确认金额范围。"}
         yield {"type": "final_text", "content": "已确认金额范围。"}
         yield {"type": "note", "content": "接下来检查缺失记录。"}
         yield {"type": "text_chunk", "content": "已经检查"}
         raise asyncio.CancelledError()
 
-    monkeypatch.setattr(AgentExecutor, "execute", interrupted)
+    monkeypatch.setattr(AgentExecutor, "execute_plan", interrupted)
     events = _chat(client, conversation, "检查金额")
     replies = [event["content"] for event in events if event["type"] == "reply"]
     assert replies == ["已确认金额范围。", "已经检查\n\n（已停止）"]
@@ -272,6 +273,7 @@ def test_creation_delivery_guard_uses_file_result_after_failed_attempt(client, f
 
 def test_creation_delivery_guard_runs_after_complete_plan_and_keeps_delivered_file(client, fake_llm):
     conversation = _new_conversation(client)
+    steps = [{"id": 1, "description": "设计字段结构"}, {"id": 2, "description": "实际生成文件"}]
     fake_llm(intent_mode="create", script=[
         {"text": "采用姓名、部门两个字段，数据留空。"},
         {"tools": [("create_workbook", {"filename": "登记表", "sheets": [
@@ -279,10 +281,8 @@ def test_creation_delivery_guard_runs_after_complete_plan_and_keeps_delivered_fi
         ]})]},
         {"text": "登记表文件已生成。"},
         {"text": "已生成登记表，包含姓名和部门两个字段。"},
-    ])
-    events = _chat(client, conversation, "按计划新建登记表", plan_steps=[
-        {"id": 1, "description": "设计字段结构"}, {"id": 2, "description": "实际生成文件"},
-    ])
+    ], script_reflection=True, json_handlers=[("规划助手", {"title": "新建登记表", "steps": steps})])
+    events = _chat(client, conversation, "按计划新建登记表")
     assert any(event["type"] == "file" for event in events)
     assert [event["status"] for event in events if event["type"] == "step_done"] == ["done", "done"]
     answer = _visible_answer(events)
@@ -304,13 +304,13 @@ def test_creation_delivery_guard_reports_no_file_after_error_or_stop(client, fak
     conversation = _new_conversation(client)
     fake_llm(intent_mode="create")
 
-    async def interrupted(self, ctx, message, history):
+    async def interrupted(self, ctx, message, steps, history):
         yield {"type": "text_chunk", "content": "费用表已建好。"}
         if stopped:
             raise asyncio.CancelledError()
         raise RuntimeError("模拟建表中断")
 
-    monkeypatch.setattr(AgentExecutor, "execute", interrupted)
+    monkeypatch.setattr(AgentExecutor, "execute_plan", interrupted)
     events = _chat(client, conversation, "帮我新建费用表")
     answer = _visible_answer(events)
     assert "本轮尚未生成可下载的 Excel 工作簿" in answer and "已建好" not in answer
@@ -386,7 +386,7 @@ def test_analysis_cleans_temporary_workspace_on_error_or_stop(client, samples, f
     _upload(client, conversation, samples["fees_sep"])
     roots: list[Path] = []
 
-    async def interrupted(self, ctx, message, history):
+    async def interrupted(self, ctx, message, steps, history):
         roots.append(ctx.ws.path.parent)
         assert list((ctx.ws.path.parent / "files").iterdir())
         yield {"type": "note", "content": "处理临时副本"}
@@ -394,7 +394,7 @@ def test_analysis_cleans_temporary_workspace_on_error_or_stop(client, samples, f
             raise asyncio.CancelledError()
         raise RuntimeError("模拟计算失败")
 
-    monkeypatch.setattr(AgentExecutor, "execute", interrupted)
+    monkeypatch.setattr(AgentExecutor, "execute_plan", interrupted)
     fake_llm()
     events = _chat(client, conversation, "统计总额")
     assert any(event["type"] == "error" for event in events)

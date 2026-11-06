@@ -82,7 +82,8 @@ function repeatsParentTitle(...titles: (string | undefined)[]): boolean {
 
       <!-- 其他信息 -->
       <div v-else-if="item.kind === 'info'" class="flex items-center gap-2 py-0.5 text-mute">
-        <Sparkles class="size-3.5 shrink-0" :class="item.tone === 'memory' || item.tone === 'mapping' ? 'text-fun-purple' : 'text-faint'" />
+        <LoaderCircle v-if="item.tone === 'planning' && item.status === 'running'" class="size-3.5 shrink-0 animate-spin text-info" />
+        <Sparkles v-else class="size-3.5 shrink-0" :class="item.tone === 'memory' || item.tone === 'mapping' ? 'text-fun-purple' : 'text-faint'" />
         <span>{{ userFacingText(item.text) }}</span>
       </div>
     </li>

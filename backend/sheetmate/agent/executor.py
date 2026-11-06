@@ -87,19 +87,15 @@ class AgentExecutor:
         async for event in self.agent_stream(messages, [], ctx):
             yield event
 
-    async def execute(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
-        """直接执行（不带计划）。"""
-        messages = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history[-12:]),
-                    {"role": "user", "content": user_content(message, ctx.image_parts)}]
-        async for event in self.agent_stream(messages, self.registry.for_context(ctx), ctx):
-            yield event
-
     async def execute_plan(self, ctx: AgentContext, message: str, steps: list[dict[str, Any]],
                            history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
-        """按用户确认的计划逐步执行，每步一次 ReAct，最后自检（TabClaw execute_plan）。"""
+        """按后端生成的全局计划自动执行，每步一次 ReAct，最后自检（TabClaw execute_plan）。"""
         tools = self.registry.for_context(ctx)
+        outline = "\n".join(f"{index}. {step['description']}" for index, step in enumerate(steps, start=1))
         conversation = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history[-12:]),
-                        {"role": "user", "content": user_content(f"原始需求：{message}\n下面按计划逐步执行。", ctx.image_parts)}]
+                        {"role": "user", "content": user_content(
+                            f"本轮需求（结合历史中的原始任务和澄清回答理解）：{message}\n全局执行计划：\n{outline}\n下面按计划逐步执行，无需再次确认计划。",
+                            ctx.image_parts)}]
         budget = _ToolBudget()
         executed_steps = 0
         yield {"type": "plan_start", "steps": [{"id": index, "description": str(step.get("description") or f"第 {index} 步")}
@@ -166,7 +162,7 @@ class AgentExecutor:
     async def agent_stream(self, messages: list[dict[str, Any]], tools: list[Tool], ctx: AgentContext,
                            transcript: list[dict[str, Any]] | None = None,
                            budget: _ToolBudget | None = None) -> AsyncIterator[dict[str, Any]]:
-        """transcript 不为空时，把这一轮新增的消息（工具调用、工具结果、最终回答）追加进去，供计划模式接续上下文。"""
+        """transcript 不为空时，把新增的工具调用、结果和最终回答追加进去，供后续计划步骤接续上下文。"""
         msgs = list(messages)
         start = len(msgs)
         tool_map = {t.name: t for t in tools}
@@ -384,7 +380,7 @@ class AgentExecutor:
                     guidance.append(_approach_switch_message(recovery))
                 if result.end_turn:
                     # 等待用户回答时立即停止，后续调用不能覆盖确认或产生额外副作用。
-                    # 只保留实际执行过的调用，保证计划模式接续时工具消息成对。
+                    # 只保留实际执行过的调用，保证后续计划步骤接续时工具消息成对。
                     assistant["tool_calls"] = calls[:call_index + 1]
                     break
             msgs.extend({"role": "user", "content": message} for message in guidance)

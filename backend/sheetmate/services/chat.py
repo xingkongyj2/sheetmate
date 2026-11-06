@@ -2,7 +2,7 @@
 
 1. 保存用户消息；历史太长先压缩（auto-compact）
 2. 组装上下文：模式（分析/修改）、客户（记忆、流程、整体处理逻辑）、工作区里的表、公式库
-3. 选择执行方式：按计划逐步执行 / 多表并行 / 直接 ReAct
+3. 处理任务由后端检查必要歧义、自动生成全局计划，再逐步 ReAct 执行和自检；普通对话不进入处理流程
 4. 事件实时推给前端（文本、工具调用、结果表、Recipe 步骤、文件…），同时精简后存进助手消息，刷新页面能还原执行明细
 5. 结束后：分析模式记一条运行记录（工作流）、首轮生成标题、后台抽取记忆
 """
@@ -20,14 +20,12 @@ from sqlalchemy.orm import Session
 from sheetmate.agent.executor import AgentExecutor
 from sheetmate.agent.intent import infer_request
 from sheetmate.agent.llm import (
-    LLMError,
     LLMNotConfigured,
     contains_llm_not_configured_text,
     get_llm,
     is_llm_not_configured_message,
 )
 from sheetmate.agent.memory import extract_memories
-from sheetmate.agent.multi_agent import execute_multi, should_activate
 from sheetmate.agent.planner import check_clarification, generate_plan
 from sheetmate.agent.persistence import infer_recipe_persistence
 from sheetmate.agent.recorder import WorkflowRecorder
@@ -58,7 +56,7 @@ _MAX_MESSAGE_IMAGES = 10
 _MAX_HISTORY_IMAGES = 8
 _MAX_IMAGE_REQUEST_BYTES = 20 * 1024 * 1024
 _KEEP_EVENTS = {
-    "note", "reply", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
+    "note", "reply", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "planning_start", "plan_start", "step_start", "step_done",
     "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
@@ -119,7 +117,7 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
 
 
 def start_chat(user: User, conversation_id: str, message: str, *,
-               plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None) -> Job:
+               attachments: list[str] | None = None) -> Job:
     text = (message or "").strip()
     if not text:
         raise ServiceError("消息不能为空")
@@ -131,19 +129,16 @@ def start_chat(user: User, conversation_id: str, message: str, *,
         for record in _attachment_records(db, conv, submitted):
             file_service.retain_for_conversation(db, record, conv.id)
         meta = {"attachments": submitted}
-        if plan_steps:
-            meta["plan"] = plan_steps
         message_id = conv_service.add_message(db, conv, "user", text, meta=meta).id
     user_id = user.id
 
     async def work(job: Job) -> None:
-        await _run_chat(job, user_id, conversation_id, text, plan_steps, message_id)
+        await _run_chat(job, user_id, conversation_id, text, message_id)
 
     return jobs.start(conversation_id, work, message_id=message_id)
 
 
-async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
-                    message_id: int) -> None:
+async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, message_id: int) -> None:
     recorder = WorkflowRecorder(message)
     stored: list[dict[str, Any]] = []
     text_parts: list[str] = []
@@ -241,7 +236,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         _limit_history_images(history, ctx.image_parts)
         files = host.list_files()
         references = file_references(conversation_id, message_id, files)
-        intent = await infer_request(llm, ctx, message, history, plan_steps, files=files, file_references=references)
+        intent = await infer_request(llm, ctx, message, history, files=files, file_references=references)
         ctx.mode = intent.mode
         if intent.files is not None:
             selected_files = select_files(intent.files, files, references)
@@ -317,7 +312,31 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
 
     try:
         with ExitStack() as resources:
+            await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None})
             if intent.action == "process":
+                # 规划属于后台任务本身，支持停止、断线重连及历史恢复，不接受客户端跳过或替换。
+                # 只有业务口径确实不明确才暂停；技术路径和一般设计细节由后端自主决定。
+                await emit({"type": "planning_start"})
+                clarification = await check_clarification(llm, ctx, message, history=history, files=files)
+                if clarification.get("needs_clarification"):
+                    await emit({"type": "clarify", "question": clarification["question"], "options": clarification["options"]})
+                    _save_assistant(conversation_id, "", stored, recorder, None)
+                    # 首轮即保留真正的需求标题，避免回答“2”等选项后才用短答案命名。
+                    title = None
+                    with session_scope() as db:
+                        conv = db.get(Conversation, conversation_id)
+                        if conv is not None and conv.title in {"新对话", ""}:
+                            title = conv.title = fallback_title(message)
+                    if title:
+                        await job.emit({"type": "title", "title": title})
+                    await job.emit({"type": "done"})
+                    return
+                plan = await generate_plan(llm, ctx, message, history=history, files=files)
+                with session_scope() as db:
+                    request = db.get(Message, message_id)
+                    if request is not None:
+                        request.meta = {**(request.meta or {}), "plan": plan["steps"], "plan_title": plan["title"]}
+                # 计划成功后才准备执行副本，规划失败绝不降级为直接执行。
                 analysis = resources.enter_context(analysis_workspace(ctx.ws))
                 ctx.ws = host.ws = analysis.ws
                 host.analysis = analysis
@@ -328,15 +347,10 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                     with session_scope() as db:
                         run_id = run_service.create_run(db, kind="analysis", user_id=user_id, customer_id=ctx.host.customer_id,
                                                         conversation_id=conversation_id, request_text=message).id
-            await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None})
             if intent.action == "chat":
                 stream = executor.converse(ctx, message, history)
-            elif plan_steps:
-                stream = executor.execute_plan(ctx, message, plan_steps, history)
-            elif should_activate(ctx, message):
-                stream = execute_multi(executor, ctx, message, history)
             else:
-                stream = executor.execute(ctx, message, history)
+                stream = executor.execute_plan(ctx, message, plan["steps"], history)
             async with aclosing(stream):
                 async for event in stream:
                     # 新建/修改的完成声明要先核对实际交付，再作为固定正文发布。
@@ -662,6 +676,29 @@ def _history_content(message: Message) -> str:
     digest = (message.meta or {}).get("digest")
     if digest:
         content += "\n" + digest
+    # 步骤的设计方案、小结可能没有工具摘要或最终正文；澄清/停止后重规划也要知道做到哪了。
+    steps: list[dict[str, Any]] = []
+    progress: dict[int, dict[str, Any]] = {}
+    for event in message.events or []:
+        if event.get("type") == "plan_start":
+            steps = [step for step in event.get("steps", []) if isinstance(step, dict)][:8]
+            progress = {}
+        elif event.get("type") in {"step_start", "step_done"}:
+            number = event.get("step_num")
+            if isinstance(number, int) and 1 <= number <= 8:
+                progress[number] = event
+    if steps:
+        statuses = {"done": "步骤已结束", "warning": "有待核对项", "waiting": "等待业务澄清",
+                    "error": "执行失败", "stopped": "已停止"}
+        lines = []
+        for index, step in enumerate(steps, 1):
+            event = progress.get(step.get("id", index), {})
+            status = (statuses.get(event.get("status"), "尚未确认完成")
+                      if event.get("type") == "step_done" else "已开始但未完成" if event else "未执行")
+            description = str(step.get("description") or "")[:160]
+            summary = str(event.get("summary") or "")[:800]
+            lines.append(f"{index}. {description}【{status}】" + (f"：{summary}" if summary else ""))
+        content += "\n本轮计划进度（步骤小结不等于工具成功，续接时核对实际结果）：\n" + "\n".join(lines)
     # 澄清卡的选项不在正文或工具摘要中；保留它们才能理解下一轮的数字回答。
     for event in message.events or []:
         if event.get("type") != "clarify":
@@ -698,26 +735,3 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
         for item in items:
             memory_service.set_memory(db, category=item["category"], key=item["key"], value=item["value"], user_id=user_id,
                                       customer_id=customer_id, conversation_id=conversation_id)
-
-
-# ---------------------------------------------------------------------------
-# 计划 / 澄清
-# ---------------------------------------------------------------------------
-
-
-async def plan(user: User, conversation_id: str, message: str, *, attachments: list[str] | None = None) -> dict[str, Any]:
-    with session_scope() as db:
-        conv = conv_service.get_conversation(db, user, conversation_id)
-        image_parts = _image_parts(_attachment_records(db, conv, attachments or []))
-    llm = get_llm()
-    ctx, _ = build_context(user.id, conversation_id, llm)
-    ctx.image_parts = image_parts
-    return await generate_plan(llm, ctx, message)
-
-
-async def clarify(user: User, conversation_id: str, message: str) -> dict[str, Any]:
-    with session_scope() as db:
-        conv_service.get_conversation(db, user, conversation_id)
-    llm = get_llm()
-    ctx, _ = build_context(user.id, conversation_id, llm)
-    return await check_clarification(llm, ctx, message)

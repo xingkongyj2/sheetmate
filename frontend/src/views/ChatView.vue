@@ -10,13 +10,12 @@ import { useRouter } from 'vue-router'
 import { conversationApi, runApi } from '@/api'
 import { ApiError, errorText } from '@/api/http'
 import type { StreamHandle } from '@/api/sse'
-import type { AgentEvent, ConversationDetail, FileInfo, PlanStep, TableBrief } from '@/api/types'
+import type { AgentEvent, ConversationDetail, FileInfo, TableBrief } from '@/api/types'
 import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
 import ChatComposer, { type Attachment } from '@/components/chat/ChatComposer.vue'
 import ExecutionPanel from '@/components/chat/ExecutionPanel.vue'
-import PlanEditor from '@/components/chat/PlanEditor.vue'
 import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
 import UserMessage from '@/components/chat/UserMessage.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
@@ -25,7 +24,7 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import { attachmentMessage } from '@/composables/attachmentFiles'
 import { applyEvent, finishMessage, fromStoredMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
-import { formatFileReference, formatTableReference, parseTableReferences, serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
+import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
 import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { pendingStarts } from '@/stores/pending'
@@ -43,13 +42,10 @@ const loading = ref(true)
 const streaming = ref(false)
 const reconnecting = ref(false)
 const text = ref('')
-const planMode = ref(false)
 const attachments = ref<Attachment[]>([])
 const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
 const recentlyUploaded = ref<FileInfo[]>([])
 const uploadedReferences = ref<TableReference[]>([])
-const plan = ref<{ title: string; steps: PlanStep[]; message: string; attachments: string[] } | null>(null)
-const planning = ref(false)
 const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角打开
 const panelTab = ref<'recipes' | 'files' | 'data'>('recipes')
 const selectedKey = ref<string | null>(null)
@@ -116,14 +112,6 @@ const tableReferences = computed<TableReference[]>(() => {
   }
   return [...references.values()]
 })
-
-function editableMessage(message: string) {
-  return parseTableReferences(message, tableReferences.value, fileReferences.value).map((segment) => {
-    if (segment.type === 'table') return formatTableReference(segment.reference)
-    if (segment.type === 'file') return formatFileReference(segment.reference)
-    return segment.text
-  }).join('')
-}
 
 function previewAttachment(key: string) {
   const file = messageFiles.value.find((item) => item.file_id === key)
@@ -212,13 +200,7 @@ onMounted(async () => {
   const pending = pendingStarts.get(props.id)
   if (pending) {
     pendingStarts.delete(props.id)
-    if (pending.plan) {
-      attachments.value = pending.attachments.flatMap((id) => {
-        const file = detail.value?.files.find((item) => item.file_id === id)
-        return file ? [{ key: id, sourceId: id, name: file.filename, kind: file.kind === 'expected' ? 'expected' as const : 'input' as const, status: 'done' as const, mediaType: file.media_type, previewUrl: file.preview_url ?? undefined }] : []
-      })
-      await requestPlan(pending.message, pending.attachments)
-    } else await send(pending.message, { attachments: pending.attachments })
+    await send(pending.message, { attachments: pending.attachments })
   }
 })
 
@@ -267,7 +249,7 @@ watch(
 )
 
 async function onSend() {
-  if (streaming.value || reconnecting.value || planning.value) return
+  if (streaming.value || reconnecting.value) return
   if (attachments.value.some((a) => a.status === 'uploading')) {
     toast.info('文件还在上传，请稍等')
     return
@@ -280,49 +262,13 @@ async function onSend() {
   if (!message) return
   const ids = attachments.value.filter((a) => a.status === 'done').map((a) => a.key)
   text.value = ''
-  if (planMode.value) await requestPlan(message, ids)
-  else await send(message, { attachments: ids })
+  await send(message, { attachments: ids })
 }
 
-async function requestPlan(message: string, ids: string[]) {
-  planning.value = true
-  messages.value.push(reactive(newUser(message, { attachments: ids })) as UiMessage)
-  scrollToBottom(true)
-  try {
-    const result = await conversationApi.plan(props.id, serializeTableReferences(message, tableReferences.value, fileReferences.value), ids)
-    plan.value = { ...result, message, attachments: [...ids] }
-  } catch (err) {
-    toast.error(errorText(err))
-    messages.value.pop()
-    text.value = editableMessage(message)
-  } finally {
-    planning.value = false
-    scrollToBottom(true)
-  }
-}
-
-async function runPlan(steps: PlanStep[]) {
-  if (!plan.value) return
-  const message = plan.value.message
-  const ids = plan.value.attachments
-  const draftAttachments = attachments.value
-  plan.value = null
-  messages.value.pop() // 计划阶段临时显示的用户消息，正式发送时重新加上
-  const running = send(message, { planSteps: steps, attachments: ids })
-  attachments.value = draftAttachments.filter((item) => !ids.includes(item.key))
-  await running
-}
-
-function cancelPlan() {
-  if (plan.value) text.value = editableMessage(plan.value.message)
-  plan.value = null
-  messages.value.pop()
-}
-
-async function send(message: string, opts: { attachments?: string[]; planSteps?: PlanStep[] } = {}) {
+async function send(message: string, opts: { attachments?: string[] } = {}) {
   if (disposed || streaming.value || reconnecting.value) return
   message = serializeTableReferences(message, tableReferences.value, fileReferences.value)
-  messages.value.push(reactive(newUser(message, { attachments: opts.attachments ?? [], plan: opts.planSteps })) as UiMessage)
+  messages.value.push(reactive(newUser(message, { attachments: opts.attachments ?? [] })) as UiMessage)
   const assistant = reactive(newAssistant()) as UiMessage
   messages.value.push(assistant)
   selectedKey.value = assistant.key
@@ -331,7 +277,7 @@ async function send(message: string, opts: { attachments?: string[]; planSteps?:
   store.patchConversation(props.id, { running: true })
 
   await receiveStream(assistant, (onEvent) => conversationApi.chat(
-    props.id, { message, plan_steps: opts.planSteps, attachments: opts.attachments }, onEvent,
+    props.id, { message, attachments: opts.attachments }, onEvent,
   ))
 }
 
@@ -498,7 +444,7 @@ function answer(option: string) {
           <div v-if="loading" class="flex justify-center py-20 text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
 
           <!-- 空对话 -->
-          <div v-else-if="!messages.length && !plan" class="flex flex-col items-center py-16 text-center">
+          <div v-else-if="!messages.length" class="flex flex-col items-center py-16 text-center">
             <Mascot :variant="customer?.mascot ?? 'blob'" :size="96" />
             <h2 class="mt-5 text-xl font-semibold">{{ customer ? `我已经了解「${customer.name}」了` : '把表格拖进来，告诉我要做什么' }}</h2>
             <p class="mt-2 max-w-md text-sm leading-relaxed text-mute">
@@ -528,10 +474,6 @@ function answer(option: string) {
               />
             </template>
 
-            <div v-if="planning" class="flex items-center gap-3 text-sm text-mute">
-              <Mascot :size="34" mood="thinking" :shadow="false" />正在拆解步骤…
-            </div>
-            <PlanEditor v-if="plan" :title="plan.title" :steps="plan.steps" @run="runPlan" @cancel="cancelPlan" />
           </div>
 
           <div v-if="reconnecting" class="mt-6 flex items-center gap-2 rounded-xl bg-info/5 px-4 py-3 text-sm text-info">
@@ -546,14 +488,12 @@ function answer(option: string) {
           <ChatComposer
             ref="composer"
             v-model="text"
-            v-model:plan="planMode"
             :attachments="attachments"
             :table-references="tableReferences"
             :file-references="fileReferences"
             :references-loading="referencesLoading"
             :references-error="referencesError"
-            :busy="streaming || reconnecting || planning"
-            :stoppable="!planning"
+            :busy="streaming || reconnecting"
             placeholder="继续追问、提出修改要求，或粘贴表格和图片…"
             @attach="attach"
             @remove="removeAttachment"

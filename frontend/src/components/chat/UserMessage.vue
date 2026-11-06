@@ -59,7 +59,7 @@ function fileDetails(file: FileInfo) {
           </div>
         </div>
       </div>
-      <div v-if="message.meta.plan" class="text-right text-[11px] text-faint">按计划执行（{{ (message.meta.plan as PlanStep[]).length }} 步）</div>
+      <div v-if="message.meta.plan" class="text-right text-[11px] text-faint">自动规划 · {{ (message.meta.plan as PlanStep[]).length }} 步</div>
     </div>
   </div>
 </template>

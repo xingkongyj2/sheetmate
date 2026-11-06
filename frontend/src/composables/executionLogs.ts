@@ -28,7 +28,7 @@ export interface ExecutionLog {
 
 const EVENT_LABELS: Record<string, string> = {
   note: '处理说明', error: '执行错误', start: '开始处理', done: '处理结束',
-  plan_start: '执行计划', step_start: '计划步骤开始', step_done: '计划步骤结束',
+  planning_start: '开始全局规划', plan_start: '执行计划', step_start: '计划步骤开始', step_done: '计划步骤结束',
   table: '数据产物', file: '交付文件', script: '脚本文件', clarify: '待确认问题',
   memory_saved: '记忆已保存', field_mapping_saved: '字段映射已保存', compacted: '上下文已压缩',
   reflect_start: '自检开始', reflect_done: '自检结束', agent_pool_start: '并行任务开始',

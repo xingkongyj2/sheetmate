@@ -1,4 +1,4 @@
-"""会话：列表 / 新建 / 详情 / 修改 / 删除 / 保存到客户、上传文件、工作区表格、对话（SSE）、计划、澄清、停止。"""
+"""会话：列表 / 新建 / 详情 / 修改 / 删除 / 保存到客户、上传文件、工作区表格、对话（SSE）、停止。"""
 
 from __future__ import annotations
 
@@ -38,12 +38,6 @@ class BindBody(BaseModel):
 
 
 class ChatBody(BaseModel):
-    message: str
-    plan_steps: list[dict[str, Any]] | None = None
-    attachments: list[str] | None = None
-
-
-class MessageBody(BaseModel):
     message: str
     attachments: list[str] | None = None
 
@@ -170,19 +164,8 @@ def set_table_role(conversation_id: str, name: str, body: RoleBody, source_conve
 @router.post("/{conversation_id}/chat")
 async def chat(conversation_id: str, body: ChatBody, user: User = Depends(current_user)):
     # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）
-    job = chat_service.start_chat(user, conversation_id, body.message, plan_steps=body.plan_steps,
-                                  attachments=body.attachments)
+    job = chat_service.start_chat(user, conversation_id, body.message, attachments=body.attachments)
     return sse_response(job)
-
-
-@router.post("/{conversation_id}/plan")
-async def plan(conversation_id: str, body: MessageBody, user: User = Depends(current_user)) -> dict[str, Any]:
-    return {"ok": True, "plan": await chat_service.plan(user, conversation_id, body.message, attachments=body.attachments)}
-
-
-@router.post("/{conversation_id}/clarify")
-async def clarify(conversation_id: str, body: MessageBody, user: User = Depends(current_user)) -> dict[str, Any]:
-    return {"ok": True, **await chat_service.clarify(user, conversation_id, body.message)}
 
 
 @router.post("/{conversation_id}/stop")

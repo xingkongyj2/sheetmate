@@ -263,18 +263,22 @@ def test_multi_table_compare(client, samples, fake_llm):
     conv = _new_conversation(client)
     _upload(client, conv, samples["fees_sep"])
     _upload(client, conv, samples["owners"])
-    fake_llm(script=[{"text": "表一结论"}, {"text": "表二结论"}, {"text": "[一致] 两表可以关联\n## ✅ 最终结论\n- ok"}])
+    steps = [{"id": 1, "description": "核对运费明细"}, {"id": 2, "description": "核对归属表并关联两表"}]
+    fake_llm(script=[{"text": "表一结论"}, {"text": "表二结论"}, {"text": "[一致] 两表可以关联\n## ✅ 最终结论\n- ok"}],
+             script_reflection=True, json_handlers=[("规划助手", {"title": "多表对比", "steps": steps})])
     events = _chat(client, conv, "对比这两张表")
     types = [e["type"] for e in events]
-    assert "agent_pool_start" in types and types.count("agent_done") == 2 and "aggregate_start" in types
+    assert types.count("step_start") == 2 and types.count("step_done") == 2 and "reflect_done" in types
+    assert "agent_pool_start" not in types and "aggregate_start" not in types
 
 
 def test_plan_execution(client, samples, fake_llm):
     conv = _new_conversation(client)
     _upload(client, conv, samples["fees_sep"])
-    fake_llm(script=[{"text": "第一步完成"}, {"text": "第二步完成"}, {"text": "## ✅ 最终结论\n- 自检通过"}])
     steps = [{"id": 1, "description": "看结构"}, {"id": 2, "description": "统计"}]
-    events = _chat(client, conv, "分析", plan_steps=steps)
+    fake_llm(script=[{"text": "第一步完成"}, {"text": "第二步完成"}, {"text": "## ✅ 最终结论\n- 自检通过"}],
+             script_reflection=True, json_handlers=[("规划助手", {"title": "分析计划", "steps": steps})])
+    events = _chat(client, conv, "分析")
     types = [e["type"] for e in events]
     assert types.count("step_start") == 2 and "reflect_done" in types
 
