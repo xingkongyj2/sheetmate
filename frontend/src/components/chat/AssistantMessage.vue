@@ -2,7 +2,7 @@
 /**
  * 助手消息：阶段回复与折叠的处理记录按发生顺序穿插，最后展示回答和交付结果。
  */
-import { Check, ChevronRight, CircleAlert, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, CircleHelp, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref } from 'vue'
 
 import { fileApi } from '@/api'
@@ -20,6 +20,7 @@ import { copyMarkdown } from '@/composables/markdown'
 import { lastResultTable, messageMarkdown, PLAN_STATUS_LABELS, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
 import { recipeViewReply } from '@/composables/recipeViewPresentation'
 import { recipeDeliveries } from '@/composables/recipeDeliveries'
+import { auditLine } from '@/composables/thinkingPresentation'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
 import { useProgressiveReply } from '@/composables/useProgressiveReply'
@@ -78,6 +79,7 @@ const { groups: displayGroups, pending: revealing } = useProgressiveReply(
   (props.message.streaming || props.message.id == null) && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
 )
 const typing = computed(() => props.message.streaming || revealing.value)
+const audit = computed(() => auditLine(props.message.audit))
 const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
 
 function stageSummary(stage: AssistantStage): string {
@@ -165,6 +167,20 @@ onBeforeUnmount(() => {
         </section>
         <MarkdownView v-else-if="group.text" :source="group.text" :streaming="!group.closed && typing" stable />
       </template>
+
+      <!-- 思考模式：此刻在做什么。只在没有别的变化的空档里出现（后端用 activity 事件告诉界面），别的事情一发生就消失。 -->
+      <div v-if="message.streaming && message.activity" class="flex items-center gap-1.5 py-0.5 text-[13px] text-mute" aria-live="polite" data-testid="activity">
+        <LoaderCircle class="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+        <span class="process-title-running min-w-0 break-words [overflow-wrap:anywhere]">{{ message.activity }}…</span>
+      </div>
+
+      <!-- 思考模式：回答发出前对照执行结果核对的结果，放在回答下面；等回答显示完再出现。 -->
+      <p v-if="!typing && audit" class="flex items-start gap-1.5 text-xs leading-5" :class="audit.tone === 'warn' ? 'text-[#9a6b00]' : 'text-mute'" data-testid="audit-line">
+        <CircleAlert v-if="audit.tone === 'warn'" class="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+        <CircleHelp v-else-if="audit.tone === 'skip'" class="mt-0.5 size-3.5 shrink-0" aria-hidden="true" />
+        <Check v-else class="mt-0.5 size-3.5 shrink-0 text-success" aria-hidden="true" />
+        <span class="min-w-0 break-words [overflow-wrap:anywhere]">{{ audit.text }}</span>
+      </p>
 
       <!-- 文件、表格和流程结果等回复接收和渐进展示都完成后再显示。 -->
       <template v-if="!typing">

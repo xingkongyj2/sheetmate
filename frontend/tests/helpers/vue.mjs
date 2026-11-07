@@ -32,7 +32,7 @@ export async function loadVue(url, overrides = {}) {
 
 /** A minimal host renderer exercises real compiled Vue handlers without browser dependencies. */
 export function mount(component, initialProps) {
-  const node = (tag, text = '') => ({ tag, text, props: {}, children: [], parent: null,
+  const node = (tag, text = '') => ({ tag, text, props: {}, style: {}, children: [], parent: null,
     get nodeType() { return tag === '#text' ? 3 : 1 },
     get textContent() { return this.text },
     get childNodes() { return this.children },

@@ -2,7 +2,7 @@
 
 1. 保存用户消息；历史太长先压缩（auto-compact）
 2. 组装上下文：模式（分析/修改）、客户（记忆、流程、整体处理逻辑）、工作区里的表、公式库
-3. 选择执行方式：按计划逐步执行 / 多表并行 / 直接 ReAct
+3. 选择执行方式：思考模式（计划 → 逐项 ReAct + 核对）/ 按给定计划逐步执行 / 多表并行 / 直接 ReAct
 4. 事件实时推给前端（文本、工具调用、结果表、Recipe 步骤、文件…），同时精简后存进助手消息，刷新页面能还原执行明细
 5. 结束后：分析模式记一条运行记录（工作流）、首轮生成标题、后台抽取记忆
 """
@@ -28,10 +28,11 @@ from sheetmate.agent.llm import (
 )
 from sheetmate.agent.memory import extract_memories
 from sheetmate.agent.multi_agent import execute_multi, should_activate
-from sheetmate.agent.planner import check_clarification, generate_plan
+from sheetmate.agent.planner import check_clarification
 from sheetmate.agent.persistence import infer_recipe_persistence
 from sheetmate.agent.recorder import WorkflowRecorder
 from sheetmate.agent.summarizer import COMPACT_THRESHOLD, compact_history, fallback_title, make_title
+from sheetmate.agent.thinking import THINKING_TOOL_BUDGET, execute_thinking
 from sheetmate.agent.tools import AgentContext, ToolRegistry
 from sheetmate.config import settings
 from sheetmate.db.database import session_scope
@@ -59,7 +60,7 @@ _MAX_HISTORY_IMAGES = 8
 _MAX_IMAGE_REQUEST_BYTES = 20 * 1024 * 1024
 _KEEP_EVENTS = {
     "note", "reply", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
-    "reflect_start", "reflect_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
+    "reflect_start", "reflect_done", "think_start", "plan_review", "step_check", "audit_start", "audit_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
     "recipe_verify", "recipe_refine", "recipe_diff", "recipe_completed", "recipe_saved", "recipe_deleted", "recipe_failed", "recipe_view",
@@ -119,7 +120,8 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
 
 
 def start_chat(user: User, conversation_id: str, message: str, *,
-               plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None) -> Job:
+               plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None,
+               thinking: bool = False) -> Job:
     text = (message or "").strip()
     if not text:
         raise ServiceError("消息不能为空")
@@ -130,20 +132,22 @@ def start_chat(user: User, conversation_id: str, message: str, *,
         submitted = list(dict.fromkeys(attachments or []))
         for record in _attachment_records(db, conv, submitted):
             file_service.retain_for_conversation(db, record, conv.id)
-        meta = {"attachments": submitted}
+        meta: dict[str, Any] = {"attachments": submitted}
         if plan_steps:
             meta["plan"] = plan_steps
+        if thinking:
+            meta["thinking"] = True
         message_id = conv_service.add_message(db, conv, "user", text, meta=meta).id
     user_id = user.id
 
     async def work(job: Job) -> None:
-        await _run_chat(job, user_id, conversation_id, text, plan_steps, message_id)
+        await _run_chat(job, user_id, conversation_id, text, plan_steps, message_id, thinking)
 
     return jobs.start(conversation_id, work, message_id=message_id)
 
 
 async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
-                    message_id: int) -> None:
+                    message_id: int, thinking: bool = False) -> None:
     recorder = WorkflowRecorder(message)
     stored: list[dict[str, Any]] = []
     text_parts: list[str] = []
@@ -287,7 +291,10 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         request = db.get(Message, message_id)
         if request is not None:
             request.meta = {**(request.meta or {}), "mode": ctx.mode, "action": intent.action}
-    executor = AgentExecutor(llm, _registry, max_iterations=settings.agent_max_iterations)
+    # 思考模式：计划的各项、补做和自检共用一份更大的工具预算；闲聊（chat）不规划
+    thinking = thinking and intent.action == "process"
+    executor = AgentExecutor(llm, _registry, max_iterations=settings.agent_max_iterations,
+                             **({"max_tool_calls": THINKING_TOOL_BUDGET} if thinking else {}))
     run_id = None
 
     async def guard_creation_delivery(*, interrupted: bool = False) -> str:
@@ -331,6 +338,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None})
             if intent.action == "chat":
                 stream = executor.converse(ctx, message, history)
+            elif thinking:
+                stream = execute_thinking(executor, ctx, message, history, plan_steps)
             elif plan_steps:
                 stream = executor.execute_plan(ctx, message, plan_steps, history)
             elif should_activate(ctx, message):
@@ -701,18 +710,8 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
 
 
 # ---------------------------------------------------------------------------
-# 计划 / 澄清
+# 澄清
 # ---------------------------------------------------------------------------
-
-
-async def plan(user: User, conversation_id: str, message: str, *, attachments: list[str] | None = None) -> dict[str, Any]:
-    with session_scope() as db:
-        conv = conv_service.get_conversation(db, user, conversation_id)
-        image_parts = _image_parts(_attachment_records(db, conv, attachments or []))
-    llm = get_llm()
-    ctx, _ = build_context(user.id, conversation_id, llm)
-    ctx.image_parts = image_parts
-    return await generate_plan(llm, ctx, message)
 
 
 async def clarify(user: User, conversation_id: str, message: str) -> dict[str, Any]:
