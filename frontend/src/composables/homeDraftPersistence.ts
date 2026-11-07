@@ -5,7 +5,7 @@ import type { DraftFile } from '../stores/homeDraft.ts'
 export interface HomeDraftMetadata {
   version: 1
   text: string
-  plan: boolean
+  thinking: boolean
   customerId: string | null
   initialized: boolean
   fileKeys: string[]

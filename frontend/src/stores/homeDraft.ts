@@ -13,7 +13,7 @@ export interface DraftFile {
 
 export const useHomeDraftStore = defineStore('homeDraft', () => {
   const text = ref('')
-  const plan = ref(false)
+  const thinking = ref(false)
   const customerId = ref<string | null>(null)
   const files = ref<DraftFile[]>([])
   const attachments = ref<Attachment[]>([])
@@ -33,7 +33,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
 
   function metadata(): HomeDraftMetadata {
     return {
-      version: 1, text: text.value, plan: plan.value, customerId: customerId.value,
+      version: 1, text: text.value, thinking: thinking.value, customerId: customerId.value,
       initialized: initialized.value, fileKeys: [...new Set([...files.value.map((item) => item.key), ...attachments.value.map((item) => item.key)])],
       attachments: attachments.value.map((item) => ({ ...item, tables: item.tables ? [...item.tables] : undefined })),
     }
@@ -78,7 +78,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
   }
 
   // Synchronous metadata writes protect even text entered immediately before refresh.
-  watch([text, plan, customerId, initialized, attachments, () => files.value.map((item) => item.key)], saveMetadata, { deep: true, flush: 'sync' })
+  watch([text, thinking, customerId, initialized, attachments, () => files.value.map((item) => item.key)], saveMetadata, { deep: true, flush: 'sync' })
   watch([files, () => attachments.value.map((item) => item.key)], saveFiles, { deep: true, flush: 'sync' })
 
   async function hydrate(userId: string | number, storage: HomeDraftStorage = browserHomeDraftStorage) {
@@ -94,7 +94,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
     busy.value = false
     savingFiles.value = false
     text.value = ''
-    plan.value = false
+    thinking.value = false
     customerId.value = null
     files.value = []
     attachments.value = []
@@ -104,7 +104,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
         const saved = storage.readMetadata(target)
         if (saved) {
           text.value = saved.text
-          plan.value = saved.plan === true
+          thinking.value = saved.thinking === true
           customerId.value = typeof saved.customerId === 'string' ? saved.customerId : null
           initialized.value = saved.initialized === true
           // A previous visit can still be saving its last attachment snapshot.
@@ -166,7 +166,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
   }
 
   function resetInitializationIfEmpty() {
-    if (!text.value && !files.value.length && !attachments.value.length && !plan.value && customerId.value === null) initialized.value = false
+    if (!text.value && !files.value.length && !attachments.value.length && !thinking.value && customerId.value === null) initialized.value = false
   }
 
   function clear() {
@@ -178,7 +178,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
     hydration = null
     initialized.value = false
     text.value = ''
-    plan.value = false
+    thinking.value = false
     customerId.value = null
     files.value = []
     attachments.value = []
@@ -194,6 +194,6 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
     }
   }
 
-  return { text, plan, customerId, files, attachments, busy, generation, ready, savingFiles, cacheError, hasMissingFiles,
+  return { text, thinking, customerId, files, attachments, busy, generation, ready, savingFiles, cacheError, hasMissingFiles,
     hydrate, flush, retrySave, initialize, resetInitializationIfEmpty, clear }
 })

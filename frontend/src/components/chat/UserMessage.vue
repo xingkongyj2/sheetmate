@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Download, FileCheck2, FileSpreadsheet, Image } from '@lucide/vue'
+import { Brain, Download, FileCheck2, FileSpreadsheet, Image } from '@lucide/vue'
 import { computed } from 'vue'
 
 import type { FileInfo, PlanStep } from '@/api/types'
@@ -59,7 +59,8 @@ function fileDetails(file: FileInfo) {
           </div>
         </div>
       </div>
-      <div v-if="message.meta.plan" class="text-right text-[11px] text-faint">按计划执行（{{ (message.meta.plan as PlanStep[]).length }} 步）</div>
+      <div v-if="message.meta.thinking" class="flex items-center justify-end gap-1 text-[11px] text-faint"><Brain class="size-3" />思考模式</div>
+      <div v-else-if="message.meta.plan" class="text-right text-[11px] text-faint">按计划执行（{{ (message.meta.plan as PlanStep[]).length }} 步）</div>
     </div>
   </div>
 </template>

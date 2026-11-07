@@ -18,7 +18,6 @@ import type {
   FormulaTrialResult,
   LLMProviderId,
   MemoryItem,
-  PlanStep,
   RecipeBrief,
   RecipeFlowData,
   RecipeJSON,
@@ -133,10 +132,9 @@ export const conversationApi = {
     http.delete(`/conversations/${id}/tables/${encodeURIComponent(name)}`, { params: { source_conversation_id: sourceConversationId } }),
   setTableRole: async (id: string, name: string, role: 'input' | 'expected', sourceConversationId?: string) =>
     (await http.put<{ table: TableBrief }>(`/conversations/${id}/tables/${encodeURIComponent(name)}/role`, { role }, { params: { source_conversation_id: sourceConversationId } })).data.table,
-  plan: async (id: string, message: string, attachments?: string[]) =>
-    (await http.post<{ plan: { title: string; steps: PlanStep[] } }>(`/conversations/${id}/plan`, { message, attachments })).data.plan,
   stop: async (id: string) => http.post(`/conversations/${id}/stop`),
-  chat: (id: string, body: { message: string; plan_steps?: PlanStep[]; attachments?: string[] }, onEvent: (e: AgentEvent) => void) =>
+  /** thinking=true 是思考模式：后端先规划、再逐步执行并核对，中途不需要用户确认计划 */
+  chat: (id: string, body: { message: string; attachments?: string[]; thinking?: boolean }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/conversations/${id}/chat`, body, onEvent),
   events: (id: string, jobId: string, onEvent: (e: AgentEvent) => void) =>
     getStream(`/conversations/${id}/events?job_id=${encodeURIComponent(jobId)}`, onEvent),

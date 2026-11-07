@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
- * 输入框：文字 + 附件（要处理的表 / 人工做好的结果）+ 先出计划 + 发送/停止。
+ * 输入框：文字 + 附件（要处理的表 / 人工做好的结果）+ 思考模式 + 发送/停止。
  * 中文输入法组字时按回车不会发送；支持选择、拖入和粘贴表格或图片。
  */
-import { ArrowUp, Eye, FileCheck2, FileSpreadsheet, Image, ListChecks, LoaderCircle, Plus, Square, X } from '@lucide/vue'
+import { ArrowUp, Brain, Eye, FileCheck2, FileSpreadsheet, Image, LoaderCircle, Plus, Square, X } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { ATTACHMENT_ACCEPT, captureAttachmentPaste, filterAttachmentFiles, isImageFile } from '@/composables/attachmentFiles'
@@ -25,7 +25,7 @@ export interface Attachment {
 const props = withDefaults(
   defineProps<{
     modelValue: string
-    plan?: boolean
+    thinking?: boolean
     attachments?: Attachment[]
     localFiles?: { key: string; file: File }[]
     tableReferences?: TableReference[]
@@ -39,12 +39,12 @@ const props = withDefaults(
     large?: boolean
     appearance?: 'outlined' | 'card'
   }>(),
-  { plan: false, attachments: () => [], localFiles: () => [], tableReferences: () => [], fileReferences: () => [], referencesLoading: false, referencesError: '', busy: false, stoppable: true, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
+  { thinking: false, attachments: () => [], localFiles: () => [], tableReferences: () => [], fileReferences: () => [], referencesLoading: false, referencesError: '', busy: false, stoppable: true, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
 )
 
 const emit = defineEmits<{
   'update:modelValue': [value: string]
-  'update:plan': [value: boolean]
+  'update:thinking': [value: boolean]
   attach: [files: File[], kind: 'input' | 'expected']
   remove: [key: string]
   preview: [key: string]
@@ -243,12 +243,14 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
       <slot name="tools" />
 
       <button
+        type="button"
         class="flex items-center gap-1 rounded-full px-2.5 py-1 text-xs transition"
-        :class="plan ? 'bg-ink text-white' : 'text-mute hover:bg-paper hover:text-ink'"
-        title="先生成执行计划，确认后再执行"
-        @click="emit('update:plan', !plan)"
+        :class="thinking ? 'bg-ink text-white' : 'text-mute hover:bg-paper hover:text-ink'"
+        :aria-pressed="thinking"
+        title="思考模式：先了解数据、制定并审查计划，再分步执行、逐步核对，回答前再核对一遍数字。更严谨，也更慢一些"
+        @click="emit('update:thinking', !thinking)"
       >
-        <ListChecks class="size-3.5" />先出计划
+        <Brain class="size-3.5" />思考模式
       </button>
 
       <div class="ml-auto">

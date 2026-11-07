@@ -1,4 +1,4 @@
-"""会话：列表 / 新建 / 详情 / 修改 / 删除 / 保存到客户、上传文件、工作区表格、对话（SSE）、计划、澄清、停止。"""
+"""会话：列表 / 新建 / 详情 / 修改 / 删除 / 保存到客户、上传文件、工作区表格、对话（SSE，可选思考模式）、澄清、停止。"""
 
 from __future__ import annotations
 
@@ -39,8 +39,9 @@ class BindBody(BaseModel):
 
 class ChatBody(BaseModel):
     message: str
-    plan_steps: list[dict[str, Any]] | None = None
+    plan_steps: list[dict[str, Any]] | None = None  # 调用方自带的计划步骤（高级用法；界面不再让用户确认计划）
     attachments: list[str] | None = None
+    thinking: bool = False  # 思考模式：后端先规划、再逐步执行并核对，不需要用户确认计划
 
 
 class MessageBody(BaseModel):
@@ -171,13 +172,8 @@ def set_table_role(conversation_id: str, name: str, body: RoleBody, source_conve
 async def chat(conversation_id: str, body: ChatBody, user: User = Depends(current_user)):
     # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）
     job = chat_service.start_chat(user, conversation_id, body.message, plan_steps=body.plan_steps,
-                                  attachments=body.attachments)
+                                  attachments=body.attachments, thinking=body.thinking)
     return sse_response(job)
-
-
-@router.post("/{conversation_id}/plan")
-async def plan(conversation_id: str, body: MessageBody, user: User = Depends(current_user)) -> dict[str, Any]:
-    return {"ok": True, "plan": await chat_service.plan(user, conversation_id, body.message, attachments=body.attachments)}
 
 
 @router.post("/{conversation_id}/clarify")

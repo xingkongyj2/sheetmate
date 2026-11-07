@@ -130,6 +130,15 @@ export interface TableArtifact {
   description?: string
 }
 
+/** 思考模式：回答发出前对照执行结果核对的结果（回答下面显示成一行小标识） */
+export interface AuditResult {
+  ok: boolean | null
+  issues: string[]
+  skipped: boolean
+  reason: string
+  corrected: boolean
+}
+
 export interface UiMessage {
   key: string
   id?: number
@@ -142,6 +151,12 @@ export interface UiMessage {
   blocks?: AssistantBlock[]
   /** 开发者日志保留诊断事件；主聊天仍使用 timeline / artifacts 的用户视图。 */
   events?: AgentEvent[]
+  /** 思考模式：此刻在做什么（临时，空档里显示，任何新事件都会让它消失）。 */
+  activity?: string
+  /** 思考模式：计划比较大，在输入框上方列任务清单；简单任务不列。 */
+  checklist?: boolean
+  /** 思考模式：回答核对的结果。 */
+  audit?: AuditResult
   error?: string
   createdAt?: string
 }
@@ -389,8 +404,10 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
 }
 
 function mergeEvent(msg: UiMessage, e: AgentEvent): void {
-  // 文本增量与模型思考不属于执行诊断，避免日志里堆积流式碎片。
-  if (e.type !== 'text_chunk' && e.type !== 'thinking') (msg.events ??= []).push({ ...e })
+  // 文本增量、模型思考和临时的活动提示不属于执行诊断，避免日志里堆积流式碎片。
+  if (e.type !== 'text_chunk' && e.type !== 'thinking' && e.type !== 'activity') (msg.events ??= []).push({ ...e })
+  // 活动提示只在「没有别的事情发生」的空档里显示：任何新事件到来它就消失（思考中的碎片不算事件）。
+  if (e.type !== 'activity' && e.type !== 'thinking' && msg.activity) msg.activity = ''
   if (e.type === 'recipe_view') {
     // 查看事件不能落进下方 recipe_* 的执行进度分派，否则会产生一次虚假的失败尝试。
     if (typeof e.recipe_id !== 'string' || !e.recipe_id || !e.flow ||
@@ -525,6 +542,7 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'compact', text: `对话较长，已把前 ${e.old_count} 条消息压缩成摘要`, step: activePlan(msg)?.num })
       break
     case 'plan_start':
+      msg.checklist = e.checklist === true
       for (const step of e.steps ?? []) {
         msg.timeline.push({ kind: 'plan', key: uid('t'), num: step.id, total: e.steps.length, description: step.description, status: 'pending' })
       }
@@ -544,7 +562,22 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'reflect_start':
+      if (e.quiet) break
       msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'reflect', text: '自检：检查需求是否都完成了', step: activePlan(msg)?.num })
+      break
+    // 思考模式：think_start / plan_review / step_check / audit_start 只出现在开发者日志里——
+    // 计划审查和每一项的核对结果已经写在正文里（引用块），不再另起一行折叠记录。
+    case 'activity':
+      msg.activity = typeof e.text === 'string' ? e.text : ''
+      break
+    case 'audit_done':
+      msg.audit = {
+        ok: typeof e.ok === 'boolean' ? e.ok : null,
+        issues: textList(e.issues),
+        skipped: e.skipped === true,
+        reason: typeof e.reason === 'string' ? e.reason.trim() : '',
+        corrected: e.corrected === true,
+      }
       break
     case 'agent_pool_start':
       msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'aggregate', text: `多表并行分析：${(e.agents ?? []).length} 位专员同时工作`, step: activePlan(msg)?.num })
@@ -573,6 +606,11 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       finishMessage(msg)
       break
   }
+}
+
+/** 事件里的字符串列表字段：只取非空字符串 */
+function textList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && !!item.trim()).map((item) => item.trim()) : []
 }
 
 function closeBlock(msg: UiMessage) {
@@ -637,6 +675,7 @@ function appendBlocks(msg: UiMessage, e: AgentEvent, timelineStart: number, arti
   }
   if (e.type === 'step_start') {
     closeBlock(msg)
+    if (e.quiet) return // 思考模式：这一项已经用一句话和清单告诉用户了，不再另起一行折叠记录
     const plan = msg.timeline.find((item) => item.kind === 'plan' && item.num === e.step_num)
     const block = processBlock(msg, e.description || (plan?.kind === 'plan' ? plan.description : '处理过程'))
     if (plan) block.itemKeys.push(plan.key)
@@ -688,6 +727,7 @@ function activePlan(msg: UiMessage) {
 
 export function finishMessage(msg: UiMessage): void {
   msg.streaming = false
+  msg.activity = ''
   closeBlock(msg)
   for (const item of msg.timeline) {
     if (item.kind === 'tool' && item.status === 'running') item.status = 'error'

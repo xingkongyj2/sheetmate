@@ -6,9 +6,13 @@ OpenAI 兼容接口，默认连接 DeepSeek（deepseek-v4-pro 或 deepseek-flash
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import re
+import time
 from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import openai
@@ -16,6 +20,9 @@ from openai import AsyncOpenAI
 
 from sheetmate.agent.content import user_content
 from sheetmate.config import LLMSettings, get_llm_settings, is_deepseek_url
+
+
+log = logging.getLogger(__name__)
 
 
 class LLMError(RuntimeError):
@@ -187,8 +194,12 @@ class LLMClient:
             raise translate_error(exc) from exc
 
     async def complete_json(self, prompt: str, system: str | None = None, retries: int = 1, *,
-                            image_parts: list[dict[str, Any]] | None = None) -> Any:
-        """要求模型只输出 JSON，解析失败时带着错误重试。"""
+                            image_parts: list[dict[str, Any]] | None = None, max_tokens: int | None = None) -> Any:
+        """要求模型只输出 JSON，解析失败时带着错误重试。
+        max_tokens 给输出很小的调用（核对类）设一个小上限，免得模型空转到默认的 8192 才停；
+        思考开着时推理内容也算在 max_tokens 里，小上限会把答案挤没，所以此时忽略它。"""
+        if max_tokens and self.cfg.thinking_supported and self.cfg.thinking_enabled:
+            max_tokens = None
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -200,7 +211,8 @@ class LLMClient:
         last_error = ""
         for _ in range(retries + 1):
             try:
-                msg = await self.chat(messages, response_format={"type": "json_object"} if use_json_mode else None)
+                msg = await self.chat(messages, response_format={"type": "json_object"} if use_json_mode else None,
+                                      max_tokens=max_tokens)
             except LLMError as exc:
                 if use_json_mode and "response_format" in str(exc):
                     use_json_mode = False
@@ -214,6 +226,59 @@ class LLMClient:
                 messages.append({"role": "assistant", "content": content})
                 messages.append({"role": "user", "content": f"上面的输出不是合法 JSON（{last_error}）。请只输出一个 JSON 对象，不要任何其他文字。"})
         raise LLMError(f"模型没有返回合法的 JSON：{last_error}")
+
+
+# ---------------------------------------------------------------------------
+# 可有可无的辅助调用：限时、失败不抛出（思考模式的计划审查、步骤核对、回答核对）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AuxResult:
+    """辅助调用的结果。成功时 value 是解析好的 JSON；失败时 reason 是给用户看的一句话。"""
+
+    value: Any = None
+    reason: str = ""
+    timed_out: bool = False
+    error: Exception | None = None
+
+    @property
+    def ok(self) -> bool:
+        return not self.reason
+
+
+def _reason_text(exc: Exception) -> str:
+    """异常信息整理成一句话（去掉结尾标点，方便放进括号里）。"""
+    text = " ".join(str(exc).split()).rstrip("。.!！")
+    return text[:160] or type(exc).__name__
+
+
+async def aux_json(llm: Any, prompt: str, *, system: str | None = None, timeout: float,
+                   max_tokens: int | None = None, image_parts: list[dict[str, Any]] | None = None,
+                   label: str = "辅助调用") -> AuxResult:
+    """限时的 JSON 调用，给计划审查、步骤核对、回答核对这类「可有可无」的环节用。
+
+    超时、模型报错和意外异常都不往外抛，而是把原因带回去，由调用方降级并如实告诉用户，同时写一行日志。
+    不加限时的话，一次调用最坏要等 4 个 120 秒（解析失败重试 1 次，SDK 超时后又各重试 1 次），比整个任务还长。
+    用户点「停止」引发的取消照常向上传递。"""
+    extra: dict[str, Any] = {}
+    if image_parts:
+        extra["image_parts"] = image_parts
+    if max_tokens:
+        extra["max_tokens"] = max_tokens
+    started = time.monotonic()
+    try:
+        value = await asyncio.wait_for(llm.complete_json(prompt, system=system, **extra), timeout)
+    except asyncio.TimeoutError:
+        log.warning("%s超时：%g 秒内没有返回，已放弃这次调用", label, timeout)
+        return AuxResult(reason=f"模型 {timeout:g} 秒内没有返回", timed_out=True)
+    except LLMError as exc:
+        log.warning("%s没有完成（%.1f 秒）：%s", label, time.monotonic() - started, exc)
+        return AuxResult(reason=_reason_text(exc), error=exc)
+    except Exception as exc:  # 辅助环节出任何问题都不能拖垮主流程
+        log.exception("%s出现意外错误", label)
+        return AuxResult(reason=f"调用出错（{type(exc).__name__}）", error=exc)
+    return AuxResult(value=value)
 
 
 # ---------------------------------------------------------------------------

@@ -35,6 +35,7 @@ from sheetmate.agent.prompts import (
     REPEATED_SCRIPT_MESSAGE,
     REFLECT_MESSAGE,
     SCRIPT_RETRY_MESSAGE,
+    THINKING_RULES,
     TOOL_FALLBACK_MESSAGE,
 )
 from sheetmate.agent.recovery import MAX_METHODS, METHOD_FAILURE_LIMIT, RECONSIDER_TOOL, RecoveryState
@@ -75,6 +76,13 @@ class AgentExecutor:
         self.registry = registry or ToolRegistry()
         self.max_iterations = max_iterations
         self.max_tool_calls = max(1, max_tool_calls)
+
+    def new_budget(self) -> _ToolBudget:
+        """一次任务共用的工具调用预算：计划的各个步骤、补做和自检共享同一份。"""
+        return _ToolBudget()
+
+    def budget_exhausted(self, budget: _ToolBudget) -> bool:
+        return budget.used >= self.max_tool_calls
 
     # ------------------------------------------------------------------
     # 入口
@@ -494,7 +502,7 @@ def _coalesce_recipe_delete_calls(calls: list[dict[str, Any]]) -> list[dict[str,
 # ---------------------------------------------------------------------------
 
 
-def build_system_prompt(ctx: AgentContext, message: str) -> str:
+def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = False) -> str:
     tables = ctx.visible_tables()
     table_lines = []
     for t in tables:
@@ -549,4 +557,4 @@ def build_system_prompt(ctx: AgentContext, message: str) -> str:
         files_block="\n".join(file_lines) or "（没有）",
         memory_block=ctx.host.memory_text(message) or "（没有）",
         recipes_block=recipes_block,
-    )
+    ) + (THINKING_RULES if thinking else "")
