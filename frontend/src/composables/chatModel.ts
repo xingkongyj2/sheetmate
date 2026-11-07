@@ -7,7 +7,7 @@
  * - artifacts 产物：结果表、文件、处理流程卡片、澄清问题
  * 刷新页面时用数据库里存的事件重新归并，得到同样的界面。
  */
-import type { AgentEvent, DiffCard, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
+import type { AgentEvent, DiffCard, PublicOperationDetail, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
 import { scriptReferences } from './scriptPresentation.ts'
 import { recipeProcessDetails, type RecipeProcessDetail } from './recipeProcessDetails'
 
@@ -29,6 +29,7 @@ export type TimelineItem =
       summary?: string
       text?: string
       duration_ms?: number
+      details?: PublicOperationDetail[]
       step?: number
     }
   | { kind: 'plan'; key: string; num: number; total: number; description: string; status: PlanStatus; summary?: string }
@@ -180,9 +181,12 @@ function stepOf(p: RecipeProgress, id: number): StepState | undefined {
 }
 
 /** 旧消息中的流程可能带有已移除的启停字段，恢复时不再保留。 */
-function recipeSnapshot(recipe: RecipeJSON | undefined): RecipeJSON | undefined {
+function recipeSnapshot(recipe: RecipeJSON | undefined, previous?: RecipeJSON): RecipeJSON | undefined {
   if (!recipe) return undefined
-  const snapshot = { ...recipe } as RecipeJSON & { status?: unknown; status_label?: unknown }
+  const snapshot = { ...previous, ...recipe, steps: recipe.steps?.map((step) => {
+    const prior = previous?.steps.find((item) => item.id === step.id)
+    return { ...prior, ...step, params: { ...(step.params ?? prior?.params) } }
+  }) } as RecipeJSON & { status?: unknown; status_label?: unknown }
   delete snapshot.status
   delete snapshot.status_label
   return snapshot
@@ -217,6 +221,7 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.status = 'running'
       return true
     case 'recipe_run_start':
+      if (e.recipe) p.recipe = recipeSnapshot(e.recipe, p.recipe)
       p.runId = e.run_id
       p.recipeId = e.recipe?.id ?? e.recipe_id ?? p.recipeId
       p.recipeName = e.recipe?.name ?? p.recipeName
@@ -264,6 +269,12 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
     }
     case 'recipe_repair': {
       const s = stepOf(p, e.step_id)
+      const planned = p.recipe?.steps.find((item) => item.id === e.step_id)
+      if (planned && e.status === 'retry') {
+        if (e.params && typeof e.params === 'object' && !Array.isArray(e.params)) planned.params = { ...e.params }
+        if (typeof e.formula === 'string') planned.formula = e.formula
+        if (typeof e.explanation === 'string') planned.explanation = e.explanation
+      }
       if (s) {
         s.repairs.push({ attempt: e.attempt, status: e.status, explanation: e.explanation })
         if (e.status === 'gave_up') s.status = 'failed'
@@ -272,6 +283,11 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
     }
     case 'recipe_step_done': {
       const s = stepOf(p, e.step_id)
+      const planned = p.recipe?.steps.find((item) => item.id === e.step_id)
+      if (planned) {
+        if (e.params && typeof e.params === 'object' && !Array.isArray(e.params)) planned.params = { ...e.params }
+        if (typeof e.formula === 'string') planned.formula = e.formula
+      }
       if (s) {
         s.status = e.status
         s.report = e as unknown as StepReport
@@ -439,13 +455,22 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       else msg.timeline.push({ kind: 'thinking', key: uid('t'), text: e.content, step })
       break
     }
-    case 'tool_call':
-      msg.timeline.push({ kind: 'tool', key: uid('t'), id: e.id, tool: e.tool, label: e.label, params: e.params ?? {}, status: 'running', step: activePlan(msg)?.num })
+    case 'tool_call': {
+      const params = { ...(e.params ?? {}) }
+      // Older recovery events kept declared explanations only in diagnostic parameters.
+      // Recover these explicit business fields without rendering arbitrary debug payloads.
+      if (e.tool === 'reconsider_approach' && e.debug_params && typeof e.debug_params === 'object') {
+        for (const key of ['action', 'method', 'target', 'before', 'after', 'evidence', 'change', 'validation']) {
+          if (!params[key] && typeof e.debug_params[key] === 'string') params[key] = e.debug_params[key]
+        }
+      }
+      msg.timeline.push({ kind: 'tool', key: uid('t'), id: e.id, tool: e.tool, label: e.label, params, status: 'running', step: activePlan(msg)?.num })
       if (RECIPE_TOOLS.has(e.tool)) {
         const progress = newProgress(e.tool === 'run_recipe' ? 'replay' : e.tool === 'revise_recipe' ? 'revise' : 'learn', e.id)
         msg.artifacts.push({ kind: 'recipe', key: progress.key, progress })
       }
       break
+    }
     case 'tool_result': {
       const item = msg.timeline.find((t) => t.kind === 'tool' && t.id === e.id)
       if (item && item.kind === 'tool') {
@@ -453,6 +478,12 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
         item.summary = e.summary
         item.text = e.text
         item.duration_ms = e.duration_ms
+        if (Array.isArray(e.details)) item.details = e.details.filter((detail) => detail &&
+          typeof detail.label === 'string' && Array.isArray(detail.items)).map((detail) => ({
+          label: detail.label,
+          items: detail.items.filter((text): text is string => typeof text === 'string'),
+          ...(detail.ordered ? { ordered: true } : {}),
+        }))
       }
       const progress = findProgress(msg, e.id)
       if (progress && progress.status !== 'done' && progress.status !== 'failed') progress.status = e.ok ? 'done' : 'failed'
@@ -558,7 +589,9 @@ function processBlock(msg: UiMessage, title = '处理过程'): Extract<Assistant
     kind: 'process', key: uid('b'), title, itemKeys: [], recipeKeys: [], closed: false,
   }
   blocks.push(block)
-  return block
+  // Read through the reactive array: synchronous consumers can observe the block
+  // before its item/recipe anchors are appended, so those pushes must notify Vue.
+  return blocks.at(-1)! as typeof block
 }
 
 function appendText(msg: UiMessage, text: string, source: 'note' | 'reply', closed: boolean) {

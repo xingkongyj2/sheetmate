@@ -61,11 +61,146 @@ function records(value: unknown): Record<string, unknown>[] {
 
 function publicToolDetail(value: unknown, maxLength = 600): string {
   if (typeof value !== 'string') return ''
-  const text = userFacingSummary(value, '', maxLength)
-  // Keep business instructions readable; diagnostics retain implementation details.
-  return text.split(/(?<=[。；\n])/).filter((sentence) =>
-    !/\b(?:Python|pandas|NumPy|openpyxl|DuckDB|SQL|API|JSON|OUTPUT_DIR|deliver_files|result_tables)\b|内置公式|脚本代码|工具参数/i.test(sentence),
-  ).join('').trim()
+  // Engine names in a declared explanation are vocabulary, not executable code.
+  // Translate them before sanitizing so a useful change is not removed as an internal ID.
+  const text = value.replace(/\bbuild_recipe\b/g, '生成处理流程')
+    .replace(/\brevise_recipe\b/g, '修订处理流程').replace(/\brun_recipe\b/g, '执行已有流程')
+    .replace(/\brun_python_script\b/g, '脚本处理').replace(/\binput_files\b/g, '输入文件绑定')
+    .replace(/\binput_tables\b/g, '输入表').replace(/\bfile_id\b(?!\s*[=:])/g, '文件标识')
+    .replace(/\bOUTPUT_DIR\b/g, '结果目录').replace(/\bdeliver_files\b/g, '交付文件清单')
+    .replace(/\bresult_tables\b/g, '结果表').replace(/\bname\/ref\b/g, '名称和引用')
+  return userFacingSummary(text, '', maxLength)
+    .replace(/\b(?:Python|pandas)\b/gi, '脚本处理').replace(/\bNumPy\b/gi, '数值计算')
+    .replace(/\bopenpyxl\b/gi, '工作簿处理').replace(/\b(?:DuckDB|SQL)\b/gi, '数据查询').trim()
+}
+
+function detailSection(label: string, items: unknown[], ordered = false): ToolDetailSection[] {
+  const readable = items.flatMap((item) => {
+    const text = publicToolDetail(item, 12000)
+    return text ? [text] : []
+  })
+  return readable.length ? [{ label, items: [...new Set(readable)], ...(ordered ? { ordered: true } : {}) }] : []
+}
+
+function explicitSections(item: ToolItem): ToolDetailSection[] {
+  const payload: unknown = 'details' in item ? item.details : undefined
+  return records(payload).flatMap((section) => {
+    const label = typeof section.label === 'string' ? userFacingText(section.label, '', 80) : ''
+    return label && Array.isArray(section.items) ? detailSection(label, section.items, section.ordered === true) : []
+  })
+}
+
+function mergeSections(...sources: ToolDetailSection[][]): ToolDetailSection[] {
+  const merged: ToolDetailSection[] = []
+  for (const section of sources.flat()) {
+    const previous = merged.find((item) => item.label === section.label)
+    if (previous) previous.items = [...new Set([...previous.items, ...section.items])]
+    else merged.push({ ...section, items: [...section.items] })
+  }
+  return merged
+}
+
+/** Recover the public names from old list_files results, never the IDs or arbitrary result fields. */
+function fileListSections(item: ToolItem): ToolDetailSection[] {
+  if (item.status === 'running') return []
+  const source = item.text?.trim() ?? ''
+  let files: Record<string, unknown>[] = []
+  if (/^[{[]/.test(source)) {
+    try {
+      const payload: unknown = JSON.parse(source)
+      files = records(Array.isArray(payload) ? payload : payload && typeof payload === 'object' ? (payload as Record<string, unknown>).files : undefined)
+    } catch { /* Older stored result text may have been truncated. */ }
+  }
+  const entries = files.flatMap((file) => {
+    const filename = typeof file.filename === 'string' ? userFacingText(file.filename, '', 300) : ''
+    if (!filename || /[/\\]/.test(filename)) return []
+    const kinds: Record<string, string> = { input: '原始文件', expected: '期望结果样例', output: '结果文件' }
+    const kind = typeof file.kind === 'string' ? kinds[file.kind] : ''
+    const tables = names(file.tables, 100)
+    return [`「${filename}」${kind ? `（${kind}）` : ''}${tables ? `；已加载为表：${tables}` : ''}`]
+  })
+  for (const line of source.split('\n')) {
+    const file = line.match(/^\s*-\s*(?:file_id=[A-Za-z0-9_-]+\s*)?「([^」\n]+)」(?:（([^）\n]*)）)?(.*)$/)
+    if (!file || /[/\\]/.test(file[1]!)) continue
+    const filename = userFacingText(file[1], '', 300)
+    const kind = file[2]?.match(/原始文件|输入文件|期望结果(?:样例)?|人工结果(?:样例)?|结果文件|输出文件/)?.[0]
+    const tableList = file[3]?.match(/已加载为表[：:]\s*(\[[^\]\n]*\])/)
+    let tables = ''
+    if (tableList) {
+      try { tables = names(JSON.parse(tableList[1]!.replace(/'/g, '"')), 100) } catch { /* Only unambiguous lists can be restored. */ }
+    }
+    if (filename) entries.push(`「${filename}」${kind ? `（${kind}）` : ''}${tables ? `；已加载为表：${tables}` : ''}`)
+  }
+  return detailSection('查看的文件', entries)
+}
+
+function scalar(value: unknown): string {
+  if (value === null) return '空值'
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (value === '') return '空文本'
+  return typeof value === 'string' ? publicToolDetail(value, 300) : ''
+}
+
+function mappingChanges(value: unknown): string[] {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+  return Object.entries(value).flatMap(([before, after]) => {
+    const from = publicToolDetail(before, 300)
+    const to = scalar(after)
+    return from && to ? [`「${from}」→「${to}」`] : []
+  })
+}
+
+/** Translate simple expressions only; complex code stays outside public progress. */
+function expressionDescription(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) return ''
+  const source = value.trim()
+  const field = '"([^"\\n]+)"'
+  const literal = "(?:'([^'\\n]*)'|(-?\\d+(?:\\.\\d+)?)|(NULL))"
+  const comparison = new RegExp(`^${field}\\s*(<=|>=|<>|!=|=|<|>)\\s*${literal}$`, 'i').exec(source)
+  if (comparison) {
+    const operators: Record<string, string> = { '=': '等于', '<>': '不等于', '!=': '不等于', '>': '大于', '<': '小于', '>=': '大于等于', '<=': '小于等于' }
+    return `${names(comparison[1])}${operators[comparison[2]!]}${names(comparison[3] ?? comparison[4] ?? '空值')}`
+  }
+  const arithmetic = /^"([^"\n]+)"\s*([+*/-])\s*(?:"([^"\n]+)"|(-?\d+(?:\.\d+)?))$/.exec(source)
+  if (arithmetic) {
+    const operators: Record<string, string> = { '+': '加', '-': '减', '*': '乘', '/': '除以' }
+    return `${names(arithmetic[1])}${operators[arithmetic[2]!]}${arithmetic[3] ? names(arithmetic[3]) : arithmetic[4]}`
+  }
+  return ''
+}
+
+function transformationSections(item: ToolItem): ToolDetailSection[] {
+  const p = item.params
+  const target = names(p.table)
+  const sections = detailSection('处理对象', target ? [target] : [])
+  switch (item.tool) {
+    case 'rename_columns':
+      return [...sections, ...detailSection('字段改名', mappingChanges(p.mapping))]
+    case 'map_values':
+      return [...sections, ...detailSection('处理字段', [names(p.column)]), ...detailSection('值的变化', mappingChanges(p.mapping)),
+        ...detailSection('写入位置', [names(p.target || p.column)]),
+        ...detailSection('未匹配的值', [p.default == null ? '保持原值。' : `改为「${scalar(p.default)}」。`])]
+    case 'cast_columns': {
+      const types: Record<string, string> = { integer: '整数', float: '小数', text: '文本', date: '日期', datetime: '日期时间' }
+      const changes = p.types && typeof p.types === 'object' && !Array.isArray(p.types) ? Object.entries(p.types).flatMap(([column, type]) =>
+        typeof type === 'string' && types[type] ? [`${names(column)} → ${types[type]}（未记录转换前的类型）`] : []) : []
+      return [...sections, ...detailSection('类型变化', changes)]
+    }
+    case 'filter_rows':
+      return [...sections, ...detailSection('保留条件', [expressionDescription(p.condition) || publicToolDetail(p.description) || '已保存的筛选条件较复杂，本记录未提供对应的文字说明。']),
+        ...detailSection('处理方式', ['满足条件的记录写入结果表，其余记录不写入结果表。'])]
+    case 'compute_column':
+      return [...sections, ...detailSection('写入字段', [names(p.column)]),
+        ...detailSection('计算规则', [expressionDescription(p.expression) || publicToolDetail(p.description) || '已保存的计算表达式较复杂，本记录未提供对应的文字说明。']),
+        ...detailSection('写入方式', ['目标字段已存在时更新该字段，否则新增字段。', p.after ? `新增字段放在${names(p.after)}之后。` : ''])]
+    case 'fill_null':
+      return [...sections, ...detailSection('处理字段', [names(p.columns) || '所有字段']),
+        ...detailSection('值的变化', [p.method === 'forward' ? '空值 → 同一字段上一个非空值。' : `空值 →「${scalar(p.value)}」。`])]
+    case 'trim_text':
+      return [...sections, ...detailSection('处理字段', [names(p.columns) || '所有文本字段']),
+        ...detailSection('文本变化', ['去除首尾空格，并将连续多余空白合并。'])]
+    default: return []
+  }
 }
 
 /** Recover numbered requirements even when a provider puts the whole list on one line. */
@@ -106,12 +241,13 @@ function instructionSections(value: unknown, revise: boolean): ToolDetailSection
 function recoverySections(item: ToolItem): ToolDetailSection[] {
   const feedback = new Map<string, string>()
   const aliases: Record<string, string> = {
+    '处理对象': 'target', '调整前': 'before', '调整后': 'after',
     '处理方法': 'method', '问题依据': 'evidence', '失败依据': 'evidence', '结果依据': 'evidence',
     '调整内容': 'change', '实质变化': 'change', '校验目标': 'validation', '验证目标': 'validation',
     '核对内容': 'validation', '下一步': 'next',
   }
   const source = item.status === 'running' ? '' : item.text?.replace(/\r\n?/g, '\n') ?? ''
-  const labels = [...source.matchAll(/(?:^|\n)[ \t]*(处理方法|问题依据|失败依据|结果依据|调整内容|实质变化|校验目标|验证目标|核对内容|下一步)[ \t]*[：:][ \t]*/g)]
+  const labels = [...source.matchAll(/(?:^|\n)[ \t]*(处理对象|处理方法|问题依据|失败依据|结果依据|调整前|调整后|调整内容|实质变化|校验目标|验证目标|核对内容|下一步)[ \t]*[：:][ \t]*/g)]
   for (const [index, label] of labels.entries()) {
     const key = aliases[label[1]!]!
     const detail = publicToolDetail(source.slice(label.index! + label[0].length, labels[index + 1]?.index ?? source.length), 2400)
@@ -119,8 +255,8 @@ function recoverySections(item: ToolItem): ToolDetailSection[] {
   }
   const existing = item.params.action === 'use_existing_result' || !item.params.action && labels.some((label) => label[1] === '结果依据')
   const fields = existing
-    ? [['evidence', '结果依据'], ['validation', '核对内容'], ['next', '下一步']]
-    : [['method', '处理方法'], ['evidence', '问题依据'], ['change', '调整内容'], ['validation', '校验目标'], ['next', '下一步']]
+    ? [['target', '处理对象'], ['evidence', '结果依据'], ['validation', '核对内容'], ['next', '下一步']]
+    : [['target', '处理对象'], ['method', '处理方法'], ['evidence', '问题依据'], ['before', '调整前'], ['after', '调整后'], ['change', '调整内容'], ['validation', '校验目标'], ['next', '下一步']]
   return fields.flatMap(([key, label]) => {
     const value = (key === 'next' ? '' : publicToolDetail(item.params[key!], 2400)) || feedback.get(key!)
     return value ? [{ label: label!, items: [value] }] : []
@@ -128,14 +264,27 @@ function recoverySections(item: ToolItem): ToolDetailSection[] {
 }
 
 function toolDetailSections(item: ToolItem): ToolDetailSection[] {
-  if (item.tool === 'reconsider_approach') return recoverySections(item)
-  if (item.tool !== 'build_recipe' && item.tool !== 'revise_recipe') return []
-  const sections = instructionSections(item.tool === 'build_recipe' ? item.params.requirement : item.params.instruction, item.tool === 'revise_recipe')
-  const inputs = Array.isArray(item.params.input_tables) ? item.params.input_tables : []
-  const sources = inputs.flatMap((source) => typeof source === 'string' && userFacingText(source, '', 300)
-    ? [`「${userFacingText(source, '', 300)}」`] : [])
-  if (sources.length) sections.push({ label: '处理来源', items: [...new Set(sources)] })
-  return sections
+  const explicit = explicitSections(item)
+  let sections: ToolDetailSection[] = []
+  if (item.tool === 'reconsider_approach') {
+    sections = recoverySections(item)
+    if (!explicit.length && !sections.length && item.status !== 'running') {
+      sections = [{ label: '记录缺失', items: ['这条历史记录未保存具体的问题依据、调整前后做法和校验目标，无法还原具体改动。'] }]
+    }
+  } else if (item.tool === 'build_recipe' || item.tool === 'revise_recipe') {
+    sections = instructionSections(item.tool === 'build_recipe' ? item.params.requirement : item.params.instruction, item.tool === 'revise_recipe')
+    const inputs = Array.isArray(item.params.input_tables) ? item.params.input_tables : []
+    const sources = inputs.flatMap((source) => typeof source === 'string' && userFacingText(source, '', 300)
+      ? [`「${userFacingText(source, '', 300)}」`] : [])
+    if (sources.length) sections.push({ label: '处理来源', items: [...new Set(sources)] })
+  } else if (item.tool === 'list_files') {
+    sections = fileListSections(item)
+    if (!explicit.length && !sections.length && item.status === 'ok' && !/没有|0\s*个/.test(item.summary ?? '')) {
+      sections = [{ label: '记录缺失', items: ['这条历史记录只保存了文件数量，未保存可还原的文件名称和查看范围。'] }]
+    }
+  } else sections = transformationSections(item)
+  // An observed result is more specific than a declaration derived from call parameters.
+  return mergeSections(explicit, sections.filter((section) => !explicit.some((observed) => observed.label === section.label)))
 }
 
 /** Describe declared work in business terms; never render arbitrary parameter values. */

@@ -3,6 +3,7 @@ import { Check, CircleAlert, FileSpreadsheet, LoaderCircle, ShieldCheck } from '
 import { computed } from 'vue'
 
 import type { RecipeProgress, StepState } from '@/composables/chatModel'
+import { recipeStepFields, repairDescriptionFields } from '@/composables/recipeProcessDetails'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 
 const props = defineProps<{ progress: RecipeProgress }>()
@@ -20,7 +21,7 @@ function repairs(step: StepState) {
   const records = step.repairs.length ? step.repairs : (step.report?.attempts ?? []).map((attempt) => ({ ...attempt, status: 'recorded' }))
   return records.map((repair) => ({
     ...repair,
-    explanation: userFacingSummary(repair.explanation, '', 2400),
+    fields: repairDescriptionFields(repair.explanation),
     label: repair.status === 'trying' ? '正在制定修正方案' : repair.status === 'gave_up' ? '调整未完成'
       : repair.status === 'retry' ? '修正后重新执行' : '已记录的调整',
   }))
@@ -64,12 +65,24 @@ function repairs(step: StepState) {
             <span class="text-[11px] text-faint">{{ STEP_LABELS[step.status] }}</span>
           </div>
           <p v-if="step.description" class="whitespace-pre-line break-words text-mute">{{ userFacingSummary(step.description, '', 2400) }}</p>
+          <dl v-if="recipeStepFields(progress, step.step_id).length" class="space-y-1 text-xs text-mute">
+            <div v-for="field in recipeStepFields(progress, step.step_id)" :key="field.label">
+              <dt class="font-medium">{{ field.label }}</dt>
+              <dd class="whitespace-pre-line break-words [overflow-wrap:anywhere]">{{ field.text }}</dd>
+            </div>
+          </dl>
           <p v-if="stepExplanation(step)" class="whitespace-pre-line break-words text-xs text-mute">处理依据：{{ stepExplanation(step) }}</p>
           <p v-if="step.report?.rows_out !== undefined" class="text-xs text-mute">整理得到 {{ step.report.rows_out }} 条记录</p>
           <ol v-if="repairs(step).length" class="space-y-2 border-l border-line pl-3 text-xs text-mute" aria-label="调整记录">
             <li v-for="(repair, index) in repairs(step)" :key="index" class="space-y-0.5">
-              <p class="font-medium">第 {{ repair.attempt }} 次 · {{ repair.label }}</p>
-              <p class="whitespace-pre-line break-words">{{ repair.explanation || (repair.status === 'trying' ? '正在核对问题并制定修正方案，尚未收到具体修改内容。' : '本次未记录具体修改说明。') }}</p>
+              <p class="font-medium">{{ repair.label }}</p>
+              <p v-if="repair.status === 'trying'" class="whitespace-pre-line break-words">正在核对问题并制定修正方案，尚未收到具体修改内容。</p>
+              <dl v-else class="space-y-1">
+                <div v-for="field in repair.fields" :key="field.label">
+                  <dt class="font-medium">{{ field.label }}</dt>
+                  <dd class="whitespace-pre-line break-words [overflow-wrap:anywhere]">{{ field.text }}</dd>
+                </div>
+              </dl>
             </li>
           </ol>
           <ul v-if="step.report?.checks?.length" class="space-y-1 text-xs text-mute" aria-label="步骤校验">

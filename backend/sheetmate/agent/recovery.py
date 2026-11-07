@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import re
 from typing import Any
 
+from sheetmate.agent.public_feedback import public_detail as _public_detail
 from sheetmate.agent.tools import Tool, ToolResult
 
 RECONSIDER_TOOL = "reconsider_approach"
@@ -13,29 +13,26 @@ METHOD_FAILURE_LIMIT = 2
 MAX_METHODS = 3
 
 
-def _public_detail(value: Any, limit: int = 1200) -> str:
-    """Only the declared business explanation belongs in progress feedback."""
-    if not isinstance(value, str):
-        return ""
-    text = re.sub(r"```[\s\S]*?(?:```|$)", "", value)
-    text = re.split(r'Traceback \(most recent call last\):|\n\s*File "', text)[0]
-    text = re.sub(r"\b(?:recipe_id|run_id|file_id|tool_call_id|result_call_id)\s*[=:]\s*[A-Za-z0-9_-]+", "", text)
-    text = re.sub(r"\b(?:rcp|run|scr|script|call)_[A-Za-z0-9_-]+\b", "", text)
-    text = re.sub(r"\b(?:cv|f)_[a-f0-9]{8,}\b", "", text, flags=re.I)
-    # Code and raw parameter dictionaries remain in diagnostics, not the public explanation.
-    sentences = re.split(r"(?<=[。；\n])", text)
-    readable = [part for part in sentences if not re.search(
-        r"\b(?:SELECT\b[\s\S]*\bFROM|INSERT\s+INTO|import\s+\w+|def\s+\w+\(|pd\.|np\.|openpyxl\.)|[\{\[]\s*[\"'][^\"']+[\"']\s*:",
-        part, flags=re.I,
-    )]
-    text = re.sub(r"[ \t]+", " ", "".join(readable)).strip()
-    return text if len(text) <= limit else text[:limit] + "…"
-
-
 def _public_params(args: dict[str, Any]) -> dict[str, str]:
-    values = {key: _public_detail(args.get(key)) for key in ("method", "evidence", "change", "validation")}
+    values = {key: _public_detail(args.get(key)) for key in ("method", "target", "before", "after", "evidence", "change", "validation")}
     return {"action": "use_existing_result" if args.get("action") == "use_existing_result" else "switch_method",
             **{key: value for key, value in values.items() if value}}
+
+
+def _public_sections(public: dict[str, str], *, existing: bool = False) -> list[dict[str, Any]]:
+    fields = [("target", "处理对象")]
+    fields += [("evidence", "结果依据"), ("validation", "核对内容")] if existing else [
+        ("method", "处理方法"), ("evidence", "问题依据"), ("before", "调整前"),
+        ("after", "调整后"), ("change", "调整内容"), ("validation", "校验目标"),
+    ]
+    sections = [{"label": label, "items": [public[key]]} for key, label in fields if public.get(key)]
+    if not public.get("target"):
+        sections.append({"label": "记录缺失", "items": ["本次未单独记录处理对象，请结合问题依据和调整内容核对。"]})
+    sections.append({"label": "下一步", "items": [
+        "依据已核实的结果回复，未完成的附加操作仍按未完成展示。" if existing else
+        "执行新方法并核对结果；选择方案尚不代表调整已生效。",
+    ]})
+    return sections
 
 
 @dataclass
@@ -110,10 +107,12 @@ class RecoveryState:
                 f"校验：{validation.strip()}\n按已经确认的结果回答，不能把失败的附加操作说成成功。",
                 summary="已核对已有结果", public_summary="已核对已有结果",
                 public_text="\n".join((
+                    *([f"处理对象：{public['target']}"] if public.get("target") else []),
                     f"结果依据：{public.get('evidence') or '已引用此前成功执行的结果。'}",
                     f"核对内容：{public.get('validation') or '尚未收到可展示的具体核对说明。'}",
                     "下一步：依据已核实的结果回复，未完成的附加操作仍按未完成展示。",
                 )),
+                public_details=_public_sections(public, existing=True),
             )
         values = {key: args.get(key) for key in ("method", "evidence", "change", "validation")}
         if any(not isinstance(value, str) or not value.strip() or len(value) > 2000 for value in values.values()):
@@ -146,11 +145,15 @@ class RecoveryState:
             f"现在执行并校验；该方法最多允许 {METHOD_FAILURE_LIMIT} 次失败，声明方案不代表已经完成。",
             summary="已选择新方法", public_summary=f"已选择新方法：{public_method}" if public_method else "已选择新的处理方法",
             public_text="\n".join((
+                *([f"处理对象：{public['target']}"] if public.get("target") else []),
                 f"问题依据：{public.get('evidence') or '尚未收到可展示的具体问题说明。'}",
+                *([f"调整前：{public['before']}"] if public.get("before") else []),
+                *([f"调整后：{public['after']}"] if public.get("after") else []),
                 f"调整内容：{public.get('change') or '尚未收到可展示的具体调整说明。'}",
                 f"校验目标：{public.get('validation') or '尚未收到可展示的具体校验说明。'}",
                 "下一步：执行新方法并核对结果；选择方案尚不代表调整已生效。",
             )),
+            public_details=_public_sections(public),
         )
 
     def tool(self) -> Tool:
@@ -160,11 +163,16 @@ class RecoveryState:
             "同一个 Python 工具更换结构假设、字段定位或算法也算换方法，无需机械更换工具。"
             "脚本正常退出但结果不对时，也可引用 result_call_id 登记业务失败并切换。"
             "已有正确结果足以覆盖目标时，action=use_existing_result，引用实际成功调用并说明证据和校验，随后直接回答。"
-            "说明实质变化和可验证目标；只改变量、名称、描述或重复相同代码不算换方法。不会向用户要求批准。",
+            "面向用户记录具体处理对象 target、原先做法 before、新做法 after、实际依据 evidence、实质变化 change 和可验证目标 validation；"
+            "对象写真实文件、工作表、字段或单元格范围，前后写实际定位、来源或计算规则，不只写工具名或已优化。"
+            "只描述可观察的操作、依据和待验证结果，不输出内部推理。只改变量、名称、描述或重复相同代码不算换方法。不会向用户要求批准。",
             {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["switch_method", "use_existing_result"], "description": "默认 switch_method 选择新方法；use_existing_result 核实已有正确结果已满足目标"},
                 "result_call_id": {"type": "string", "description": "引用真实工具调用的 ID；业务结果不对但工具成功、或核实已有结果时必填"},
                 "method": {"type": "string", "description": "新方法的具体名称，说明定位或计算思路"},
+                "target": {"type": "string", "description": "实际要调整的文件名、工作表名、字段或单元格范围；已有结果核对时写被核对的结果对象"},
+                "before": {"type": "string", "description": "之前实际使用的做法：依据哪个来源、如何定位、匹配或计算；不要补造未执行的做法"},
+                "after": {"type": "string", "description": "现在改成的具体做法，与 before 对应写清来源、字段或计算规则的变化；尚未执行不要声称成功"},
                 "evidence": {"type": "string", "description": "已执行工具提供的失败依据或结果异常"},
                 "change": {"type": "string", "description": "相对之前失败方案改变的结构假设、数据来源、定位或计算规则"},
                 "validation": {"type": "string", "description": "执行后如何检查关键字段、样本和汇总是否满足用户目标"},

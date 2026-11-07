@@ -10,6 +10,7 @@ import json
 from typing import Any
 
 from sheetmate.agent.prompts import REPAIR_PROMPT, REPAIR_SYSTEM
+from sheetmate.agent.public_feedback import public_detail as _public_detail
 from sheetmate.engine.script_store import resolve_script_code
 from sheetmate.recipe.executor import RepairContext
 from sheetmate.recipe.schema import RecipeStep
@@ -65,12 +66,89 @@ class LLMStepRepairer:
         params = result.get("params")
         if not isinstance(params, dict) or not params:
             return None
-        explanation = str(result.get("explanation") or "本次修正未提供具体修改说明，将以重新执行与校验结果确认是否生效。")
+        supplied = _public_detail(result.get("explanation"), 2400)
+        changes = _business_changes(step, formula, params, ctx)
+        targets = _repair_targets(step, params, ctx)
+        explanation = "\n".join([
+            f"处理对象：{targets}" if targets else f"处理对象：未单独记录文件或工作表；当前步骤为「{_public_detail(step.name, 140)}」。",
+            f"问题依据：{_public_detail(ctx.error, 800) or '执行未通过，具体错误未记录为可展示说明。'}",
+            *([f"实际修改：{line}" for line in changes] if changes else []),
+            supplied if supplied else "修正说明：本次未提供具体修改说明，将以重新执行与校验结果确认是否生效。",
+        ])
         return RecipeStep.model_validate({**step.model_dump(),
             "formula": formula, "kind": "python" if formula == "python_script" else "sql" if formula == "custom_sql" else "formula",
             "formula_kind": ctx.library.resolve(formula).kind if ctx.library.has(formula) else "builtin",
             "params": params, "explanation": f"修正方案：{explanation}",
         })
+
+
+def _repair_targets(step: RecipeStep, params: dict[str, Any], ctx: RepairContext) -> str:
+    values: list[str] = []
+    aliases = {item.alias: (item.source_file or item.alias) + (f" · {item.sheet}" if item.sheet else "") for item in ctx.recipe.inputs}
+    for source in (step.params, params):
+        names = [source.get(key) for key in ("table", "lookup_table", "left", "right")]
+        for key in ("input_tables", "tables"):
+            if isinstance(source.get(key), list):
+                names.extend(source[key])
+        if isinstance(source.get("input_files"), dict):
+            names.extend(source["input_files"].values())
+        for name in names:
+            if isinstance(name, str):
+                value = _public_detail(aliases.get(name, name), 140)
+                if value and value not in values:
+                    values.append(value)
+    return "、".join(f"「{name}」" for name in values)
+
+
+def _business_changes(step: RecipeStep, formula: str, params: dict[str, Any], ctx: RepairContext) -> list[str]:
+    """Describe verified parameter differences, without rendering executable expressions or payloads."""
+    lines: list[str] = []
+    aliases = {item.alias: item.source_file or item.alias for item in ctx.recipe.inputs}
+    def value_text(value: Any) -> str:
+        if value is None:
+            return "未设置"
+        if value == "":
+            return "空文本"
+        if isinstance(value, bool):
+            return "启用" if value else "关闭"
+        if isinstance(value, (list, tuple)):
+            return "、".join(value_text(item) for item in value if isinstance(item, (str, int, float, bool))) or "空列表"
+        if not isinstance(value, (str, int, float, bool)):
+            return ""
+        text = _public_detail(aliases.get(value, value) if isinstance(value, str) else str(value), 180)
+        return f"「{text}」" if text else ""
+    if formula != step.formula:
+        def formula_name(name: str) -> str:
+            if name == "python_script": return "脚本处理"
+            if name == "custom_sql": return "查询处理"
+            try: return ctx.library.resolve(name).spec.name
+            except ValueError: return "已配置的处理步骤"
+        lines.append(f"执行方式从「{formula_name(step.formula)}」改为「{formula_name(formula)}」。")
+    fields = {"table": "处理表", "lookup_table": "对照表", "key": "匹配字段", "lookup_key": "对照表匹配字段",
+              "column": "处理字段", "columns": "处理字段", "target": "写入字段", "left": "左侧表",
+              "right": "右侧表", "left_on": "左侧匹配字段", "right_on": "右侧匹配字段",
+              "input_tables": "输入表", "tables": "输入表", "output_tables": "结果表", "keep": "重复记录保留方式", "method": "填充方式",
+              "normalize_key": "匹配键标准化", "duplicates": "重复匹配键处理方式", "fuzzy_threshold": "模糊匹配阈值",
+              "how": "合并方式", "separator": "分隔符", "into": "拆分后字段", "keep_original": "保留原字段",
+              "group_by": "分组字段", "by": "排序字段", "order": "排序方向", "n": "保留记录数",
+              "value": "空值填充值", "default": "未映射值处理", "carry_columns": "保留字段", "sum_columns": "合计字段"}
+    for key, label in fields.items():
+        before, after = step.params.get(key), params.get(key)
+        if before != after:
+            old, new = value_text(before), value_text(after)
+            if old and new:
+                lines.append(f"{label}从{old}改为{new}。")
+    for key, label in (("mapping", "字段名称" if formula == "rename_columns" else "替换规则"), ("types", "字段类型"),
+                       ("missing_fill", "未匹配时填充值"), ("input_files", "文件来源"), ("output_tables", "结果表")):
+        before, after = step.params.get(key), params.get(key)
+        if (isinstance(before, dict) or before is None) and (isinstance(after, dict) or after is None):
+            before, after = before or {}, after or {}
+            for name in dict.fromkeys([*before, *after]):
+                if before.get(name) != after.get(name):
+                    old, new, field = value_text(before.get(name)), value_text(after.get(name)), value_text(name)
+                    if old and new and field:
+                        lines.append(f"{label}{field}从{old}改为{new}。")
+    return lines
 
 
 def _formula_text(ctx: RepairContext, formula_id: str) -> str:

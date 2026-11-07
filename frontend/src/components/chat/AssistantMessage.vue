@@ -272,16 +272,20 @@ onBeforeUnmount(() => {
 }
 
 .process-title-running {
-  background: linear-gradient(100deg, currentColor 30%, #c8c8cf 46%, currentColor 62%);
-  background-size: 240% 100%;
+  display: inline-block;
+  background-image: linear-gradient(90deg, var(--color-mute) 35%, var(--color-ink) 50%, var(--color-mute) 65%);
+  background-size: 250% 100%;
+  background-repeat: no-repeat;
   background-clip: text;
+  -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: process-shimmer 2.2s linear infinite;
+  animation: process-shimmer 2s linear infinite;
 }
 
 @keyframes process-shimmer {
-  from { background-position: 160% 0; }
-  to { background-position: -80% 0; }
+  /* With an oversized background, decreasing its position moves the highlight right. */
+  from { background-position: 100% 0; }
+  to { background-position: 0% 0; }
 }
 
 @media (prefers-reduced-motion: reduce) {

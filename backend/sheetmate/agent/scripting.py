@@ -29,7 +29,38 @@ class ScriptRequest(BaseModel):
 
 
 def python_script_tools():
-    from sheetmate.agent.tools import Tool, ToolResult, table_payload
+    from sheetmate.agent.tools import Tool, ToolResult, public_detail_section, table_payload
+
+    def details_for(request: ScriptRequest, ctx, tables: list[str], report: dict[str, Any], *, historical: bool = False):
+        details = [public_detail_section("执行目标", [request.description])]
+        inputs = []
+        for name in tables:
+            if historical:
+                inputs.append(f"运行时绑定表「{name}」；历史记录未保存当时的输入行数。")
+            else:
+                info = ctx.ws.require(name)
+                inputs.append(f"「{name}」：{info.rows} 行" + (f"，来源「{info.filename}」" if info.filename else ""))
+        if request.input_files:
+            available = {item["file_id"]: item for item in ctx.host.list_files()}
+            for alias, file_id in request.input_files.items():
+                item = available.get(file_id)
+                if item:
+                    inputs.append(f"输入「{alias}」 → 「{item['filename']}」的工作副本")
+                elif historical:
+                    inputs.append(f"运行时绑定文件「{alias}」；原文件名称在当前可访问范围中不可用。")
+        if inputs:
+            details.append(public_detail_section("处理对象", inputs))
+        outputs = [f"「{item['filename']}」" for item in report.get("files", [])]
+        outputs.extend(f"「{item['name']}」：{item['rows']} 行，字段：{'、'.join(item.get('columns', []))}" for item in report.get("tables", []))
+        if outputs:
+            details.append(public_detail_section("实际产出", outputs))
+        checks = [f"{'通过' if item.get('ok') else '未通过'}：{item.get('message', '')}" for item in report.get("checks", []) if isinstance(item, dict)]
+        details.append(public_detail_section("校验结果", checks or ["本次未记录具体业务校验。" if report.get("ok") else "本次处理未完成，未确认达到处理目标。"]))
+        if not report.get("ok") and report.get("error"):
+            details.append(public_detail_section("问题反馈", [report["error"]]))
+        if report.get("warnings"):
+            details.append(public_detail_section("核对提示", report["warnings"]))
+        return [section for section in details if section["items"]]
 
     async def run(args: dict[str, Any], ctx):
         request = ScriptRequest.model_validate(args)
@@ -78,12 +109,17 @@ def python_script_tools():
                                  *[{"type": "file", **file, "script_run_id": report["run_id"]} for file in files]],
                          public_summary="处理完成" if report.get("ok") else "本次尝试未完成",
                          public_text=(f"已生成 {len(files)} 个文件、{len(report.get('table_names', []))} 张结果表。"
-                                      if files or report.get("table_names") else "已完成计算。") if report.get("ok") else "本次处理未完成。")
+                                      if files or report.get("table_names") else "已完成计算。") if report.get("ok") else "本次处理未完成。",
+                         public_details=details_for(request, ctx, tables, report))
 
     def inspect(args, ctx):
         saved = ctx.host.inspect_python_script(str(args.get("run_id") or ""))
+        request = ScriptRequest.model_validate({key: saved[key] for key in ScriptRequest.model_fields if key in saved})
+        details = details_for(request, ctx, request.input_tables or [],
+                              {**saved, "ok": saved.get("status") == "success"}, historical=True)
+        details.insert(0, public_detail_section("查看记录", [saved.get("script_title") or request.description]))
         return ToolResult(json.dumps(saved, ensure_ascii=False), summary=f"查看脚本 run_id={saved['run_id']}",
-                          public_summary="已读取处理记录", public_text="已读取上次处理记录。")
+                          public_summary="已读取处理记录", public_text="已读取上次处理记录。", public_details=details)
 
     return [
         Tool("run_python_script",
@@ -98,6 +134,7 @@ def python_script_tools():
              "无网络、无安装包能力；只能访问隔离副本和运行目录，支持已有的 pandas/numpy/openpyxl 和标准处理库。",
              ScriptRequest.model_json_schema(), stream=run, label=lambda args: "处理表格",
              public_params=lambda args: {"description": args.get("description", "处理表格"),
+                                         **({"input_tables": args["input_tables"]} if args.get("input_tables") else {}),
                                          "script_title": normalize_script_title(args.get("title") or args.get("description") or "Python 脚本"),
                                          **({"script_id": args["script_id"], "script_filename": f"{args['script_id']}.py"}
                                             if args.get("script_id") else {})}),

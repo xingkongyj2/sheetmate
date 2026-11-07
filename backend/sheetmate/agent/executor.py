@@ -321,6 +321,7 @@ class AgentExecutor:
                             REPEATED_SCRIPT_MESSAGE + "\n上次实际执行的反馈：\n" + attempt.result.text,
                             ok=attempt.result.ok, summary="相同代码与输入已执行，复用上次结果",
                             public_summary="已读取已有处理结果", public_text="正在根据已有结果核对处理方法。",
+                            public_details=attempt.result.public_details,
                         )
                     else:
                         async for item in execute_tool(tool, args, ctx):
@@ -353,6 +354,7 @@ class AgentExecutor:
                 yield {"type": "tool_result", "id": call["id"], "tool": name, "ok": result.ok,
                        "summary": result.public_summary if result.public_summary is not None else result.summary or result.text[:200],
                        "text": public_text[:3000],
+                       **({"details": result.public_details} if result.public_details else {}),
                        "debug_result": externalize_script_text(result.text, python=name in {_SCRIPT_TOOL, "inspect_python_script"}),
                        "duration_ms": int((time.perf_counter() - started) * 1000)}
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})

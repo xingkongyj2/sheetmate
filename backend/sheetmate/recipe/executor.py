@@ -968,11 +968,17 @@ class RecipeRunner:
             return formula_id
 
     def _recipe_brief(self) -> dict[str, Any]:
+        public_fields = {"table", "lookup_table", "left", "right", "tables", "input_tables", "input_files",
+                         "key", "lookup_key", "column", "columns", "target", "left_on", "right_on",
+                         "group_by", "by", "carry_columns", "mapping", "types"}
         return {
             "id": self.recipe.id, "version": self.recipe.version, "name": self.recipe.name,
+            "inputs": [{"alias": item.alias, "kind": item.kind, "source_file": item.source_file, "sheet": item.sheet}
+                       for item in self.recipe.inputs],
             "steps": [
                 {"id": s.id, "name": s.name, "kind": s.kind, "formula": s.formula, "formula_name": self._formula_name(s.formula),
                  "formula_kind": s.formula_kind, "description": s.description, "output": s.output,
+                 "params": {key: value for key, value in s.params.items() if key in public_fields},
                  **({key: s.params[key] for key in ("script_id", "script_title", "script_filename") if key in s.params}
                     if s.kind == "python" else {})}
                 for s in self.recipe.ordered_steps()

@@ -91,6 +91,11 @@ def test_step_repair_loop(samples, tmp_path):
     assert runner.recipe.step(3).params["key"] == "店铺名称"
     assert runner.recipe_changed
     assert any(e["type"] == "recipe_repair" and e["status"] == "retry" for e in events)
+    snapshot = next(event["recipe"] for event in events if event["type"] == "recipe_run_start")
+    assert next(step for step in snapshot["steps"] if step["id"] == 3)["params"]["key"] == "店铺"
+    repaired = next(event for event in events if event["type"] == "recipe_step_done" and event["step_id"] == 3)
+    assert repaired["params"]["key"] == "店铺名称"
+    assert snapshot["inputs"][0]["alias"] == "运费明细"
 
 
 def test_repair_gives_up_after_max_attempts(samples, tmp_path):

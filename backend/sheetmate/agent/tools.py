@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,7 +28,7 @@ import pandas as pd
 from sheetmate.engine.analysis import column_stats, table_info, table_info_text, value_counts
 from sheetmate.engine.formulas import Formula, FormulaLibrary, ParamSpec
 from sheetmate.engine.runner import apply_formula
-from sheetmate.engine.sqlutil import assert_single_select, frame_rows, frame_to_text, sanitize_table_name
+from sheetmate.engine.sqlutil import assert_single_select, frame_rows, frame_to_text, sanitize_table_name, sql_table_refs
 from sheetmate.engine.workspace import TableInfo, Workspace
 from sheetmate.recipe.compiler import compile_from_workspace
 from sheetmate.recipe.executor import InputSource, RecipeRunner, has_reviewable_output
@@ -60,6 +61,7 @@ class ToolResult:
     end_turn: bool = False  # ask_user 之后结束本轮
     public_text: str | None = None  # 与模型内部反馈分离；日志、调试数据无需发送到界面
     public_summary: str | None = None
+    public_details: list[dict[str, Any]] | None = None  # 面向用户的对象、操作、变化及执行证据
 
 
 class ToolHost(Protocol):
@@ -179,6 +181,37 @@ def _clip(text: str) -> str:
     return text if len(text) <= MAX_TOOL_TEXT else text[:MAX_TOOL_TEXT] + "\n…（内容过长已截断）"
 
 
+def public_detail_text(value: Any, limit: int = 2400) -> str:
+    """Allow business feedback, never raw code, diagnostic IDs or parameter dictionaries."""
+    if not isinstance(value, (str, int, float, bool)) or value is None:
+        return ""
+    text = re.sub(r"```[\s\S]*?(?:```|$)", "", str(value))
+    text = re.split(r'Traceback \(most recent call last\):|\n\s*File "', text)[0]
+    text = re.sub(r"\b(?:recipe_id|run_id|file_id|tool_call_id|result_call_id)\s*[=:]\s*[A-Za-z0-9_-]+", "", text)
+    text = re.sub(r"\b(?:rcp|run|scr|script|call)_[A-Za-z0-9_-]+\b|\b(?:f|cv)_[a-f0-9]{8,}\b", "", text)
+    parts = re.split(r"(?<=[。；\n])", text)
+    text = "".join(part for part in parts if not re.search(
+        r"\b(?:SELECT\b[\s\S]*\bFROM|INSERT\s+INTO|import\s+\w+|def\s+\w+\(|pd\.|np\.|openpyxl\.)|[\{\[]\s*[\"'][^\"']+[\"']\s*:", part, re.I))
+    text = re.sub(r"[ \t]+", " ", text).strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def public_detail_section(label: str, values: list[Any]) -> dict[str, Any]:
+    return {"label": label, "items": [text for value in values if (text := public_detail_text(value))]}
+
+
+def _file_detail(item: dict[str, Any]) -> str:
+    kind = item.get("kind_label") or {"input": "原始文件", "expected": "结果样例", "output": "结果文件"}.get(item.get("kind"), "文件")
+    sheets = [str(sheet.get("sheet") or sheet.get("name")) for sheet in item.get("sheets", []) if isinstance(sheet, dict) and (sheet.get("sheet") or sheet.get("name"))]
+    tables = [str(table) for table in item.get("tables", []) if isinstance(table, str)]
+    return f"「{item['filename']}」 · {kind}" + (f" · 工作表：{'、'.join(sheets)}" if sheets else "") + (f" · 已加载为：{'、'.join(tables)}" if tables else " · 尚未加载到分析工作区")
+
+
+def _table_detail(info: TableInfo) -> str:
+    source = f"「{info.filename}」" + (f" / 「{info.sheet}」" if info.sheet else "") if info.filename else ""
+    return (source + " → " if source else "") + f"「{info.name}」：{info.rows} 行 × {len(info.columns)} 列"
+
+
 # ---------------------------------------------------------------------------
 # 只读分析工具
 # ---------------------------------------------------------------------------
@@ -186,7 +219,14 @@ def _clip(text: str) -> str:
 
 def _tool_table_info(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     data = table_info(ctx.ws, str(args.get("table", "")))
-    return ToolResult(_clip(table_info_text(data)), summary=f"「{data['name']}」{data['rows']} 行 × {data['cols']} 列")
+    columns = [f"「{col['name']}」：{col['dtype']}，空值 {col['null_rate']:.0%}，{col['unique']} 个不同值" for col in data["columns"]]
+    keys = data.get("keys", {})
+    checks = [f"「{name}」非空且没有重复值，可作为候选主键。" for name in keys.get("candidates", [])]
+    checks.extend(f"「{item['column']}」有 {item['duplicate_values']} 个重复值，单值最多出现 {item['max_repeat']} 次。" for item in keys.get("duplicated", []))
+    return ToolResult(_clip(table_info_text(data)), summary=f"「{data['name']}」{data['rows']} 行 × {data['cols']} 列",
+                      public_details=[public_detail_section("查看对象", [_table_detail(ctx.ws.require(data["name"]))]),
+                                      public_detail_section("字段检查", columns),
+                                      *([public_detail_section("主键检查", checks)] if checks else [])])
 
 
 def _tool_value_counts(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -194,14 +234,20 @@ def _tool_value_counts(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     df = value_counts(ctx.ws, table, column, int(args.get("limit") or 20))
     return ToolResult(_clip(f"「{table}.{column}」取值分布：\n{frame_to_text(df, limit=30)}"),
                       summary=f"「{column}」有 {len(df)} 种取值（前 {len(df)}）",
-                      tables=[ephemeral_payload(f"{column} 分布", df)])
+                      tables=[ephemeral_payload(f"{column} 分布", df)],
+                      public_details=[public_detail_section("统计对象", [f"「{table}」的「{column}」字段"]),
+                                      public_detail_section("统计结果", [f"{row.iloc[0]}：{row.iloc[1]} 条，占比 {row.iloc[2]}%" for _, row in df.iterrows()])])
 
 
 def _tool_column_stats(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     table = str(args.get("table", ""))
     df = column_stats(ctx.ws, table, args.get("columns") or None)
+    statistics = [f"「{row['列']}」：" + "，".join(f"{key} {row[key]}" for key in ("最小", "最大", "均值", "约不同值", "空值比例") if key in row and not pd.isna(row[key])) for _, row in df.iterrows()]
     return ToolResult(_clip(f"「{table}」描述统计：\n{frame_to_text(df, limit=40, max_cell=24)}"),
-                      summary=f"「{table}」{len(df)} 列的统计", tables=[ephemeral_payload(f"{table} 统计", df)])
+                      summary=f"「{table}」{len(df)} 列的统计", tables=[ephemeral_payload(f"{table} 统计", df)],
+                      public_details=[public_detail_section("统计对象", [_table_detail(ctx.ws.require(table))]),
+                                      public_detail_section("检查字段", args.get("columns") or ctx.ws.require(table).column_names),
+                                      public_detail_section("统计结果", statistics)])
 
 
 def _tool_preview(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -210,11 +256,18 @@ def _tool_preview(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     page = ctx.ws.page(table, offset, limit)
     df = pd.DataFrame(page["rows"], columns=[c["name"] for c in page["columns"]])
     return ToolResult(_clip(f"「{table}」第 {offset + 1}~{offset + len(df)} 行（共 {page['total']} 行）：\n{frame_to_text(df, limit=limit)}"),
-                      summary=f"查看「{table}」{len(df)} 行")
+                      summary=f"查看「{table}」{len(df)} 行",
+                      public_details=[public_detail_section("查看对象", [_table_detail(ctx.ws.require(table))]),
+                                      public_detail_section("读取范围", [f"第 {offset + 1}～{offset + len(df)} 行，共读取 {len(df)} 行。" if len(df) else f"从第 {offset + 1} 行开始读取，未读到记录。"]),
+                                      public_detail_section("读取字段", [column["name"] for column in page["columns"]])])
 
 
 def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     sql = assert_single_select(str(args.get("sql", "")))
+    inputs = [ctx.ws.require(name) for name in sql_table_refs(sql)]
+    details = [public_detail_section("查询对象", [_table_detail(info) for info in inputs])]
+    if args.get("description"):
+        details.append(public_detail_section("执行内容", [args["description"]]))
     result_name = args.get("result_name")
     if result_name:
         out = _result_name(ctx, result_name, "查询结果")
@@ -225,10 +278,16 @@ def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         df = ctx.ws.df(out, limit=10)
         info = ctx.ws.require(out)
         return ToolResult(_clip(f"已生成表「{out}」：{info.rows} 行 × {len(info.columns)} 列。前几行：\n{frame_to_text(df, limit=10)}"),
-                          summary=f"生成「{out}」{info.rows} 行", tables=[table_payload(ctx.ws, out)])
+                          summary=f"生成「{out}」{info.rows} 行", tables=[table_payload(ctx.ws, out)],
+                          public_details=[section for section in [*details,
+                              public_detail_section("查询结果", [f"生成「{out}」：{info.rows} 行 × {len(info.columns)} 列。"]),
+                              public_detail_section("结果字段", info.column_names)] if section["items"]])
     df = ctx.ws.query(sql, limit=500)
     return ToolResult(_clip(f"查询结果（{len(df)} 行{'，最多显示 500 行' if len(df) == 500 else ''}）：\n{frame_to_text(df, limit=40)}"),
-                      summary=f"查询返回 {len(df)} 行", tables=[ephemeral_payload("查询结果", df)])
+                      summary=f"查询返回 {len(df)} 行", tables=[ephemeral_payload("查询结果", df)],
+                      public_details=[section for section in [*details,
+                          public_detail_section("查询结果", [f"读取 {len(df)} 行结果" + ("（达到 500 行显示上限）。" if len(df) == 500 else "。")]),
+                          public_detail_section("结果字段", [str(column) for column in df.columns])] if section["items"]])
 
 
 # ---------------------------------------------------------------------------
@@ -278,8 +337,27 @@ def formula_tool(spec: Formula, kind: str) -> Tool:
         ctx.ws.update_meta(out, role="derived", step={"formula": fid, "params": outcome.params})
         preview = pd.DataFrame(outcome.preview["rows"][:5], columns=outcome.columns_out)
         text = f"{outcome.summary()}\n前 5 行：\n{frame_to_text(preview, limit=5)}"
+        details = [public_detail_section("处理对象", [_table_detail(ctx.ws.require(name)) for name in outcome.inputs])]
+        if fid == "rename_columns":
+            details.append(public_detail_section("字段变化", [f"「{old}」 → 「{new}」" for old, new in outcome.params.get("mapping", {}).items()]))
+        elif fid == "cast_columns":
+            info = ctx.ws.require(str(outcome.params["table"]))
+            before = {column["name"]: column["type"] for column in info.columns}
+            details.append(public_detail_section("类型变化", [f"「{column}」：{before.get(column, '未记录原类型')} → {kind}" for column, kind in outcome.params.get("types", {}).items()]))
+        elif fid == "map_values":
+            column = outcome.params.get("column", "")
+            target = outcome.params.get("target") or column
+            details.append(public_detail_section("值的变化", [f"「{column}」的 {old} → 「{target}」的 {new}" for old, new in outcome.params.get("mapping", {}).items()]))
+        else:
+            details.append(public_detail_section("执行内容", [outcome.description]))
+        details.extend([public_detail_section("数据变化", [f"「{name}」{rows} 行 → 「{out}」{outcome.rows_out} 行" for name, rows in outcome.rows_in.items()]),
+                        public_detail_section("结果字段", outcome.columns_out)])
+        if outcome.metrics.get("match_rate") is not None:
+            details.append(public_detail_section("匹配结果", [f"匹配 {outcome.metrics['matched_rows']}/{outcome.metrics['total_rows']} 行，匹配率 {outcome.metrics['match_rate']:.1%}。"] ))
+        if outcome.warnings:
+            details.append(public_detail_section("核对提示", outcome.warnings))
         return ToolResult(_clip(text), summary=f"{outcome.description} → 「{out}」{outcome.rows_out} 行",
-                          tables=[table_payload(ctx.ws, out)])
+                          tables=[table_payload(ctx.ws, out)], public_details=[section for section in details if section["items"]])
 
     def label(args: dict[str, Any]) -> str:
         table = args.get("table") or args.get("left") or ", ".join(args.get("tables") or [])
@@ -296,13 +374,16 @@ def formula_tool(spec: Formula, kind: str) -> Tool:
 def _tool_list_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     files = ctx.host.list_files()
     if not files:
-        return ToolResult("没有可加载的文件。", summary="没有文件")
+        return ToolResult("没有可加载的文件。", summary="没有文件", public_details=[public_detail_section("查看结果", ["当前可访问范围没有文件。"])])
     lines = [
         f"- file_id={f['file_id']}「{f['filename']}」（{f.get('scope_label', '')}，{f.get('kind_label', '')}）"
         + (f" 已加载为表：{f['tables']}" if f.get("tables") else " 未加载")
         for f in files
     ]
-    return ToolResult("\n".join(lines), summary=f"{len(files)} 个文件")
+    return ToolResult("\n".join(lines), summary=f"{len(files)} 个文件",
+                      public_text="\n".join(_file_detail(item) for item in files),
+                      public_details=[public_detail_section("查看到的文件", [_file_detail(item) for item in files]),
+                                      public_detail_section("查看内容", ["已查询文件名称、类型、工作表和加载状态。"])])
 
 
 def _tool_show_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -359,6 +440,8 @@ def _tool_show_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         summary + "界面已提供原文件的查看和下载卡片；只需简短说明，不要读取或转写原表、重新导出副本或编造下载链接。"
         "若本轮还明确要求分析或修改，可继续完成那些要求。",
         summary=summary, public_text=summary, events=events,
+        public_details=[public_detail_section("展示文件", [_file_detail(item) for item in files]),
+                        public_detail_section("提供内容", ["已提供以上文件的查看和下载入口。"])],
     )
 
 
@@ -366,7 +449,9 @@ def _tool_load_file(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     infos = ctx.host.load_file(str(args.get("file_id", "")))
     names = [f"「{t.name}」{t.rows} 行 × {len(t.columns)} 列" for t in infos]
     return ToolResult("已加载：" + "、".join(names) + "。可以用 table_info 查看结构。", summary="加载了 " + "、".join(t.name for t in infos),
-                      tables=[table_payload(ctx.ws, t.name) for t in infos])
+                      tables=[table_payload(ctx.ws, t.name) for t in infos],
+                      public_details=[public_detail_section("加载来源和结果", [_table_detail(info) for info in infos]),
+                                      public_detail_section("已加载字段", [f"「{info.name}」：{'、'.join(info.column_names)}" for info in infos])])
 
 
 def _tool_export_excel(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -382,7 +467,8 @@ def _tool_export_excel(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         raise ValueError("sheets 至少要有一张表，例如 [{\"table\": \"汇总\", \"sheet_name\": \"汇总\"}]")
     info = ctx.host.export_excel(sheets, str(args.get("filename") or "导出结果"))
     return ToolResult(f"已导出文件「{info['filename']}」，包含 {len(sheets)} 个 sheet，用户可以在右侧下载。",
-                      summary=f"导出「{info['filename']}」", events=[{"type": "file", **info}])
+                      summary=f"导出「{info['filename']}」", events=[{"type": "file", **info}],
+                      public_details=[public_detail_section("数据来源与写入位置", [f"「{table}」{ctx.ws.require(table).rows} 行 → 「{info['filename']}」的「{sheet}」工作表" for table, sheet in sheets])])
 
 
 # ---------------------------------------------------------------------------

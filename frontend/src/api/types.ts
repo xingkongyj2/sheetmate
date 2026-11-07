@@ -431,8 +431,15 @@ export interface PlanStep {
 }
 
 /** Agent 事件（SSE），字段随 type 变化 */
+export interface PublicOperationDetail {
+  label: string
+  items: string[]
+  ordered?: boolean
+}
+
 export interface AgentEvent {
   type: string
+  details?: PublicOperationDetail[]
   [key: string]: any // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 

@@ -155,10 +155,20 @@ def prepare_workbook_spec(ws: Workspace, raw: dict[str, Any], *, base: dict[str,
 
 def workbook_creation_tool():
     # 延迟导入避免工具注册表和独立技能之间形成循环依赖。
-    from sheetmate.agent.tools import Tool, ToolResult, table_payload
+    from sheetmate.agent.tools import Tool, ToolResult, public_detail_section, public_detail_text, table_payload
+
+    def cell_text(value):
+        if value is None:
+            return "空白"
+        if value == "":
+            return "空文本"
+        if isinstance(value, dict):
+            value = value.get("formula", value.get("date"))
+        return public_detail_text(value, 180) or "未记录可展示的值"
 
     def run(args, ctx):
         spec = {key: value for key, value in args.items() if key != "filename"}
+        base = ctx.host.created_workbook_spec(str(spec["base_file_id"])) if spec.get("base_file_id") else None
         info = ctx.host.create_workbook(spec, str(args.get("filename") or "新建表格"))
         sheets = info.get("sheets_written", [])
         merges = sum(len(sheet.get("merges", [])) for sheet in sheets)
@@ -168,9 +178,40 @@ def workbook_creation_tool():
             text += "公式已写入，需在 Excel 等支持公式计算的软件中打开后重算；服务端预览不代表计算结果。"
         if warning:
             text += f"提示：{warning}"
+        details = [public_detail_section("生成文件", [info["filename"]]),
+                   public_detail_section("写入工作表", [f"「{sheet['sheet']}」：{sheet['rows']} 行 × {sheet['columns']} 列" for sheet in sheets])]
+        if base:
+            details.insert(0, public_detail_section("调整来源", [base["file"]["filename"]]))
+        previous = {sheet["name"].casefold(): sheet for sheet in base["spec"]["sheets"]} if base else {}
+        changes, sources = [], []
+        for sheet in spec.get("sheets", []):
+            name = sheet["name"]
+            old = previous.get(name.casefold(), {})
+            old_rows = old.get("rows", [])
+            for coordinate, value in sheet.get("cells", {}).items():
+                row, column = _cell_position(coordinate)
+                before = old_rows[row - 1][column - 1] if row <= len(old_rows) and column <= len(old_rows[row - 1]) else None
+                if before != value:
+                    changes.append(f"「{name}」!{coordinate.upper()}：{cell_text(before)} → {cell_text(value)}")
+            for column, width in sheet.get("column_widths", {}).items():
+                before = old.get("column_widths", {}).get(column)
+                if before != width:
+                    changes.append(f"「{name}」的 {column} 列宽：{before if before is not None else '自动列宽'} → {width}")
+            if sheet.get("table"):
+                table = ctx.ws.require(sheet["table"])
+                sources.append(f"「{table.name}」{table.rows} 行 → 「{name}」!{sheet.get('table_start_cell') or 'A1'}，{'包含' if sheet.get('table_headers', True) else '不包含'}表头")
+            if "merges" in sheet and old.get("merges", []) != sheet["merges"]:
+                changes.append(f"「{name}」合并区域：{'、'.join(old.get('merges', [])) or '无'} → {'、'.join(sheet['merges']) or '无'}")
+        if changes:
+            details.append(public_detail_section("具体变化", changes[:50] + ([f"另有 {len(changes) - 50} 项变化，完整内容见生成文件。"] if len(changes) > 50 else [])))
+        if sources:
+            details.append(public_detail_section("数据来源与写入位置", sources))
+        if warning:
+            details.append(public_detail_section("核对提示", info["warnings"]))
         return ToolResult(text, summary=f"新建「{info['filename']}」",
                           tables=[table_payload(ctx.ws, name) for name in info.get("table_names", [])],
-                          events=[{"type": "file", **{key: value for key, value in info.items() if key != "table_names"}}])
+                          events=[{"type": "file", **{key: value for key, value in info.items() if key != "table_names"}}],
+                          public_details=[section for section in details if section["items"]])
 
     return Tool("create_workbook",
                 "根据用户文字、口述转写或已读取资料从零创建带格式的 Excel，无需上传模板。"
@@ -183,7 +224,7 @@ def workbook_creation_tool():
 
 
 def workbook_inspection_tool():
-    from sheetmate.agent.tools import Tool, ToolResult
+    from sheetmate.agent.tools import Tool, ToolResult, public_detail_section
 
     def run(args, ctx):
         saved = ctx.host.created_workbook_spec(str(args.get("file_id") or ""))
@@ -202,7 +243,10 @@ def workbook_inspection_tool():
                     "sheets": [{"name": sheet["name"], "rows": len(sheet.get("rows", [])),
                                 "columns": max((len(row) for row in sheet.get("rows", [])), default=0)} for sheet in specs],
                     "layout": layout}
-        return ToolResult(json.dumps(response, ensure_ascii=False), summary=f"查看「{saved['file']['filename']}」建表布局")
+        return ToolResult(json.dumps(response, ensure_ascii=False), summary=f"查看「{saved['file']['filename']}」建表布局",
+                          public_details=[public_detail_section("查看对象", [f"「{saved['file']['filename']}」的「{chosen['name']}」工作表"]),
+                                          public_detail_section("读取内容", ["已读取前 12 行、14 列范围内的数据预览，以及已保存的合并区域、样式、列宽、行高、冻结和筛选设置。"]),
+                                          public_detail_section("合并区域", chosen.get("merges", []) or ["未设置合并区域。"])])
 
     return Tool("inspect_workbook_creation", "查看本建表技能已生成文件的布局与数据预览，供按 base_file_id 继续调整标题、合并或样式。仅可读取当前会话或客户的建表文件。",
                 {"type": "object", "properties": {"file_id": {"type": "string"}, "sheet_name": {"type": "string"}},

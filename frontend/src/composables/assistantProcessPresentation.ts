@@ -142,7 +142,8 @@ function runningTitle(stage: AssistantStage): string {
   const tool = items.find((item): item is ToolItem => item.kind === 'tool' && item.status === 'running')
   const label = tool ? readable(toolPresentation(tool).label) : ''
   if (attempt) return recipeRunningTitle(attempt.progress, label || '执行处理步骤')
-  if (tool) return runningLabel(label)
+  // Use the same complete action title as the detail row, including its current target.
+  if (tool) return label || categoryForStage(stage).label
   const agent = items.find((item) => item.kind === 'agent' && item.status === 'running')
   if (agent?.kind === 'agent') return `正在分析「${readable(agent.table)}」`
   const plan = items.find((item) => item.kind === 'plan' && item.status === 'running') ?? stage.plan

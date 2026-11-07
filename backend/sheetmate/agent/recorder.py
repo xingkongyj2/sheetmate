@@ -35,6 +35,8 @@ class WorkflowRecorder:
             step = self._open.pop(event["id"])
             step["ok"] = event.get("ok", True)
             step["summary"] = str(event.get("summary", ""))[:300]
+            if event.get("details"):
+                step["details"] = event["details"]
             step["duration_ms"] = int((time.perf_counter() - step.pop("started")) * 1000)
         elif kind == "file" and event.get("file_id"):
             self.files.append(event["file_id"])
