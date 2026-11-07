@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sheetmate.agent.content import model_history, user_content
+from sheetmate.agent.contracts import ANSWER_AUDIT_SCHEMA, STEP_VERDICT_SCHEMA
 from sheetmate.agent.executor import AgentExecutor, build_system_prompt
 from sheetmate.agent.llm import aux_json
 from sheetmate.agent.planner import Plan, clean_list, clean_text, clip, data_brief, make_plan, plan_from_steps, review_plan
@@ -105,6 +106,7 @@ class _Run:
     transcript: list[dict[str, Any]] = field(default_factory=list)
     held: list[dict[str, Any]] = field(default_factory=list)  # 最终回答阶段扣住的文字事件
     results_ok: dict[str, bool] = field(default_factory=dict)  # 工具调用 ID → 是否成功
+    protocol_results: set[str] = field(default_factory=set)  # 参数未通过校验、尚未执行的调用，不能作为业务证据
     unresolved: set[str] = field(default_factory=set)  # 最后一次调用仍然失败的工具
     waiting: bool = False
     question: str = ""
@@ -117,6 +119,9 @@ class _Run:
             self.waiting = True
             self.question = event.get("question") or "需要确认后才能继续"
         elif kind == "tool_result":
+            if event.get("error_kind") in {"protocol", "schema"}:
+                self.protocol_results.add(event["id"])
+                return
             self.results_ok[event["id"]] = bool(event["ok"])
             if event["ok"]:
                 self.unresolved.discard(event["tool"])
@@ -148,7 +153,8 @@ async def _in_thread(ctx: AgentContext, function: Callable[..., Any], *args: Any
 # ---------------------------------------------------------------------------
 
 
-def _tool_digest(transcript: list[dict[str, Any]], results_ok: dict[str, bool], step: int) -> list[dict[str, Any]]:
+def _tool_digest(transcript: list[dict[str, Any]], results_ok: dict[str, bool], step: int,
+                 protocol_results: set[str] | None = None) -> list[dict[str, Any]]:
     """把一次 ReAct 的消息整理成「调用了什么、返回了什么」，作为核对依据。"""
     calls: dict[str, tuple[str, str]] = {}
     digest = []
@@ -159,6 +165,8 @@ def _tool_digest(transcript: list[dict[str, Any]], results_ok: dict[str, bool], 
                 calls[call.get("id", "")] = (function.get("name", "?"), function.get("arguments", ""))
         elif message.get("role") == "tool":
             call_id = message.get("tool_call_id", "")
+            if call_id in (protocol_results or ()):
+                continue
             name, arguments = calls.get(call_id, ("?", ""))
             digest.append({"step": step, "tool": name, "ok": results_ok.get(call_id), "args": clip(arguments, 240),
                            "result": clip(message.get("content") or "", _DIGEST_RESULT)})
@@ -186,16 +194,19 @@ async def verify_step(llm: Any, message: str, plan: Plan, step: dict[str, Any], 
         "step_summary": clip(run.text.strip(), 1500),
     }
     outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=THINK_VERIFY_SYSTEM,
-                             timeout=CHECK_TIMEOUT, max_tokens=CHECK_MAX_TOKENS, label=f"思考模式第 {num} 步核对")
+                             timeout=CHECK_TIMEOUT, max_tokens=CHECK_MAX_TOKENS,
+                             schema=STEP_VERDICT_SCHEMA, schema_name="step_verdict", label=f"思考模式第 {num} 步核对")
     if not outcome.ok:
-        return Verdict(skipped=True, reason=outcome.reason, timed_out=outcome.timed_out)
+        return Verdict(passed=False, skipped=True, reason=outcome.reason, timed_out=outcome.timed_out)
     result = outcome.value
     if not isinstance(result, dict) or not isinstance(result.get("passed"), bool):
         log.warning("思考模式第 %s 步核对：模型返回的内容无法解析：%s", num, clip(repr(result), 200))
-        return Verdict(skipped=True, reason="核对结果无法解析")
+        return Verdict(passed=False, skipped=True, reason="核对结果无法解析")
     issues = clean_list(result.get("issues"), 5, 240)
-    # 判不通过却说不出具体问题，没法据此补救，按通过处理
-    passed = result["passed"] or not issues
+    passed = result["passed"]
+    if (passed and issues) or (not passed and not issues):
+        log.warning("思考模式第 %s 步核对：结论与问题列表矛盾，未确认通过", num)
+        return Verdict(passed=False, skipped=True, reason="核对结论与问题列表不一致，未确认通过")
     checked = clean_text(result.get("checked"), 120) if passed else ""
     if checked and not grounded(checked, "\n".join(f"{item['args']}\n{item['result']}" for item in digest)):
         # 这句话会直接展示给用户：里面的数字必须能在工具的真实返回里找到，否则只说「核对通过」，不展示可能编造的数字
@@ -223,15 +234,19 @@ async def audit_answer(llm: Any, message: str, plan: Plan, answer: str, ledger: 
         "final_answer": clip(answer, 6000),
     }
     outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=THINK_AUDIT_SYSTEM,
-                             timeout=CHECK_TIMEOUT, max_tokens=CHECK_MAX_TOKENS, label="思考模式回答核对")
+                             timeout=CHECK_TIMEOUT, max_tokens=CHECK_MAX_TOKENS,
+                             schema=ANSWER_AUDIT_SCHEMA, schema_name="answer_audit", label="思考模式回答核对")
     if not outcome.ok:
-        return Audit(skipped=True, reason=outcome.reason)
+        return Audit(ok=False, skipped=True, reason=outcome.reason)
     result = outcome.value
     if not isinstance(result, dict) or not isinstance(result.get("ok"), bool):
         log.warning("思考模式回答核对：模型返回的内容无法解析：%s", clip(repr(result), 200))
-        return Audit(skipped=True, reason="核对结果无法解析")
+        return Audit(ok=False, skipped=True, reason="核对结果无法解析")
     issues = clean_list(result.get("issues"), 6, 300)
-    ok = result["ok"] or not issues  # 同样：说不出具体问题就没有可更正的内容
+    ok = result["ok"]
+    if (ok and issues) or (not ok and not issues):
+        log.warning("思考模式回答核对：结论与问题列表矛盾，未确认通过")
+        return Audit(ok=False, skipped=True, reason="核对结论与问题列表不一致，未确认通过")
     return Audit(ok=ok, issues=[] if ok else issues)
 
 
@@ -379,7 +394,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
             async for event in _stream(executor, conversation, tools, ctx, budget, run, ledger, step=num, activity=doing):
                 yield event
             conversation.extend(run.transcript)
-            digest = _tool_digest(run.transcript, run.results_ok, num)
+            digest = _tool_digest(run.transcript, run.results_ok, num, run.protocol_results)
             step_digest.extend(digest)
             ledger.digests.extend(digest)
             if run.failed or run.waiting:
@@ -403,7 +418,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                 verdict = await verify_step(llm, message, plan, step, num, run, step_digest)
                 if verdict.timed_out:
                     health.degraded = True  # 模型服务卡住时，后面的核对不再各等一轮
-            retry = not verdict.passed and attempt < MAX_STEP_FIXES and not exhausted
+            retry = not verdict.skipped and not verdict.passed and attempt < MAX_STEP_FIXES and not exhausted
             # 给用户看：这一项的汇报，紧跟一行核对结果
             report = tidy_report(run.text)
             check = step_check_note(passed=None if verdict.skipped else verdict.passed, checked=verdict.checked,
@@ -457,7 +472,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     async for event in _stream(executor, reflect_messages, tools, ctx, budget, final, ledger, step=None, activity="正在整理结论"):
         yield event
     held = final.held
-    ledger.digests.extend(_tool_digest(final.transcript, final.results_ok, 0))
+    ledger.digests.extend(_tool_digest(final.transcript, final.results_ok, 0, final.protocol_results))
     answer = _answer_text(held)
     if answer and not final.failed and not final.waiting and ledger.digests:
         yield {"type": "audit_start"}

@@ -26,6 +26,8 @@ export type TimelineItem =
       label: string
       params: Record<string, unknown>
       status: ToolStatus
+      /** 参数校验未通过，调用尚未执行；不能作为一次流程执行尝试。 */
+      errorKind?: 'protocol' | 'schema'
       summary?: string
       text?: string
       duration_ms?: number
@@ -395,6 +397,10 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
 
 const RECIPE_TOOLS = new Set(['build_recipe', 'revise_recipe', 'run_recipe'])
 
+function argumentErrorKind(e: AgentEvent): 'protocol' | 'schema' | undefined {
+  return e.error_kind === 'protocol' || e.error_kind === 'schema' ? e.error_kind : undefined
+}
+
 /** 把一个事件归并进助手消息（recipe_* 事件交给流程进度对象处理）。 */
 export function applyEvent(msg: UiMessage, e: AgentEvent): void {
   const timelineStart = msg.timeline.length
@@ -473,16 +479,18 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'tool_call': {
-      const params = { ...(e.params ?? {}) }
+      const errorKind = argumentErrorKind(e)
+      const params = errorKind ? {} : { ...(e.params ?? {}) }
       // Older recovery events kept declared explanations only in diagnostic parameters.
       // Recover these explicit business fields without rendering arbitrary debug payloads.
-      if (e.tool === 'reconsider_approach' && e.debug_params && typeof e.debug_params === 'object') {
+      if (!errorKind && e.tool === 'reconsider_approach' && e.debug_params && typeof e.debug_params === 'object') {
         for (const key of ['action', 'method', 'target', 'before', 'after', 'evidence', 'change', 'validation']) {
           if (!params[key] && typeof e.debug_params[key] === 'string') params[key] = e.debug_params[key]
         }
       }
-      msg.timeline.push({ kind: 'tool', key: uid('t'), id: e.id, tool: e.tool, label: e.label, params, status: 'running', step: activePlan(msg)?.num })
-      if (RECIPE_TOOLS.has(e.tool)) {
+      msg.timeline.push({ kind: 'tool', key: uid('t'), id: e.id, tool: e.tool,
+        label: errorKind ? '核对处理参数' : e.label, params, status: 'running', errorKind, step: activePlan(msg)?.num })
+      if (RECIPE_TOOLS.has(e.tool) && !errorKind) {
         const progress = newProgress(e.tool === 'run_recipe' ? 'replay' : e.tool === 'revise_recipe' ? 'revise' : 'learn', e.id)
         msg.artifacts.push({ kind: 'recipe', key: progress.key, progress })
       }
@@ -490,17 +498,36 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
     }
     case 'tool_result': {
       const item = msg.timeline.find((t) => t.kind === 'tool' && t.id === e.id)
+      const errorKind = argumentErrorKind(e) ?? (item?.kind === 'tool' ? item.errorKind : undefined)
       if (item && item.kind === 'tool') {
         item.status = e.ok ? 'ok' : 'error'
         item.summary = e.summary
         item.text = e.text
         item.duration_ms = e.duration_ms
+        if (errorKind) {
+          item.errorKind = errorKind
+          item.label = '核对处理参数'
+          item.params = {}
+        }
         if (Array.isArray(e.details)) item.details = e.details.filter((detail) => detail &&
           typeof detail.label === 'string' && Array.isArray(detail.items)).map((detail) => ({
           label: detail.label,
           items: detail.items.filter((text): text is string => typeof text === 'string'),
           ...(detail.ordered ? { ordered: true } : {}),
         }))
+      }
+      if (errorKind) {
+        // Older stored events may only mark the result. Remove the speculative
+        // placeholder and its anchors so SSE replay also shows no execution.
+        const rejected = new Set(msg.artifacts.flatMap((artifact) => artifact.kind === 'recipe' &&
+          artifact.progress.toolCallId === e.id ? [artifact.key] : []))
+        if (rejected.size) {
+          msg.artifacts = msg.artifacts.filter((artifact) => !rejected.has(artifact.key))
+          for (const block of msg.blocks ?? []) {
+            if (block.kind === 'process') block.recipeKeys = block.recipeKeys.filter((key) => !rejected.has(key))
+          }
+        }
+        break
       }
       const progress = findProgress(msg, e.id)
       if (progress && progress.status !== 'done' && progress.status !== 'failed') progress.status = e.ok ? 'done' : 'failed'

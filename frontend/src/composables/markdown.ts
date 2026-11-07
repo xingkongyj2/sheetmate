@@ -18,9 +18,9 @@ function formattedPayload(markdown: string): { html: string; text: string } {
     ul: 'list-style-type:disc;padding-left:24px;margin:8px 0',
     ol: 'list-style-type:decimal;padding-left:24px;margin:8px 0',
     li: 'margin:4px 0',
-    table: 'border-collapse:collapse;margin:12px 0;font-size:14px',
-    th: 'border:1px solid #d9dde3;padding:8px 12px;background:#f3f4f6;font-weight:700',
-    td: 'border:1px solid #d9dde3;padding:8px 12px',
+    table: 'width:100%;border-collapse:collapse;margin:16px 0 20px;font-size:14px;line-height:1.65;border:1px solid #dfe3e8;font-variant-numeric:tabular-nums',
+    th: 'border:1px solid #dfe3e8;padding:11px 18px;background:#f7f8fa;color:#52525b;font-size:13px;font-weight:600',
+    td: 'border:1px solid #e1e5ea;padding:12px 18px;vertical-align:top',
     blockquote: 'border-left:3px solid #d9dde3;padding-left:12px;margin:12px 0;color:#5e6470',
     pre: 'white-space:pre-wrap;background:#f3f4f6;padding:12px;font-family:monospace',
     code: 'font-family:monospace;background:#f3f4f6',
@@ -28,6 +28,8 @@ function formattedPayload(markdown: string): { html: string; text: string } {
   for (const [selector, style] of Object.entries(styles)) {
     for (const element of container.querySelectorAll<HTMLElement>(selector)) element.style.cssText = style
   }
+  for (const cell of container.querySelectorAll<HTMLElement>('th:not([align]), td:not([align])')) cell.style.textAlign = 'left'
+  for (const row of container.querySelectorAll<HTMLElement>('tbody tr:nth-child(even)')) row.style.background = '#fafbfc'
   for (const link of container.querySelectorAll<HTMLAnchorElement>('a[href]')) link.href = link.href
   const host = document.createElement('div')
   host.style.cssText = 'position:fixed;left:-10000px;top:0;width:800px;pointer-events:none'

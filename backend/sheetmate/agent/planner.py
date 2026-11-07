@@ -19,6 +19,7 @@ from typing import Any
 
 import pandas as pd
 
+from sheetmate.agent.contracts import PLAN_REVIEW_SCHEMA, PLAN_SCHEMA
 from sheetmate.agent.executor import build_system_prompt
 from sheetmate.agent.llm import LLMError, aux_json
 from sheetmate.agent.prompts import CLARIFY_PROMPT, THINK_PLAN_SYSTEM, THINK_REVIEW_SYSTEM
@@ -288,6 +289,7 @@ async def make_plan(llm: Any, ctx: AgentContext, message: str, history: list[dic
     system = THINK_PLAN_SYSTEM + "\n\n# 执行助手的工作环境（计划必须能在其中落地）\n" + build_system_prompt(ctx, message, thinking=True)
     payload = {"history": _history_context(history), "data_profile": brief, "requirement": message}
     outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=system, timeout=PLAN_TIMEOUT,
+                             schema=PLAN_SCHEMA, schema_name="execution_plan",
                              label="思考模式起草计划", **_image_kwargs(ctx, history))
     if not outcome.ok:
         if ctx.image_parts and (outcome.timed_out or isinstance(outcome.error, LLMError)):
@@ -305,6 +307,7 @@ async def review_plan(llm: Any, ctx: AgentContext, message: str, plan: Plan, bri
         return plan
     payload = {"requirement": message, "data_profile": brief, "plan": plan.to_json()}
     outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=THINK_REVIEW_SYSTEM, timeout=REVIEW_TIMEOUT,
+                             schema=PLAN_REVIEW_SCHEMA, schema_name="plan_review",
                              label="思考模式审查计划", **_image_kwargs(ctx, history or []))
     if not outcome.ok:
         plan.reason = outcome.reason

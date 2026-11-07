@@ -445,7 +445,37 @@ export interface AgentEvent {
 
 export type LLMProviderId = 'deepseek' | 'qwen' | 'custom'
 
-export interface LLMProviderConfig {
+export interface LLMCapabilities {
+  structured_output: 'auto' | 'json_schema' | 'json_object' | 'prompt'
+}
+
+export interface LLMRuntimePolicy {
+  structured_retries: number
+  tool_protocol_retries: number
+  sdk_retries: number
+  structured_timeout: number
+}
+
+export interface LLMAdvancedConfig {
+  timeout: number
+  max_tokens: number
+  capabilities: LLMCapabilities
+  runtime_policy: LLMRuntimePolicy
+}
+
+export interface LLMConfigUpdate {
+  provider_id: LLMProviderId
+  api_key?: string
+  base_url?: string
+  model?: string
+  thinking_enabled?: boolean
+  timeout?: number
+  max_tokens?: number
+  capabilities?: Partial<LLMCapabilities>
+  runtime_policy?: Partial<LLMRuntimePolicy>
+}
+
+export interface LLMProviderConfig extends LLMAdvancedConfig {
   id: LLMProviderId
   name: string
   description: string
@@ -459,7 +489,7 @@ export interface LLMProviderConfig {
   thinking_enabled: boolean
 }
 
-export interface LLMConfig {
+export interface LLMConfig extends LLMAdvancedConfig {
   configured: boolean
   base_url: string
   model: string

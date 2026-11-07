@@ -1,4 +1,4 @@
-import type { LLMConfig } from './types'
+import type { LLMAdvancedConfig, LLMConfig, LLMCapabilities } from './types'
 
 const PROVIDER_IDS = ['deepseek', 'qwen', 'custom']
 const VERSION_ERROR = '设置接口版本不兼容，请重启 SheetMate 后重新加载设置页。'
@@ -9,6 +9,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
+}
+
+function boundedNumber(value: unknown, fallback: number, min: number, max: number, integer = false): number {
+  if (value === undefined) return fallback
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max ||
+    (integer && !Number.isInteger(value))) throw new Error(VERSION_ERROR)
+  return value
+}
+
+function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
+  const capabilities = value.capabilities === undefined ? {} : value.capabilities
+  const policy = value.runtime_policy === undefined ? {} : value.runtime_policy
+  if (!isRecord(capabilities) || !isRecord(policy)) throw new Error(VERSION_ERROR)
+  const protocol = capabilities.structured_output === undefined ? 'auto' : capabilities.structured_output
+  if (typeof protocol !== 'string' || !['auto', 'json_schema', 'json_object', 'prompt'].includes(protocol)) {
+    throw new Error(VERSION_ERROR)
+  }
+  return {
+    timeout: boundedNumber(value.timeout, 120, 5, 900),
+    max_tokens: boundedNumber(value.max_tokens, 8192, 1, 131072, true),
+    capabilities: { structured_output: protocol as LLMCapabilities['structured_output'] },
+    runtime_policy: {
+      structured_retries: boundedNumber(policy.structured_retries, 1, 0, 3, true),
+      tool_protocol_retries: boundedNumber(policy.tool_protocol_retries, 2, 0, 5, true),
+      sdk_retries: boundedNumber(policy.sdk_retries, 1, 0, 3, true),
+      structured_timeout: boundedNumber(policy.structured_timeout, 0, 0, 900),
+    },
+  }
 }
 
 /** Reject the old single-provider API before its metadata reaches the forms. */
@@ -22,7 +50,7 @@ export function parseLLMConfig(value: unknown): LLMConfig {
     throw new Error(VERSION_ERROR)
   }
   const ids = new Set<string>()
-  for (const provider of value.providers) {
+  const providers = value.providers.map((provider) => {
     if (!isRecord(provider) || typeof provider.id !== 'string' || !PROVIDER_IDS.includes(provider.id) ||
       ids.has(provider.id) || typeof provider.name !== 'string' || typeof provider.description !== 'string' ||
       typeof provider.api_key !== 'string' || typeof provider.base_url !== 'string' ||
@@ -33,6 +61,7 @@ export function parseLLMConfig(value: unknown): LLMConfig {
       throw new Error(VERSION_ERROR)
     }
     ids.add(provider.id)
-  }
-  return value as unknown as LLMConfig
+    return { ...provider, ...advancedConfig(provider) }
+  })
+  return { ...value, ...advancedConfig(value), providers } as unknown as LLMConfig
 }

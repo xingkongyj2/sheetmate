@@ -15,4 +15,4 @@
 
 依赖采用同一固定版本的 Univer 开源核心，无 Pro 导入服务。`WorkbookPreview` 与 Univer 渲染器按需加载，不进入聊天首屏主包。
 
-对话中的原始输入、期望结果和正式输出使用文件卡片，提供查看和下载，不重复展示解析后的数据表。执行明细中的标准表格也打开关联工作簿。仅临时查询和中间计算表可以内联：最多 20 行、8 列、120 个单元格，且必须包含完整数据；已导出为文件的表不重复内联。展示规则位于 `composables/tablePresentation.ts`，文件关联和去重位于 `composables/filePresentation.ts`。
+对话中的原始输入、期望结果和正式输出使用文件卡片，提供查看和下载，不重复展示解析后的数据表。回复中的说明性表格统一使用正文 Markdown 样式；临时查询和中间计算表仅在「执行明细」的数据区查看，不再作为独立卡片附加到回复下方。执行明细中的标准表格打开关联工作簿。数据展示规则位于 `composables/executionPresentation.ts`，文件关联和去重位于 `composables/filePresentation.ts`。

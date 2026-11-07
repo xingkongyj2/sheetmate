@@ -4,8 +4,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from sheetmate.agent.contracts import INTENT_SCHEMA
 from sheetmate.agent.llm import LLMError
 from sheetmate.agent.prompts import INTENT_PROMPT
+from sheetmate.agent.structured import StructuredOutputError, complete_structured
 from sheetmate.agent.tools import AgentContext
 
 
@@ -52,7 +54,11 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
     }
     image_parts = [part for item in history[-8:] for part in item.get("image_parts", [])] + ctx.image_parts
     image_kwargs = {"image_parts": image_parts} if image_parts else {}
-    result = await llm.complete_json(json.dumps(context, ensure_ascii=False), system=INTENT_PROMPT, **image_kwargs)
+    try:
+        result = await complete_structured(llm, json.dumps(context, ensure_ascii=False), system=INTENT_PROMPT,
+                                           schema=INTENT_SCHEMA, schema_name="request_intent", **image_kwargs)
+    except (LLMError, StructuredOutputError) as exc:
+        raise LLMError(f"暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。（{exc}）") from exc
     mode = result.get("mode") if isinstance(result, dict) else None
     if not isinstance(mode, str) or mode not in {"analyze", "modify", "create"}:
         raise LLMError("暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。")

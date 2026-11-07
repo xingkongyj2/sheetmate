@@ -7,11 +7,14 @@ OpenAI 兼容接口，默认连接 DeepSeek（deepseek-v4-pro 或 deepseek-flash
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
 import re
 import time
 from collections.abc import AsyncIterator, Callable
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,6 +22,7 @@ import openai
 from openai import AsyncOpenAI
 
 from sheetmate.agent.content import user_content
+from sheetmate.agent.structured import StructuredOutputError, complete_structured, validate_payload
 from sheetmate.config import LLMSettings, get_llm_settings, is_deepseek_url
 
 
@@ -27,6 +31,10 @@ log = logging.getLogger(__name__)
 
 class LLMError(RuntimeError):
     """调用模型失败。message 是给用户看的中文说明。"""
+
+
+class LLMTimeout(LLMError):
+    """A request/deadline timeout, preserved for auxiliary-stage degradation."""
 
 
 class LLMNotConfigured(LLMError):
@@ -73,10 +81,10 @@ def translate_error(exc: Exception) -> LLMError:
         return LLMError("这个 API Key 没有权限调用当前模型。")
     if isinstance(exc, openai.RateLimitError):
         return LLMError("模型服务限流或额度不足，请稍后再试或检查账户余额。")
+    if isinstance(exc, openai.APITimeoutError):
+        return LLMTimeout("模型响应超时，请稍后再试。")
     if isinstance(exc, openai.APIConnectionError):
         return LLMError("连接不上模型服务，请检查网络或「设置」里的接口地址。")
-    if isinstance(exc, openai.APITimeoutError):
-        return LLMError("模型响应超时，请稍后再试。")
     if isinstance(exc, openai.APIStatusError):
         if exc.status_code in {400, 422} and re.search(
             r"(?:image|vision|multimodal).{0,100}(?:not supported|unsupported|not support)|"
@@ -98,23 +106,151 @@ def _short(text: str, limit: int = 300) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def parse_json(text: str) -> Any:
-    """宽松解析 LLM 返回的 JSON：去掉 ```json 包裹、截取最外层括号、去掉尾逗号。"""
+def _json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"JSON 字段重复：{key[:80]}")
+        result[key] = value
+    return result
+
+
+def _invalid_constant(value: str) -> Any:
+    raise ValueError(f"JSON 不支持 {value}")
+
+
+def _json_float(value: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError("JSON 数值超出有效范围")
+    return result
+
+
+def _without_trailing_commas(text: str) -> str:
+    """Remove syntax commas only; SQL, scripts and all string contents stay intact."""
+    result: list[str] = []
+    quoted = escaped = False
+    for index, char in enumerate(text):
+        if quoted:
+            result.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+            result.append(char)
+        elif char == ",":
+            following = index + 1
+            while following < len(text) and text[following].isspace():
+                following += 1
+            if following >= len(text) or text[following] not in "}]":
+                result.append(char)
+        else:
+            result.append(char)
+    return "".join(result)
+
+
+def _json_boundary(content: str, start: int) -> int:
+    stack: list[str] = []
+    quoted = escaped = False
+    for index in range(start, len(content)):
+        char = content[index]
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack or (stack.pop(), char) not in {("{", "}"), ("[", "]")}:
+                raise ValueError("JSON 括号不匹配")
+            if not stack:
+                return index + 1
+    raise ValueError("JSON 输出不完整，请返回完整对象")
+
+
+def parse_json(text: str, *, allow_text: bool = True) -> Any:
+    """Parse JSON without modifying string values. Tool arguments forbid prose."""
     content = (text or "").strip()
-    content = re.sub(r"^```(?:json)?\s*", "", content)
-    content = re.sub(r"\s*```$", "", content)
+    fenced = re.fullmatch(r"```(?:json)?\s*([\s\S]*?)\s*```", content)
+    if fenced:
+        content = fenced.group(1).strip()
+    decoder = json.JSONDecoder(object_pairs_hook=_json_object, parse_constant=_invalid_constant, parse_float=_json_float)
     try:
-        return json.loads(content)
+        return decoder.decode(content)
     except json.JSONDecodeError:
         pass
+    repaired = _without_trailing_commas(content)
+    try:
+        return decoder.decode(repaired)
+    except json.JSONDecodeError:
+        if not allow_text:
+            raise ValueError("工具参数必须是完整 JSON，不得包含说明文字或截断内容") from None
     starts = [i for i in (content.find("{"), content.find("[")) if i >= 0]
     if not starts:
         raise ValueError("返回内容里没有 JSON")
     start = min(starts)
-    end = max(content.rfind("}"), content.rfind("]"))
-    candidate = content[start : end + 1]
-    candidate = re.sub(r",\s*([}\]])", r"\1", candidate)
-    return json.loads(candidate)
+    end = _json_boundary(content, start)
+    value = decoder.decode(_without_trailing_commas(content[start:end]))
+    # Multiple objects are ambiguous; never choose a business decision silently.
+    if any(char in "{[" for char in content[end:]):
+        raise ValueError("返回内容包含多个 JSON 或多余括号，请只返回一个对象")
+    return value
+
+
+_FORMAT_CACHE: OrderedDict[tuple[str, ...], tuple[str, float]] = OrderedDict()
+_FORMAT_CACHE_LIMIT = 256
+_FORMAT_CACHE_TTL = 1800.0
+
+
+def _format_cache_key(cfg: LLMSettings) -> tuple[str, ...]:
+    return (cfg.base_url.rstrip("/"), cfg.model, cfg.provider_id, cfg.capabilities.structured_output,
+            hashlib.sha256(cfg.api_key.encode()).hexdigest(),
+            str(cfg.thinking_enabled), json.dumps(cfg.extra_body, sort_keys=True, ensure_ascii=False, default=str))
+
+
+def _cache_format(key: tuple[str, ...], value: str) -> None:
+    _FORMAT_CACHE[key] = (value, time.monotonic())
+    _FORMAT_CACHE.move_to_end(key)
+    while len(_FORMAT_CACHE) > _FORMAT_CACHE_LIMIT:
+        _FORMAT_CACHE.popitem(last=False)
+
+
+def _cached_format(key: tuple[str, ...]) -> str | None:
+    entry = _FORMAT_CACHE.get(key)
+    if entry is None:
+        return None
+    value, timestamp = entry
+    if time.monotonic() - timestamp >= _FORMAT_CACHE_TTL:
+        _FORMAT_CACHE.pop(key, None)
+        return None
+    return value
+
+
+def _unsupported_format(exc: LLMError) -> bool:
+    """Only a definite protocol rejection can change a cached capability."""
+    cause = exc.__cause__
+    if not isinstance(cause, openai.APIStatusError) or cause.status_code not in {400, 422, 501}:
+        return False
+    message = str(cause.message).lower()
+    if re.search(r"invalid schema|schema validation|schema keyword|keyword.{0,80}(?:unsupported|not supported)", message):
+        return False  # A bad contract must not permanently disable a working protocol.
+    target = r"(?:response_format(?:\.type)?|json_schema|json_object)"
+    unsupported = r"(?:not supported|unsupported|not implemented|not support(?:ed)?)"
+    punctuation = r"[\s\"'`:=,-]*"
+    return bool(re.search(
+        rf"{target}{punctuation}(?:(?:is|are)\s+)?{unsupported}\b|"
+        rf"\b(?:does not support|not support|unsupported|unknown parameter|unknown field|"
+        rf"unrecognized parameter|unexpected keyword(?: argument)?){punctuation}(?:the\s+)?{punctuation}{target}\b|"
+        rf"{target}{punctuation}extra inputs are not permitted", message))
 
 
 class LLMClient:
@@ -125,7 +261,8 @@ class LLMClient:
             raise LLMNotConfigured()
         self.cfg = cfg
         self.model = cfg.model
-        self.client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout, max_retries=1)
+        self.client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout,
+                                  max_retries=cfg.runtime_policy.sdk_retries)
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
@@ -140,10 +277,11 @@ class LLMClient:
             # 从思考模型切换回 Chat 时，历史中的思考字段不属于它的请求格式。
             messages = [{key: value for key, value in message.items() if key != "reasoning_content"}
                         for message in messages]
+        temperature = extra.pop("temperature", None)
         kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
-            "temperature": extra.pop("temperature", None) or self.cfg.temperature,
+            "temperature": self.cfg.temperature if temperature is None else temperature,
         }
         if self.cfg.max_tokens > 0:
             kwargs["max_tokens"] = self.cfg.max_tokens
@@ -179,7 +317,13 @@ class LLMClient:
         except Exception as exc:
             raise translate_error(exc) from exc
         self._add_usage(resp.usage)
-        return resp.choices[0].message
+        if not resp.choices:
+            raise LLMError("模型服务返回了空响应，请检查接口兼容性后重试。")
+        message = resp.choices[0].message
+        # Keep request-local metadata on this response, not mutable client state:
+        # the same LLMClient can serve concurrent agent requests.
+        object.__setattr__(message, "_sheetmate_finish_reason", resp.choices[0].finish_reason)
+        return message
 
     async def stream_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                           tool_choice: str | None = None) -> AsyncIterator[Any]:
@@ -187,19 +331,45 @@ class LLMClient:
         kwargs = self._kwargs(messages, tools, stream=True, tool_choice=tool_choice if tools else None)
         try:
             stream = await self.client.chat.completions.create(**kwargs)
-            async for chunk in stream:
-                self._add_usage(getattr(chunk, "usage", None))
-                yield chunk
+            try:
+                async for chunk in stream:
+                    self._add_usage(getattr(chunk, "usage", None))
+                    if any(choice.finish_reason == "length" for choice in getattr(chunk, "choices", [])):
+                        raise LLMError("模型输出达到长度上限，本轮响应不完整，请增加输出上限后重试。")
+                    yield chunk
+            finally:
+                await stream.close()
         except Exception as exc:
             raise translate_error(exc) from exc
 
-    async def complete_json(self, prompt: str, system: str | None = None, retries: int = 1, *,
-                            image_parts: list[dict[str, Any]] | None = None, max_tokens: int | None = None) -> Any:
-        """要求模型只输出 JSON，解析失败时带着错误重试。
-        max_tokens 给输出很小的调用（核对类）设一个小上限，免得模型空转到默认的 8192 才停；
-        思考开着时推理内容也算在 max_tokens 里，小上限会把答案挤没，所以此时忽略它。"""
+    async def complete_json(self, prompt: str, system: str | None = None, retries: int | None = None, *,
+                            image_parts: list[dict[str, Any]] | None = None, max_tokens: int | None = None,
+                            schema: dict[str, Any] | None = None, schema_name: str = "response",
+                            validator: Callable[[Any], None] | None = None) -> Any:
+        """Request JSON and, when supplied, enforce a schema before returning it.
+
+        Protocol negotiation and bounded response repair have separate budgets.
+        A successful response takes one model call for every configuration.
+        """
+        request = self._complete_json(prompt, system, retries, image_parts=image_parts, max_tokens=max_tokens,
+                                      schema=schema, schema_name=schema_name, validator=validator)
+        timeout = self.cfg.runtime_policy.structured_timeout
+        if not timeout:
+            return await request
+        try:
+            return await asyncio.wait_for(request, timeout)
+        except asyncio.TimeoutError as exc:
+            raise LLMTimeout(f"模型结构化返回超过 {timeout:g} 秒，已停止本次调用。") from exc
+
+    async def _complete_json(self, prompt: str, system: str | None, retries: int | None, *,
+                             image_parts: list[dict[str, Any]] | None, max_tokens: int | None,
+                             schema: dict[str, Any] | None, schema_name: str,
+                             validator: Callable[[Any], None] | None) -> Any:
         if max_tokens and self.cfg.thinking_supported and self.cfg.thinking_enabled:
             max_tokens = None
+        if schema is not None:
+            prompt += ("\n\n请只返回符合以下 JSON Schema 的 json，不要省略必填字段，不能把布尔值或数组写成字符串：\n"
+                       + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
         messages: list[dict[str, Any]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -207,25 +377,59 @@ class LLMClient:
         if "json" not in f"{system or ''}{prompt}":
             prompt = f"{prompt}\n\n（请输出 json）"
         messages.append({"role": "user", "content": user_content(prompt, image_parts)})
-        use_json_mode = True
+        preferred = self.cfg.capabilities.structured_output
+        formats = (["json_schema", "json_object", "prompt"] if preferred == "json_schema" and schema is not None
+                   else ["prompt"] if preferred == "prompt" else ["json_object", "prompt"])
+        cache_key = (*_format_cache_key(self.cfg), "schema" if schema is not None else "untyped",
+                     "images" if image_parts else "text")
+        cached = _cached_format(cache_key)
+        if cached in formats:
+            formats = formats[formats.index(cached):]
+        repairs_left = self.cfg.runtime_policy.structured_retries if retries is None else max(0, retries)
         last_error = ""
-        for _ in range(retries + 1):
+        while True:
+            output_format = formats[0]
+            response_format: dict[str, Any] | None = None
+            if output_format == "json_schema":
+                response_format = {"type": "json_schema", "json_schema": {
+                    "name": re.sub(r"[^a-zA-Z0-9_-]", "_", schema_name)[:64] or "response", "schema": schema,
+                }}
+            elif output_format == "json_object":
+                response_format = {"type": "json_object"}
             try:
-                msg = await self.chat(messages, response_format={"type": "json_object"} if use_json_mode else None,
-                                      max_tokens=max_tokens)
+                msg = await self.chat(messages, response_format=response_format, max_tokens=max_tokens)
             except LLMError as exc:
-                if use_json_mode and "response_format" in str(exc):
-                    use_json_mode = False
+                if len(formats) > 1 and _unsupported_format(exc):
+                    formats.pop(0)
+                    _cache_format(cache_key, formats[0])
                     continue
                 raise
             content = msg.content or ""
             try:
-                return parse_json(content)
-            except (ValueError, json.JSONDecodeError) as exc:
+                if getattr(msg, "refusal", None):
+                    raise LLMError("模型拒绝了本次结构化请求，请检查需求或模型配置。")
+                if getattr(msg, "_sheetmate_finish_reason", None) == "length":
+                    raise ValueError("输出被长度上限截断，请精简内容并返回完整 JSON")
+                if not content.strip():
+                    raise ValueError("返回内容为空，可能达到输出上限，请返回完整 JSON")
+                value = parse_json(content)
+                if schema is not None:
+                    validate_payload(value, schema)
+                if validator is not None:
+                    validator(value)
+                return value
+            except ValueError as exc:
                 last_error = str(exc)
+                if repairs_left <= 0:
+                    break
+                repairs_left -= 1
+                details = (json.dumps(exc.errors, ensure_ascii=False) if isinstance(exc, StructuredOutputError)
+                           else last_error[:500])
                 messages.append({"role": "assistant", "content": content})
-                messages.append({"role": "user", "content": f"上面的输出不是合法 JSON（{last_error}）。请只输出一个 JSON 对象，不要任何其他文字。"})
-        raise LLMError(f"模型没有返回合法的 JSON：{last_error}")
+                messages.append({"role": "user", "content": (
+                    f"上面的 json 尚不能使用。校验错误：{details}。"
+                    "请只修正这些格式或字段错误，返回完整 JSON；保持原有业务含义，不猜测金额、列名或文件 ID。")})
+        raise LLMError(f"模型没有返回符合要求的 JSON：{last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +459,7 @@ def _reason_text(exc: Exception) -> str:
 
 async def aux_json(llm: Any, prompt: str, *, system: str | None = None, timeout: float,
                    max_tokens: int | None = None, image_parts: list[dict[str, Any]] | None = None,
+                   schema: dict[str, Any] | None = None, schema_name: str = "response",
                    label: str = "辅助调用") -> AuxResult:
     """限时的 JSON 调用，给计划审查、步骤核对、回答核对这类「可有可无」的环节用。
 
@@ -268,13 +473,15 @@ async def aux_json(llm: Any, prompt: str, *, system: str | None = None, timeout:
         extra["max_tokens"] = max_tokens
     started = time.monotonic()
     try:
-        value = await asyncio.wait_for(llm.complete_json(prompt, system=system, **extra), timeout)
+        request = (complete_structured(llm, prompt, schema=schema, schema_name=schema_name, system=system, **extra)
+                   if schema is not None else llm.complete_json(prompt, system=system, **extra))
+        value = await asyncio.wait_for(request, timeout)
     except asyncio.TimeoutError:
         log.warning("%s超时：%g 秒内没有返回，已放弃这次调用", label, timeout)
         return AuxResult(reason=f"模型 {timeout:g} 秒内没有返回", timed_out=True)
     except LLMError as exc:
         log.warning("%s没有完成（%.1f 秒）：%s", label, time.monotonic() - started, exc)
-        return AuxResult(reason=_reason_text(exc), error=exc)
+        return AuxResult(reason=_reason_text(exc), error=exc, timed_out=isinstance(exc, LLMTimeout))
     except Exception as exc:  # 辅助环节出任何问题都不能拖垮主流程
         log.exception("%s出现意外错误", label)
         return AuxResult(reason=f"调用出错（{type(exc).__name__}）", error=exc)

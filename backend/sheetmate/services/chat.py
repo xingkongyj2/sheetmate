@@ -409,7 +409,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
 def _script_fallback(events: list[dict[str, Any]], *, mode: str, interrupted: bool = False) -> str:
     """脚本失败或仅返回辅助数据时，不把最后一轮模型话术当成已交付修改。"""
     calls = [(index, event) for index, event in enumerate(events)
-             if event.get("type") == "tool_call" and event.get("tool") == "run_python_script"]
+             if event.get("type") == "tool_call" and event.get("tool") == "run_python_script"
+             and event.get("error_kind") not in {"protocol", "schema"}]
     if not calls or any(event.get("type") == "clarify" for event in events):
         return ""
     index, call = calls[-1]
@@ -457,7 +458,8 @@ def _creation_fallback(events: list[dict[str, Any]], *, interrupted: bool = Fals
     if interrupted:
         blocks.append("本次处理已停止。")
     failure = next((event for event in reversed(events)
-                    if event.get("type") == "tool_result" and event.get("ok") is False), None)
+                    if event.get("type") == "tool_result" and event.get("ok") is False
+                    and event.get("error_kind") not in {"protocol", "schema"}), None)
     if failure is not None:
         details = str(failure.get("summary") or failure.get("text") or "").strip().splitlines()
         # 布局校验返回 Pydantic 文本时，展示实际原因而非英文校验标题或字段路径。
@@ -475,6 +477,7 @@ def _creation_fallback(events: list[dict[str, Any]], *, interrupted: bool = Fals
 
 def _recipe_fallback(events: list[dict[str, Any]], *, interrupted: bool = False) -> str:
     calls = [event for event in events if event.get("type") == "tool_call"
+             and event.get("error_kind") not in {"protocol", "schema"}
              and event.get("tool") in {"build_recipe", "revise_recipe", "run_recipe"}]
     if not calls:
         return ""

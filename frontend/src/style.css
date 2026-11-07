@@ -217,22 +217,118 @@ body {
 .prose-sm pre code {
   @apply bg-transparent p-0;
 }
+.prose-sm .markdown-table-scroll {
+  width: 100%;
+  max-width: 100%;
+  margin: 16px 0 20px;
+  overflow-x: auto;
+  border: 1px solid #dfe3e8;
+  border-radius: 12px;
+  background: #fff;
+  overscroll-behavior-x: contain;
+}
+.prose-sm .markdown-table-scroll:focus-visible {
+  outline: 2px solid #a1a1aa;
+  outline-offset: 2px;
+}
 .prose-sm table {
-  @apply my-3 block max-w-full overflow-x-auto border-collapse text-sm;
+  display: table;
+  width: 100%;
+  min-width: 100%;
+  margin: 16px 0 20px;
+  table-layout: auto;
+  border: 1px solid #dfe3e8;
+  border-collapse: separate;
+  border-spacing: 0;
+  background: #fff;
+  font-size: 14px;
+  line-height: 1.65;
+  font-variant-numeric: tabular-nums;
+}
+.prose-sm .markdown-table-scroll > table {
+  margin: 0;
+  border: 0;
 }
 .prose-sm th,
 .prose-sm td {
-  @apply border border-line px-3 py-2 align-top;
+  min-width: 88px;
+  padding: 12px 18px;
+  border: 0;
+  border-right: 1px solid #e1e5ea;
+  border-bottom: 1px solid #e1e5ea;
+  vertical-align: top;
+  overflow-wrap: break-word;
+}
+.prose-sm th:last-child,
+.prose-sm td:last-child {
+  border-right: 0;
 }
 .prose-sm th {
-  @apply whitespace-nowrap bg-paper font-semibold;
+  position: relative;
+  padding-top: 11px;
+  padding-bottom: 11px;
+  border-bottom-color: #dfe3e8;
+  background: #f7f8fa;
+  color: #52525b;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: normal;
+}
+.prose-sm .markdown-column-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1;
+  width: 9px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: col-resize;
+  touch-action: none;
+  user-select: none;
+}
+.prose-sm .markdown-column-resize::after {
+  position: absolute;
+  top: 6px;
+  right: 0;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 1px;
+  background: #8b93a1;
+  content: '';
+  opacity: 0;
+}
+.prose-sm .markdown-column-resize:hover::after,
+.prose-sm .markdown-column-resize:focus-visible::after,
+.prose-sm .is-resizing .markdown-column-resize::after {
+  opacity: 1;
+}
+.prose-sm .markdown-column-resize:focus-visible {
+  outline: 2px solid #8b93a1;
+  outline-offset: -2px;
 }
 .prose-sm th:not([align]),
 .prose-sm td:not([align]) {
   text-align: left;
 }
 .prose-sm tbody tr:nth-child(even) {
-  @apply bg-paper/40;
+  background: #fafbfc;
+}
+.prose-sm tbody tr:last-child td {
+  border-bottom: 0;
+}
+@media (hover: hover) {
+  .prose-sm tbody tr:hover {
+    background: #f3f5f8;
+  }
+}
+@media (max-width: 480px) {
+  .prose-sm th,
+  .prose-sm td {
+    padding-right: 14px;
+    padding-left: 14px;
+  }
 }
 .prose-sm hr {
   @apply my-5 border-line;

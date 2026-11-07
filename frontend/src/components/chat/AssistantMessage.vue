@@ -17,7 +17,7 @@ import type { UiMessage } from '@/composables/chatModel'
 import { fileKindLabel, standaloneFiles } from '@/composables/filePresentation'
 import { missingLLMKeyPresentation } from '@/composables/llmErrorPresentation'
 import { copyMarkdown } from '@/composables/markdown'
-import { lastResultTable, messageMarkdown, PLAN_STATUS_LABELS, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
+import { messageMarkdown, PLAN_STATUS_LABELS, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
 import { recipeViewReply } from '@/composables/recipeViewPresentation'
 import { recipeDeliveries } from '@/composables/recipeDeliveries'
 import { auditLine } from '@/composables/thinkingPresentation'
@@ -27,7 +27,6 @@ import { useProgressiveReply } from '@/composables/useProgressiveReply'
 
 import RecipeStageDetails from './RecipeStageDetails.vue'
 import RecipeViewCard from './RecipeViewCard.vue'
-import TableCard from './TableCard.vue'
 import TimelineList from './TimelineList.vue'
 
 const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean; answersClosed?: boolean }>()
@@ -122,8 +121,7 @@ const mood = computed(() => {
   return props.message.error || (latest && recipeFailure(latest.progress)) ? 'idle' : 'happy'
 })
 
-// 正式输入输出只交付文件；小型临时表完整内联，其余计算数据可在执行明细中查看。
-const lastTable = computed(() => lastResultTable(props.message))
+// 回复表格统一由正文 Markdown 展示，计算数据可在执行明细中查看。
 const fileCards = computed(() => standaloneFiles(props.message, fileContext.value))
 const questions = computed(() => props.message.artifacts.flatMap((a) => (a.kind === 'clarify' ? [a] : [])))
 const answerDrafts = ref<Record<string, string>>({})
@@ -189,12 +187,11 @@ onBeforeUnmount(() => {
         <span class="min-w-0 break-words [overflow-wrap:anywhere]">{{ audit.text }}</span>
       </p>
 
-      <!-- 文件、表格和流程结果等回复接收和渐进展示都完成后再显示。 -->
+      <!-- 文件和流程结果等回复接收和渐进展示都完成后再显示。 -->
       <template v-if="!typing">
         <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" />
         <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :customer-id="customerId" @preview-file="(file) => emit('previewFile', file)" />
 
-        <TableCard v-if="lastTable" :table="lastTable" />
         <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft flex flex-wrap items-center gap-3 px-4 py-3" data-testid="file-delivery">
           <FileSpreadsheet class="size-5 text-fun-green" />
           <div class="min-w-0 flex-1">
@@ -261,7 +258,7 @@ onBeforeUnmount(() => {
       </div>
 
       <div v-if="!typing && markdown" class="assistant-actions pointer-events-none flex items-center gap-1 pt-2 opacity-0 transition-opacity group-hover/message:pointer-events-auto group-hover/message:opacity-100 group-focus-within/message:pointer-events-auto group-focus-within/message:opacity-100">
-        <button type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含阶段回复、回答、简要结果表和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
+        <button type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含阶段回复、回答、正文表格和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
           <Check v-if="copied === 'formatted'" class="size-4 text-success" /><Copy v-else class="size-4" />
         </button>
         <button type="button" class="icon-btn disabled:opacity-50" :disabled="copying" aria-label="复制 Markdown" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">

@@ -14,6 +14,7 @@ class WorkflowRecorder:
         self.request_text = request_text
         self.started = time.perf_counter()
         self.steps: list[dict[str, Any]] = []
+        self.protocol_errors: list[dict[str, Any]] = []
         self._open: dict[str, dict[str, Any]] = {}
         self.final_text = ""
         self.error = ""
@@ -22,6 +23,11 @@ class WorkflowRecorder:
 
     def observe(self, event: dict[str, Any]) -> None:
         kind = event.get("type")
+        if event.get("error_kind") in {"protocol", "schema"}:
+            if kind == "tool_result":
+                self.protocol_errors.append({"tool": event.get("tool"), "error_kind": event["error_kind"],
+                                             "errors": event.get("error_details", []), "executed": False})
+            return
         if kind == "tool_call":
             step = {"tool": event["tool"], "label": event.get("label", ""), "params": event.get("params", {}),
                     "started": time.perf_counter(), "tables": []}
@@ -63,6 +69,7 @@ class WorkflowRecorder:
         return {
             "request_text": self.request_text,
             "steps": self.steps,
+            "protocol_errors": self.protocol_errors,
             "tool_sequence": self.tool_sequence(),
             "final_text": self.final_text[:1000],
             "error": self.error,

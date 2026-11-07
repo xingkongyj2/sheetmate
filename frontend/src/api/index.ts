@@ -16,7 +16,7 @@ import type {
   FormulaInfo,
   FormulaTrialInput,
   FormulaTrialResult,
-  LLMProviderId,
+  LLMConfigUpdate,
   MemoryItem,
   RecipeBrief,
   RecipeFlowData,
@@ -49,9 +49,9 @@ export const authApi = {
 // ---------------------------------------------------------------- 设置
 export const settingsApi = {
   getLLM: async () => parseLLMConfig((await http.get<unknown>('/settings/llm')).data),
-  saveLLM: async (payload: { provider_id: LLMProviderId; api_key?: string; base_url?: string; model?: string; thinking_enabled?: boolean }) =>
+  saveLLM: async (payload: LLMConfigUpdate) =>
     parseLLMConfig((await http.put<unknown>('/settings/llm', payload)).data),
-  testLLM: async (payload: { provider_id: LLMProviderId; api_key?: string; base_url?: string; model?: string; thinking_enabled?: boolean }) =>
+  testLLM: async (payload: LLMConfigUpdate) =>
     (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/llm/test', payload,
       { validateStatus: () => true })).data,
 }

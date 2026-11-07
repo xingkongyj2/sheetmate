@@ -21,11 +21,13 @@ from sheetmate.agent.prompts import (
     RECIPE_REVISE_PROMPT,
     RECIPE_SYSTEM,
 )
+from sheetmate.agent.structured import StructuredOutputError, complete_structured
 from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.profile import detect_keys, profile_columns
 from sheetmate.engine.script_store import resolve_script_code
 from sheetmate.engine.sqlutil import frame_to_text
 from sheetmate.recipe.differ import diff_to_text
+from sheetmate.recipe.response_contract import RECIPE_RESPONSE_SCHEMA, validate_recipe_response
 from sheetmate.recipe.schema import (
     OutputSheet,
     Recipe,
@@ -91,7 +93,9 @@ class RecipeLearner:
             catalog=ctx.library.catalog_text(),
             base_recipe="",
         )
-        result = await self.llm.complete_json(prompt, system=RECIPE_SYSTEM)
+        result = await complete_structured(self.llm, prompt, system=RECIPE_SYSTEM,
+                                           schema=RECIPE_RESPONSE_SCHEMA, schema_name="recipe",
+                                           validator=validate_recipe_response)
         return build_recipe(result, ctx)
 
     async def refine(self, ctx: LearnContext, recipe: Recipe, report: dict[str, Any]) -> Recipe:
@@ -103,7 +107,9 @@ class RecipeLearner:
             diff=diff_to_text(ctx.diff) if ctx.diff else "（无）",
             catalog=ctx.library.catalog_text(),
         )
-        result = await self.llm.complete_json(prompt, system=RECIPE_SYSTEM)
+        result = await complete_structured(self.llm, prompt, system=RECIPE_SYSTEM,
+                                           schema=RECIPE_RESPONSE_SCHEMA, schema_name="recipe",
+                                           validator=validate_recipe_response)
         return build_recipe(result, ctx, base=recipe)
 
     async def revise(self, ctx: LearnContext, recipe: Recipe, instruction: str) -> Recipe:
@@ -114,7 +120,9 @@ class RecipeLearner:
             memory=ctx.memory_text or "（无）",
             catalog=ctx.library.catalog_text(),
         )
-        result = await self.llm.complete_json(prompt, system=RECIPE_SYSTEM)
+        result = await complete_structured(self.llm, prompt, system=RECIPE_SYSTEM,
+                                           schema=RECIPE_RESPONSE_SCHEMA, schema_name="recipe",
+                                           validator=validate_recipe_response)
         return build_recipe(result, ctx, base=recipe)
 
     async def fix_structure(self, ctx: LearnContext, recipe: Recipe, problems: list[str]) -> Recipe:
@@ -124,7 +132,9 @@ class RecipeLearner:
             inputs=inputs_text(ctx),
             catalog=ctx.library.catalog_text(),
         )
-        result = await self.llm.complete_json(prompt, system=RECIPE_SYSTEM)
+        result = await complete_structured(self.llm, prompt, system=RECIPE_SYSTEM,
+                                           schema=RECIPE_RESPONSE_SCHEMA, schema_name="recipe",
+                                           validator=validate_recipe_response)
         return build_recipe(result, ctx, base=recipe)
 
 
@@ -193,19 +203,12 @@ def _recipe_json(recipe: Recipe) -> str:
 
 
 def build_recipe(result: dict[str, Any], ctx: LearnContext, base: Recipe | None = None) -> Recipe:
-    if not isinstance(result, dict):
-        raise ValueError("模型返回的 Recipe 不是 JSON 对象")
+    validate_recipe_response(result)
     steps = parse_steps(result, ctx.library)
     key_columns = result.get("key_columns") if isinstance(result.get("key_columns"), dict) else {}
     inputs = build_inputs(ctx, steps, key_columns or {}, base)
     outputs = parse_outputs(result, steps, ctx, base)
-    rules = []
-    for raw in result.get("validation_rules") or []:
-        if isinstance(raw, dict) and raw.get("type"):
-            try:
-                rules.append(ValidationRule(**raw))
-            except ValueError:
-                continue
+    rules = [ValidationRule(**raw) for raw in result.get("validation_rules", [])]
     metadata = dict(base.metadata) if base else {}
     alignment = result.get("alignment_report") if isinstance(result.get("alignment_report"), dict) else {}
     metadata.update(
@@ -252,8 +255,6 @@ def parse_steps(result: dict[str, Any], library: FormulaLibrary) -> list[RecipeS
     steps: list[RecipeStep] = []
     used_outputs: set[str] = set()
     for i, raw in enumerate(result.get("steps") or [], start=1):
-        if not isinstance(raw, dict):
-            continue
         formula = str(raw.get("formula") or raw.get("action") or "").strip()
         tool_kind = str(raw.get("kind") or "")
         if tool_kind == "python":
@@ -266,12 +267,7 @@ def parse_steps(result: dict[str, Any], library: FormulaLibrary) -> list[RecipeS
         while output in used_outputs:
             output = f"{output}_{i}"
         used_outputs.add(output)
-        assertions = []
-        for a in raw.get("assertions") or []:
-            try:
-                assertions.append(StepAssertion(**a))
-            except (TypeError, ValueError):
-                continue
+        assertions = [StepAssertion(**a) for a in raw.get("assertions", [])]
         kind = library.resolve(formula).kind if library.has(formula) else "builtin"
         try:
             confidence = float(raw.get("confidence", 0.8))
@@ -313,16 +309,17 @@ def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnCon
     outputs: list[OutputSheet] = []
     table_outputs = [name for step in steps for name in step_output_tables(step)]
     known = set(table_outputs)
-    for raw in result.get("output_sheets") or result.get("output_spec") or []:
-        if not isinstance(raw, dict):
-            continue
+    field = "output_sheets" if result.get("output_sheets") else "output_spec"
+    for index, raw in enumerate(result.get(field) or []):
         source = str(raw.get("source") or "")
         match = re.fullmatch(r"step_(\d+)(?:_output)?", source)
         if match:  # 兼容 SheetAgent 的 step_N_output 写法
             idx = int(match.group(1))
             source = next((s.output for s in steps if s.id == idx), source)
         if source not in known:
-            continue
+            raise StructuredOutputError([
+                {"path": f"/{field}/{index}/source", "message": "必须引用步骤实际声明的输出表"},
+            ])
         columns = raw.get("columns")
         outputs.append(OutputSheet(
             name=str(raw.get("name") or source), source=source, description=str(raw.get("description") or ""),

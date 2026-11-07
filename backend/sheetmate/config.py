@@ -14,6 +14,9 @@ from pathlib import Path
 from threading import RLock
 
 from dotenv import load_dotenv
+from pydantic import BaseModel, TypeAdapter, ValidationError
+
+from sheetmate.model_policy import LLMCapabilities, LLMMaxTokens, LLMRuntimePolicy, LLMTimeout
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 PROJECT_DIR = BACKEND_DIR.parent
@@ -145,6 +148,8 @@ class LLMSettings:
     extra_body: dict = field(default_factory=dict)
     thinking_enabled: bool = False
     provider_id: str = "deepseek"
+    capabilities: LLMCapabilities = field(default_factory=LLMCapabilities)
+    runtime_policy: LLMRuntimePolicy = field(default_factory=LLMRuntimePolicy)
 
     @property
     def thinking_supported(self) -> bool:
@@ -205,8 +210,19 @@ def _write_settings_file(data: dict) -> None:
 
 _LLM_FIELDS = {
     "api_key", "base_url", "model", "temperature", "timeout", "max_tokens", "extra_body", "thinking_enabled",
+    "capabilities", "runtime_policy",
 }
 _llm_settings_lock = RLock()
+_timeout_adapter = TypeAdapter(LLMTimeout)
+_max_tokens_adapter = TypeAdapter(LLMMaxTokens)
+
+
+def _saved_policy(model: type[BaseModel], value: object) -> BaseModel:
+    """Older files have no policy; malformed hand-edited policy cannot break settings loading."""
+    try:
+        return model.model_validate({} if value is None else value)
+    except ValidationError:
+        return model()
 
 
 def _provider_defaults(provider_id: str) -> tuple[str, str]:
@@ -257,16 +273,26 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         thinking_enabled = False
     base_url = str(overrides.get("base_url") or default_base_url).strip()
     model = str(overrides.get("model") or default_model).strip()
+    try:
+        timeout = _timeout_adapter.validate_python(float(overrides.get("timeout", 120)))
+    except (TypeError, ValueError):
+        timeout = 120.0
+    try:
+        max_tokens = _max_tokens_adapter.validate_python(overrides.get("max_tokens", 8192))
+    except (TypeError, ValueError):
+        max_tokens = 8192
     cfg = LLMSettings(
         api_key=str(overrides.get("api_key") or "").strip(),
         base_url=base_url,
         model=model,
         temperature=float(overrides.get("temperature", 0.1)),
-        timeout=float(overrides.get("timeout", 120)),
-        max_tokens=int(overrides.get("max_tokens", 8192)),
+        timeout=timeout,
+        max_tokens=max_tokens,
         extra_body=extra_body,
         thinking_enabled=thinking_enabled,
         provider_id=provider_id,
+        capabilities=_saved_policy(LLMCapabilities, overrides.get("capabilities")),
+        runtime_policy=_saved_policy(LLMRuntimePolicy, overrides.get("runtime_policy")),
     )
     cfg.thinking_enabled = thinking_enabled and cfg.thinking_supported
     return cfg
@@ -292,7 +318,9 @@ def get_llm_settings() -> LLMSettings:
 
 
 def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | None, model: str | None,
-                      thinking_enabled: bool | None = None) -> LLMSettings:
+                      thinking_enabled: bool | None = None, *, timeout: float | None = None,
+                      max_tokens: int | None = None, capabilities: LLMCapabilities | dict | None = None,
+                      runtime_policy: LLMRuntimePolicy | dict | None = None) -> LLMSettings:
     """Save one provider. None keeps a field; an empty API key clears it."""
     _provider_defaults(provider_id)  # validate before touching the file
     # FastAPI runs sync handlers in separate threads. Keep saves to different
@@ -309,7 +337,19 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
             llm["model"] = model.strip()
         if thinking_enabled is not None:
             llm["thinking_enabled"] = thinking_enabled
-        providers[provider_id] = {k: v for k, v in llm.items() if v or k == "thinking_enabled"}
+        if timeout is not None:
+            llm["timeout"] = _timeout_adapter.validate_python(timeout)
+        if max_tokens is not None:
+            llm["max_tokens"] = _max_tokens_adapter.validate_python(max_tokens)
+        current = _build_provider_settings(provider_id, llm)
+        for name, policy, schema in (("capabilities", capabilities, LLMCapabilities),
+                                     ("runtime_policy", runtime_policy, LLMRuntimePolicy)):
+            if policy is not None:
+                changes = policy.model_dump(exclude_unset=True) if isinstance(policy, BaseModel) else policy
+                validated = schema.model_validate({**getattr(current, name).model_dump(), **changes})
+                llm[name] = validated.model_dump()
+        # false and 0 are real configuration values, including disabled retries.
+        providers[provider_id] = {k: v for k, v in llm.items() if v is not None and v != ""}
         data["llm"] = {"providers": {
             current_id: providers[current_id] for current_id in LLM_PROVIDER_PRIORITY if providers.get(current_id)
         }}

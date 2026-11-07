@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sheetmate.agent.content import model_history, user_content
-from sheetmate.agent.llm import LLMError
+from sheetmate.agent.llm import LLMError, parse_json
 from sheetmate.agent.prompts import (
     AGENT_SYSTEM,
     AGENT_TABLE_LINE,
@@ -40,7 +40,10 @@ from sheetmate.agent.prompts import (
 )
 from sheetmate.agent.recovery import MAX_METHODS, METHOD_FAILURE_LIMIT, RECONSIDER_TOOL, RecoveryState
 from sheetmate.agent.scripting import ScriptRequest
-from sheetmate.agent.tools import AgentContext, Tool, ToolRegistry, ToolResult, execute_tool
+from sheetmate.agent.structured import StructuredOutputError
+from sheetmate.agent.tools import (
+    AgentContext, Tool, ToolRegistry, ToolResult, ToolSchemaError, execute_tool, tool_argument_error, validate_tool_args,
+)
 from sheetmate.engine.script_references import externalize_script_references, externalize_script_text
 from sheetmate.engine.script_store import script_params
 
@@ -67,6 +70,7 @@ class _ScriptAttempt:
 @dataclass
 class _ToolBudget:
     used: int = 0
+    protocol_retries: int = 0
 
 
 class AgentExecutor:
@@ -144,7 +148,7 @@ class AgentExecutor:
                 if event["type"] == "clarify":
                     waiting = True
                     question = event.get("question", "需要确认后才能继续")
-                if event["type"] == "tool_result":
+                if event["type"] == "tool_result" and event.get("error_kind") not in {"protocol", "schema"}:
                     if event["ok"]:
                         unresolved_tools.discard(event["tool"])
                     else:
@@ -187,14 +191,25 @@ class AgentExecutor:
         failures: dict[tuple[str, str], int] = {}
         script_attempts: dict[str, _ScriptAttempt] = {}
         budget = budget or _ToolBudget()
+        policy = getattr(getattr(self.llm, "cfg", None), "runtime_policy", None)
+        protocol_retry_limit = getattr(policy, "tool_protocol_retries", 2)
+        protocol_pending = False
         while iteration < iteration_limit:
             budget_exhausted = recovery.exhausted or budget.used >= self.max_tool_calls
             available = [tool for name, tool in tool_map.items()
                          if (name != RECONSIDER_TOOL or recovery.pending or recovery.results)
                          and (not recovery.must_switch or name == RECONSIDER_TOOL or name in _DIAGNOSTIC_TOOLS)]
-            definitions = [tool.definition() for tool in available] or None
-            # 最后一轮不再允许调用工具，保证一定有回答（TabClaw 原来是直接报「超过最大轮数」）
-            final_round = budget_exhausted or (iteration == iteration_limit - 1 and definitions is not None)
+            try:
+                definitions = [tool.definition() for tool in available] or None
+            except ToolSchemaError as exc:
+                if transcript is not None:
+                    transcript.extend(msgs[start:])
+                yield {"type": "error", "content": str(exc)}
+                return
+            # 最后一轮只允许依据已有结果回答；服务商违规返回工具时会如实终止。
+            final_round = not protocol_pending and (
+                budget_exhausted or (iteration == iteration_limit - 1 and definitions is not None)
+            )
             iteration += 1
             if final_round:
                 if budget_exhausted:
@@ -202,10 +217,10 @@ class AgentExecutor:
                 msgs.append({"role": "user", "content": FINAL_ROUND_MESSAGE})
             content, reasoning = "", ""
             calls_acc: dict[int, dict[str, str]] = {}
+            # 文件任务要先确认没有违规工具调用再发布正文；普通闲聊保留逐字流式输出。
+            # 即使 tool_choice=none，也不能提前把尚未执行的声明当作最终回答。
+            live = not tools and not protocol_pending
             suppress = False
-            # 允许工具的轮次，只有收齐本轮内容后才能确定文字属于过程还是回答。
-            # 不能根据长度提前展示，否则后到的工具调用会迫使界面撤回已显示文字。
-            live = not definitions or final_round
             try:
                 async for chunk in self.llm.stream_chat(msgs, tools=definitions, tool_choice="none" if final_round else None):
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
@@ -218,8 +233,7 @@ class AgentExecutor:
                         yield {"type": "thinking", "content": piece}
                     if delta.content:
                         content += delta.content
-                        if _TOOL_MARKER in delta.content:
-                            suppress = True
+                        suppress = suppress or _TOOL_MARKER in content
                         if live and not suppress:
                             yield {"type": "text_chunk", "content": delta.content}
                     for tc in delta.tool_calls or []:
@@ -239,7 +253,28 @@ class AgentExecutor:
             reply: dict[str, Any] = {"role": "assistant", "content": display}
             if reasoning:
                 reply["reasoning_content"] = reasoning
-            if not definitions or not calls_acc or final_round:
+            calls = [
+                {"id": slot["id"] or f"call_{idx}", "type": "function",
+                 "function": {"name": slot["name"], "arguments": slot["arguments"]}}
+                for idx, slot in sorted(calls_acc.items())
+            ]
+            if not tools:
+                calls = []  # 普通闲聊从未提供执行工具，保留正文并忽略服务商多余的调用。
+            forbidden_calls = bool(calls) and (not definitions or final_round)
+            if not calls:
+                if protocol_pending:
+                    # 参数纠错之后仍没有真实调用，不能把自由文本当作完成依据。
+                    if display:
+                        msgs.append(reply)
+                    if budget.protocol_retries >= protocol_retry_limit:
+                        if transcript is not None:
+                            transcript.extend(msgs[start:])
+                        yield {"type": "error", "content": "工具调用参数多次未通过校验，相关操作尚未执行，任务未完成。"}
+                        return
+                    budget.protocol_retries += 1
+                    iteration_limit += 1
+                    msgs.append({"role": "user", "content": _PROTOCOL_CORRECTION_MESSAGE})
+                    continue
                 if not final_round and definitions and not recovery.may_finish:
                     # 单一路径失败时先自主恢复；不同方法确实尝试后由 AI 决定是否收尾。
                     # 候选文字尚未展示，可以直接继续恢复，不改变已有内容。
@@ -255,15 +290,60 @@ class AgentExecutor:
                         transcript.append(reply)
                 yield {"type": "final_text", "content": display}
                 return
+            try:
+                errors = ([tool_argument_error(call["function"]["name"], "protocol", [
+                    {"path": "/", "message": "本轮不允许工具调用，此操作尚未执行，不能作为完成依据。"},
+                ]) for call in calls] if forbidden_calls else [_preflight_call(call, tool_map) for call in calls])
+            except ToolSchemaError as exc:
+                # 配置故障无法通过模型纠错解决；整批未执行，仍保留完整成对的对话。
+                assistant = {"role": "assistant", "content": display or None, "tool_calls": calls}
+                if reasoning:
+                    assistant["reasoning_content"] = reasoning
+                msgs.append(assistant)
+                msgs.extend({"role": "tool", "tool_call_id": call["id"], "content": str(exc)} for call in calls)
+                if transcript is not None:
+                    transcript.extend(msgs[start:])
+                yield {"type": "error", "content": str(exc)}
+                return
+            if any(error is not None for error in errors):
+                # 整批预检：即使只有一个调用结构错误，本响应也不能产生部分副作用。
+                assistant = {"role": "assistant", "content": display or None, "tool_calls": calls}
+                if reasoning:
+                    assistant["reasoning_content"] = reasoning
+                msgs.append(assistant)
+                for call, error in zip(calls, errors):
+                    name = call["function"]["name"]
+                    result = error or tool_argument_error(name, "protocol", [
+                        {"path": "/", "message": "同一响应中的其他调用未通过校验，本调用尚未执行，请一起重新发出。"},
+                    ])
+                    # 不调用 display/public_params，也不保存脚本或计入业务失败。
+                    yield {"type": "tool_call", "id": call["id"], "tool": name,
+                           "label": "核对处理参数", "params": {}, "debug_params": {},
+                           "error_kind": result.error_kind}
+                    yield {"type": "tool_result", "id": call["id"], "tool": name, "ok": False,
+                           "summary": result.public_summary, "text": result.public_text,
+                           "debug_result": result.text, "duration_ms": 0,
+                           "error_kind": result.error_kind, "error_details": result.error_details}
+                    msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})
+                if forbidden_calls:
+                    if transcript is not None:
+                        transcript.extend(msgs[start:])
+                    yield {"type": "error", "content": "模型在禁止工具调用的收尾阶段仍返回了操作请求，相关操作尚未执行，不能确认任务完成。"}
+                    return
+                if budget.protocol_retries >= protocol_retry_limit:
+                    if transcript is not None:
+                        transcript.extend(msgs[start:])
+                    yield {"type": "error", "content": "工具调用参数多次未通过校验，相关操作尚未执行，任务未完成。"}
+                    return
+                budget.protocol_retries += 1
+                protocol_pending = True
+                iteration_limit += 1
+                msgs.append({"role": "user", "content": _PROTOCOL_CORRECTION_MESSAGE})
+                continue
+            protocol_pending = False
             if display:
                 # 先确定这段文字是过程说明，再按顺序展示一次。
                 yield {"type": "note", "content": display}
-
-            calls = [
-                {"id": slot["id"] or f"call_{idx}", "type": "function",
-                 "function": {"name": slot["name"], "arguments": slot["arguments"]}}
-                for idx, slot in sorted(calls_acc.items())
-            ]
             if "delete_recipes" in tool_map:
                 calls = _coalesce_recipe_delete_calls(calls)
             assistant: dict[str, Any] = {"role": "assistant", "content": display or None, "tool_calls": calls}
@@ -437,10 +517,39 @@ def _approach_switch_message(recovery: RecoveryState) -> str:
 
 def _parse_args(raw: str) -> dict[str, Any] | None:
     try:
-        value = json.loads(raw) if raw and raw.strip() else {}
-    except json.JSONDecodeError:
+        value = parse_json(raw, allow_text=False)
+    except (ValueError, TypeError):
         return None
     return value if isinstance(value, dict) else None
+
+
+_PROTOCOL_CORRECTION_MESSAGE = (
+    "上一轮工具调用未通过协议或参数结构校验，该响应中的全部调用均未执行。"
+    "请根据各条工具反馈及工具 JSON Schema，仅修正工具名称、JSON 语法、字段、类型、枚举或必填结构，"
+    "并重新发出全部仍需执行的调用（包括同批被暂缓的调用）。"
+    "不要猜测或替换列名、金额、业务规则等语义，不要从自由文本中提取执行动作，"
+    "也不要以文字回复声称这些操作已经完成。"
+)
+
+
+def _preflight_call(call: dict[str, Any], tool_map: dict[str, Tool]) -> ToolResult | None:
+    """任何显示、脚本保存或执行副作用之前检查原始调用。"""
+    name = call["function"]["name"]
+    tool = tool_map.get(name)
+    if tool is None:
+        return tool_argument_error(name, "protocol", [
+            {"path": "/name", "message": f"未知工具，请使用可用工具：{', '.join(tool_map)}"},
+        ])
+    args = _parse_args(call["function"]["arguments"])
+    if args is None:
+        return tool_argument_error(name, "protocol", [
+            {"path": "/arguments", "message": "参数必须是完整 JSON 对象，不能包含说明文字或非对象值。"},
+        ])
+    try:
+        validate_tool_args(tool, args)
+    except StructuredOutputError as exc:
+        return tool_argument_error(name, "schema", exc.errors)
+    return None
 
 
 def _coalesce_recipe_delete_calls(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:

@@ -31,6 +31,10 @@ class ScriptRequest(BaseModel):
 def python_script_tools():
     from sheetmate.agent.tools import Tool, ToolResult, public_detail_section, table_payload
 
+    parameters = ScriptRequest.model_json_schema()
+    # 标题先由展示层归一化和截断，不把既有的可接受输入判为协议错误。
+    parameters["properties"]["title"].pop("maxLength", None)
+
     def details_for(request: ScriptRequest, ctx, tables: list[str], report: dict[str, Any], *, historical: bool = False):
         details = [public_detail_section("执行目标", [request.description])]
         inputs = []
@@ -132,7 +136,7 @@ def python_script_tools():
              "使用 openpyxl.load_workbook(files['别名']) 修改原格式副本，另存到 OUTPUT_DIR，不覆盖输入。"
              "执行错误、日志、校验和实际产物返回后可继续改代码重试；不要把代码无异常等同于满足用户目标。"
              "无网络、无安装包能力；只能访问隔离副本和运行目录，支持已有的 pandas/numpy/openpyxl 和标准处理库。",
-             ScriptRequest.model_json_schema(), stream=run, label=lambda args: "处理表格",
+             parameters, stream=run, label=lambda args: "处理表格",
              public_params=lambda args: {"description": args.get("description", "处理表格"),
                                          **({"input_tables": args["input_tables"]} if args.get("input_tables") else {}),
                                          "script_title": normalize_script_title(args.get("title") or args.get("description") or "Python 脚本"),

@@ -6,7 +6,7 @@ from dataclasses import replace
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from sheetmate.agent.llm import LLMError, test_connection
 from sheetmate.api.deps import current_user
@@ -23,6 +23,7 @@ from sheetmate.config import (
     save_llm_settings,
 )
 from sheetmate.db.models import User
+from sheetmate.model_policy import LLMCapabilities, LLMMaxTokens, LLMRuntimePolicy, LLMTimeout
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -40,16 +41,28 @@ ProviderId = Literal["deepseek", "qwen", "custom"]
 
 
 class LLMBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
     provider_id: ProviderId = "deepseek"
     api_key: str | None = None  # 不传表示保持原来的 Key
     base_url: str | None = None
     model: str | None = None
     thinking_enabled: bool | None = None
+    timeout: LLMTimeout | None = None
+    max_tokens: LLMMaxTokens | None = None
+    capabilities: LLMCapabilities | None = None
+    runtime_policy: LLMRuntimePolicy | None = None
+
+
+def _policy_view(cfg: LLMSettings) -> dict[str, Any]:
+    return {"timeout": cfg.timeout, "max_tokens": cfg.max_tokens,
+            "capabilities": cfg.capabilities.model_dump(), "runtime_policy": cfg.runtime_policy.model_dump()}
 
 
 def _provider_view(provider: dict[str, Any], cfg: LLMSettings) -> dict[str, Any]:
     return {
         **provider,
+        **_policy_view(cfg),
         "configured": cfg.configured,
         "api_key": cfg.api_key,
         "key_hint": cfg.key_hint(),
@@ -75,6 +88,7 @@ def _view() -> dict[str, Any]:
         "default_model": DEEPSEEK_DEFAULT_MODEL,
         "thinking_supported": active.thinking_supported,
         "thinking_enabled": active.thinking_enabled and active.thinking_supported,
+        **_policy_view(active),
         "providers": [_provider_view(provider, configs[provider["id"]]) for provider in PROVIDERS],
     }
 
@@ -88,7 +102,9 @@ def get_llm_config(response: Response, _: User = Depends(current_user)) -> dict[
 @router.put("/llm")
 def put_llm_config(body: LLMBody, response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
-    save_llm_settings(body.provider_id, body.api_key, body.base_url, body.model, body.thinking_enabled)
+    save_llm_settings(body.provider_id, body.api_key, body.base_url, body.model, body.thinking_enabled,
+                      timeout=body.timeout, max_tokens=body.max_tokens,
+                      capabilities=body.capabilities, runtime_policy=body.runtime_policy)
     return {"ok": True, **_view()}
 
 
@@ -100,7 +116,13 @@ async def test_llm(body: LLMBody, response: Response, _: User = Depends(current_
                   api_key=current.api_key if body.api_key is None else body.api_key.strip(),
                   base_url=current.base_url if body.base_url is None else body.base_url.strip(),
                   model=current.model if body.model is None else body.model.strip(),
-                  thinking_enabled=current.thinking_enabled if body.thinking_enabled is None else body.thinking_enabled)
+                  thinking_enabled=current.thinking_enabled if body.thinking_enabled is None else body.thinking_enabled,
+                  timeout=current.timeout if body.timeout is None else body.timeout,
+                  max_tokens=current.max_tokens if body.max_tokens is None else body.max_tokens,
+                  capabilities=current.capabilities if body.capabilities is None else current.capabilities.model_copy(
+                      update=body.capabilities.model_dump(exclude_unset=True)),
+                  runtime_policy=current.runtime_policy if body.runtime_policy is None else current.runtime_policy.model_copy(
+                      update=body.runtime_policy.model_dump(exclude_unset=True)))
     try:
         result = await test_connection(cfg)
     except LLMError as exc:

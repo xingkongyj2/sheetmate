@@ -19,12 +19,15 @@ import asyncio
 import json
 import re
 from collections.abc import AsyncIterator, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
 import pandas as pd
+from jsonschema import Draft202012Validator
 
+from sheetmate.agent.structured import StructuredOutputError, validate_payload
 from sheetmate.engine.analysis import column_stats, table_info, table_info_text, value_counts
 from sheetmate.engine.formulas import Formula, FormulaLibrary, ParamSpec
 from sheetmate.engine.runner import apply_formula
@@ -62,6 +65,8 @@ class ToolResult:
     public_text: str | None = None  # 与模型内部反馈分离；日志、调试数据无需发送到界面
     public_summary: str | None = None
     public_details: list[dict[str, Any]] | None = None  # 面向用户的对象、操作、变化及执行证据
+    error_kind: str | None = None  # protocol/schema 不属于工具内部的业务失败
+    error_details: list[dict[str, str]] | None = None
 
 
 class ToolHost(Protocol):
@@ -121,6 +126,35 @@ StreamFn = Callable[[dict[str, Any], AgentContext], AsyncIterator[Any]]
 RunFn = Callable[[dict[str, Any], AgentContext], ToolResult]
 
 
+class ToolSchemaError(ValueError):
+    """本地工具定义错误，不能要求模型通过修改业务参数修复。"""
+
+    def __init__(self, name: str, reason: str):
+        super().__init__(f"工具 `{name}` 的参数契约配置无效：{reason}。本轮操作尚未执行，请检查工具配置。")
+
+
+def _check_tool_schema(name: str, schema: dict[str, Any]) -> None:
+    def check_refs(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"$ref", "$dynamicRef", "$recursiveRef"} and (
+                    not isinstance(item, str) or not item.startswith("#")
+                ):
+                    raise ToolSchemaError(name, "Schema 引用仅允许使用 # 开头的本地引用")
+                check_refs(item)
+        elif isinstance(value, list):
+            for item in value:
+                check_refs(item)
+
+    try:
+        check_refs(schema)  # 在 jsonschema 接触引用前拒绝任何外部资源。
+        Draft202012Validator.check_schema(schema)
+    except ToolSchemaError:
+        raise
+    except Exception as exc:
+        raise ToolSchemaError(name, "JSON Schema 定义不合法") from exc
+
+
 @dataclass
 class Tool:
     name: str
@@ -132,9 +166,24 @@ class Tool:
     label: Callable[[dict[str, Any]], str] | None = None
     needs_customer: bool = False
     public_params: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    _checked_schema: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
+
+    def parameters_schema(self) -> dict[str, Any]:
+        """模型与执行器共用契约；仅默认关闭顶层的未声明字段。"""
+        if not isinstance(self.parameters, dict):
+            raise ToolSchemaError(self.name, "parameters 必须是 JSON Schema 对象")
+        if self.parameters.get("type", "object") != "object":
+            raise ToolSchemaError(self.name, "参数契约顶层 type 必须是 object")
+        schema = {**self.parameters, "type": "object"}
+        schema.setdefault("additionalProperties", False)
+        if self._checked_schema != schema:
+            _check_tool_schema(self.name, schema)
+            self._checked_schema = deepcopy(schema)
+        return schema
 
     def definition(self) -> dict[str, Any]:
-        return {"type": "function", "function": {"name": self.name, "description": self.description, "parameters": self.parameters}}
+        return {"type": "function", "function": {"name": self.name, "description": self.description,
+                                                   "parameters": self.parameters_schema()}}
 
     def display(self, args: dict[str, Any]) -> str:
         try:
@@ -145,6 +194,27 @@ class Tool:
 
 def _obj(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
     return {"type": "object", "properties": properties, "required": required or []}
+
+
+def validate_tool_args(tool: Tool, args: Any) -> dict[str, Any]:
+    """执行前验证公开契约，不转换类型，也不补全任何业务参数。"""
+    schema = tool.parameters_schema()
+    try:
+        return validate_payload(args, schema)
+    except StructuredOutputError:
+        raise
+    except Exception as exc:
+        raise ToolSchemaError(tool.name, "参数契约无法完成校验，请检查本地引用和约束配置") from exc
+
+
+def tool_argument_error(name: str, error_kind: str, errors: list[dict[str, str]]) -> ToolResult:
+    """同一错误协议供流式执行器和直接工具调用使用。"""
+    payload = {"error_kind": error_kind, "errors": errors, "executed": False}
+    return ToolResult(
+        f"工具 `{name}` 尚未执行。请按工具定义修正调用结构：\n" + json.dumps(payload, ensure_ascii=False),
+        ok=False, summary="调用参数未通过校验，尚未执行", error_kind=error_kind, error_details=errors,
+        public_summary="正在核对处理参数", public_text="调用参数尚未通过校验，本次操作未执行。",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -984,7 +1054,7 @@ def _static_tools() -> list[Tool]:
         Tool("load_file", "把一个文件加载到工作区（每个 sheet 一张表）。",
              _obj({"file_id": _STR}, ["file_id"]), both, run=_tool_load_file, label=lambda a: "加载文件"),
         Tool("export_excel", "把一张或多张已核对的结果表导出成 Excel，由文件卡片提供查看和下载。正式明细或较大结果使用此工具交付，不把完整数据粘贴到回复中；已有交付文件不重复导出。",
-             _obj({"sheets": {"type": "array", "items": _obj({"table": _STR, "sheet_name": _STR}, ["table"])},
+             _obj({"sheets": {"type": "array", "items": {"anyOf": [_STR, _obj({"table": _STR, "sheet_name": _STR}, ["table"])]}},
                    "filename": {**_STR, "description": "文件名（不含扩展名）"}}, ["sheets"]),
              analyze, run=_tool_export_excel, label=lambda a: f"导出 Excel · {a.get('filename', '')}"),
         Tool("build_recipe",
@@ -1070,6 +1140,11 @@ class ToolRegistry:
 
 async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> AsyncIterator[Any]:
     """统一执行：同步工具放线程里跑；流式工具逐个转发事件。最后一定产出一个 ToolResult。"""
+    try:
+        args = validate_tool_args(tool, args)
+    except StructuredOutputError as exc:
+        yield tool_argument_error(tool.name, "schema", exc.errors)
+        return
     try:
         if tool.stream is not None:
             got_result = False

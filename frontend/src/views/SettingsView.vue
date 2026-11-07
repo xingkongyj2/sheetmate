@@ -5,7 +5,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 
 import { settingsApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { LLMConfig, LLMProviderConfig, LLMProviderId } from '@/api/types'
+import type { LLMAdvancedConfig, LLMConfig, LLMProviderConfig, LLMProviderId } from '@/api/types'
 import { useToast } from '@/composables/useToast'
 
 const toast = useToast()
@@ -20,7 +20,7 @@ const savingProvider = ref<LLMProviderId | null>(null)
 const testingProvider = ref<LLMProviderId | null>(null)
 const testResults = reactive<Partial<Record<LLMProviderId, { ok: boolean; text: string } | null>>>({})
 
-interface ProviderDraft {
+interface ProviderDraft extends LLMAdvancedConfig {
   api_key: string
   base_url: string
   model: string
@@ -56,6 +56,10 @@ function draftFrom(provider: LLMProviderConfig): ProviderDraft {
     base_url: provider.base_url,
     model: provider.model || '',
     thinking_enabled: provider.thinking_enabled,
+    timeout: provider.timeout,
+    max_tokens: provider.max_tokens,
+    capabilities: { ...provider.capabilities },
+    runtime_policy: { ...provider.runtime_policy },
   }
 }
 
@@ -90,7 +94,19 @@ function isThinkingSupported(provider: LLMProviderConfig) {
 
 function isComplete(provider: LLMProviderConfig) {
   const draft = drafts[provider.id]
-  return !!draft?.api_key.trim() && !!draft.base_url.trim() && !!draft.model.trim()
+  return !!draft?.api_key.trim() && !!draft.base_url.trim() && !!draft.model.trim() && !validationMessage(provider)
+}
+
+function validationMessage(provider: LLMProviderConfig): string {
+  const draft = drafts[provider.id]
+  if (!draft) return ''
+  const numberInRange = (value: number, min: number, max: number, integer = false) =>
+    typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isInteger(value))
+  if (!numberInRange(draft.timeout, 5, 900)) return '请求超时需为 5–900 秒。'
+  if (!numberInRange(draft.max_tokens, 1, 131072, true)) return '输出 Token 上限需为 1–131072 的整数。'
+  if (!numberInRange(draft.runtime_policy.structured_retries, 0, 3, true)) return '结构输出纠错次数需为 0–3 的整数。'
+  if (!numberInRange(draft.runtime_policy.tool_protocol_retries, 0, 5, true)) return '工具调用纠错次数需为 0–5 的整数。'
+  return ''
 }
 
 function resetTestResult(id: LLMProviderId) {
@@ -115,6 +131,10 @@ async function save(provider: LLMProviderConfig) {
       base_url: draft.base_url,
       model: draft.model,
       thinking_enabled: isThinkingSupported(provider) && draft.thinking_enabled,
+      timeout: draft.timeout,
+      max_tokens: draft.max_tokens,
+      capabilities: { ...draft.capabilities },
+      runtime_policy: { ...draft.runtime_policy },
     })
     applyConfig(next, provider.id)
     resetTestResult(provider.id)
@@ -139,6 +159,10 @@ async function test(provider: LLMProviderConfig) {
       base_url: draft.base_url,
       model: draft.model,
       thinking_enabled: isThinkingSupported(provider) && draft.thinking_enabled,
+      timeout: draft.timeout,
+      max_tokens: draft.max_tokens,
+      capabilities: { ...draft.capabilities },
+      runtime_policy: { ...draft.runtime_policy },
     })
     testResults[provider.id] = result.ok
       ? { ok: true, text: '连接成功' }
@@ -266,6 +290,47 @@ async function test(provider: LLMProviderConfig) {
                   @change="resetTestResult(provider.id)"
                 />
               </label>
+
+              <details class="rounded-xl border border-line px-4 py-3">
+                <summary class="cursor-pointer text-sm font-medium">高级配置</summary>
+                <div class="mt-4 space-y-4">
+                  <label class="block">
+                    <span class="mb-1.5 block text-xs font-medium text-mute">结构输出协议</span>
+                    <select v-model="drafts[provider.id]!.capabilities.structured_output" class="field"
+                      :disabled="anyBusy" @change="resetTestResult(provider.id)">
+                      <option value="auto">自动兼容（默认）</option>
+                      <option value="json_schema">优先 JSON Schema</option>
+                      <option value="json_object">优先 JSON 模式</option>
+                      <option value="prompt">仅提示词</option>
+                    </select>
+                    <p class="mt-1.5 text-xs leading-5 text-faint">默认优先使用 JSON 模式；服务明确不支持时自动改用提示词约束。已知支持 Schema 的服务可优先使用 JSON Schema。</p>
+                  </label>
+                  <div class="grid gap-4 sm:grid-cols-2">
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">请求超时（秒）</span>
+                      <input v-model.number="drafts[provider.id]!.timeout" type="number" min="5" max="900" step="1"
+                        class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                    </label>
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">输出 Token 上限</span>
+                      <input v-model.number="drafts[provider.id]!.max_tokens" type="number" min="1" max="131072" step="1"
+                        class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                    </label>
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">结构输出纠错次数</span>
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.structured_retries" type="number" min="0" max="3" step="1"
+                        class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                    </label>
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">工具调用纠错次数</span>
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.tool_protocol_retries" type="number" min="0" max="5" step="1"
+                        class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                    </label>
+                  </div>
+                  <p class="text-xs leading-5 text-faint">纠错次数为 0 时关闭对应重试。超时和输出上限也需符合模型服务的限制。</p>
+                  <p v-if="validationMessage(provider)" class="text-xs text-error" role="alert">{{ validationMessage(provider) }}</p>
+                </div>
+              </details>
 
               <div
                 v-if="testResults[provider.id]"
