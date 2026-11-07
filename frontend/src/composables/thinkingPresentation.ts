@@ -1,7 +1,7 @@
 /**
  * 思考模式的展示：输入框上方的任务清单、回答下面的核对小标识。
  *
- * 都是纯函数：规模（要不要列清单）由后端决定并写在 plan_start.checklist 里，这里只负责把数据整理成界面要的样子。
+ * 都是纯函数：AI 根据展示整体进度的价值决定要不要列清单，后端把决定写在 plan_start.checklist 里，与步骤数无关；这里只负责整理界面数据。
  */
 import type { AuditResult, PlanStatus, UiMessage } from './chatModel'
 import { userFacingText } from './timelinePresentation'
@@ -23,7 +23,7 @@ export interface ChecklistSummary {
   tone: ChecklistTone
 }
 
-/** 要在输入框上方列任务清单的那条助手消息的各项；简单任务（后端没有要求列清单）返回空数组。 */
+/** 要在输入框上方列任务清单的那条助手消息的各项；后端没有要求展示时返回空数组。 */
 export function checklistItems(message: UiMessage | undefined): ChecklistItem[] {
   if (!message || message.role !== 'assistant' || !message.checklist) return []
   return message.timeline.flatMap((item): ChecklistItem[] => item.kind === 'plan'

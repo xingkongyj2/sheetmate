@@ -153,7 +153,7 @@ export interface UiMessage {
   events?: AgentEvent[]
   /** 思考模式：此刻在做什么（临时，空档里显示，任何新事件都会让它消失）。 */
   activity?: string
-  /** 思考模式：计划比较大，在输入框上方列任务清单；简单任务不列。 */
+  /** 思考模式：AI 决定是否在输入框上方列任务清单，与步骤数无关。 */
   checklist?: boolean
   /** 思考模式：回答核对的结果。 */
   audit?: AuditResult
@@ -675,7 +675,7 @@ function appendBlocks(msg: UiMessage, e: AgentEvent, timelineStart: number, arti
   }
   if (e.type === 'step_start') {
     closeBlock(msg)
-    if (e.quiet) return // 思考模式：这一项已经用一句话和清单告诉用户了，不再另起一行折叠记录
+    if (e.quiet) return // 思考模式：本项由正文汇报，不再另起一行折叠记录
     const plan = msg.timeline.find((item) => item.kind === 'plan' && item.num === e.step_num)
     const block = processBlock(msg, e.description || (plan?.kind === 'plan' ? plan.description : '处理过程'))
     if (plan) block.itemKeys.push(plan.key)

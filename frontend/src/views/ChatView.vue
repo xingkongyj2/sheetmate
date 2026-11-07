@@ -74,7 +74,7 @@ const selectedMessage = computed(() => {
   return assistants.find((m) => m.key === selectedKey.value) ?? assistants[assistants.length - 1] ?? null
 })
 const customer = computed(() => detail.value?.customer ?? null)
-// 比较大的任务才在输入框上方列任务清单（由后端按计划规模决定）；简单任务没有
+// AI 决定是否展示任务清单，后端通过事件传递决定
 const checklist = computed(() => {
   const last = messages.value.at(-1)
   const items = checklistItems(last)

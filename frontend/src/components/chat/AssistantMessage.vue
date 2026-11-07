@@ -79,6 +79,13 @@ const { groups: displayGroups, pending: revealing } = useProgressiveReply(
   (props.message.streaming || props.message.id == null) && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
 )
 const typing = computed(() => props.message.streaming || revealing.value)
+const activity = computed(() => {
+  if (!props.message.streaming || props.message.error) return ''
+  const current = props.message.activity?.trim()
+  if (current) return current
+  const hasVisibleContent = displayGroups.value.some((group) => group.kind === 'process' || !!group.text.trim())
+  return hasVisibleContent ? '' : '正在思考'
+})
 const audit = computed(() => auditLine(props.message.audit))
 const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
 
@@ -150,9 +157,9 @@ onBeforeUnmount(() => {
       <template v-for="group in displayGroups" :key="group.key">
         <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">
           <details class="assistant-process group/process">
-            <summary class="flex w-fit max-w-full cursor-pointer list-none items-center gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden" :title="processHeaders.get(group.key)?.title">
-              <LoaderCircle v-if="processHeaders.get(group.key)?.status === 'running'" class="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
-              <ChevronRight v-else class="size-3.5 shrink-0 transition group-open/process:rotate-90" />
+            <summary class="flex w-fit max-w-full cursor-pointer list-none items-start gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden" :title="processHeaders.get(group.key)?.title">
+              <LoaderCircle v-if="processHeaders.get(group.key)?.status === 'running'" class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+              <ChevronRight v-else class="mt-[3px] size-3.5 shrink-0 transition group-open/process:rotate-90" />
               <span class="min-w-0 break-words [overflow-wrap:anywhere]" :class="{ 'process-title-running': processHeaders.get(group.key)?.status === 'running', 'text-error': processHeaders.get(group.key)?.status === 'error' }" aria-live="polite" aria-atomic="true">{{ processHeaders.get(group.key)?.title }}</span>
               <span v-if="processHeaders.get(group.key)?.status && !['running', 'done'].includes(processHeaders.get(group.key)!.status)" class="shrink-0 text-[11px]" :class="processHeaders.get(group.key)?.status === 'error' ? 'text-error' : 'text-faint'">{{ PLAN_STATUS_LABELS[processHeaders.get(group.key)!.status] }}</span>
             </summary>
@@ -168,10 +175,10 @@ onBeforeUnmount(() => {
         <MarkdownView v-else-if="group.text" :source="group.text" :streaming="!group.closed && typing" stable />
       </template>
 
-      <!-- 思考模式：此刻在做什么。只在没有别的变化的空档里出现（后端用 activity 事件告诉界面），别的事情一发生就消失。 -->
-      <div v-if="message.streaming && message.activity" class="flex items-center gap-1.5 py-0.5 text-[13px] text-mute" aria-live="polite" data-testid="activity">
-        <LoaderCircle class="size-3.5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
-        <span class="process-title-running min-w-0 break-words [overflow-wrap:anywhere]">{{ message.activity }}…</span>
+      <!-- 发送后立即显示等待状态；后端活动提示优先，实际正文或处理进度出现后替换通用提示。 -->
+      <div v-if="activity" class="assistant-activity flex items-start gap-1.5 py-0.5 text-[13px] leading-5 text-mute" role="status" aria-live="polite" data-testid="activity">
+        <LoaderCircle class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+        <span class="process-title-running min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ activity }}…</span>
       </div>
 
       <!-- 思考模式：回答发出前对照执行结果核对的结果，放在回答下面；等回答显示完再出现。 -->
@@ -270,6 +277,9 @@ onBeforeUnmount(() => {
   --assistant-avatar-size: 3rem;
 }
 
+/* 首行文字中心与头像中心对齐；多行内容的后续行自然向下排。 */
+.assistant-content > .assistant-activity:first-child,
+.assistant-stage:first-child > .assistant-process > summary,
 .assistant-content > :deep(.prose-sm:first-child) {
   padding-top: max(0px, calc((var(--assistant-avatar-size) - 1lh) / 2));
 }

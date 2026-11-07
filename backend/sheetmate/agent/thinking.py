@@ -13,7 +13,7 @@
 给用户看的内容像同事边做边讲，不是「第 N 步」的报告：
 - 开场白：对需求的理解、默认口径、数据里要留意的、计划审查的结果；
 - 每一项开始前一句话说明现在要做什么（两项及以上），做完一两句汇报，再跟一行核对结果（引用块）；
-- 计划有四项及以上才算比较大的任务，才在输入框上方列任务清单（plan_start.checklist），最后回顾每一项；简单任务不列；
+- 规划和审查由 AI 判断展示整体进度是否有价值（show_plan），与步骤数无关；选择展示时在输入框上方列任务清单（plan_start.checklist），最后回顾每一项，否则保持简洁；
 - 过程中大模型在忙、界面上没有别的变化时，用 activity 事件告诉用户当前在做什么（临时状态，不存库）；
 - 回答核对的结果（audit_done）是结构化事件，界面在回答下面显示为一行小标识，不追加进回答文字。
 所有辅助调用都有时限、都可以降级：超时、调用失败或返回无法解析的内容时，退回到更简单的做法，
@@ -332,13 +332,15 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     if intro:
         yield _note(intro)
     total = len(plan.steps)
-    # checklist：计划比较大才在输入框上方列任务清单；规模由后端决定，界面只管显示
+    # checklist 沿用事件字段名，其值来自 AI 的 show_plan 展示决定，界面只管显示
     yield {"type": "plan_start", "title": plan.title, "checklist": plan.checklist,
            "steps": [{"id": s["id"], "description": s["description"]} for s in plan.steps]}
 
     # ---- 3. 逐项执行并核对
     tools = executor.registry.for_context(ctx)
-    seen = "用户已经看到这份大纲，每一项开始时也会看到一句说明。" if plan.narrated else "用户还没有看到计划的细节。"
+    seen = "用户已经看到任务清单中的计划大纲。" if plan.checklist else "本轮不展示任务清单，不必额外复述完整计划。"
+    if plan.narrated:
+        seen += "每一项开始时也会看到一句说明。"
     conversation: list[dict[str, Any]] = [
         {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}, *model_history(history[-12:]),
         {"role": "user", "content": user_content(THINK_TASK_MESSAGE.format(message=message, plan=plan.overview(), seen=seen), ctx.image_parts)},
@@ -446,7 +448,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     yield _activity("正在整理结论")
     conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}
     record = check_record(plan, ledger)
-    template = THINK_REFLECT_MESSAGE if plan.checklist else THINK_REFLECT_MESSAGE_SMALL  # 大任务回顾每一项，简单任务保持简洁
+    template = THINK_REFLECT_MESSAGE if plan.checklist else THINK_REFLECT_MESSAGE_SMALL  # 过程回顾沿用计划展示决定
     reflect = template.format(message=message, total=executed, record=record)
     if executed < total:
         reflect += f"\n工具调用预算已用尽；计划中还有 {total - executed} 个步骤未执行，不得称已完成。"

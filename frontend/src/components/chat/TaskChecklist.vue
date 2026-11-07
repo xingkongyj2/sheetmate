@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
- * 任务清单：比较大的任务才会出现，挂在输入框上方的「抽屉」里。
+ * 任务清单：AI 选择展示整体进度时出现，挂在输入框上方的「抽屉」里。
  * 进行中的一项转圈，做完一项打一个勾；任务进行时展开，结束后自动收成一行，随时可以点开看。
- * 简单任务（后端没有要求列清单）不渲染这个组件。
+ * 后端没有要求展示清单时不渲染这个组件。
  */
 import { Check, ChevronDown, CircleAlert, CircleHelp, ListChecks, LoaderCircle, Pause } from '@lucide/vue'
 import { computed, nextTick, ref, watch } from 'vue'

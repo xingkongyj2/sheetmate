@@ -3,8 +3,8 @@
 - data_brief：规划前的数据勘察——每张表真实的列类型、空值率、样本、候选主键和重复键（只读、不用大模型）
 - make_plan / review_plan：思考模式的计划。先按数据画像起草（理解、默认口径、风险、每一项的说明和验收标准），
   再让大模型审查一轮，补遗漏、纠顺序、核对列名；全程不需要用户确认
-- 计划的规模决定展示多少：只有一项的不多说；两项以上每项开始时向用户说一句现在要做什么；
-  四项及以上才算「比较大的任务」，才在输入框上方列任务清单，并在最后回顾每一项
+- 规划模型通过 show_plan 判断是否向用户展示任务清单，审查模型可以调整该判断；
+  展示清单时在最后回顾每一项，不再按步骤数量决定是否展示
 - check_clarification：判断需求是否有真正的歧义，有就给选项（TabClaw 保留，/clarify 接口使用）
 
 规划和审查都可以降级：大模型调用失败或返回的内容无法使用时，退回兜底计划 / 保留原计划，不会让整次请求失败。
@@ -28,7 +28,6 @@ from sheetmate.engine.analysis import table_info
 from sheetmate.engine.sqlutil import frame_to_text
 
 MAX_PLAN_STEPS = 8
-CHECKLIST_MIN_STEPS = 4  # 计划有这么多项及以上才算比较大的任务：才在输入框上方列清单、最后回顾每一项
 PLAN_TIMEOUT = 120.0  # 起草计划最多等多久；超时按兜底计划继续
 REVIEW_TIMEOUT = 90.0  # 审查计划最多等多久；超时保留原计划
 _ROLE_TAGS = {"expected": "，人工做好的期望结果", "derived": "，分析结果", "result": "，流程产出"}
@@ -109,6 +108,7 @@ class Plan:
     assumptions: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     steps: list[dict[str, Any]] = field(default_factory=list)  # {"id", "description", "check"}
+    show_plan: bool = False  # 规划/审查模型判断是否展示任务清单，未给出有效判断时隐藏
     reviewed: bool = False  # 审查确实执行并给出了结论
     changes: list[str] = field(default_factory=list)  # 审查时发现并修订的问题
     fallback: bool = False  # 规划失败后的兜底计划
@@ -116,7 +116,7 @@ class Plan:
 
     def to_json(self) -> dict[str, Any]:
         return {"title": self.title, "understanding": self.understanding, "assumptions": self.assumptions,
-                "risks": self.risks, "steps": self.steps}
+                "risks": self.risks, "steps": self.steps, "show_plan": self.show_plan}
 
     def overview(self) -> str:
         """给执行助手看的整份计划，让它知道每一步在全局里的位置。"""
@@ -132,7 +132,7 @@ class Plan:
         lines.append("步骤：\n" + "\n".join(steps))
         return "\n".join(lines)
 
-    # ---- 规模：决定展示多少（简单任务不要列清单、不要啰嗦）
+    # ---- 展示：任务清单由模型决定，每项说明保留简洁表达
     @property
     def narrated(self) -> bool:
         """两项以上、且不是兜底计划：每一项开始时向用户说一句现在要做什么。只有一项时说了也只是重复需求。"""
@@ -140,8 +140,8 @@ class Plan:
 
     @property
     def checklist(self) -> bool:
-        """比较大的任务才在输入框上方列任务清单（做完一项勾一项），并在最后回顾每一项。"""
-        return len(self.steps) >= CHECKLIST_MIN_STEPS and not self.fallback
+        """按模型判断展示任务清单和最终回顾；规划失败的兜底计划不展示。"""
+        return self.show_plan and not self.fallback
 
     @property
     def worth_reviewing(self) -> bool:
@@ -175,7 +175,7 @@ class Plan:
 
     def intro(self) -> str:
         """开场白（给用户看）：怎么理解的需求、按什么口径做、数据里要留意什么、计划审查的结果。
-        具体做哪几项由输入框上方的清单展示（大任务），这里不再重复列一遍；没有内容时返回空字符串。"""
+        模型决定展示清单时，具体做哪几项由输入框上方的清单展示，这里不再重复列一遍；没有内容时返回空字符串。"""
         if self.fallback:
             why = public_sentence(self.reason, 80)
             return f"没能制定详细计划{f'（{why}）' if why else ''}，先按通用步骤处理。"
@@ -202,7 +202,7 @@ _CONNECTOR = re.compile(r"^(先|首先|然后|接着|接下来|再|之后|随后
 
 
 def plan_from_steps(steps: list[dict[str, Any]]) -> Plan:
-    """调用方自带步骤（API 的 plan_steps）时，仍然走思考模式的执行和核对。"""
+    """调用方自带步骤时仍执行和核对；跳过了模型规划，没有展示判断时默认隐藏清单。"""
     return Plan(steps=_clean_steps(steps) or [{"id": 1, "description": "完成需求", "check": ""}])
 
 
@@ -254,6 +254,7 @@ def _parse_plan(result: Any) -> Plan | None:
         assumptions=clean_list(result.get("assumptions"), 6),
         risks=clean_list(result.get("risks"), 6),
         steps=steps,
+        show_plan=result.get("show_plan") is True,
     )
 
 
@@ -315,6 +316,8 @@ async def review_plan(llm: Any, ctx: AgentContext, message: str, plan: Plan, bri
         return plan
     issues = clean_list(result.get("issues"), 8, 240)
     if verdict == "ok":
+        if isinstance(result.get("show_plan"), bool):
+            plan.show_plan = result["show_plan"]
         plan.reviewed = True
         return plan
     revised = _parse_plan(result)
@@ -328,6 +331,8 @@ async def review_plan(llm: Any, ctx: AgentContext, message: str, plan: Plan, bri
         revised.assumptions = plan.assumptions
     if not isinstance(result.get("risks"), list):
         revised.risks = plan.risks
+    if not isinstance(result.get("show_plan"), bool):
+        revised.show_plan = plan.show_plan
     revised.reviewed = True
     revised.changes = issues
     return revised
