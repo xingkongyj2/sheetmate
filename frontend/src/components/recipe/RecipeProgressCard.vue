@@ -93,19 +93,14 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
   <div class="card-soft min-w-0 animate-rise overflow-hidden">
     <!-- 标题 -->
     <div class="flex items-center gap-3 border-b border-line bg-paper/60 px-4 py-3">
-      <FunObject kind="blocks" :size="30" />
-      <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-2">
-          <span class="truncate text-[14px] font-semibold">{{ progress.recipeName || progress.saved?.name || MODE_LABEL[progress.mode] }}</span>
-          <span v-if="progress.deleted" class="tag">流程已删除</span>
-          <span v-else-if="progress.saved" class="tag">v{{ progress.saved.version }}</span>
-          <span v-else-if="progress.mode === 'replay' && progress.recipeVersion" class="tag">v{{ progress.recipeVersion }}</span>
-        </div>
-        <div class="text-xs text-mute">
-          {{ MODE_LABEL[progress.mode] }}<template v-if="progress.round > 1"> · 第 {{ progress.round }} 轮</template>
-        </div>
+      <FunObject kind="blocks" :size="30" class="shrink-0" />
+      <div class="flex min-w-0 flex-1 items-center gap-2">
+        <span class="truncate text-[14px] font-semibold leading-6">{{ progress.saved?.name || progress.recipeName || MODE_LABEL[progress.mode] }}</span>
+        <span v-if="progress.deleted" class="tag shrink-0 whitespace-nowrap">流程已删除</span>
+        <span v-else-if="progress.saved" class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ progress.saved.version }}</span>
+        <span v-else-if="progress.mode === 'replay' && progress.recipeVersion" class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ progress.recipeVersion }}</span>
       </div>
-      <StatusPill :status="pillStatus" :label="STATUS_LABEL[progress.status]" />
+      <StatusPill :status="pillStatus" :label="STATUS_LABEL[progress.status]" class="shrink-0 whitespace-nowrap" />
     </div>
 
     <div v-if="flow || busy || progress.runSummary || progress.questions?.length || failure || hasDetails" class="space-y-3 px-4 py-3.5">
@@ -183,15 +178,12 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
     </div>
 
     <!-- 操作 -->
-    <div v-if="resultFiles.length || progress.saved" class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
+    <div v-if="resultFiles.length || (progress.saved && customerId)" class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
       <div v-for="file in resultFiles" :key="file.file_id" class="flex max-w-full flex-wrap items-center gap-2">
         <span v-if="resultFiles.length > 1" class="min-w-0 break-words text-xs text-mute">{{ file.filename }}</span>
         <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果</button>
         <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载结果 Excel</a>
       </div>
-      <span v-if="progress.saved" class="flex items-center gap-1.5 text-xs text-mute">
-        流程已保存为 v{{ progress.saved.version }}
-      </span>
       <RouterLink v-if="progress.saved && customerId" :to="{ name: 'customer', params: { id: customerId }, query: { tab: 'recipes' } }" class="btn-text ml-auto">
         在客户页查看<ExternalLink class="size-3.5" />
       </RouterLink>

@@ -1,4 +1,5 @@
-import type { FileInfo, TableBrief } from '@/api/types'
+import type { FileInfo, RecipeBrief, TableBrief } from '@/api/types'
+import type { RecipeProgress } from './chatModel'
 
 function timestamp(value?: string | null): number {
   const time = value ? Date.parse(value) : NaN
@@ -19,6 +20,18 @@ export function executionFileGroups(files: FileInfo[]) {
 
 export function executionTables(tables: TableBrief[]): TableBrief[] {
   return chronological(tables.filter((table) => table.source === 'computed'))
+}
+
+/** Keep run details and saved metadata together when they describe the same recipe version. */
+export function executionRecipeSections(recipes: RecipeBrief[], progresses: RecipeProgress[]) {
+  const progressSections = progresses.map((progress) => {
+    const recipeId = progress.saved?.recipe_id ?? progress.recipeId ?? progress.recipe?.id
+    const version = progress.deleted ? undefined : progress.saved?.version ?? progress.recipeVersion ?? progress.recipe?.version
+    const recipe = progress.deleted ? undefined : recipes.find((item) => item.recipe_id === recipeId && item.version === version)
+    return { progress, recipe, version }
+  })
+  const represented = new Set(progressSections.map((section) => section.recipe))
+  return { progresses: progressSections, saved: recipes.filter((recipe) => !represented.has(recipe)) }
 }
 
 export function conversationTables(tables: TableBrief[], conversationId: string): TableBrief[] {
