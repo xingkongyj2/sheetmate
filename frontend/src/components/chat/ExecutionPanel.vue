@@ -1,21 +1,16 @@
 <script setup lang="ts">
 /** 客户/会话资源与单次回答的处理流程；表名按来源工作区定位。 */
 import { Download, Eye, FileCheck2, FileSpreadsheet, PanelRightClose, Trash2 } from '@lucide/vue'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted } from 'vue'
 
 import { conversationApi } from '@/api'
 import type { ConversationDetail, FileInfo, RecipeBrief, RecipeFlowData, TableBrief } from '@/api/types'
-import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
-import ScriptFile from '@/components/common/ScriptFile.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
-import StepDetail from '@/components/recipe/StepDetail.vue'
 import VerifyBadge from '@/components/recipe/VerifyBadge.vue'
-import type { RecipeProgress, StepState, UiMessage } from '@/composables/chatModel'
+import type { RecipeProgress, UiMessage } from '@/composables/chatModel'
 import { executionFileGroups, executionRecipeSections, executionTableKey, executionTables } from '@/composables/executionPresentation'
 import { progressFlow } from '@/composables/recipeFlow'
-import { recipeToolLabel } from '@/composables/recipeTools'
-import { scriptReferences } from '@/composables/scriptPresentation'
 import { useConfirm } from '@/composables/useConfirm'
 
 type Tab = 'recipes' | 'files' | 'data'
@@ -30,8 +25,6 @@ const emit = defineEmits<{
 }>()
 const { confirmDelete } = useConfirm()
 const tab = computed({ get: () => props.activeTab, set: (value: Tab) => emit('update:activeTab', value) })
-const selected = ref<{ progress: RecipeProgress; step: StepState } | null>(null)
-const savedStep = ref<ConversationDetail['recipes'][number]['steps'][number] | null>(null)
 const tabs = [
   { key: 'recipes', label: '流程' }, { key: 'files', label: '文件' },
   { key: 'data', label: '数据' },
@@ -65,20 +58,14 @@ function stepFlow(recipe: RecipeBrief): RecipeFlowData {
 function progressRecipeFlow(progress: RecipeProgress, recipe?: RecipeBrief): RecipeFlowData {
   return progress.flow || progress.saved?.flow || progress.steps.length || !recipe ? progressFlow(progress) : stepFlow(recipe)
 }
-function selectProgressStep(progress: RecipeProgress, recipe: RecipeBrief | undefined, id: number) {
-  const step = progress.steps.find((item) => item.step_id === id)
-  if (step) selected.value = { progress, step }
-  else savedStep.value = recipe?.steps.find((item) => item.id === id) ?? progressRecipeFlow(progress, recipe).steps.find((item) => item.id === id) ?? null
-}
 function progressStatus(progress: RecipeProgress): string {
   if (progress.status === 'failed' || progress.failed || ['failed', 'escalated'].includes(progress.runStatus ?? '')) return 'failed'
   if (progress.status !== 'done') return 'running'
   return progress.runStatus === 'warning' ? 'warning' : 'success'
 }
 function onKey(event: KeyboardEvent) {
-  if (event.key === 'Escape' && !selected.value && !savedStep.value && !document.querySelector('[role="dialog"]')) emit('close')
+  if (event.key === 'Escape' && !document.querySelector('[role="dialog"]')) emit('close')
 }
-watch(() => props.message?.key, () => { selected.value = null })
 onMounted(() => window.addEventListener('keydown', onKey))
 onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
@@ -124,7 +111,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               v-if="progress.flow || progress.saved?.flow || progress.steps.length || recipe"
               :flow="progressRecipeFlow(progress, recipe)"
               :states="progress.steps"
-              @select="(id) => selectProgressStep(progress, recipe, id)"
+              :context="{
+                title: recipe?.name || progress.saved?.name || progress.recipeName,
+                recipeId: progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id,
+                version, recipe: recipe?.recipe || progress.recipe, runId: progress.runId,
+                customerId: recipe?.customer_id || detail?.customer?.id, conversationId: detail?.id,
+                files: detail?.files, resultFiles: progress.files || (progress.file ? [progress.file] : []),
+                running: !['done', 'failed'].includes(progress.status), failed: progressStatus(progress) === 'failed', deleted: progress.deleted,
+              }"
+              @changed="emit('refresh')"
             />
             <div v-if="progress.verify || progress.validation || progress.failed" class="mt-4 space-y-3">
               <VerifyBadge v-if="progress.verify" :report="progress.verify" :rounds="progress.verifyHistory.length" />
@@ -142,7 +137,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           </header>
           <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
             <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>
-            <RecipeFlow :flow="stepFlow(recipe)" @select="(id) => (savedStep = recipe.steps.find((step) => step.id === id) ?? null)" />
+            <RecipeFlow :flow="stepFlow(recipe)" :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id || detail?.id, recipe: recipe.recipe, files: detail?.files }" @changed="emit('refresh')" />
             <RouterLink v-if="recipe.customer_id" :to="{ name: 'customer', params: { id: recipe.customer_id }, query: { tab: 'recipes' } }" class="btn-text -ml-2 mt-3 text-xs">在客户页查看与重复执行 →</RouterLink>
           </div>
         </article>
@@ -182,12 +177,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </template>
 
     </div>
-    <StepDetail v-if="selected" :step-id="selected.step.step_id" :name="selected.step.name" :formula-name="selected.step.formula_name" :formula="selected.step.formula" :kind="selected.step.kind" :formula-kind="selected.step.formula_kind" :description="selected.step.description" :status="selected.step.status" :report="selected.step.report" :run-id="selected.progress.runId" :error="selected.step.error" :repairs="selected.step.repairs" @close="selected = null" />
-    <BaseModal v-if="savedStep" :title="`第 ${savedStep.id} 步 · ${savedStep.name}`" width="max-w-lg" @close="savedStep = null">
-      <p v-if="savedStep.description" class="text-sm leading-7">{{ savedStep.description }}</p>
-      <p v-if="savedStep.formula" class="mt-3 text-xs text-mute">{{ recipeToolLabel(savedStep) }} · <code class="font-mono">{{ savedStep.formula }}</code></p>
-      <div class="mt-3"><ScriptFile v-for="script in scriptReferences(savedStep)" :key="script.script_id" :script="script" /></div>
-    </BaseModal>
   </aside>
 </template>
 

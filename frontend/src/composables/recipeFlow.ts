@@ -46,7 +46,7 @@ export function progressFlow(progress: RecipeProgress): RecipeFlowData {
     outputs: snapshot?.outputs ?? (progress.outputs ?? []).map((output) => ({ name: output.sheet, source: '' })),
     output_files: delivered.length ? delivered.map((file) => {
       const declared = files?.find((item) => item.name === file.filename)
-      return declared ?? { name: file.filename, ref: '', source: '', sources: [] }
+      return { ...(declared ?? { name: file.filename, ref: '', source: '', sources: [] }), file_id: file.file_id, download_url: file.download_url }
     }) : files,
   }
 }

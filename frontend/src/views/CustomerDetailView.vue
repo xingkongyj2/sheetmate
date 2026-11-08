@@ -285,7 +285,7 @@ async function onEdited() {
 
       <!-- 流程 -->
       <section v-else-if="tab === 'recipes'" class="mt-6 space-y-5">
-        <RecipePanel v-for="r in customer.recipes" :key="r.recipe_id" :recipe="r" @run="(id) => (runDialog = { recipeId: id })" @changed="load" />
+        <RecipePanel v-for="r in customer.recipes" :key="r.recipe_id" :recipe="r" :files="[...customer.files, ...customer.outputs]" @run="(id) => (runDialog = { recipeId: id })" @changed="load" />
         <div v-if="!customer.recipes.length" class="card-soft py-14 text-center text-sm text-faint">还没有流程</div>
       </section>
 

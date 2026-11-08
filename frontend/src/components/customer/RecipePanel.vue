@@ -2,29 +2,26 @@
 /**
  * 客户页里的一个流程：说明、流程图、运行记录、校验规则、版本历史、用新文件执行。
  */
-import { Braces, ChevronDown, ClipboardList, History, Info, Play, ShieldCheck, Trash2 } from '@lucide/vue'
+import { Braces, ClipboardList, History, Info, Play, ShieldCheck, Trash2 } from '@lucide/vue'
 import { ref } from 'vue'
 
 import { recipeApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { CustomerDetail, RecipeStepJSON } from '@/api/types'
+import type { CustomerDetail, FileInfo } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
-import ScriptFile from '@/components/common/ScriptFile.vue'
 import RecipeRunsDialog from '@/components/customer/RecipeRunsDialog.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { percent, timeAgo } from '@/composables/chatModel'
-import { scriptReferences } from '@/composables/scriptPresentation'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
 type CustomerRecipe = CustomerDetail['recipes'][number]
 
-const props = defineProps<{ recipe: CustomerRecipe }>()
+const props = defineProps<{ recipe: CustomerRecipe; files?: FileInfo[] }>()
 const emit = defineEmits<{ run: [recipeId: string]; changed: [] }>()
 const toast = useToast()
 const { confirmDelete } = useConfirm()
 
-const step = ref<RecipeStepJSON | null>(null)
 const showJson = ref(false)
 const showDetails = ref(false)
 const showRuns = ref(false)
@@ -50,10 +47,6 @@ async function removeRecipe() {
   toast.success('已删除流程')
   emit('changed')
 }
-
-function openStep(id: number) {
-  step.value = props.recipe.recipe.steps.find((s) => s.id === id) ?? null
-}
 </script>
 
 <template>
@@ -72,7 +65,11 @@ function openStep(id: number) {
 
     <div class="rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
       <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>
-      <RecipeFlow :flow="recipe.flow" @select="openStep" />
+      <RecipeFlow
+        :flow="recipe.flow"
+        :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id, recipe: recipe.recipe, files }"
+        @changed="emit('changed')"
+      />
     </div>
 
     <RecipeRunsDialog v-if="showRuns" :recipe-id="recipe.recipe_id" :recipe-name="recipe.name" :customer-id="recipe.customer_id" @close="showRuns = false" @changed="emit('changed')" />
@@ -124,26 +121,6 @@ function openStep(id: number) {
       <template #footer>
         <button type="button" class="btn-line w-full justify-center border-error/20 text-error hover:border-error/40 hover:bg-error/5" @click="removeRecipe"><Trash2 class="size-4" />删除流程</button>
       </template>
-    </BaseModal>
-
-    <BaseModal v-if="step" :title="step.name" width="max-w-lg" @close="step = null">
-      <div class="space-y-4 text-sm">
-        <p class="leading-7 text-ink">{{ step.description || '暂无这一步的说明。' }}</p>
-        <ScriptFile v-for="script in scriptReferences(step.params)" :key="script.script_id" :script="script" />
-        <div v-if="step.explanation" class="rounded-2xl bg-[#f5f5ff] px-4 py-3 text-[13px] leading-6 text-mute">
-          <div class="mb-1 font-medium text-ink">处理依据</div>{{ step.explanation }}
-        </div>
-        <details class="group rounded-2xl bg-paper/70">
-          <summary class="flex cursor-pointer list-none items-center gap-2 px-4 py-3 text-xs text-mute [&::-webkit-details-marker]:hidden">
-            查看详细设置<ChevronDown class="ml-auto size-3.5 transition-transform group-open:rotate-180" />
-          </summary>
-          <div class="space-y-3 px-4 pb-4 text-xs text-mute">
-            <p>处理方式：{{ step.formula }}</p>
-            <pre class="max-h-52 overflow-auto rounded-xl bg-white p-3 font-mono leading-relaxed">{{ JSON.stringify(step.params, null, 2) }}</pre>
-            <pre v-if="step.sql" class="max-h-52 overflow-auto whitespace-pre-wrap rounded-xl bg-white p-3 font-mono leading-relaxed">{{ step.sql }}</pre>
-          </div>
-        </details>
-      </div>
     </BaseModal>
 
     <BaseModal v-if="showJson" :title="`${recipe.name} · Recipe JSON`" width="max-w-4xl" @close="showJson = false">

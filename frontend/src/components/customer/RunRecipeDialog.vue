@@ -14,8 +14,7 @@ import type { FileInfo, RecipeBrief, RecipeFlowData } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
-import StepDetail from '@/components/recipe/StepDetail.vue'
-import { addProgressFile, applyRecipeEvent, newProgress, type FileArtifact, type RecipeProgress, type StepState } from '@/composables/chatModel'
+import { addProgressFile, applyRecipeEvent, newProgress, type FileArtifact, type RecipeProgress } from '@/composables/chatModel'
 import { progressFlow } from '@/composables/recipeFlow'
 import { useToast } from '@/composables/useToast'
 
@@ -37,7 +36,6 @@ const mapping = ref<Record<string, string>>({})
 const progress = reactive<RecipeProgress>(newProgress('replay'))
 const outputFiles = ref<FileArtifact[]>([])
 const running = ref(false)
-const selected = ref<StepState | null>(null)
 const preview = ref<FileInfo | null>(null)
 const loadingPreview = ref(false)
 
@@ -133,7 +131,7 @@ const flow = computed(() => {
             :class="recipeId === r.recipe_id ? 'border-ink' : 'border-line hover:bg-paper'"
             @click="recipeId = r.recipe_id"
           >
-            <div class="flex items-center gap-2"><span class="font-medium">{{ r.name }}</span><span class="tag">v{{ r.version }}</span></div>
+            <div class="flex items-center gap-2"><span class="font-medium">{{ r.name }}</span><span class="tag !bg-[#6265DC]/10 !text-[#6265DC]">v{{ r.version }}</span></div>
             <div class="mt-1 line-clamp-2 text-xs text-mute">{{ r.description }}</div>
             <div class="mt-2 text-[11px] text-faint">需要：{{ r.input_patterns.map((i) => `${i.alias}（${i.file_pattern || '任意文件'}）`).join('、') }}</div>
           </button>
@@ -195,7 +193,11 @@ const flow = computed(() => {
           <span v-for="w in i.warnings" :key="w" class="rounded bg-warning/10 px-1.5 text-[#8a5a00]">{{ w }}</span>
         </div>
       </div>
-      <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" @select="(id) => (selected = progress.steps.find((s) => s.step_id === id) ?? null)" />
+      <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" :context="{
+        title: recipe?.name, recipeId, version: recipe?.version, customerId,
+        recipe: recipe?.recipe, files: localFiles, resultFiles: outputFiles,
+        runId: progress.runId, running, failed: progress.status === 'failed' || !!progress.failed,
+      }" @changed="emit('done')" />
       <p v-if="progress.validation" class="text-xs text-mute">运行校验：{{ progress.validation.summary }}</p>
       <div v-if="progress.escalation || progress.failed" class="whitespace-pre-wrap rounded-xl bg-error/5 px-3 py-2.5 text-[13px] leading-relaxed text-error">{{ progress.escalation || progress.failed }}</div>
       <p v-else-if="progress.runSummary" class="text-sm text-mute">{{ progress.runSummary }}</p>
@@ -207,7 +209,6 @@ const flow = computed(() => {
           <a :href="file.download_url" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
         </div>
       </div>
-      <div v-if="progress.saved" class="rounded-xl bg-fun-purple/10 px-3 py-2 text-xs text-fun-purple">流程已保存为 v{{ progress.saved.version }}。</div>
     </div>
 
     <template #footer>
@@ -226,22 +227,6 @@ const flow = computed(() => {
       </template>
     </template>
 
-    <StepDetail
-      v-if="selected"
-      :step-id="selected.step_id"
-      :name="selected.name"
-      :formula-name="selected.formula_name"
-      :formula="selected.formula"
-      :kind="selected.kind"
-      :formula-kind="selected.formula_kind"
-      :description="selected.description"
-      :status="selected.status"
-      :report="selected.report"
-      :run-id="progress.runId"
-      :error="selected.error"
-      :repairs="selected.repairs"
-      @close="selected = null"
-    />
     <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </BaseModal>
 </template>

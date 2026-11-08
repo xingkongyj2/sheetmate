@@ -29,8 +29,8 @@ import RecipeStageDetails from './RecipeStageDetails.vue'
 import RecipeViewCard from './RecipeViewCard.vue'
 import TimelineList from './TimelineList.vue'
 
-const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; mascot?: string | null; answersDisabled?: boolean; answersClosed?: boolean }>()
-const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo] }>()
+const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; conversationId?: string | null; mascot?: string | null; answersDisabled?: boolean; answersClosed?: boolean }>()
+const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo]; refresh: [] }>()
 const toast = useToast()
 const openingFile = ref<string | null>(null)
 
@@ -189,8 +189,8 @@ onBeforeUnmount(() => {
 
       <!-- 文件和流程结果等回复接收和渐进展示都完成后再显示。 -->
       <template v-if="!typing">
-        <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" />
-        <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :customer-id="customerId" @preview-file="(file) => emit('previewFile', file)" />
+        <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" :files="files" :customer-id="customerId" :conversation-id="conversationId" @refresh="emit('refresh')" />
+        <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :files="files" :customer-id="customerId" :conversation-id="conversationId" @preview-file="(file) => emit('previewFile', file)" @refresh="emit('refresh')" />
 
         <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft flex flex-wrap items-center gap-3 px-4 py-3" data-testid="file-delivery">
           <FileSpreadsheet class="size-5 text-fun-green" />

@@ -171,7 +171,7 @@ export const recipeApi = {
   match: async (id: string, fileIds: string[]) =>
     (await http.post<{ inputs: { alias: string; kind?: 'table' | 'file'; description: string; file_pattern: string; required_columns: string[]; match: { key: string; score: number; filename: string; sheet: string | null } | null }[]; candidates: { key: string; kind?: 'table' | 'file'; filename: string; sheet: string | null; rows: number }[] }>(
       `/recipes/${id}/match`, { file_ids: fileIds })).data,
-  run: (id: string, body: { file_ids: string[]; inputs?: Record<string, string>; allow_repair?: boolean }, onEvent: (e: AgentEvent) => void) =>
+  run: (id: string, body: { file_ids: string[]; inputs?: Record<string, string>; allow_repair?: boolean; version?: number }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/recipes/${id}/run`, body, onEvent),
   formulas: async (customerId?: string) =>
     (await http.get<{ builtin: FormulaInfo[]; customer: FormulaInfo[]; reserved_ids: string[] }>('/formulas', { params: { customer_id: customerId } })).data,

@@ -1,223 +1,292 @@
 <script setup lang="ts">
-/**
- * Recipe 流程图：输入表或文件 → 公式、SQL、Python 步骤 → 输出。
- * 业务步骤名优先展示，工具类型用于查看与复核；执行时显示每一步的实时状态。
- * 横向默认使用原始宽卡片，正式流程、临时处理和重复执行共用。
- */
-import { Check, CircleAlert, LoaderCircle, TriangleAlert, Wrench } from '@lucide/vue'
-import { computed } from 'vue'
+/** A flow stays on its page: shared canvas, fullscreen layer, resource inspector and live replay. */
+import { Check, CircleAlert, Focus, LoaderCircle, LocateFixed, Maximize2, Minus, Play, Plus, X } from '@lucide/vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import type { FlowStep, RecipeFlowData } from '@/api/types'
-import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
-import ScriptFile from '@/components/common/ScriptFile.vue'
-import { formulaArt, percent, type StepState } from '@/composables/chatModel'
-import { flowInputFiles, flowOutputFiles } from '@/composables/recipeFlow'
-import { recipeToolKind, recipeToolLabel } from '@/composables/recipeTools'
-import { scriptReferences } from '@/composables/scriptPresentation'
+import type { FileInfo, RecipeFlowData } from '@/api/types'
+import type { StepState } from '@/composables/chatModel'
+import { progressFlow } from '@/composables/recipeFlow'
+import type { FlowFileNode, FlowSelection, RecipeFlowContext } from '@/composables/recipeFlowInteraction'
+import { useFlowReplay } from '@/composables/useFlowReplay'
 
-const props = withDefaults(
-  defineProps<{ flow: RecipeFlowData; states?: StepState[]; direction?: 'horizontal' | 'vertical'; activeStep?: number | null; compact?: boolean }>(),
-  { states: () => [], direction: 'horizontal', activeStep: null, compact: false },
-)
-const emit = defineEmits<{ select: [stepId: number] }>()
+import RecipeFlowCanvas from './RecipeFlowCanvas.vue'
+import RecipeFlowInspector from './RecipeFlowInspector.vue'
+import RecipeFlowRunSetup from './RecipeFlowRunSetup.vue'
 
-const stateById = computed(() => Object.fromEntries(props.states.map((s) => [s.step_id, s])))
-const STATUS_LABELS: Record<StepState['status'], string> = {
-  pending: '等待执行', running: '执行中', repairing: '修复中', success: '已完成',
-  repaired: '已修复', warning: '有提示', failed: '执行失败',
-}
-
-function state(id: number): StepState | undefined {
-  return stateById.value[id]
-}
-
-function stateLabel(id: number): string {
-  const status = state(id)?.status
-  return status ? STATUS_LABELS[status] : ''
-}
-
-function art(step: FlowStep): FunKind {
-  return recipeToolKind(step) === 'formula' ? formulaArt(step.formula, step.formula_kind) as FunKind : 'code'
-}
-
-function scripts(step: FlowStep) {
-  return scriptReferences([step, state(step.id)?.report?.params])
-}
-
-function rowsText(s?: StepState): string {
-  const r = s?.report
-  if (!r) return ''
-  if (recipeToolKind(r) === 'python' && !r.columns?.length) return r.output_files?.length ? `${r.output_files.length} 个文件` : '处理完成'
-  if (r.rows_out === undefined) return ''
-  const first = r.rows_in ? Object.values(r.rows_in)[0] : undefined
-  return first !== undefined ? `${first} → ${r.rows_out} 行` : `${r.rows_out} 行`
-}
-
-const running = computed(() => props.states.some((s) => s.status === 'running' || s.status === 'repairing'))
-const inputs = computed(() => {
-  const files = flowInputFiles(props.flow)
-  return files.length ? files.map((file) => ({
-    alias: file.name, kind: 'file', description: file.aliases.join('、'), file_pattern: file.file_pattern,
-  })) : [{ alias: '输入文件未记录', kind: 'file', description: '', file_pattern: '' }]
+const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
+const props = withDefaults(defineProps<{
+  flow: RecipeFlowData
+  states?: StepState[]
+  direction?: 'horizontal' | 'vertical'
+  activeStep?: number | null
+  compact?: boolean
+  context?: RecipeFlowContext
+}>(), { states: () => [], direction: 'horizontal', activeStep: null, compact: false, context: () => ({}) })
+const emit = defineEmits<{ changed: [] }>()
+const fullscreen = ref(false)
+const selection = ref<FlowSelection | null>(null)
+const preview = ref<FileInfo | null>(null)
+const dialog = ref<HTMLElement | null>(null)
+const viewport = ref<HTMLElement | null>(null)
+const canvas = ref<HTMLElement | null>(null)
+const zoom = ref(1)
+const follow = ref(true)
+const dimensions = ref({ width: 1, height: 1, viewportWidth: 1, viewportHeight: 1 })
+const replay = useFlowReplay(() => props.context, () => props.flow)
+const shownFlow = computed(() => replay.progress.value
+  ? progressFlow({ ...replay.progress.value, flow: replay.progress.value.flow ?? replay.flow.value ?? props.flow }) : props.flow)
+const states = computed(() => {
+  const steps = replay.progress.value?.steps ?? props.states
+  const stoppedWithError = replay.progress.value ? replay.progress.value.status === 'failed' : props.context.failed
+  return stoppedWithError ? steps.map((step) => ['running', 'repairing'].includes(step.status) ? { ...step, status: 'failed' as const } : step) : steps
 })
-const outputs = computed(() => {
-  const files = flowOutputFiles(props.flow)
-  return files.length ? files.map((file) => ({ name: file.name, source: '' }))
-    : [{ name: '输出文件未记录', source: '' }]
+const running = computed(() => replay.running.value || (!replay.progress.value && (props.context.running ?? states.value.some((step) => ['running', 'repairing'].includes(step.status)))))
+const context = computed<RecipeFlowContext>(() => {
+  const progress = replay.progress.value
+  if (!progress) return props.context
+  return {
+    ...props.context,
+    title: progress.recipeName || replay.executionRecipe.value?.name || props.context.title,
+    recipeId: progress.saved?.recipe_id ?? progress.recipeId ?? props.context.recipeId,
+    version: progress.saved?.version ?? progress.recipeVersion ?? replay.executionRecipe.value?.version ?? props.context.version,
+    recipe: replay.executionRecipe.value ?? progress.recipe ?? props.context.recipe,
+    runId: progress.runId,
+    resultFiles: progress.files ?? (progress.file ? [progress.file] : []),
+    files: replay.executionFiles.value,
+    running: running.value,
+  }
+})
+const currentStep = computed(() => running.value ? states.value.find((step) => ['running', 'repairing'].includes(step.status)) : undefined)
+const completed = computed(() => states.value.filter((step) => ['success', 'warning', 'repaired'].includes(step.status)).length)
+const failed = computed(() => (replay.progress.value ? replay.progress.value.status === 'failed' : props.context.failed) || states.value.some((step) => step.status === 'failed'))
+const canReplay = computed(() => !context.value.deleted && !!(context.value.recipeId || context.value.recipe?.id || context.value.runId))
+const dialogOpen = computed(() => fullscreen.value || !!selection.value)
+const stageSize = computed(() => ({
+  width: Math.max(dimensions.value.viewportWidth, dimensions.value.width * zoom.value + 96),
+  height: Math.max(dimensions.value.viewportHeight, dimensions.value.height * zoom.value + 96),
+}))
+const canvasStyle = computed(() => ({
+  left: `${(stageSize.value.width - dimensions.value.width * zoom.value) / 2}px`,
+  top: `${(stageSize.value.height - dimensions.value.height * zoom.value) / 2}px`,
+  transform: `scale(${zoom.value})`,
+}))
+let observer: ResizeObserver | null = null
+let returnFocus: HTMLElement | null = null
+let previousOverflow = ''
+let locked = false
+let dragging: { x: number; y: number; left: number; top: number } | null = null
+
+function measure() {
+  if (!canvas.value || !viewport.value) return
+  dimensions.value = {
+    width: canvas.value.scrollWidth, height: canvas.value.scrollHeight,
+    viewportWidth: viewport.value.clientWidth, viewportHeight: viewport.value.clientHeight,
+  }
+}
+function fit() {
+  measure()
+  const d = dimensions.value
+  zoom.value = Math.max(0.25, Math.min(1, (d.viewportWidth - 96) / d.width, (d.viewportHeight - 96) / d.height))
+}
+function changeZoom(value: number) {
+  zoom.value = Math.max(0.25, Math.min(1.6, value))
+  follow.value = false
+}
+async function openFullscreen() {
+  fullscreen.value = true
+  follow.value = true
+  await nextTick()
+  measure()
+  fit()
+  observer?.disconnect()
+  observer = new ResizeObserver(measure)
+  if (viewport.value) observer.observe(viewport.value)
+  if (canvas.value) observer.observe(canvas.value)
+}
+function closeDialog() {
+  selection.value = null
+  fullscreen.value = false
+  replay.closeSetup()
+  observer?.disconnect()
+}
+function selectStep(id: number) {
+  replay.closeSetup()
+  selection.value = { kind: 'step', id }
+}
+function selectFile(file: FlowFileNode) {
+  replay.closeSetup()
+  selection.value = { kind: 'file', file }
+}
+async function prepareRun() {
+  if (running.value) return
+  if (!fullscreen.value) await openFullscreen()
+  selection.value = null
+  await replay.prepare()
+}
+function runStarted() {
+  selection.value = null
+  follow.value = true
+}
+async function locateCurrent() {
+  follow.value = true
+  await nextTick()
+  const target = canvas.value?.querySelector<HTMLElement>(`[data-flow-step="${currentStep.value?.step_id}"]`)
+  target?.scrollIntoView({ block: 'nearest', inline: 'center', behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' })
+}
+function startPan(event: PointerEvent) {
+  if (event.button !== 0 || !viewport.value || (event.target as HTMLElement).closest('button, a, input, select, textarea')) return
+  dragging = { x: event.clientX, y: event.clientY, left: viewport.value.scrollLeft, top: viewport.value.scrollTop }
+  viewport.value.setPointerCapture(event.pointerId)
+  follow.value = false
+}
+function pan(event: PointerEvent) {
+  if (!dragging || !viewport.value) return
+  viewport.value.scrollLeft = dragging.left - (event.clientX - dragging.x)
+  viewport.value.scrollTop = dragging.top - (event.clientY - dragging.y)
+}
+function endPan() { dragging = null }
+function wheel(event: WheelEvent) {
+  if (!event.ctrlKey && !event.metaKey) return
+  event.preventDefault()
+  changeZoom(zoom.value + (event.deltaY > 0 ? -0.1 : 0.1))
+}
+function onKey(event: KeyboardEvent) {
+  if (!dialogOpen.value || preview.value || !dialog.value) return
+  const dialogs = document.querySelectorAll('[role="dialog"]')
+  if (dialogs[dialogs.length - 1] !== dialog.value) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    closeDialog()
+  } else if (event.key === 'Tab') {
+    const items = [...dialog.value.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')].filter((element) => element.getClientRects().length)
+    const first = items[0]
+    const last = items.at(-1)
+    if (!first) { event.preventDefault(); dialog.value.focus() }
+    else if (event.shiftKey && (document.activeElement === first || document.activeElement === dialog.value || !dialog.value.contains(document.activeElement))) { event.preventDefault(); last?.focus() }
+    else if (!event.shiftKey && (document.activeElement === last || !dialog.value.contains(document.activeElement))) { event.preventDefault(); first.focus() }
+  }
+}
+watch(dialogOpen, async (opened) => {
+  if (opened) {
+    returnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    locked = true
+    await nextTick()
+    dialog.value?.focus()
+  } else {
+    if (locked) document.body.style.overflow = previousOverflow
+    locked = false
+    if (returnFocus?.isConnected) returnFocus.focus()
+  }
+})
+watch(() => currentStep.value?.step_id, () => { if (fullscreen.value && follow.value) void locateCurrent() })
+watch(replay.running, (value, previous) => { if (previous && !value) emit('changed') })
+watch([() => props.context.recipeId || props.context.recipe?.id, () => props.context.runId], ([recipeId, runId], previous) => {
+  selection.value = null
+  replay.closeSetup()
+  if (!replay.running.value && (recipeId !== previous[0] || runId !== replay.progress.value?.runId)) replay.progress.value = null
+})
+watch(() => props.context.running, (value) => {
+  if (value && !replay.running.value) replay.progress.value = null
+})
+onMounted(() => window.addEventListener('keydown', onKey, true))
+onBeforeUnmount(() => {
+  observer?.disconnect()
+  window.removeEventListener('keydown', onKey, true)
+  if (locked) document.body.style.overflow = previousOverflow
 })
 </script>
 
 <template>
-  <!-- 横向：卡片、客户页 -->
-  <div v-if="direction === 'horizontal'" class="overflow-x-auto pb-2" :class="{ 'recipe-flow-compact': compact }" role="group" aria-label="处理流程图" tabindex="0">
-    <div class="recipe-flow-row flex min-w-max items-stretch gap-0">
-      <div class="flex flex-col justify-center gap-2 pr-1">
-        <div
-          v-for="inp in inputs"
-          :key="inp.alias"
-          class="recipe-flow-input flex items-center gap-2 rounded-xl border border-line bg-white py-1.5 pl-1.5 pr-3"
-          :title="inp.description"
-        >
-          <FunObject :kind="inp.kind === 'file' ? 'folder' : 'sheet'" :size="compact ? 28 : 26" />
-          <div class="leading-tight">
-            <div class="recipe-flow-file-name text-[13px] font-medium">{{ inp.alias }}</div>
-            <div v-if="!compact && inp.file_pattern" class="font-mono text-[10px] text-faint">{{ inp.file_pattern }}</div>
-            <div v-if="!compact && inp.kind === 'file'" class="text-[10px] text-faint">输入文件</div>
-          </div>
-        </div>
-      </div>
-
-      <template v-for="step in flow.steps" :key="step.id">
-        <div class="recipe-flow-connector flex w-9 items-center" aria-hidden="true">
-          <svg width="36" height="12" viewBox="0 0 36 12" class="text-[#c9c9cf]">
-            <line x1="2" y1="6" x2="30" y2="6" stroke="currentColor" stroke-width="1.6" :class="{ 'flow-dash': state(step.id)?.status === 'running' }" />
-            <path d="M28 2l5 4-5 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-          </svg>
-        </div>
-        <div
-          class="recipe-flow-step group relative flex w-[212px] flex-col rounded-2xl border bg-white p-3 text-left transition hover:-translate-y-0.5 hover:shadow-[0_10px_24px_-14px_rgba(0,0,0,0.3)]"
-          :class="[
-            activeStep === step.id ? 'border-ink' : 'border-line',
-            state(step.id)?.status === 'failed' ? 'border-error/60' : '',
-            state(step.id)?.status === 'running' ? 'border-info/60' : '',
-          ]"
-          :title="compact ? step.description : undefined"
-          @click="emit('select', step.id)"
-        >
-          <button type="button" class="absolute inset-0 rounded-2xl focus-visible:outline-2 focus-visible:outline-fun-purple" :aria-label="`查看步骤：${step.name}${state(step.id) ? `，${stateLabel(step.id)}` : ''}`" @click.stop="emit('select', step.id)" />
-          <span v-if="compact && state(step.id)" class="absolute right-1.5 top-1.5 flex size-4 items-center justify-center rounded-full bg-white/90" role="img" :aria-label="stateLabel(step.id)" :title="stateLabel(step.id)">
-            <LoaderCircle v-if="state(step.id)!.status === 'running'" class="size-3 animate-spin text-info" />
-            <Wrench v-else-if="state(step.id)!.status === 'repairing'" class="size-3 animate-pulse text-fun-purple" />
-            <Check v-else-if="state(step.id)!.status === 'success'" class="size-3 text-success" />
-            <Wrench v-else-if="state(step.id)!.status === 'repaired'" class="size-3 text-fun-purple" />
-            <TriangleAlert v-else-if="state(step.id)!.status === 'warning'" class="size-3 text-warning" />
-            <CircleAlert v-else-if="state(step.id)!.status === 'failed'" class="size-3 text-error" />
-            <span v-else class="size-1.5 rounded-full bg-faint" />
-          </span>
-          <div class="recipe-flow-step-art flex items-center gap-2">
-            <span v-if="!compact" class="flex size-5 items-center justify-center rounded-full bg-ink text-[11px] font-semibold text-white">{{ step.id }}</span>
-            <FunObject :kind="art(step)" :size="compact ? 34 : 22" />
-            <span v-if="!compact" class="tag ml-auto" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">
-              {{ recipeToolLabel(step) }}
-            </span>
-          </div>
-          <div class="recipe-flow-step-name mt-2 text-[13.5px] font-semibold leading-snug">{{ step.name }}</div>
-          <div v-if="!compact" class="mt-1 line-clamp-2 text-xs leading-relaxed text-mute">{{ step.description }}</div>
-          <div v-if="scripts(step).length" class="relative z-10 mt-2 w-full min-w-0">
-            <ScriptFile v-for="script in scripts(step)" :key="script.script_id" :script="script" compact />
-          </div>
-          <div v-if="!compact" class="mt-auto flex items-center gap-1.5 pt-2.5 text-[11px] text-faint">
-            <template v-if="state(step.id)">
-              <LoaderCircle v-if="state(step.id)!.status === 'running'" class="size-3.5 animate-spin text-info" />
-              <Wrench v-else-if="state(step.id)!.status === 'repairing'" class="size-3.5 animate-pulse text-fun-purple" />
-              <Check v-else-if="state(step.id)!.status === 'success'" class="size-3.5 text-success" />
-              <Wrench v-else-if="state(step.id)!.status === 'repaired'" class="size-3.5 text-fun-purple" />
-              <TriangleAlert v-else-if="state(step.id)!.status === 'warning'" class="size-3.5 text-warning" />
-              <CircleAlert v-else-if="state(step.id)!.status === 'failed'" class="size-3.5 text-error" />
-              <span v-if="state(step.id)!.status === 'repairing'" class="text-fun-purple">AI 修复中…</span>
-              <span v-else>{{ rowsText(state(step.id)) }}</span>
-              <span v-if="state(step.id)!.report?.metrics?.match_rate !== undefined" class="ml-auto">
-                匹配 {{ percent(state(step.id)!.report!.metrics!.match_rate as number, 0) }}
-              </span>
-            </template>
-            <span v-else class="font-mono">→ {{ step.output }}</span>
-          </div>
-        </div>
-      </template>
-
-      <div class="recipe-flow-connector flex w-9 items-center" aria-hidden="true">
-        <svg width="36" height="12" viewBox="0 0 36 12" class="text-[#c9c9cf]">
-          <line x1="2" y1="6" x2="30" y2="6" stroke="currentColor" stroke-width="1.6" :class="{ 'flow-dash': running }" />
-          <path d="M28 2l5 4-5 4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" />
-        </svg>
-      </div>
-      <div class="flex flex-col justify-center gap-2">
-        <div v-for="out in outputs" :key="out.name" class="recipe-flow-output flex items-center gap-2 rounded-xl bg-ink py-1.5 pl-1.5 pr-3 text-white">
-          <span class="flex size-[26px] items-center justify-center rounded-lg bg-white/15"><FunObject kind="plane" :size="18" /></span>
-          <div class="leading-tight">
-            <div class="recipe-flow-file-name text-[13px] font-medium">{{ out.name }}</div>
-            <div v-if="!compact" class="text-[10px] text-white/50">输出文件</div>
-          </div>
-        </div>
-      </div>
+  <div class="recipe-flow-viewer min-w-0">
+    <div class="mb-2 flex min-h-6 items-center justify-end gap-1">
+      <span v-if="running" class="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-[#6265DC]" role="status"><LoaderCircle class="size-3 shrink-0 animate-spin" /><span class="truncate">{{ currentStep?.name || '执行中' }}</span></span>
+      <button v-if="canReplay" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running" @click="prepareRun"><Play class="size-3.5" />重新执行</button>
+      <button type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="openFullscreen"><Maximize2 class="size-3.5" />全屏</button>
     </div>
+    <RecipeFlowCanvas :flow="shownFlow" :states="states" :direction="direction" :compact="compact" :active-step="selection?.kind === 'step' ? selection.id : activeStep" :selected-file-key="selection?.kind === 'file' ? selection.file.key : null" :busy="running" :failed="failed" @select="selectStep" @select-file="selectFile" />
   </div>
 
-  <!-- 纵向：右侧执行明细面板 -->
-  <ol v-else class="relative space-y-2 pl-1">
-    <li v-for="step in flow.steps" :key="step.id" class="relative flex gap-3">
-      <div class="flex flex-col items-center">
-        <span
-          class="z-10 flex size-6 shrink-0 items-center justify-center rounded-full border text-[11px] font-semibold"
-          :class="{
-            'border-ink bg-ink text-white': state(step.id)?.status === 'success' || state(step.id)?.status === 'warning' || state(step.id)?.status === 'repaired',
-            'border-info bg-info/10 text-info': state(step.id)?.status === 'running' || state(step.id)?.status === 'repairing',
-            'border-error bg-error/10 text-error': state(step.id)?.status === 'failed',
-            'border-line bg-white text-faint': !state(step.id) || state(step.id)?.status === 'pending',
-          }"
-        >
-          <LoaderCircle v-if="state(step.id)?.status === 'running'" class="size-3.5 animate-spin" />
-          <Wrench v-else-if="state(step.id)?.status === 'repairing'" class="size-3.5" />
-          <template v-else>{{ step.id }}</template>
-        </span>
-        <span class="w-px flex-1 bg-line" />
-      </div>
-      <div class="mb-1 min-w-0 flex-1 rounded-xl px-2 py-1 text-left hover:bg-paper">
-        <button type="button" class="w-full text-left" @click="emit('select', step.id)">
-        <div class="flex items-center gap-1.5">
-          <span class="truncate text-[13px] font-medium">{{ step.name }}</span>
-          <span class="tag shrink-0" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">
-            {{ recipeToolLabel(step) }}
-          </span>
-        </div>
-        <div class="line-clamp-2 text-xs text-mute">{{ step.description }}</div>
-        <div v-if="state(step.id)?.report" class="mt-0.5 text-[11px] text-faint">
-          {{ rowsText(state(step.id)) }}
-          <template v-if="state(step.id)?.report?.warnings?.length"> · {{ state(step.id)!.report!.warnings!.length }} 条提示</template>
-        </div>
-        <div v-else-if="state(step.id)?.error" class="mt-0.5 line-clamp-2 text-[11px] text-error">{{ state(step.id)!.error }}</div>
-        </button>
-        <ScriptFile v-for="script in scripts(step)" :key="script.script_id" :script="script" compact />
-      </div>
-    </li>
-  </ol>
+  <Teleport v-if="dialogOpen" to="body">
+    <div class="flow-layer" :class="{ 'flow-layer--detail': !fullscreen }" @click.self="closeDialog">
+      <section ref="dialog" role="dialog" aria-modal="true" :aria-label="fullscreen ? `${context.title || '处理流程'} · 全屏流程图` : '流程节点详情'" tabindex="-1" class="flow-dialog" :class="fullscreen ? 'flow-dialog--full' : 'flow-dialog--detail'">
+        <template v-if="fullscreen">
+          <header class="flow-header">
+            <div class="flex min-w-0 flex-1 items-center gap-2.5">
+              <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-[#6265DC]/10 text-[#6265DC]"><Focus class="size-4" /></span>
+              <h2 class="truncate text-[15px] font-semibold">{{ context.title || '处理流程' }}</h2>
+              <span v-if="context.version" class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ context.version }}</span>
+            </div>
+            <button v-if="canReplay" type="button" class="flow-run-button" :disabled="running || replay.loading.value" @click="prepareRun"><LoaderCircle v-if="running" class="size-3.5 animate-spin" /><Play v-else class="size-3.5" /><span>{{ running ? '执行中' : '重新执行' }}</span></button>
+            <button type="button" class="icon-btn ml-1 shrink-0" aria-label="退出全屏" title="退出全屏 · Esc" @click="closeDialog"><X class="size-5" /></button>
+          </header>
+          <div class="flow-workspace">
+            <div class="flow-canvas-area">
+              <div ref="viewport" class="flow-viewport" tabindex="0" aria-label="流程画布，可滚动和拖动" @pointerdown="startPan" @pointermove="pan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan" @wheel="wheel">
+                <div class="flow-stage" :style="{ width: `${stageSize.width}px`, height: `${stageSize.height}px` }">
+                  <div ref="canvas" class="flow-canvas" :style="canvasStyle">
+                    <RecipeFlowCanvas :flow="shownFlow" :states="states" :active-step="selection?.kind === 'step' ? selection.id : null" :selected-file-key="selection?.kind === 'file' ? selection.file.key : null" :busy="running" :failed="failed" @select="selectStep" @select-file="selectFile" />
+                  </div>
+                </div>
+              </div>
+              <div class="flow-tools">
+                <button class="icon-btn size-8" type="button" aria-label="缩小流程图" :disabled="zoom <= 0.25" @click="changeZoom(zoom - 0.1)"><Minus class="size-4" /></button>
+                <span class="w-11 text-center text-[11px] tabular-nums text-mute">{{ Math.round(zoom * 100) }}%</span>
+                <button class="icon-btn size-8" type="button" aria-label="放大流程图" :disabled="zoom >= 1.6" @click="changeZoom(zoom + 0.1)"><Plus class="size-4" /></button>
+                <span class="mx-1 h-4 w-px bg-line" />
+                <button class="icon-btn size-8" type="button" aria-label="适应画布" title="适应画布" @click="fit"><Maximize2 class="size-4" /></button>
+                <button v-if="currentStep" class="icon-btn size-8" :class="{ '!text-[#6265DC] !bg-[#6265DC]/10': follow }" type="button" aria-label="跟随执行步骤" title="跟随执行" @click="locateCurrent"><LocateFixed class="size-4" /></button>
+              </div>
+              <div v-if="states.length || running || failed" class="flow-run-status" role="status" aria-live="polite">
+                <LoaderCircle v-if="running" class="size-3.5 shrink-0 animate-spin text-[#6265DC]" /><CircleAlert v-else-if="failed" class="size-3.5 shrink-0 text-error" /><Check v-else-if="completed === shownFlow.steps.length" class="size-3.5 shrink-0 text-success" />
+                <span class="truncate">{{ currentStep?.name || (failed ? '执行失败' : running ? '正在生成结果' : completed === shownFlow.steps.length ? '执行完成' : '等待执行') }}</span>
+                <span class="shrink-0 tabular-nums text-faint">{{ completed }}/{{ shownFlow.steps.length }}</span>
+              </div>
+            </div>
+            <aside v-if="replay.setupOpen.value || selection" class="flow-side-panel" :aria-label="replay.setupOpen.value ? '执行设置' : '节点详情'">
+              <RecipeFlowRunSetup v-if="replay.setupOpen.value" :controller="replay" @close="replay.closeSetup()" @started="runStarted" @preview="(file) => (preview = file)" />
+              <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" @close="selection = null" @preview="(file) => (preview = file)" />
+            </aside>
+          </div>
+          <div v-if="replay.error.value && !replay.setupOpen.value" class="border-t border-error/10 bg-error/5 px-5 py-2 text-xs text-error" role="alert">{{ replay.error.value }}</div>
+        </template>
+        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" @close="closeDialog" @preview="(file) => (preview = file)" />
+      </section>
+    </div>
+  </Teleport>
+  <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
 </template>
 
 <style scoped>
-/* Auto margins center a fitting flow and collapse to zero when it overflows. */
-.recipe-flow-row { width: max-content; margin-inline: auto; }
-.recipe-flow-compact { padding: 6px 2px 10px; }
-.recipe-flow-compact:focus-visible { outline: 2px solid #a6a2df; outline-offset: 4px; border-radius: 12px; }
-.recipe-flow-compact .recipe-flow-row { align-items: center; gap: 0; min-width: max-content; }
-.recipe-flow-compact .recipe-flow-step { width: 76px; min-height: 102px; flex-shrink: 0; align-items: center; justify-content: center; padding: 12px 7px; border: 0; background: #f8f8fc; text-align: center; box-shadow: 0 2px 8px #34345205; }
-.recipe-flow-compact .recipe-flow-step:hover { background: #f0effb; box-shadow: 0 5px 14px #6265dc12; }
-.recipe-flow-compact .recipe-flow-step:focus-visible { outline: 2px solid #8581cc; outline-offset: 3px; }
-.recipe-flow-compact .recipe-flow-step-art { justify-content: center; }
-.recipe-flow-compact .recipe-flow-step-name { width: 100%; margin-top: 9px; overflow-wrap: anywhere; font-size: 12px; font-weight: 500; line-height: 1.5; }
-.recipe-flow-compact .recipe-flow-connector { width: 20px; flex: 0 0 20px; }
-.recipe-flow-compact .recipe-flow-connector svg { width: 20px; }
-.recipe-flow-compact .recipe-flow-input, .recipe-flow-compact .recipe-flow-output { width: 88px; min-height: 50px; justify-content: flex-start; gap: 5px; border: 0; padding: 7px 5px; background: #f5f8f7; color: #495c53; }
-.recipe-flow-compact .recipe-flow-output { background: #faf6f1; color: #7c6246; }
-.recipe-flow-compact .recipe-flow-input > svg, .recipe-flow-compact .recipe-flow-output > span { flex-shrink: 0; }
-.recipe-flow-compact .recipe-flow-file-name { overflow-wrap: anywhere; font-size: 11px; line-height: 1.5; }
+.flow-layer { position: fixed; inset: 0; z-index: 4000; background: white; }
+.flow-layer--detail { display: flex; align-items: center; justify-content: center; padding: 24px; background: #0b0b0c35; backdrop-filter: blur(3px); }
+.flow-dialog { min-width: 0; background: white; outline: none; }
+.flow-dialog--full { display: flex; height: 100dvh; flex-direction: column; }
+.flow-dialog--detail { width: min(760px, 100%); max-height: 88dvh; overflow-y: auto; border: 1px solid #ececef; border-radius: 24px; box-shadow: 0 24px 90px #22224225; }
+.flow-header { display: flex; min-height: 68px; flex: none; align-items: center; gap: 10px; border-bottom: 1px solid #ececef; padding: 12px 24px; }
+.flow-run-button { display: inline-flex; height: 34px; flex: none; align-items: center; justify-content: center; gap: 7px; border-radius: 10px; padding: 0 14px; background: #6265dc; color: white; font-size: 12px; font-weight: 500; transition: background .2s; }
+.flow-run-button:hover { background: #5356c6; }
+.flow-run-button:disabled { cursor: default; opacity: .55; }
+.flow-workspace { display: flex; min-height: 0; flex: 1; }
+.flow-canvas-area { position: relative; min-width: 0; min-height: 0; flex: 1; background-color: #fafafd; background-image: radial-gradient(#6265dc18 .8px, transparent .8px); background-size: 20px 20px; }
+.flow-viewport { width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; cursor: grab; touch-action: pan-x pan-y; }
+.flow-viewport:active { cursor: grabbing; }
+.flow-viewport:focus-visible { outline: 2px solid #6265dc; outline-offset: -3px; }
+.flow-stage { position: relative; }
+.flow-canvas { position: absolute; width: max-content; transform-origin: top left; padding: 4px; }
+.flow-tools { position: absolute; left: 20px; bottom: 20px; display: flex; align-items: center; padding: 4px; border: 1px solid #ececef; border-radius: 13px; background: white; box-shadow: 0 3px 18px #22224208; }
+.flow-run-status { position: absolute; right: 20px; bottom: 26px; display: flex; max-width: calc(100% - 280px); align-items: center; gap: 8px; border: 1px solid #ececef; border-radius: 12px; padding: 9px 12px; background: white; font-size: 12px; }
+.flow-side-panel { width: 390px; min-height: 0; flex: none; overflow-y: auto; border-left: 1px solid #ececef; background: white; }
+@media (max-width: 760px) {
+  .flow-header { min-height: 60px; gap: 6px; padding: 10px 12px; }
+  .flow-run-button { padding: 0 10px; }
+  .flow-header h2 { font-size: 13px; }
+  .flow-workspace { position: relative; }
+  .flow-side-panel { position: absolute; inset: 0 0 0 auto; z-index: 2; width: min(390px, 100%); box-shadow: -12px 0 40px #22224210; }
+  .flow-tools { left: 12px; bottom: 12px; }
+  .flow-run-status { top: 12px; right: 12px; bottom: auto; max-width: calc(100% - 24px); }
+  .flow-layer--detail { padding: 12px; }
+}
 </style>

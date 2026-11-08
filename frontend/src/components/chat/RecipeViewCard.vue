@@ -1,26 +1,16 @@
 <script setup lang="ts">
-import { ref } from 'vue'
-
-import type { FlowStep, RecipeFlowData } from '@/api/types'
-import BaseModal from '@/components/common/BaseModal.vue'
-import ScriptFile from '@/components/common/ScriptFile.vue'
+import type { FileInfo } from '@/api/types'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
-import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
-import { scriptReferences } from '@/composables/scriptPresentation'
+import type { RecipeViewArtifact } from '@/composables/chatModel'
+import { userFacingSummary } from '@/composables/timelinePresentation'
 
-const props = defineProps<{
-  view: {
-    name: string
-    description: string
-    flow: RecipeFlowData
-    deleted?: boolean
-  }
+defineProps<{
+  view: RecipeViewArtifact
+  files?: FileInfo[]
+  customerId?: string | null
+  conversationId?: string | null
 }>()
-const selected = ref<FlowStep | null>(null)
-
-function openStep(id: number) {
-  selected.value = props.view.flow.steps.find((step) => step.id === id) ?? null
-}
+const emit = defineEmits<{ refresh: [] }>()
 </script>
 
 <template>
@@ -31,16 +21,11 @@ function openStep(id: number) {
     </header>
     <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
       <p v-if="view.description" class="mb-5 whitespace-pre-line break-words text-[13px] leading-[1.8] text-mute">{{ userFacingSummary(view.description) }}</p>
-      <RecipeFlow :flow="view.flow" @select="openStep" />
+      <RecipeFlow
+        :flow="view.flow"
+        :context="{ title: view.name, recipeId: view.recipe_id, version: view.version, customerId, conversationId, files, deleted: view.deleted }"
+        @changed="emit('refresh')"
+      />
     </div>
-
-    <BaseModal v-if="selected" :title="selected.name" width="max-w-lg" @close="selected = null">
-      <div class="space-y-4 text-sm">
-        <p class="whitespace-pre-line leading-7 text-ink">{{ userFacingSummary(selected.description || selected.action, '按照流程设置处理输入数据。') }}</p>
-        <p v-if="selected.inputs.length" class="break-words text-[13px] leading-6 text-mute">使用：{{ selected.inputs.map((name) => userFacingText(name)).filter(Boolean).join('、') }}</p>
-        <p v-if="selected.output" class="break-words text-[13px] leading-6 text-mute">产出：{{ userFacingText(selected.output) }}</p>
-        <ScriptFile v-for="script in scriptReferences(selected)" :key="script.script_id" :script="script" />
-      </div>
-    </BaseModal>
   </article>
 </template>

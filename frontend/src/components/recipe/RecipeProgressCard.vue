@@ -12,7 +12,7 @@ import type { FileInfo } from '@/api/types'
 import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
-import type { RecipeProgress, StepState } from '@/composables/chatModel'
+import type { RecipeProgress } from '@/composables/chatModel'
 import { recipeFailure } from '@/composables/messagePresentation'
 import { progressFlow } from '@/composables/recipeFlow'
 import { userFacingText } from '@/composables/timelinePresentation'
@@ -20,11 +20,10 @@ import { useToast } from '@/composables/useToast'
 
 import DiffCards from './DiffCards.vue'
 import RecipeFlow from './RecipeFlow.vue'
-import StepDetail from './StepDetail.vue'
 import VerifyBadge from './VerifyBadge.vue'
 
-const props = defineProps<{ progress: RecipeProgress; customerId?: string | null }>()
-const emit = defineEmits<{ previewFile: [file: FileInfo] }>()
+const props = defineProps<{ progress: RecipeProgress; customerId?: string | null; conversationId?: string | null; files?: FileInfo[] }>()
+const emit = defineEmits<{ previewFile: [file: FileInfo]; refresh: [] }>()
 const toast = useToast()
 const openingFile = ref<string | null>(null)
 const resultFiles = computed(() => props.progress.files?.length ? props.progress.files : props.progress.file ? [props.progress.file] : [])
@@ -41,7 +40,6 @@ async function previewFile(fileId: string) {
   }
 }
 
-const selected = ref<(Pick<StepState, 'step_id' | 'name'> & Partial<StepState>) | null>(null)
 const showEvidence = ref(false)
 const showDetail = ref(false) // 流程直接展示，校验和比对详情按需展开
 
@@ -54,16 +52,6 @@ const flow = computed(() => {
   if (!props.progress.flow && !props.progress.saved?.flow && !props.progress.steps.length) return null
   return progressFlow(props.progress)
 })
-
-function selectStep(id: number) {
-  const state = props.progress.steps.find((step) => step.step_id === id)
-  const step = flow.value?.steps.find((item) => item.id === id)
-  // 单独保存流程的历史消息只有流程快照，没有本轮执行记录。
-  selected.value = state ?? (step ? {
-    step_id: step.id, name: step.name, formula: step.formula, kind: step.kind,
-    formula_kind: step.formula_kind, description: step.description, output: step.output,
-  } : null)
-}
 
 const busy = computed(() => ['thinking', 'running', 'verifying', 'refining'].includes(props.progress.status))
 const failure = computed(() => {
@@ -86,7 +74,6 @@ const busyText = computed(() => {
   if (currentStep.value) return `第 ${doneCount.value + 1}/${p.steps.length} 步 · ${currentStep.value.name}`
   return '正在理解需求与整理处理步骤…'
 })
-const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id === id)
 </script>
 
 <template>
@@ -136,7 +123,13 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
       </div>
 
       <!-- 流程始终可见，保存后的历史快照也可以查看每个步骤。 -->
-      <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" @select="selectStep" />
+      <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" :context="{
+        title: progress.saved?.name || progress.recipeName,
+        recipeId: progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id,
+        version: progress.saved?.version ?? progress.recipeVersion ?? progress.recipe?.version,
+        customerId, conversationId, files, recipe: progress.recipe, runId: progress.runId,
+        resultFiles, running: busy, failed: !!failure, deleted: progress.deleted,
+      }" @changed="emit('refresh')" />
 
       <!-- 校验、比对与错误详情：默认收起 -->
       <div v-if="hasDetails">
@@ -189,23 +182,5 @@ const recipeStep = (id: number) => props.progress.recipe?.steps.find((s) => s.id
       </RouterLink>
     </div>
 
-    <StepDetail
-      v-if="selected"
-      :step-id="selected.step_id"
-      :name="selected.name"
-      :formula-name="selected.formula_name"
-      :formula="selected.formula"
-      :kind="selected.kind"
-      :formula-kind="selected.formula_kind"
-      :description="selected.description"
-      :explanation="recipeStep(selected.step_id)?.explanation"
-      :status="selected.status"
-      :report="selected.report"
-      :params="recipeStep(selected.step_id)?.params"
-      :run-id="progress.runId"
-      :error="selected.error"
-      :repairs="selected.repairs"
-      @close="selected = null"
-    />
   </div>
 </template>

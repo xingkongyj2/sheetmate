@@ -478,9 +478,11 @@ function answer(option: string) {
                 :answers-disabled="streaming || reconnecting"
                 :answers-closed="messages.at(-1)?.key !== m.key"
                 :customer-id="customer?.id"
+                :conversation-id="props.id"
                 :mascot="customer?.mascot"
                 @answer="answer"
                 @preview-file="(file) => (viewingFile = file)"
+                @refresh="refreshSide"
               />
             </template>
           </div>
