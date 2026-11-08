@@ -44,11 +44,15 @@ def get_conversation(db: Session, user: User, conversation_id: str) -> Conversat
 
 
 def create_conversation(db: Session, user: User, *, customer_id: str | None = None, mode: str = "analyze",
-                        title: str = "") -> Conversation:
+                        title: str = "", recipe_id: str | None = None) -> Conversation:
     if customer_id:
         require_customer(db, user, customer_id)
+        selected = recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
+        recipe_id = selected.recipe_id if selected else None
+    elif recipe_id:
+        raise ServiceError("请先选择流程所属客户")
     conv = Conversation(user_id=user.id, customer_id=customer_id, mode=mode if mode in MODES else "analyze",
-                        title=title.strip() or "新对话")
+                        title=title.strip() or "新对话", recipe_id=recipe_id)
     db.add(conv)
     db.flush()
     if customer_id:
@@ -67,6 +71,7 @@ def conversation_dict(db: Session, conv: Conversation) -> dict[str, Any]:
     customer = db.get(Customer, conv.customer_id) if conv.customer_id else None
     return {
         "id": conv.id, "title": conv.title, "mode": conv.mode, "mode_label": MODES.get(conv.mode, conv.mode),
+        "recipe_id": conv.recipe_id,
         "customer": {"id": customer.id, "name": customer.name, "mascot": customer.mascot} if customer else None,
         "created_at": conv.created_at.isoformat(), "updated_at": conv.updated_at.isoformat(),
     }
@@ -231,6 +236,12 @@ def update_conversation(db: Session, conv: Conversation, user: User, data: dict[
         elif not new_customer and conv.customer_id:
             file_service.retain_customer_files(db, conv.customer_id, conversation_id=conv.id)
             conv.customer_id = None
+            conv.recipe_id = None
+    if "recipe_id" in data:
+        if not conv.customer_id and data["recipe_id"]:
+            raise ServiceError("请先选择流程所属客户")
+        selected = recipe_service.resolve_customer_recipe(db, conv.customer_id, data["recipe_id"]) if conv.customer_id else None
+        conv.recipe_id = selected.recipe_id if selected else None
     return conv
 
 
@@ -255,7 +266,10 @@ def bind_to_customer(db: Session, conv: Conversation, user: User, *, customer_id
     for run in db.scalars(select(Run).where(Run.conversation_id == conv.id, Run.customer_id.is_(None))):
         run.customer_id = customer.id
     recipe_service.assign_customer(db, conversation_id=conv.id, customer_id=customer.id)
-    memory_service.move_conversation_memories(db, conv.id, customer.id)
+    selected = recipe_service.resolve_customer_recipe(db, customer.id)
+    if previous_customer != customer.id or not conv.recipe_id:
+        conv.recipe_id = selected.recipe_id if selected else None
+    memory_service.move_conversation_memories(db, conv.id, customer.id, recipe_id=conv.recipe_id)
     db.flush()
     return customer
 

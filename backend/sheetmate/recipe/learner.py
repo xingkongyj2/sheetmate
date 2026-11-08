@@ -100,6 +100,8 @@ class RecipeLearner:
 
     async def refine(self, ctx: LearnContext, recipe: Recipe, report: dict[str, Any]) -> Recipe:
         prompt = RECIPE_REFINE_PROMPT.format(
+            requirement=ctx.requirement or "（沿用已有处理要求）",
+            memory=ctx.memory_text or "（无）",
             recipe=_recipe_json(recipe),
             report=report_to_text(report),
             inputs=inputs_text(ctx),
@@ -127,6 +129,8 @@ class RecipeLearner:
 
     async def fix_structure(self, ctx: LearnContext, recipe: Recipe, problems: list[str]) -> Recipe:
         prompt = RECIPE_FIX_STRUCTURE_PROMPT.format(
+            requirement=ctx.requirement or "（沿用已有处理要求）",
+            memory=ctx.memory_text or "（无）",
             problems="\n".join(f"- {p}" for p in problems),
             recipe=_recipe_json(recipe),
             inputs=inputs_text(ctx),

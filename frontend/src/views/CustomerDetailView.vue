@@ -1,19 +1,11 @@
 <script setup lang="ts">
-/**
- * 客户详情：
- * - 处理逻辑：AI 写的「Excel 整体处理逻辑」说明
- * - 流程：每个 Recipe 的流程图、输入要求、运行记录、校验规则、版本，可用新文件执行
- * - 文件：客户上传过的 Excel（含人工结果样例）和生成的结果
- * - 记忆：业务规则、偏好、字段映射
- */
 import {
-  ArrowLeft, ArrowRight, Download, FileCheck2, FileSpreadsheet, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Sparkles,
-  Trash2, Upload,
+  ArrowLeft, ArrowRight, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Sparkles, Star, Trash2,
 } from '@lucide/vue'
-import { computed, defineAsyncComponent, nextTick, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { conversationApi, customerApi, fileApi } from '@/api'
+import { conversationApi, customerApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerDetail, FileInfo } from '@/api/types'
 import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
@@ -24,7 +16,9 @@ import CustomerLogicSummary from '@/components/customer/CustomerLogicSummary.vue
 import MemoryPanel from '@/components/customer/MemoryPanel.vue'
 import RecipePanel from '@/components/customer/RecipePanel.vue'
 import RunRecipeDialog from '@/components/customer/RunRecipeDialog.vue'
+import WorkflowFiles from '@/components/customer/WorkflowFiles.vue'
 import { timeAgo } from '@/composables/chatModel'
+import { primaryFirst, workflowFiles } from '@/composables/customerWorkflow'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
@@ -52,58 +46,84 @@ const tab = ref<Tab>(TABS.find((item) => item.key === initialTab)?.key ?? 'logic
 const customer = ref<CustomerDetail | null>(null)
 const loading = ref(true)
 const summarizing = ref(false)
+const settingPrimary = ref(false)
 const editing = ref(false)
 const runDialog = ref<{ recipeId: string | null } | null>(null)
 const preview = ref<FileInfo | null>(null)
 const conversationsOpen = ref(false)
-const uploadKind = ref<'input' | 'expected'>('input')
-const uploading = ref(false)
-const uploadMenuOpen = ref(false)
-const uploadInput = ref<HTMLInputElement | null>(null)
-const uploadButton = ref<HTMLButtonElement | null>(null)
-const uploadFirstChoice = ref<HTMLButtonElement | null>(null)
+let loadVersion = 0
+let active = true
 
 async function load() {
+  const customerId = props.id
+  const version = ++loadVersion
   try {
-    customer.value = await customerApi.get(props.id)
-    const previous = customer.value.summary
-    if (customer.value.summary_by === 'ai' && previous && !/^#{1,3}\s+这项工作做什么\s*$/m.test(previous)) {
-      void upgradeSummary(previous)
-    }
+    const result = await customerApi.get(customerId)
+    if (!active || version !== loadVersion || props.id !== customerId) return
+    customer.value = result
   } catch (err) {
+    if (!active || version !== loadVersion) return
     toast.error(errorText(err))
     router.replace({ name: 'customers' })
   } finally {
-    loading.value = false
+    if (active && version === loadVersion) loading.value = false
   }
 }
 onMounted(() => {
   if (route.query.tab === 'runs') void router.replace({ query: { ...route.query, tab: 'recipes' } })
   void load()
 })
+onBeforeUnmount(() => { active = false; loadVersion++ })
+watch(() => props.id, () => {
+  customer.value = null
+  const nextTab = route.query.tab === 'runs' ? 'recipes' : route.query.tab
+  tab.value = TABS.find((item) => item.key === nextTab)?.key ?? 'logic'
+  preview.value = null
+  runDialog.value = null
+  editing.value = false
+  conversationsOpen.value = false
+  loading.value = true
+  void load()
+})
+watch(() => route.query.tab, (next) => {
+  const nextTab = next === 'runs' ? 'recipes' : next
+  tab.value = TABS.find((item) => item.key === nextTab)?.key ?? 'logic'
+})
 
-const inputFiles = computed(() => customer.value?.files ?? [])
+const orderedRecipes = computed(() => primaryFirst(customer.value?.recipes ?? [], customer.value?.primary_recipe_id))
+const primaryRecipe = computed(() => orderedRecipes.value[0] ?? null)
+const fileCount = computed(() => workflowFiles(orderedRecipes.value.length
+  ? orderedRecipes.value.flatMap((recipe) => [...recipe.files, ...recipe.output_files])
+  : [...(customer.value?.files ?? []), ...(customer.value?.outputs ?? [])]).length)
 
-async function upgradeSummary(previous: string) {
-  if (summarizing.value) return
+function setTab(next: Tab) {
+  tab.value = next
+  void router.replace({ query: { ...route.query, tab: next } })
+}
+
+async function setPrimary(recipeId: string) {
+  if (settingPrimary.value || !customer.value?.recipes.some((recipe) => recipe.recipe_id === recipeId)
+    || customer.value.primary_recipe_id === recipeId) return
   const customerId = props.id
-  summarizing.value = true
+  settingPrimary.value = true
   try {
-    const result = await customerApi.upgradeSummary(customerId)
-    if (result.summary !== previous && customer.value?.id === customerId && customer.value.summary === previous) {
-      customer.value.summary = result.summary
-      customer.value.summary_by = result.summary_by
-      if (result.updated) customer.value.summary_updated_at = new Date().toISOString()
+    await customerApi.update(customerId, { primary_recipe_id: recipeId })
+    if (active && props.id === customerId && customer.value?.id === customerId) {
+      await load()
+      if (!active || props.id !== customerId) return
+      toast.success('已设为主流程')
+      void store.refreshCustomers()
     }
-  } catch {
+  } catch (err) {
+    if (active && props.id === customerId) toast.error(errorText(err))
   } finally {
-    summarizing.value = false
+    settingPrimary.value = false
   }
 }
 
 async function newChat() {
   try {
-    const conv = await conversationApi.create({ customer_id: props.id })
+    const conv = await conversationApi.create({ customer_id: props.id, recipe_id: primaryRecipe.value?.recipe_id })
     store.upsertConversation(conv)
     router.push({ name: 'chat', params: { id: conv.id } })
   } catch (err) {
@@ -112,73 +132,27 @@ async function newChat() {
 }
 
 async function regenerate() {
+  if (summarizing.value) return
+  const recipeId = primaryRecipe.value?.recipe_id
+  const customerId = props.id
   summarizing.value = true
   try {
-    const result = await customerApi.refreshSummary(props.id)
-    if (customer.value) {
-      customer.value.summary = result.summary
-      customer.value.summary_by = 'ai'
+    const result = await customerApi.refreshSummary(customerId, recipeId)
+    if (!active || props.id !== customerId || customer.value?.id !== customerId) return
+    const updatedAt = new Date().toISOString()
+    const recipe = customer.value.recipes.find((item) => item.recipe_id === recipeId)
+    if (recipe) {
+      Object.assign(recipe, { summary: result.summary, summary_by: 'ai', summary_updated_at: updatedAt })
+    }
+    if (primaryRecipe.value?.recipe_id === recipeId) {
+      Object.assign(customer.value, { summary: result.summary, summary_by: 'ai', summary_updated_at: updatedAt })
     }
     toast.success(result.by_ai ? '处理说明已更新' : '已根据现有资料整理处理说明')
   } catch (err) {
-    toast.error(errorText(err))
+    if (active && props.id === customerId) toast.error(errorText(err))
   } finally {
     summarizing.value = false
   }
-}
-
-async function toggleUploadMenu() {
-  if (uploading.value) return
-  uploadMenuOpen.value = !uploadMenuOpen.value
-  if (uploadMenuOpen.value) {
-    await nextTick()
-    uploadFirstChoice.value?.focus({ preventScroll: true })
-  }
-}
-
-function closeUploadMenu() {
-  uploadMenuOpen.value = false
-  uploadButton.value?.focus({ preventScroll: true })
-}
-
-function chooseUpload(kind: 'input' | 'expected') {
-  if (uploading.value) return
-  uploadKind.value = kind
-  closeUploadMenu()
-  uploadInput.value?.click()
-}
-
-async function upload(e: Event) {
-  const input = e.target as HTMLInputElement
-  const files = Array.from(input.files ?? [])
-  input.value = ''
-  if (!files.length || uploading.value) return
-  const kind = uploadKind.value
-  uploading.value = true
-  let uploaded = 0
-  try {
-    for (const f of files) {
-      await customerApi.uploadFile(props.id, f, kind)
-      uploaded++
-    }
-    toast.success(`已上传 ${files.length} 个文件`)
-  } catch (err) {
-    toast.error(errorText(err))
-  } finally {
-    if (uploaded) await load()
-    uploading.value = false
-  }
-}
-
-async function removeFile(f: FileInfo) {
-  if (!await confirmDelete({
-    title: '从客户资料移除这个文件？',
-    target: f.filename,
-    description: '已有会话会保留文件，新会话将无法再从客户资料中使用它。',
-    confirmText: '移除文件',
-    action: () => fileApi.remove(f.file_id, props.id),
-  })) return
-  await load()
 }
 
 async function removeCustomer() {
@@ -251,12 +225,12 @@ async function onEdited() {
           :aria-pressed="tab === key"
           class="inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-2 text-sm transition-[background-color,color,box-shadow] duration-200 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ink/40 motion-reduce:transition-none"
           :class="tab === key ? 'bg-white font-medium text-ink shadow-[0_2px_8px_rgba(34,34,66,0.08)]' : 'text-mute hover:bg-white/60 hover:text-ink'"
-          @click="tab = key; router.replace({ query: { tab: key } })"
+          @click="setTab(key)"
         >
           <CustomerDetailTabIcon :name="key" class="size-5 shrink-0 transition-opacity duration-200 motion-reduce:transition-none" :class="tab === key ? 'opacity-100' : 'opacity-70'" />
           <span>{{ label }}</span>
           <span v-if="key === 'recipes'" class="rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[11px] leading-none tabular-nums text-mute">{{ customer.recipes.length }}</span>
-          <span v-else-if="key === 'files'" class="rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[11px] leading-none tabular-nums text-mute">{{ customer.files.length + (customer.output_count ?? customer.outputs.length) }}</span>
+          <span v-else-if="key === 'files'" class="rounded-full bg-black/[0.05] px-1.5 py-0.5 text-[11px] leading-none tabular-nums text-mute">{{ fileCount }}</span>
         </button>
       </nav>
 
@@ -277,88 +251,52 @@ async function onEdited() {
           <CustomerLogicSummary v-if="customer.summary" :source="customer.summary" />
           <div v-else class="py-10 text-center text-sm text-faint">
             还没有处理逻辑说明<br />
-            <button class="btn-line mt-3" @click="regenerate"><Sparkles class="size-4" />让 AI 总结</button>
+            <button class="btn-line mt-3" :disabled="summarizing" @click="regenerate"><Sparkles class="size-4" />让 AI 总结</button>
           </div>
         </div>
-
       </section>
 
       <!-- 流程 -->
       <section v-else-if="tab === 'recipes'" class="mt-6 space-y-5">
-        <RecipePanel v-for="r in customer.recipes" :key="r.recipe_id" :recipe="r" :files="[...customer.files, ...customer.outputs]" @run="(id) => (runDialog = { recipeId: id })" @changed="load" />
+        <RecipePanel
+          v-for="recipe in orderedRecipes"
+          :key="`${customer.id}:${recipe.recipe_id}`"
+          :recipe="recipe"
+          :files="workflowFiles([...recipe.files, ...recipe.output_files])"
+          :primary="recipe.recipe_id === primaryRecipe?.recipe_id"
+          :setting-primary="settingPrimary"
+          :refresh="load"
+          @set-primary="setPrimary"
+          @run="(id) => (runDialog = { recipeId: id })"
+          @changed="load"
+        />
         <div v-if="!customer.recipes.length" class="card-soft py-14 text-center text-sm text-faint">还没有流程</div>
       </section>
 
       <!-- 文件 -->
-      <section v-else-if="tab === 'files'" class="mt-6 space-y-6">
-        <div class="card-soft p-5">
-          <div class="mb-4 flex flex-wrap items-center gap-2">
-            <h2 class="text-[15px] font-semibold">上传过的表格</h2>
-            <div class="relative ml-auto shrink-0" @keydown.esc.stop.prevent="closeUploadMenu">
-              <button
-                ref="uploadButton"
-                type="button"
-                class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs"
-                :disabled="uploading"
-                :aria-expanded="uploadMenuOpen"
-                @click="toggleUploadMenu"
-              >
-                <LoaderCircle v-if="uploading" class="size-3.5 shrink-0 animate-spin" /><Upload v-else class="size-3.5 shrink-0" />
-                <span>{{ uploading ? '上传中…' : '上传' }}</span>
-              </button>
-              <div v-if="uploadMenuOpen" class="fixed inset-0 z-30" @click="closeUploadMenu" />
-              <div v-if="uploadMenuOpen" class="absolute right-0 top-full z-40 mt-2 w-max max-w-[calc(100vw-3rem)] animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl" role="group" aria-label="选择上传文件类型">
-                <button ref="uploadFirstChoice" type="button" class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper focus-visible:bg-paper focus-visible:outline-none" @click="chooseUpload('input')">
-                  <FileSpreadsheet class="size-4 shrink-0 text-fun-green" />
-                  <span class="text-sm font-medium">要处理的文件</span>
-                </button>
-                <button type="button" class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper focus-visible:bg-paper focus-visible:outline-none" @click="chooseUpload('expected')">
-                  <FileCheck2 class="size-4 shrink-0 text-[#b7860b]" />
-                  <span class="text-sm font-medium">人工做好的文件</span>
-                </button>
-              </div>
-              <input ref="uploadInput" type="file" class="hidden" multiple accept=".xlsx,.xlsm,.xls,.csv" @change="upload" />
-            </div>
-          </div>
-          <table class="w-full text-sm">
-            <thead class="text-left text-xs text-faint">
-              <tr><th class="py-2 font-normal">文件</th><th class="font-normal">类型</th><th class="font-normal">上传</th><th /></tr>
-            </thead>
-            <tbody>
-              <tr v-for="f in inputFiles" :key="f.file_id" class="border-t border-line">
-                <td class="py-2.5">
-                  <button type="button" class="flex items-center gap-2 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :aria-label="`预览 ${f.filename}`" @click="preview = f">
-                    <FileCheck2 v-if="f.kind === 'expected'" class="size-4 text-[#b7860b]" />
-                    <FileSpreadsheet v-else class="size-4 text-fun-green" />{{ f.filename }}
-                  </button>
-                </td>
-                <td><span class="tag" :class="f.kind === 'expected' ? '!bg-fun-yellow/20 !text-[#8a6400]' : ''">{{ f.kind_label }}</span></td>
-                <td class="text-xs text-faint">{{ timeAgo(f.created_at) }}</td>
-                <td class="text-right">
-                  <a :href="f.download_url" class="icon-btn" title="下载"><Download class="size-4" /></a>
-                  <button class="icon-btn hover:text-error" title="删除" @click="removeFile(f)"><Trash2 class="size-4" /></button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-          <p v-if="!inputFiles.length" class="py-8 text-center text-sm text-faint">还没有文件</p>
-        </div>
-        <div class="card-soft p-5">
-          <h2 class="mb-3 text-[15px] font-semibold">生成的结果</h2>
-          <div v-for="f in customer.outputs" :key="f.file_id" class="flex items-center gap-3 border-t border-line py-2.5 text-sm first:border-0">
-            <FileSpreadsheet class="size-4" />
-            <button type="button" class="min-w-0 flex-1 truncate rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :title="f.filename" :aria-label="`预览 ${f.filename}`" @click="preview = f">{{ f.filename }}</button>
-            <span class="text-xs text-faint">{{ timeAgo(f.created_at) }}</span>
-            <a :href="f.download_url" class="icon-btn" title="下载"><Download class="size-4" /></a>
-            <button type="button" class="icon-btn hover:text-error" title="删除" :aria-label="`删除 ${f.filename}`" @click="removeFile(f)"><Trash2 class="size-4" /></button>
-          </div>
-          <p v-if="!customer.outputs.length" class="py-6 text-center text-sm text-faint">还没有生成过结果</p>
-        </div>
+      <section v-else-if="tab === 'files'" class="mt-6 space-y-8">
+        <section v-for="recipe in orderedRecipes" :key="`${customer.id}:${recipe.recipe_id}`" class="space-y-3">
+          <header class="flex items-center gap-2 px-1">
+            <h2 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h2>
+            <span v-if="recipe.recipe_id === primaryRecipe?.recipe_id" class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[#6265DC]/8 px-2 py-1 text-[10px] text-[#6265DC]"><Star class="size-3 fill-current" />主流程</span>
+          </header>
+          <WorkflowFiles :customer-id="customer.id" :recipe-id="recipe.recipe_id" :files="recipe.files" :outputs="recipe.output_files" :refresh="load" @preview="preview = $event" />
+        </section>
+        <WorkflowFiles v-if="!orderedRecipes.length" :key="customer.id" :customer-id="customer.id" :files="customer.files" :outputs="customer.outputs" :refresh="load" @preview="preview = $event" />
       </section>
 
       <!-- 记忆 -->
-      <section v-else class="mt-6">
-        <MemoryPanel :customer-id="customer.id" :memories="customer.memories" :mapping="customer.field_mapping" @changed="load" />
+      <section v-else-if="tab === 'memory'" class="mt-6">
+        <div class="space-y-8">
+          <section v-for="recipe in orderedRecipes" :key="`${customer.id}:${recipe.recipe_id}`" class="space-y-3">
+            <header class="flex items-center gap-2 px-1">
+              <h2 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h2>
+              <span v-if="recipe.recipe_id === primaryRecipe?.recipe_id" class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[#6265DC]/8 px-2 py-1 text-[10px] text-[#6265DC]"><Star class="size-3 fill-current" />主流程</span>
+            </header>
+            <MemoryPanel :customer-id="customer.id" :recipe-id="recipe.recipe_id" :memories="recipe.memories" :mapping="recipe.field_mapping" :mapping-entries="recipe.field_mapping_entries" :refresh="load" />
+          </section>
+          <div v-if="!orderedRecipes.length" class="card-soft py-12 text-center text-sm text-faint">保存流程后，可以维护对应的记忆和字段。</div>
+        </div>
         <div v-if="auth.user?.role === 'admin' || customer" class="mt-8 flex justify-end">
           <button class="btn-text text-error hover:!bg-error/5 hover:!text-error" @click="removeCustomer"><Trash2 class="size-4" />删除客户</button>
         </div>
@@ -386,8 +324,8 @@ async function onEdited() {
     <RunRecipeDialog
       v-if="runDialog && customer"
       :customer-id="customer.id"
-      :recipes="customer.recipes"
-      :files="customer.files"
+      :recipes="customer.recipes.filter((recipe) => recipe.recipe_id === runDialog?.recipeId)"
+      :files="customer.recipes.find((recipe) => recipe.recipe_id === runDialog?.recipeId)?.files ?? []"
       :initial-recipe-id="runDialog.recipeId"
       @close="runDialog = null"
       @done="load"

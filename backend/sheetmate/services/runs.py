@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import shutil
+from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -81,14 +82,18 @@ def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification
     run = db.get(Run, run_id)
     if run is None:
         raise NotFound("运行记录不存在")
+    steps = deepcopy(report.get("steps", []))
+    _retain_step_files(db, run, steps)
     run.status = report.get("status", "failed")
     if run.status == "running":
         run.status = "failed"
-    run.steps = externalize_script_references([_slim_step(s) for s in report.get("steps", [])])
+    run.steps = externalize_script_references([_slim_step(s) for s in steps])
     run.tool_sequence = " → ".join(str(s.get("formula")) for s in report.get("steps", []))
     validation = dict(report.get("validation") or {})
     if (run.validation or {}).get("recipe_deleted"):
         validation["recipe_deleted"] = True
+    if (run.validation or {}).get("resumed_from"):
+        validation["resumed_from"] = run.validation["resumed_from"]
     if outputs_metrics:
         validation["metrics"] = outputs_metrics
     if diff:
@@ -109,6 +114,37 @@ def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification
     # 连续追问可能在同一秒内完成，保留微秒才能取到最后一次执行快照。
     run.finished_at = datetime.now()
     return run
+
+
+def _retain_step_files(db: Session, run: Run, steps: list[dict[str, Any]]) -> None:
+    """中间文件与最终交付分开登记，保留步骤归属，历史重跑不覆盖旧文件。"""
+    from sheetmate.db.models import FileRecord
+    from sheetmate.services import files as file_service
+
+    existing = {record.profile.get("source_path"): record for record in db.scalars(
+        select(FileRecord).where(FileRecord.run_id == run.id)) if (record.profile or {}).get("intermediate")}
+    for step in steps:
+        retained = []
+        for artifact in step.get("output_files", []):
+            if artifact.get("file_id"):
+                retained.append(artifact)
+                continue
+            if not artifact.get("path") or not Path(artifact["path"]).is_file():
+                continue
+            source_path = str(Path(artifact["path"]).resolve())
+            if source_path in existing:
+                retained.append({**artifact, **file_service.file_dict(existing[source_path])})
+                continue
+            delivered = register_delivery_files(db, run, [artifact], user_id=run.user_id)[0]
+            record = db.get(FileRecord, delivered["file_id"])
+            assert record is not None
+            record.profile = {**(record.profile or {}), "intermediate": True,
+                              "step_id": step.get("step_id"), "step_name": step.get("name", ""), "source_path": source_path}
+            existing[source_path] = record
+            retained.append({**artifact, **file_service.file_dict(record), "intermediate": True,
+                             "step_id": step.get("step_id"), "step_name": step.get("name", "")})
+        if retained:
+            step["output_files"] = retained
 
 
 def finish_analysis_run(db: Session, run_id: str, record: dict[str, Any]) -> None:

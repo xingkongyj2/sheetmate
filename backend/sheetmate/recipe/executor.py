@@ -27,7 +27,7 @@ from typing import Any, Protocol
 import pandas as pd
 
 from sheetmate.engine.file_copies import FileCopies, temporary_file_copies
-from sheetmate.engine.field_mapping import apply_field_mapping, match_columns
+from sheetmate.engine.field_mapping import apply_field_mapping, match_columns, normalize_name
 from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.profile import dtype_label
 from sheetmate.engine.reader import ReadError, SheetData, read_sheet, read_workbook
@@ -95,6 +95,7 @@ class RecipeRunner:
         ws: Workspace,
         *,
         field_mapping: dict[str, list[str]] | None = None,
+        field_mapping_authoritative: bool = False,
         repairer: StepRepairer | None = None,
         max_repair: int = 3,
         run_id: str = "",
@@ -103,7 +104,10 @@ class RecipeRunner:
         self.recipe = recipe
         self.library = library
         self.ws = ws
-        self.field_mapping = {**(field_mapping or {}), **recipe.field_mapping}
+        reserved = {normalize_name(name) for standard, aliases in (field_mapping or {}).items() for name in [standard, *aliases]}
+        fallback = {standard: [alias for alias in aliases if normalize_name(alias) not in reserved]
+                    for standard, aliases in recipe.field_mapping.items() if normalize_name(standard) not in reserved}
+        self.field_mapping = dict(field_mapping or {}) if field_mapping_authoritative else {**fallback, **(field_mapping or {})}
         self.repairer = repairer
         self.max_repair = max_repair
         self.recipe_changed = False
@@ -529,8 +533,38 @@ class RecipeRunner:
             self.report["repaired_steps"].append(step.id)
         current.sql = outcome.sql
         item = self._step_report(current, outcome, assertions, attempts, started, repaired)
+        try:
+            item["output_files"] = [*item.get("output_files", []),
+                                    *await self._in_worker(self._snapshot_step_tables, current)]
+        except Exception as exc:
+            item["warnings"].append(f"过程文件归档失败：{exc}")
+            item["status"] = "warning" if not repaired else item["status"]
         self.report["steps"].append(item)
         yield {"type": "recipe_step_done", **item}
+
+    def _snapshot_step_tables(self, step: RecipeStep) -> list[dict[str, Any]]:
+        """保留每一步当时的完整结果，后续覆盖同名表或重跑也不改变旧文件。"""
+        tables = [name for name in step_output_tables(step) if self.ws.exists(name)]
+        if not tables:
+            return []
+        if self._artifact_dir is None:
+            self._artifact_dir = Path(mkdtemp(prefix="sheetmate_recipe_files_"))
+        self._artifact_dir.mkdir(parents=True, exist_ok=True)
+        directory = Path(mkdtemp(prefix=f"snapshot_{step.id}_", dir=self._artifact_dir))
+        snapshots = []
+        for index, table in enumerate(tables):
+            path = directory / f"step_{step.id}_{index}.xlsx"
+            frame = self.ws.df(table)
+            try:
+                write_excel(path, [SheetSpec(name=table, df=frame)])
+            except Exception:
+                path.unlink(missing_ok=True)
+                path = path.with_suffix(".csv")
+                frame.to_csv(path, index=False, encoding="utf-8-sig")
+            snapshots.append({"step_id": step.id, "step_name": step.name, "table": table,
+                              "name": f"{step.id:02d}_{step.name}_{table}{path.suffix}", "path": str(path.resolve()),
+                              "intermediate": True})
+        return snapshots
 
     def _execute(self, step: RecipeStep) -> StepOutcome:
         if step.kind == "python":

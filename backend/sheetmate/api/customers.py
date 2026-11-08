@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
@@ -19,7 +20,7 @@ from sheetmate.services import formula_generation
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services.auth import require_customer
-from sheetmate.services.errors import Forbidden
+from sheetmate.services.errors import Forbidden, NotFound, ServiceError
 
 router = APIRouter(prefix="/api/customers", tags=["customers"])
 memories_router = APIRouter(prefix="/api/memories", tags=["memories"])
@@ -57,6 +58,7 @@ class CustomerBody(BaseModel):
     code: str | None = None
     description: str | None = None
     mascot: str | None = None
+    primary_recipe_id: str | None = None
 
 
 class MappingBody(BaseModel):
@@ -65,8 +67,8 @@ class MappingBody(BaseModel):
 
 class MemoryBody(BaseModel):
     category: str = "domain_knowledge"
-    key: str
-    value: str
+    key: str | None = None
+    value: str = Field(min_length=1, max_length=12_000)
 
 
 @router.get("")
@@ -89,7 +91,7 @@ def get_customer(customer_id: str, db: Session = Depends(get_db), user: User = D
 @router.put("/{customer_id}")
 def update_customer(customer_id: str, body: CustomerBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     customer = require_customer(db, user, customer_id)
-    customer_service.update_customer(customer, body.model_dump(exclude_none=True))
+    customer_service.update_customer(customer, body.model_dump(exclude_none=True), db=db)
     return {"ok": True, "customer": customer_service.card(db, customer)}
 
 
@@ -103,7 +105,7 @@ def delete_customer(customer_id: str, db: Session = Depends(get_db), user: User 
 
 
 @router.post("/{customer_id}/summary")
-async def refresh_summary(customer_id: str, only_if_outdated: bool = False,
+async def refresh_summary(customer_id: str, only_if_outdated: bool = False, recipe_id: str | None = None,
                           db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     """重新生成「Excel 整体处理逻辑」说明（配置了模型就由 AI 写，否则按流程结构生成）。"""
     customer = require_customer(db, user, customer_id)
@@ -112,38 +114,57 @@ async def refresh_summary(customer_id: str, only_if_outdated: bool = False,
     except LLMError:
         llm = None
     if only_if_outdated:
-        summary, updated = await customer_service.upgrade_business_summary(db, customer, llm)
-        return {"ok": True, "summary": summary, "updated": updated, "summary_by": customer.summary_by}
-    summary = await customer_service.refresh_summary(db, customer, llm)
+        summary, updated = await customer_service.upgrade_business_summary(db, customer, llm, recipe_id=recipe_id)
+        record = recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
+        target = recipe_service.ensure_profile(db, record) if record else customer
+        return {"ok": True, "summary": summary, "updated": updated, "summary_by": target.summary_by}
+    summary = await customer_service.refresh_summary(db, customer, llm, recipe_id=recipe_id)
     return {"ok": True, "summary": summary, "by_ai": llm is not None}
 
 
 @router.post("/{customer_id}/files")
 async def upload_customer_file(customer_id: str, file: UploadFile = File(...), kind: str = Form("input"),
+                               recipe_id: str | None = None,
                                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     require_customer(db, user, customer_id)
+    recipe = recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
     record = file_service.save_upload(db, data=await file.read(), filename=file.filename or "file", user=user,
                                       customer_id=customer_id, kind=kind)
+    if recipe:
+        file_service.retain_for_recipe(db, record, customer_id, recipe.recipe_id)
     return {"ok": True, "file": file_service.file_dict(record)}
 
 
 @router.get("/{customer_id}/field-mapping")
-def get_mapping(customer_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+def get_mapping(customer_id: str, recipe_id: str | None = None,
+                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     require_customer(db, user, customer_id)
-    return {"ok": True, "mapping": memory_service.field_mapping_for(db, customer_id)}
+    record = recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
+    selected = record.recipe_id if record else None
+    return {"ok": True, "mapping": memory_service.field_mapping_for(db, customer_id, selected),
+            "entries": memory_service.field_mapping_entries(db, customer_id, selected)}
 
 
 @router.put("/{customer_id}/field-mapping")
-def put_mapping(customer_id: str, body: MappingBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+def put_mapping(customer_id: str, body: MappingBody, recipe_id: str | None = None,
+                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     require_customer(db, user, customer_id)
-    return {"ok": True, "mapping": memory_service.replace_field_mappings(db, customer_id, body.mapping)}
+    record = recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
+    selected = record.recipe_id if record else None
+    mapping = memory_service.replace_field_mappings(db, customer_id, body.mapping, recipe_id=selected)
+    return {"ok": True, "mapping": mapping,
+            "entries": memory_service.field_mapping_entries(db, customer_id, selected)}
 
 
 @router.post("/{customer_id}/memories")
-def add_memory(customer_id: str, body: MemoryBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+def add_memory(customer_id: str, body: MemoryBody, recipe_id: str | None = None,
+               db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     require_customer(db, user, customer_id)
-    item = memory_service.set_memory(db, category=body.category, key=body.key.strip(), value=body.value.strip(),
-                                     customer_id=customer_id, source="human")
+    record = recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
+    item = memory_service.set_memory(db, category=body.category,
+                                     key=(body.key or f"note_{uuid.uuid4().hex}").strip(), value=body.value.strip(),
+                                     customer_id=customer_id, recipe_id=record.recipe_id if record else None,
+                                     source="human")
     return {"ok": True, "memory": memory_service.memory_dict(item)}
 
 
@@ -210,21 +231,43 @@ def delete_formula(customer_id: str, formula_id: str, db: Session = Depends(get_
     return {"ok": True}
 
 
-@memories_router.delete("/{memory_id}")
-def delete_memory(memory_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
-    """删除一条记忆：客户记忆需要有客户权限，个人记忆只能本人删除。"""
+def _require_memory_access(db: Session, user: User, memory_id: int):
     from sheetmate.db.models import Conversation, Memory
 
     item = db.get(Memory, memory_id)
     if item is None:
-        return {"ok": True}
+        return None
     if item.customer_id:
         require_customer(db, user, item.customer_id)
     elif item.conversation_id:
         conv = db.get(Conversation, item.conversation_id)
         if conv is None or (conv.user_id != user.id and user.role != "admin"):
-            raise Forbidden("你没有权限删除这条记忆")
+            raise Forbidden("你没有权限维护这条记忆")
     elif item.user_id != user.id and user.role != "admin":
-        raise Forbidden("你没有权限删除这条记忆")
+        raise Forbidden("你没有权限维护这条记忆")
+    return item
+
+
+@memories_router.put("/{memory_id}")
+def update_memory(memory_id: int, body: MemoryBody, db: Session = Depends(get_db),
+                  user: User = Depends(current_user)) -> dict[str, Any]:
+    item = _require_memory_access(db, user, memory_id)
+    if item is None:
+        raise NotFound("记忆不存在")
+    if item.source != "human":
+        raise Forbidden("只能编辑用户维护的记忆")
+    value = body.value.strip()
+    if not value:
+        raise ServiceError("记忆内容不能为空")
+    item.value = value
+    db.flush()
+    return {"ok": True, "memory": memory_service.memory_dict(item)}
+
+
+@memories_router.delete("/{memory_id}")
+def delete_memory(memory_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """删除一条记忆：客户记忆需要有客户权限，个人记忆只能本人删除。"""
+    if _require_memory_access(db, user, memory_id) is None:
+        return {"ok": True}
     memory_service.delete_memory(db, memory_id)
     return {"ok": True}

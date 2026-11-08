@@ -31,7 +31,7 @@ export async function loadVue(url, overrides = {}) {
 }
 
 /** A minimal host renderer exercises real compiled Vue handlers without browser dependencies. */
-export function mount(component, initialProps) {
+export function mount(component, initialProps, components = {}) {
   const node = (tag, text = '') => ({ tag, text, props: {}, style: {}, children: [], parent: null,
     get nodeType() { return tag === '#text' ? 3 : 1 },
     get textContent() { return this.text },
@@ -63,6 +63,7 @@ export function mount(component, initialProps) {
   })
   const props = reactive(initialProps)
   const app = renderer.createApp(defineComponent({ setup: () => () => h(component, props) }))
+  for (const [name, component] of Object.entries(components)) app.component(name, component)
   app.mount(root)
   return { root, body, props, unmount: () => app.unmount() }
 }

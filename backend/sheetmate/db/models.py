@@ -56,6 +56,9 @@ class Customer(Base):
     summary_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # ai：AI 自动生成（流程变化时自动更新）；human：用户手动编辑过（不再自动覆盖，点「重新总结」才更新）
     summary_by: Mapped[str] = mapped_column(String(16), default="ai")
+    summary_policy_version: Mapped[int] = mapped_column(Integer, default=0)
+    # 使用流程身份而非版本行 ID，更新流程版本时主流程保持不变。
+    primary_recipe_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     mascot: Mapped[str] = mapped_column(String(32), default="")  # 卡片上的 IP 形象
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -80,6 +83,7 @@ class Conversation(Base):
     customer_id: Mapped[str | None] = mapped_column(
         ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
     )
+    recipe_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(String(200), default="新对话")
     mode: Mapped[str] = mapped_column(String(16), default="analyze")  # analyze / modify / create
     # 历史太长时压缩出的上下文摘要（TabClaw 的 auto-compact），以及它覆盖到的最后一条消息 id
@@ -151,6 +155,17 @@ class FileCustomer(Base):
     customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), primary_key=True, index=True)
 
 
+class FileRecipe(Base):
+    """流程引用同一份原件；excluded 保留移除记录，避免历史运行重新带回文件。"""
+
+    __tablename__ = "file_recipes"
+
+    file_id: Mapped[str] = mapped_column(ForeignKey("files.id", ondelete="CASCADE"), primary_key=True)
+    recipe_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    excluded: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class FormulaRecord(Base):
     """客户专属公式（scope=customer）。内置公式写在 engine/formulas/builtin.py，不入库。"""
 
@@ -194,6 +209,19 @@ class RecipeRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
+class RecipeProfile(Base):
+    """流程跨版本保留的业务说明，执行和文件通过 recipe_id 关联。"""
+
+    __tablename__ = "recipe_profiles"
+
+    recipe_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"), index=True)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    summary_by: Mapped[str] = mapped_column(String(16), default="ai")
+    summary_policy_version: Mapped[int] = mapped_column(Integer, default=0)
+    summary_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class Run(Base):
     """任务流水：每次分析、每次生成并执行 Recipe、每次重复执行 Recipe 都记一条。"""
 
@@ -234,6 +262,8 @@ class Memory(Base):
     conversation_id: Mapped[str | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True
     )
+    # 流程身份不随版本变化；未绑定流程的旧记忆在主流程初始化时迁移。
+    recipe_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     # preferences 偏好 / domain_knowledge 业务规则 / user_context 背景 / history_insights 经验
     category: Mapped[str] = mapped_column(String(32))
     key: Mapped[str] = mapped_column(String(128))
@@ -254,6 +284,23 @@ class FieldMapping(Base):
     standard: Mapped[str] = mapped_column(String(128))
     aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
     source: Mapped[str] = mapped_column(String(16), default="human")  # ai 提议 / human 确认
+    confirmed: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class RecipeFieldMapping(Base):
+    """流程字段映射；独立表兼容旧表的客户级唯一约束。"""
+
+    __tablename__ = "recipe_field_mappings"
+    __table_args__ = (UniqueConstraint("customer_id", "recipe_id", "standard"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id", ondelete="CASCADE"))
+    recipe_id: Mapped[str] = mapped_column(String(32), index=True)
+    standard: Mapped[str] = mapped_column(String(128))
+    aliases: Mapped[list[str]] = mapped_column(JSON, default=list)
+    source: Mapped[str] = mapped_column(String(16), default="human")
     confirmed: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)

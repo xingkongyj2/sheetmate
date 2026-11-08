@@ -24,12 +24,14 @@ router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
 class CreateBody(BaseModel):
     customer_id: str | None = None
+    recipe_id: str | None = None
     title: str = ""
 
 
 class UpdateBody(BaseModel):
     title: str | None = None
     customer_id: str | None = None
+    recipe_id: str | None = None
 
 
 class BindBody(BaseModel):
@@ -65,7 +67,7 @@ def list_conversations(customer_id: str | None = None, db: Session = Depends(get
 
 @router.post("")
 def create_conversation(body: CreateBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
-    conv = conv_service.create_conversation(db, user, customer_id=body.customer_id, title=body.title)
+    conv = conv_service.create_conversation(db, user, customer_id=body.customer_id, title=body.title, recipe_id=body.recipe_id)
     return {"ok": True, "conversation": conv_service.conversation_dict(db, conv)}
 
 
@@ -125,6 +127,8 @@ async def upload_file(conversation_id: str, file: UploadFile = File(...), kind: 
     conv = conv_service.get_conversation(db, user, conversation_id)
     record = file_service.save_upload(db, data=await file.read(), filename=file.filename or "file", user=user,
                                       customer_id=conv.customer_id, conversation_id=conv.id, kind=kind)
+    if conv.customer_id and conv.recipe_id:
+        file_service.retain_for_recipe(db, record, conv.customer_id, conv.recipe_id)
     tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
     return {"ok": True, "file": file_service.file_dict(record),
             "tables": [conv_service._table_brief(t, conversation=conv) for t in tables]}
@@ -137,6 +141,8 @@ def load_file(conversation_id: str, body: LoadFileBody, db: Session = Depends(ge
     if not file_service.can_access_in_conversation(db, record, conversation_id=conv.id, customer_id=conv.customer_id):
         raise ServiceError("只能加载本会话或当前客户的文件")
     file_service.retain_for_conversation(db, record, conv.id)
+    if conv.customer_id and conv.recipe_id:
+        file_service.retain_for_recipe(db, record, conv.customer_id, conv.recipe_id)
     tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
     return {"ok": True, "tables": [conv_service._table_brief(t, conversation=conv) for t in tables]}
 

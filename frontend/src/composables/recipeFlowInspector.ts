@@ -1,9 +1,16 @@
-import type { FileInfo, RecipeFlowData, RecipeJSON, StepReport } from '../api/types.ts'
+import type { CustomerDetail, FileInfo, RecipeFlowData, RecipeJSON, StepReport } from '../api/types.ts'
 import type { StepState } from './chatModel.ts'
 import type { FlowFileNode } from './recipeFlowInteraction.ts'
 
 function text(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
+}
+
+/** A workflow fallback must not borrow same-named files from another workflow. */
+export function inspectorCustomerFiles(customer: CustomerDetail, recipeId?: string | null): FileInfo[] {
+  if (!recipeId) return [...customer.files, ...customer.outputs]
+  const workflow = customer.recipes.find((item) => item.recipe_id === recipeId)
+  return workflow ? [...workflow.files, ...workflow.output_files] : []
 }
 
 /** Public event snapshots omit implementation fields that the versioned recipe includes. */

@@ -36,6 +36,9 @@ export interface FileInfo {
   download_url: string
   media_type?: string
   preview_url?: string | null
+  intermediate?: boolean
+  step_id?: number | null
+  step_name?: string | null
 }
 
 export type RecipeToolKind = 'formula' | 'sql' | 'python'
@@ -180,7 +183,28 @@ export interface MemoryItem {
   value: string
   scope_label: string
   source: string
+  recipe_id?: string | null
   updated_at: string
+}
+
+export interface FieldMappingEntry {
+  standard: string
+  aliases: string[]
+  source: 'ai' | 'human'
+}
+
+export interface CustomerWorkflow extends RecipeBrief {
+  flow: RecipeFlowData
+  recipe: RecipeJSON
+  summary: string
+  summary_by: 'ai' | 'human'
+  summary_updated_at: string | null
+  files: FileInfo[]
+  output_files: FileInfo[]
+  runs: RunDetail[]
+  memories: MemoryItem[]
+  field_mapping: Record<string, string[]>
+  field_mapping_entries: FieldMappingEntry[]
 }
 
 export interface RunBrief {
@@ -211,13 +235,14 @@ export interface RunDetail extends RunBrief {
 }
 
 export interface CustomerDetail extends Omit<CustomerCard, 'recipes'> {
+  primary_recipe_id: string | null
   summary: string
   summary_by: 'ai' | 'human' // ai：流程变化时自动更新；human：手动编辑过，不再自动覆盖
   summary_updated_at: string | null
   output_count: number
   files: FileInfo[]
   outputs: FileInfo[]
-  recipes: (RecipeBrief & { flow: RecipeFlowData; recipe: RecipeJSON })[]
+  recipes: CustomerWorkflow[]
   memories: MemoryItem[]
   field_mapping: Record<string, string[]>
   formulas: CustomerFormula[]

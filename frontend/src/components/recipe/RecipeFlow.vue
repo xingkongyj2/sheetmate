@@ -21,7 +21,8 @@ const props = withDefaults(defineProps<{
   activeStep?: number | null
   compact?: boolean
   context?: RecipeFlowContext
-}>(), { states: () => [], direction: 'horizontal', activeStep: null, compact: false, context: () => ({}) })
+  toolbarPlacement?: 'inline' | 'card'
+}>(), { states: () => [], direction: 'horizontal', activeStep: null, compact: false, context: () => ({}), toolbarPlacement: 'inline' })
 const emit = defineEmits<{ changed: [] }>()
 const fullscreen = ref(false)
 const selection = ref<FlowSelection | null>(null)
@@ -201,8 +202,8 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="recipe-flow-viewer min-w-0">
-    <div class="mb-2 flex min-h-6 items-center justify-end gap-1">
-      <span v-if="running" class="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-[#6265DC]" role="status"><LoaderCircle class="size-3 shrink-0 animate-spin" /><span class="truncate">{{ currentStep?.name || '执行中' }}</span></span>
+    <div class="recipe-flow-toolbar flex min-h-6 items-center justify-end gap-1" :class="toolbarPlacement === 'card' ? 'recipe-flow-toolbar--card' : 'mb-2'">
+      <span v-if="running && toolbarPlacement === 'inline'" class="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-[#6265DC]" role="status"><LoaderCircle class="size-3 shrink-0 animate-spin" /><span class="truncate">{{ currentStep?.name || '执行中' }}</span></span>
       <button v-if="canReplay" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running" @click="prepareRun"><Play class="size-3.5" />重新执行</button>
       <button type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="openFullscreen"><Maximize2 class="size-3.5" />全屏</button>
     </div>
@@ -260,6 +261,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.recipe-flow-toolbar--card { position: absolute; top: 12px; right: 12px; z-index: 2; }
 .flow-layer { position: fixed; inset: 0; z-index: 4000; background: white; }
 .flow-layer--detail { display: flex; align-items: center; justify-content: center; padding: 24px; background: #0b0b0c35; backdrop-filter: blur(3px); }
 .flow-dialog { min-width: 0; background: white; outline: none; }
@@ -280,6 +282,7 @@ onBeforeUnmount(() => {
 .flow-run-status { position: absolute; right: 20px; bottom: 26px; display: flex; max-width: calc(100% - 280px); align-items: center; gap: 8px; border: 1px solid #ececef; border-radius: 12px; padding: 9px 12px; background: white; font-size: 12px; }
 .flow-side-panel { width: 390px; min-height: 0; flex: none; overflow-y: auto; border-left: 1px solid #ececef; background: white; }
 @media (max-width: 760px) {
+  .recipe-flow-toolbar--card { top: 10px; right: 10px; }
   .flow-header { min-height: 60px; gap: 6px; padding: 10px 12px; }
   .flow-run-button { padding: 0 10px; }
   .flow-header h2 { font-size: 13px; }

@@ -62,25 +62,25 @@ export const customerApi = {
   get: async (id: string) => (await http.get<{ customer: CustomerDetail }>(`/customers/${id}`)).data.customer,
   create: async (payload: { name: string; code?: string; description?: string }) =>
     (await http.post<{ customer: CustomerCard }>('/customers', payload)).data.customer,
-  update: async (id: string, payload: Partial<{ name: string; code: string; description: string; mascot: string }>) =>
+  update: async (id: string, payload: Partial<{ name: string; code: string; description: string; mascot: string; primary_recipe_id: string }>) =>
     (await http.put<{ customer: CustomerCard }>(`/customers/${id}`, payload)).data.customer,
   remove: async (id: string) => http.delete(`/customers/${id}`),
-  refreshSummary: async (id: string) =>
-    (await http.post<{ summary: string; by_ai: boolean }>(`/customers/${id}/summary`, {}, { timeout: 180_000 })).data,
-  upgradeSummary: async (id: string) =>
+  refreshSummary: async (id: string, recipeId?: string) =>
+    (await http.post<{ summary: string; by_ai: boolean }>(`/customers/${id}/summary`, {}, { params: { recipe_id: recipeId }, timeout: 180_000 })).data,
+  upgradeSummary: async (id: string, recipeId?: string) =>
     (await http.post<{ summary: string; updated: boolean; summary_by: 'ai' | 'human' }>(
-      `/customers/${id}/summary`, {}, { params: { only_if_outdated: true }, timeout: 180_000 },
+      `/customers/${id}/summary`, {}, { params: { only_if_outdated: true, recipe_id: recipeId }, timeout: 180_000 },
     )).data,
-  uploadFile: async (id: string, file: File, kind = 'input') => {
+  uploadFile: async (id: string, file: File, kind = 'input', recipeId?: string) => {
     const form = new FormData()
     form.append('file', file)
     form.append('kind', kind)
-    return (await http.post<{ file: FileInfo }>(`/customers/${id}/files`, form)).data.file
+    return (await http.post<{ file: FileInfo }>(`/customers/${id}/files`, form, { params: { recipe_id: recipeId } })).data.file
   },
-  saveMapping: async (id: string, mapping: Record<string, string[]>) =>
-    (await http.put<{ mapping: Record<string, string[]> }>(`/customers/${id}/field-mapping`, { mapping })).data.mapping,
-  addMemory: async (id: string, payload: { category: string; key: string; value: string }) =>
-    (await http.post<{ memory: MemoryItem }>(`/customers/${id}/memories`, payload)).data.memory,
+  saveMapping: async (id: string, mapping: Record<string, string[]>, recipeId?: string) =>
+    (await http.put<{ mapping: Record<string, string[]> }>(`/customers/${id}/field-mapping`, { mapping }, { params: { recipe_id: recipeId } })).data.mapping,
+  addMemory: async (id: string, payload: { value: string; category?: string; key?: string }, recipeId?: string) =>
+    (await http.post<{ memory: MemoryItem }>(`/customers/${id}/memories`, payload, { params: { recipe_id: recipeId } })).data.memory,
 
   // ---- 客户独有公式（参数声明 + {{参数}} SQL 模板）
   formulas: async (id: string) => (await http.get<{ formulas: CustomerFormula[] }>(`/customers/${id}/formulas`)).data.formulas,
@@ -101,6 +101,8 @@ export const customerApi = {
 }
 
 export const memoryApi = {
+  update: async (id: number, payload: { value: string }) =>
+    (await http.put<{ memory: MemoryItem }>(`/memories/${id}`, payload)).data.memory,
   remove: async (id: number) => http.delete(`/memories/${id}`),
 }
 
@@ -109,7 +111,7 @@ export const conversationApi = {
   list: async (customerId?: string) =>
     (await http.get<{ conversations: ConversationBrief[] }>('/conversations', { params: { customer_id: customerId } })).data
       .conversations,
-  create: async (payload: { customer_id?: string | null; title?: string }) =>
+  create: async (payload: { customer_id?: string | null; recipe_id?: string | null; title?: string }) =>
     (await http.post<{ conversation: ConversationBrief }>('/conversations', payload)).data.conversation,
   get: async (id: string) => (await http.get<{ conversation: ConversationDetail & { running: boolean } }>(`/conversations/${id}`)).data.conversation,
   update: async (id: string, payload: Partial<{ title: string; customer_id: string | null }>) =>
@@ -154,8 +156,8 @@ export const fileApi = {
     return (await http.post<{ preview: { filename: string; sheet: string; sheets: string[]; total: number; columns: string[]; rows: unknown[][] } }>(
       '/files/preview-upload', form, { params: { sheet, offset, limit }, signal })).data.preview
   },
-  remove: async (id: string, customerId?: string) =>
-    http.delete(`/files/${id}`, { params: { customer_id: customerId } }),
+  remove: async (id: string, customerId?: string, recipeId?: string) =>
+    http.delete(`/files/${id}`, { params: { customer_id: customerId, recipe_id: recipeId } }),
   downloadUrl: (id: string) => `/api/files/${id}/download`,
 }
 

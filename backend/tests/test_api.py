@@ -442,7 +442,12 @@ def test_rerun_from_step_with_new_params(client, save_recipe):
     done = next(e for e in events if e["type"] == "recipe_run_done")
     assert done["status"] in {"success", "warning"}
     assert [e["step_id"] for e in events if e["type"] == "recipe_step_done"] == [3, 4]
-    after = client.get(f"/api/runs/{run_id}").json()["run"]
+    resumed_id = done["run_id"]
+    assert resumed_id != run_id
+    original = client.get(f"/api/runs/{run_id}").json()["run"]
+    assert original["steps"] == run["run"]["steps"]
+    after = client.get(f"/api/runs/{resumed_id}").json()["run"]
+    assert after["validation"]["resumed_from"] == {"run_id": run_id, "step_id": 3}
     assert [s["step_id"] for s in after["steps"]] == [1, 2, 3, 4]  # 前两步的明细沿用原记录
     assert after["steps"][2]["params"]["missing_fill"] == missing_fill
     stored_recipe = client.get(f"/api/recipes/{after['recipe_id']}").json()["recipe"]

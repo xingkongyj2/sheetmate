@@ -638,8 +638,10 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
         summary = (ctx.customer.get("summary") or "").strip()
         excerpt = summary[:800] + ("…" if len(summary) > 800 else "")
         customer_block = f"已绑定客户「{ctx.customer['name']}」：按这个客户的记忆、流程和业务规则来处理。"
+        if ctx.customer.get("recipe_id"):
+            customer_block += f"\n当前流程 ID：{ctx.customer['recipe_id']}，使用这个流程的资料、字段映射和用户记忆。"
         if excerpt:
-            customer_block += f"\n客户的整体处理逻辑：\n{excerpt}"
+            customer_block += f"\n当前流程的处理逻辑：\n{excerpt}"
     else:
         customer_block = "未绑定客户：本会话的数据只属于这个会话。用户以后可以把会话保存到某个客户名下。"
     recipes = ctx.host.list_recipes()

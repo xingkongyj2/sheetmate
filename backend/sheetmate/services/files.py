@@ -16,7 +16,7 @@ from sqlalchemy import event, or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.config import settings
-from sheetmate.db.models import Conversation, FileConversation, FileCustomer, FileRecord, User
+from sheetmate.db.models import Conversation, FileConversation, FileCustomer, FileRecipe, FileRecord, RecipeRecord, Run, User
 from sheetmate.engine.file_copies import temporary_file_copies
 from sheetmate.engine.images import IMAGE_SUFFIXES, image_profile
 from sheetmate.engine.profile import profile_workbook
@@ -230,6 +230,9 @@ def file_dict(record: FileRecord) -> dict[str, Any]:
         "preview_url": f"/api/files/{record.id}/image" if image_type in {
             "image/png", "image/jpeg", "image/webp", "image/gif",
         } else None,
+        "intermediate": bool((record.profile or {}).get("intermediate")),
+        "step_id": (record.profile or {}).get("step_id"),
+        "step_name": (record.profile or {}).get("step_name"),
     }
 
 
@@ -274,6 +277,108 @@ def retain_for_customer(db: Session, record: FileRecord, customer_id: str) -> No
     if record.customer_id is None:
         record.customer_id = customer_id
         db.flush()
+
+
+def retain_for_recipe(db: Session, record: FileRecord, customer_id: str, recipe_id: str) -> None:
+    """在完成归属校验后添加流程引用，不复制文件。"""
+    retain_for_customer(db, record, customer_id)
+    link = db.get(FileRecipe, (record.id, recipe_id))
+    if link is None:
+        db.add(FileRecipe(file_id=record.id, recipe_id=recipe_id, customer_id=customer_id, excluded=False))
+    else:
+        link.excluded = False
+    db.flush()
+
+
+def _recipe_file_ids(db: Session, customer_id: str, recipe_id: str) -> set[str]:
+    ids: set[str] = set()
+    exact_inputs: set[str] = set(db.scalars(select(FileRecipe.file_id).where(
+        FileRecipe.customer_id == customer_id, FileRecipe.recipe_id == recipe_id)))
+    resolved_aliases: set[str] = set()
+    records = list(db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id,
+                                                        RecipeRecord.customer_id == customer_id)))
+    for record in records:
+        bindings = (record.body or {}).get("learned_from", {}).get("input_bindings", {})
+        for alias, value in bindings.items() if isinstance(bindings, dict) else []:
+            file_id = value if isinstance(value, str) else value.get("file_id") if isinstance(value, dict) else None
+            if file_id:
+                exact_inputs.add(str(file_id))
+                resolved_aliases.add(alias)
+    runs = list(db.scalars(select(Run).where(Run.recipe_id == recipe_id, Run.customer_id == customer_id)))
+    for run in runs:
+        exact_inputs.update(run.input_file_ids or [])
+        for item in (run.validation or {}).get("inputs", []):
+            file_id = item.get("file_id") or (item.get("source") or {}).get("file_id") if isinstance(item, dict) else None
+            if file_id:
+                exact_inputs.add(str(file_id))
+                resolved_aliases.add(item.get("alias"))
+        if run.output_file_id:
+            ids.add(run.output_file_id)
+    ids.update(exact_inputs)
+    exact_names = set(db.scalars(select(FileRecord.filename).where(
+        FileRecord.id.in_(exact_inputs), FileRecord.kind != "output"))) if exact_inputs else set()
+    # 旧流程缺少原件 ID 时才回退到名称；同名文件只选一个，优先流程来源会话。
+    for record in records:
+        inputs = (record.body or {}).get("inputs", [])
+        origin = record.conversation_id or (record.body or {}).get("learned_from", {}).get("conversation_id")
+        for item in inputs:
+            if not isinstance(item, dict) or not item.get("source_file"):
+                continue
+            if item.get("alias") in resolved_aliases or item["source_file"] in exact_names:
+                continue
+            if len(inputs) == 1 and any(run.input_file_ids for run in runs):
+                continue
+            candidates = list(db.scalars(select(FileRecord).where(customer_file_condition(customer_id),
+                                                                 FileRecord.filename == item["source_file"],
+                                                                 FileRecord.kind != "output")))
+            candidates = [candidate for candidate in candidates if Path(candidate.stored_path).is_file()]
+            linked = set(db.scalars(select(FileConversation.file_id).where(
+                FileConversation.conversation_id == origin))) if origin else set()
+            candidates.sort(key=lambda candidate: (0 if origin and candidate.conversation_id == origin
+                                                    else 1 if candidate.id in linked else 2,
+                                                    candidate.created_at, candidate.id))
+            if candidates:
+                ids.add(candidates[0].id)
+                resolved_aliases.add(item.get("alias"))
+                exact_names.add(item["source_file"])
+    if runs:
+        ids.update(db.scalars(select(FileRecord.id).where(FileRecord.run_id.in_([run.id for run in runs]))))
+    return ids
+
+
+def recipe_files(db: Session, customer_id: str, recipe_id: str, *, primary_recipe_id: str | None = None) -> list[FileRecord]:
+    """用流程引用、执行记录和原始输入绑定还原完整资料；旧公共资料只归主流程。"""
+    available = list_files(db, customer_id=customer_id)
+    links = list(db.scalars(select(FileRecipe).where(FileRecipe.customer_id == customer_id)))
+    own = {link.file_id: link for link in links if link.recipe_id == recipe_id}
+    ids = _recipe_file_ids(db, customer_id, recipe_id) | {file_id for file_id, link in own.items() if not link.excluded}
+    if recipe_id == primary_recipe_id:
+        attributed = {link.file_id for link in links}
+        recipe_ids = set(db.scalars(select(RecipeRecord.recipe_id).where(RecipeRecord.customer_id == customer_id)))
+        for other in recipe_ids:
+            attributed.update(_recipe_file_ids(db, customer_id, other))
+        ids.update(record.id for record in available if record.id not in attributed)
+    # 固定旧资料的归属，之后更换主流程也不会把这些文件搬到另一个流程。
+    for record in available:
+        if record.id in ids and record.id not in own:
+            db.add(FileRecipe(file_id=record.id, recipe_id=recipe_id, customer_id=customer_id, excluded=False))
+    db.flush()
+    return [record for record in available if record.id in ids and not (own.get(record.id) and own[record.id].excluded)]
+
+
+def remove_from_recipe(db: Session, record: FileRecord, user: User, customer_id: str, recipe_id: str) -> bool:
+    from sheetmate.services import recipes as recipe_service
+    require_customer(db, user, customer_id)
+    recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
+    if not can_access_in_customer(db, record, customer_id):
+        raise ServiceError("这个文件不属于指定客户")
+    link = db.get(FileRecipe, (record.id, recipe_id))
+    if link is None:
+        db.add(FileRecipe(file_id=record.id, recipe_id=recipe_id, customer_id=customer_id, excluded=True))
+    else:
+        link.excluded = True
+    db.flush()
+    return False
 
 
 def customer_file_condition(customer_id: str):

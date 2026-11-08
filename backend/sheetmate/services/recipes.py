@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy import String, cast, delete, func, select, update
 from sqlalchemy.orm import Session
 
-from sheetmate.db.models import Conversation, FormulaRecord, Message, RecipeRecord, Run, User, now
+from sheetmate.db.models import Conversation, Customer, FormulaRecord, Message, RecipeProfile, RecipeRecord, Run, User, now
 from sheetmate.engine.formulas import BUILTIN_FORMULAS, Formula, FormulaError, FormulaLibrary
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.recipe.schema import Recipe
@@ -28,6 +28,7 @@ from sheetmate.services.errors import Forbidden, NotFound
 def save_recipe(db: Session, recipe: Recipe, *, conversation_id: str | None = None) -> RecipeRecord:
     """保存为新版本（recipe_id 不存在时就是第 1 版）。"""
     latest = db.scalar(select(func.max(RecipeRecord.version)).where(RecipeRecord.recipe_id == recipe.id)) or 0
+    previous_mapping = (get_record(db, recipe.id).body or {}).get("field_mapping", {}) if latest else {}
     recipe.version = latest + 1
     recipe.updated_at = now().isoformat()
     record = RecipeRecord(
@@ -37,6 +38,21 @@ def save_recipe(db: Session, recipe: Recipe, *, conversation_id: str | None = No
     )
     db.add(record)
     db.flush()
+    if record.customer_id:
+        customer = db.get(Customer, record.customer_id)
+        if customer is not None:
+            ensure_primary_recipe(db, customer)
+            profile = ensure_profile(db, record)
+            if latest:
+                from sheetmate.services.memory import upsert_field_mapping
+                for standard, aliases in recipe.field_mapping.items():
+                    additions = [alias for alias in aliases if alias not in previous_mapping.get(standard, [])]
+                    if additions:
+                        upsert_field_mapping(db, record.customer_id, standard, additions,
+                                             source="ai", recipe_id=record.recipe_id)
+            if profile.summary_by != "human":
+                profile.summary = ""
+                profile.summary_updated_at = None
     _bind_scripts(record)
     return record
 
@@ -154,6 +170,60 @@ def latest_records(db: Session, *, customer_id: str | None = None, conversation_
     return list(db.scalars(stmt.order_by(RecipeRecord.updated_at.desc())))
 
 
+def ensure_primary_recipe(db: Session, customer: Customer) -> str | None:
+    """旧客户也按首次创建顺序选主流程，修改版本不会改变选择。"""
+    ids = list(db.scalars(select(RecipeRecord.recipe_id).where(RecipeRecord.customer_id == customer.id)
+                         .group_by(RecipeRecord.recipe_id)
+                         .order_by(func.min(RecipeRecord.created_at), func.min(RecipeRecord.id))))
+    if customer.primary_recipe_id not in ids:
+        customer.primary_recipe_id = ids[0] if ids else None
+        db.flush()
+    if customer.primary_recipe_id:
+        from sheetmate.services.memory import migrate_customer_context
+        migrate_customer_context(db, customer.id, customer.primary_recipe_id)
+    return customer.primary_recipe_id
+
+
+def resolve_customer_recipe(db: Session, customer_id: str, recipe_id: str | None = None) -> RecipeRecord | None:
+    customer = db.get(Customer, customer_id)
+    if customer is None:
+        raise NotFound("客户不存在")
+    primary = ensure_primary_recipe(db, customer)
+    selected = recipe_id or primary
+    if not selected:
+        return None
+    record = get_record(db, selected)
+    if record.customer_id != customer_id:
+        raise NotFound("这个流程不属于当前客户")
+    return record
+
+
+def ensure_profile(db: Session, record: RecipeRecord) -> RecipeProfile:
+    profile = db.get(RecipeProfile, record.recipe_id)
+    if profile is None:
+        profile = RecipeProfile(recipe_id=record.recipe_id, customer_id=record.customer_id,
+                                summary="", summary_by="ai")
+        db.add(profile)
+        db.flush()
+        from sheetmate.services.memory import upsert_field_mapping
+        for standard, aliases in (record.body or {}).get("field_mapping", {}).items():
+            if isinstance(aliases, list) and standard.strip() and aliases:
+                upsert_field_mapping(db, record.customer_id, standard, aliases,
+                                     source="ai", recipe_id=record.recipe_id)
+        # 客户只有一个流程时，旧说明可以原样归入该流程。
+        customer = db.get(Customer, record.customer_id)
+        count = db.scalar(select(func.count(func.distinct(RecipeRecord.recipe_id)))
+                          .where(RecipeRecord.customer_id == record.customer_id))
+        if customer and count == 1 and customer.summary:
+            profile.summary = customer.summary
+            profile.summary_by = customer.summary_by
+            profile.summary_policy_version = customer.summary_policy_version
+            profile.summary_updated_at = customer.summary_updated_at
+    elif profile.customer_id != record.customer_id:
+        profile.customer_id = record.customer_id
+    return profile
+
+
 def versions(db: Session, recipe_id: str) -> list[dict[str, Any]]:
     records = db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id).order_by(RecipeRecord.version.desc()))
     return [
@@ -178,18 +248,70 @@ def delete_recipe(db: Session, recipe_id: str, *, user: User) -> dict[str, Any]:
     for run in db.scalars(select(Run).where(Run.recipe_id == recipe_id)):
         run.validation = {**(run.validation or {}), "recipe_deleted": True}
     db.execute(delete(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id))
+    if record.customer_id:
+        customer = db.get(Customer, record.customer_id)
+        if customer is not None:
+            ensure_primary_recipe(db, customer)
+            db.execute(update(Conversation).where(Conversation.customer_id == record.customer_id,
+                                                   Conversation.recipe_id == recipe_id)
+                       .values(recipe_id=customer.primary_recipe_id))
     return deleted
 
 
 def assign_customer(db: Session, *, conversation_id: str, customer_id: str) -> int:
-    """会话保存到客户时，会话里生成的流程一起归到客户名下（所有版本）。"""
-    records = list(db.scalars(select(RecipeRecord).where(RecipeRecord.conversation_id == conversation_id)))
+    """按流程身份整体迁移，版本、资料、记忆和执行历史保持在同一客户下。"""
+    from sheetmate.db.models import FileRecipe, FileRecord, Memory, RecipeFieldMapping
+    from sheetmate.services import files as file_service
+
+    recipe_ids = set(db.scalars(select(RecipeRecord.recipe_id).where(RecipeRecord.conversation_id == conversation_id)))
+    if not recipe_ids:
+        return 0
+    records = list(db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id.in_(recipe_ids))))
+    previous_customers = {record.customer_id for record in records if record.customer_id and record.customer_id != customer_id}
+    file_ids: set[str] = set()
+    for previous_id in previous_customers:
+        previous = db.get(Customer, previous_id)
+        if previous is not None:
+            ensure_primary_recipe(db, previous)
+            db.execute(update(Conversation).where(Conversation.customer_id == previous_id,
+                                                   Conversation.recipe_id.in_(recipe_ids))
+                       .values(recipe_id=previous.primary_recipe_id))
+        for recipe_id in recipe_ids:
+            file_ids.update(file_service._recipe_file_ids(db, previous_id, recipe_id))
+    for link in db.scalars(select(FileRecipe).where(FileRecipe.recipe_id.in_(recipe_ids))):
+        file_ids.add(link.file_id)
+        link.customer_id = customer_id
+    transferred_runs = list(db.scalars(select(Run).where(Run.recipe_id.in_(recipe_ids))))
+    for run in transferred_runs:
+        run.customer_id = customer_id
+        file_ids.update(run.input_file_ids or [])
+        if run.output_file_id:
+            file_ids.add(run.output_file_id)
+        snapshot = (run.validation or {}).get("recipe_snapshot")
+        if isinstance(snapshot, dict):
+            run.validation = {**run.validation, "recipe_snapshot": {**snapshot, "customer_id": customer_id}}
+    if transferred_runs:
+        file_ids.update(db.scalars(select(FileRecord.id).where(FileRecord.run_id.in_([run.id for run in transferred_runs]))))
+    for model in (Memory, RecipeFieldMapping):
+        for item in db.scalars(select(model).where(model.recipe_id.in_(recipe_ids))):
+            item.customer_id = customer_id
+    for file in db.scalars(select(FileRecord).where(FileRecord.id.in_(file_ids))):
+        file_service.retain_for_customer(db, file, customer_id)
     for record in records:
         record.customer_id = customer_id
         body = dict(record.body or {})
         body["customer_id"] = customer_id
         record.body = body
-    return len({r.recipe_id for r in records})
+        ensure_profile(db, record)
+    db.flush()
+    customer = db.get(Customer, customer_id)
+    if customer is not None:
+        ensure_primary_recipe(db, customer)
+    for previous_id in previous_customers:
+        previous = db.get(Customer, previous_id)
+        if previous is not None:
+            ensure_primary_recipe(db, previous)
+    return len(recipe_ids)
 
 
 def recipe_brief(record: RecipeRecord) -> dict[str, Any]:

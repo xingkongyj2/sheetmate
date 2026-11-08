@@ -102,6 +102,7 @@ def image_preview(file_id: str, db: Session = Depends(get_db), user: User = Depe
 
 @router.delete("/{file_id}")
 def delete_file(file_id: str, customer_id: str | None = None, conversation_id: str | None = None,
+                recipe_id: str | None = None,
                 db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     # 删除关联也适用于原件已丢失的旧记录，让用户可以清理损坏条目。
     record = db.get(FileRecord, file_id)
@@ -111,7 +112,11 @@ def delete_file(file_id: str, customer_id: str | None = None, conversation_id: s
     if customer_id and conversation_id:
         raise ServiceError("请指定客户或会话中的一个删除范围")
     scope = customer_id or record.customer_id
-    if conversation_id:
+    if recipe_id:
+        if not scope or conversation_id:
+            raise ServiceError("流程文件需要指定客户")
+        deleted = file_service.remove_from_recipe(db, record, user, scope, recipe_id)
+    elif conversation_id:
         deleted = file_service.remove_from_conversation(db, record, user, conversation_id)
     elif scope:
         deleted = file_service.remove_from_customer(db, record, user, scope)

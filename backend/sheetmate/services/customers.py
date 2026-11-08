@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from sheetmate.agent.summarizer import customer_summary, fallback_customer_summary
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import Conversation, Customer, FileRecord, RecipeRecord, Run, User, UserCustomer, now
+from sheetmate.db.models import Conversation, Customer, FileRecord, RecipeProfile, RecipeRecord, Run, User, UserCustomer, now
 from sheetmate.services import files as file_service
 from sheetmate.services import formulas as formula_service
 from sheetmate.services import memory as memory_service
@@ -21,6 +21,7 @@ from sheetmate.services import runs as run_service
 from sheetmate.services.errors import ServiceError
 
 MASCOTS = ["blob", "rocket", "briefcase", "megaphone", "folder", "puzzle", "crown", "book", "beret"]
+SUMMARY_POLICY_VERSION = 1  # 用户可见说明只使用流程资料和用户维护的记忆。
 
 
 def accessible_customers(db: Session, user: User) -> list[Customer]:
@@ -44,12 +45,18 @@ def create_customer(db: Session, user: User, name: str, code: str = "", descript
     return customer
 
 
-def update_customer(customer: Customer, data: dict[str, Any]) -> Customer:
+def update_customer(customer: Customer, data: dict[str, Any], db: Session | None = None) -> Customer:
     for key in ("name", "code", "description", "mascot"):
         if key in data and data[key] is not None:
             setattr(customer, key, str(data[key]).strip())
     if not customer.name:
         raise ServiceError("客户名称不能为空")
+    if "primary_recipe_id" in data and db is not None:
+        old_primary = recipe_service.ensure_primary_recipe(db, customer)
+        if old_primary:
+            file_service.recipe_files(db, customer.id, old_primary, primary_recipe_id=old_primary)
+        record = recipe_service.resolve_customer_recipe(db, customer.id, data["primary_recipe_id"])
+        customer.primary_recipe_id = record.recipe_id if record else None
     return customer
 
 
@@ -77,9 +84,12 @@ def card(db: Session, customer: Customer) -> dict[str, Any]:
     file_count = db.scalar(select(func.count()).select_from(FileRecord).where(
         file_service.customer_file_condition(customer.id), FileRecord.kind != "output")) or 0
     recipes = recipe_service.latest_records(db, customer_id=customer.id)
+    primary_id = recipe_service.ensure_primary_recipe(db, customer)
     conv_count = db.scalar(select(func.count()).select_from(Conversation).where(Conversation.customer_id == customer.id)) or 0
     last_run = db.scalars(select(Run).where(Run.customer_id == customer.id).order_by(Run.created_at.desc()).limit(1)).first()
-    summary = (customer.summary or "").strip()
+    primary = next((record for record in recipes if record.recipe_id == primary_id), None)
+    target = _summary_for_display(db, customer, primary)
+    summary = (target.summary or "").strip()
     excerpt = _first_paragraph(summary) if summary else (customer.description or "")
     return {
         "id": customer.id,
@@ -87,6 +97,7 @@ def card(db: Session, customer: Customer) -> dict[str, Any]:
         "code": customer.code,
         "mascot": customer.mascot or "blob",
         "description": customer.description,
+        "primary_recipe_id": primary_id,
         "excerpt": excerpt[:120],
         "file_count": int(file_count),
         "recipe_count": len(recipes),
@@ -115,6 +126,7 @@ def _first_paragraph(markdown: str) -> str:
 
 
 def detail(db: Session, customer: Customer) -> dict[str, Any]:
+    primary_id = recipe_service.ensure_primary_recipe(db, customer)
     files = file_service.list_files(db, customer_id=customer.id)
     output_count = db.scalar(select(func.count()).select_from(FileRecord).where(
         file_service.customer_file_condition(customer.id), FileRecord.kind == "output")) or 0
@@ -122,36 +134,71 @@ def detail(db: Session, customer: Customer) -> dict[str, Any]:
     recipes = []
     for record in records:
         recipe = recipe_service.record_to_recipe(record)
-        recipes.append({**recipe_service.recipe_brief(record), "flow": recipe.flow(), "recipe": recipe.to_dict()})
+        profile = _summary_for_display(db, customer, record)
+        resources = file_service.recipe_files(db, customer.id, record.recipe_id, primary_recipe_id=primary_id)
+        if not profile.summary:
+            inputs = [file_service.file_dict(item) for item in resources if item.kind != "output"]
+            _, _, context = _summary_inputs(db, customer, record.recipe_id)
+            profile.summary = fallback_customer_summary(recipe.name, inputs, [recipe], context)
+            profile.summary_updated_at = now()
+            profile.summary_policy_version = SUMMARY_POLICY_VERSION
+        recipes.append({**recipe_service.recipe_brief(record), "flow": recipe.flow(), "recipe": recipe.to_dict(),
+                        "summary": profile.summary, "summary_by": profile.summary_by,
+                        "summary_updated_at": profile.summary_updated_at.isoformat() if profile.summary_updated_at else None,
+                        "files": [file_service.file_dict(item) for item in resources if item.kind != "output"],
+                        "output_files": [file_service.file_dict(item) for item in resources if item.kind == "output"],
+                        "memories": memory_service.customer_memories(db, customer.id, recipe_id=record.recipe_id, source="human"),
+                        "field_mapping": memory_service.field_mapping_for(db, customer.id, recipe_id=record.recipe_id),
+                        "field_mapping_entries": memory_service.field_mapping_entries(db, customer.id, recipe_id=record.recipe_id),
+                        "runs": [run_service.run_dict(run) for run in db.scalars(select(Run).where(
+                            Run.customer_id == customer.id, Run.recipe_id == record.recipe_id).order_by(Run.created_at.desc()))]})
     conversations = db.scalars(select(Conversation).where(Conversation.customer_id == customer.id)
                                .order_by(Conversation.updated_at.desc()))
+    primary = next((item for item in recipes if item["recipe_id"] == primary_id), None)
+    if primary is None:
+        _summary_for_display(db, customer)
     return {
         **card(db, customer),
-        "summary": customer.summary,
-        "summary_by": customer.summary_by,
-        "summary_updated_at": customer.summary_updated_at.isoformat() if customer.summary_updated_at else None,
+        "summary": primary["summary"] if primary else customer.summary,
+        "summary_by": primary["summary_by"] if primary else customer.summary_by,
+        "summary_updated_at": primary["summary_updated_at"] if primary else customer.summary_updated_at.isoformat() if customer.summary_updated_at else None,
         "output_count": int(output_count),
         "files": [file_service.file_dict(f) for f in files if f.kind != "output"],
         "outputs": [file_service.file_dict(f) for f in files if f.kind == "output"][:20],
         "recipes": recipes,
-        "memories": memory_service.customer_memories(db, customer.id),
-        "field_mapping": memory_service.field_mapping_for(db, customer.id),
+        "memories": memory_service.customer_memories(db, customer.id, recipe_id=primary_id, source="human"),
+        "field_mapping": memory_service.field_mapping_for(db, customer.id, recipe_id=primary_id),
         "formulas": formula_service.list_with_usage(db, customer.id),
         "runs": [run_service.run_dict(r, with_steps=False) for r in run_service.list_runs(db, customer_id=customer.id, limit=20)],
         "conversations": [{"id": c.id, "title": c.title, "mode": c.mode, "updated_at": c.updated_at.isoformat()} for c in conversations],
     }
 
 
-def _summary_inputs(db: Session, customer: Customer) -> tuple[list[dict[str, Any]], list[Any], str]:
-    """写总结需要的材料：上传过的文件、当前流程、客户记忆和字段映射。"""
-    files = [file_service.file_dict(f) for f in file_service.list_files(db, customer_id=customer.id) if f.kind != "output"]
-    recipes = [recipe_service.record_to_recipe(r) for r in recipe_service.latest_records(db, customer_id=customer.id)]
-    memories = memory_service.customer_memories(db, customer.id)
-    mapping = memory_service.field_mapping_for(db, customer.id)
-    memory_text = "\n".join(f"- {m['category_label']}：{m['key']} = {m['value']}" for m in memories)
-    if mapping:
-        memory_text += "\n" + "\n".join(f"- 字段映射：{std} ← {'、'.join(aliases)}" for std, aliases in mapping.items())
+def _summary_inputs(db: Session, customer: Customer, recipe_id: str | None = None) -> tuple[list[dict[str, Any]], list[Any], str]:
+    """面向用户的说明只使用流程资料和人工规则；AI 辅助记忆留在执行上下文。"""
+    if recipe_id:
+        record = recipe_service.resolve_customer_recipe(db, customer.id, recipe_id)
+        resources = file_service.recipe_files(db, customer.id, recipe_id, primary_recipe_id=customer.primary_recipe_id)
+        files = [file_service.file_dict(f) for f in resources if f.kind != "output"]
+        recipes = [recipe_service.record_to_recipe(record)]
+    else:
+        files = [file_service.file_dict(f) for f in file_service.list_files(db, customer_id=customer.id) if f.kind != "output"]
+        recipes = [recipe_service.record_to_recipe(r) for r in recipe_service.latest_records(db, customer_id=customer.id)]
+    memories = memory_service.customer_memories(db, customer.id, recipe_id=recipe_id, source="human")
+    memory_text = "\n".join(f"- {item['value']}" for item in memories)
     return files, recipes, memory_text
+
+
+def _summary_for_display(db: Session, customer: Customer, record: RecipeRecord | None = None) -> Customer | RecipeProfile:
+    """旧自动总结可能混入 AI 习惯；展示前从允许公开的资料重建一次。"""
+    target = recipe_service.ensure_profile(db, record) if record else customer
+    if (target.summary and target.summary_by != "human"
+            and (target.summary_policy_version or 0) < SUMMARY_POLICY_VERSION):
+        files, recipes, memory_text = _summary_inputs(db, customer, record.recipe_id if record else None)
+        target.summary = fallback_customer_summary(record.name if record else customer.name, files, recipes, memory_text)
+        target.summary_updated_at = now()
+        target.summary_policy_version = SUMMARY_POLICY_VERSION
+    return target
 
 
 async def _compose_summary(name: str, files: list[dict[str, Any]], recipes: list[Any], memory_text: str, llm: Any | None) -> str:
@@ -166,13 +213,16 @@ async def _compose_summary(name: str, files: list[dict[str, Any]], recipes: list
     return fallback_customer_summary(name, files, recipes, memory_text)
 
 
-async def refresh_summary(db: Session, customer: Customer, llm: Any | None) -> str:
+async def refresh_summary(db: Session, customer: Customer, llm: Any | None, recipe_id: str | None = None) -> str:
     """手动「重新总结」：重新生成并恢复为自动更新。"""
-    files, recipes, memory_text = _summary_inputs(db, customer)
-    text = await _compose_summary(customer.name, files, recipes, memory_text, llm)
-    customer.summary = text
-    customer.summary_updated_at = now()
-    customer.summary_by = "ai"
+    record = recipe_service.resolve_customer_recipe(db, customer.id, recipe_id)
+    target = recipe_service.ensure_profile(db, record) if record else customer
+    files, recipes, memory_text = _summary_inputs(db, customer, record.recipe_id if record else None)
+    text = await _compose_summary(record.name if record else customer.name, files, recipes, memory_text, llm)
+    target.summary = text
+    target.summary_updated_at = now()
+    target.summary_by = "ai"
+    target.summary_policy_version = SUMMARY_POLICY_VERSION
     return text
 
 
@@ -181,25 +231,33 @@ def needs_business_summary(customer: Customer) -> bool:
             and not re.search(r"(?m)^#{1,3}\s+这项工作做什么\s*$", customer.summary))
 
 
-async def upgrade_business_summary(db: Session, customer: Customer, llm: Any | None) -> tuple[str, bool]:
-    if not needs_business_summary(customer) or llm is None:
-        return customer.summary, False
-    original = customer.summary
-    files, recipes, memory_text = _summary_inputs(db, customer)
+async def upgrade_business_summary(db: Session, customer: Customer, llm: Any | None,
+                                   recipe_id: str | None = None) -> tuple[str, bool]:
+    record = recipe_service.resolve_customer_recipe(db, customer.id, recipe_id)
+    target = recipe_service.ensure_profile(db, record) if record else customer
+    previous = target.summary
+    target = _summary_for_display(db, customer, record)
+    sanitized = previous != target.summary
+    if not needs_business_summary(target) or llm is None:
+        return target.summary, sanitized
+    original = target.summary
+    files, recipes, memory_text = _summary_inputs(db, customer, record.recipe_id if record else None)
     try:
-        text = await customer_summary(llm, customer.name, files, recipes, memory_text, previous_summary=original)
+        text = await customer_summary(llm, record.name if record else customer.name, files, recipes, memory_text, previous_summary=original)
     except Exception:
-        return original, False
+        return target.summary, sanitized
     if not re.search(r"(?m)^#{1,3}\s+这项工作做什么\s*$", text):
-        return original, False
+        return target.summary, sanitized
+    model = RecipeProfile if record else Customer
+    identity = RecipeProfile.recipe_id == record.recipe_id if record else Customer.id == customer.id
     changed = db.execute(
-        update(Customer)
-        .where(Customer.id == customer.id, Customer.summary_by == "ai", Customer.summary == original)
-        .values(summary=text, summary_updated_at=now())
+        update(model)
+        .where(identity, model.summary_by == "ai", model.summary == original)
+        .values(summary=text, summary_updated_at=now(), summary_policy_version=SUMMARY_POLICY_VERSION)
     ).rowcount == 1
     if not changed:
-        db.refresh(customer, ["summary", "summary_by", "summary_updated_at"])
-    return customer.summary, changed
+        db.refresh(target, ["summary", "summary_by", "summary_updated_at", "summary_policy_version"])
+    return target.summary, changed
 
 
 _refreshing: set[str] = set()
@@ -229,23 +287,37 @@ async def _auto_refresh(customer_id: str) -> None:
 
     _refreshing.add(customer_id)
     try:
-        # 分两段事务：先取材料，调模型时不占着数据库
+        # 分两段事务，逐个流程整理，调用模型时不占用数据库事务。
         with session_scope() as db:
             customer = db.get(Customer, customer_id)
-            if customer is None or customer.summary_by == "human":
+            if customer is None:
                 return
-            name = customer.name
-            files, recipes, memory_text = _summary_inputs(db, customer)
+            recipe_service.ensure_primary_recipe(db, customer)
+            records = recipe_service.latest_records(db, customer_id=customer_id)
+            materials = []
+            for record in records:
+                profile = recipe_service.ensure_profile(db, record)
+                if profile.summary_by != "human":
+                    materials.append((record.recipe_id, record.version, record.name,
+                                      _summary_inputs(db, customer, record.recipe_id)))
+            if not records and customer.summary_by != "human":
+                materials.append((None, None, customer.name, _summary_inputs(db, customer)))
         try:
             llm = get_llm()
         except LLMError:
             llm = None
-        text = await _compose_summary(name, files, recipes, memory_text, llm)
-        with session_scope() as db:
-            customer = db.get(Customer, customer_id)
-            if customer is not None and customer.summary_by != "human":
-                customer.summary = text
-                customer.summary_updated_at = now()
+        for recipe_id, version, name, (files, recipes, memory_text) in materials:
+            text = await _compose_summary(name, files, recipes, memory_text, llm)
+            with session_scope() as db:
+                target = db.get(RecipeProfile, recipe_id) if recipe_id else db.get(Customer, customer_id)
+                if target is None or target.summary_by == "human":
+                    continue
+                latest = db.scalar(select(func.max(RecipeRecord.version)).where(RecipeRecord.recipe_id == recipe_id)) if recipe_id else None
+                if recipe_id and latest != version:
+                    continue
+                target.summary = text
+                target.summary_updated_at = now()
+                target.summary_policy_version = SUMMARY_POLICY_VERSION
     except Exception:
         pass  # 总结只是锦上添花，失败不影响主流程
     finally:

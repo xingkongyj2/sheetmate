@@ -136,10 +136,16 @@ def test_db_migration_adds_missing_columns(tmp_path):
     with sqlite3.connect(path) as raw:
         raw.execute("CREATE TABLE customers (id VARCHAR(32) PRIMARY KEY, name VARCHAR(128))")
         raw.execute("INSERT INTO customers VALUES ('c_1', '老客户')")
+        raw.execute("CREATE TABLE recipe_profiles (recipe_id VARCHAR(32) PRIMARY KEY, customer_id VARCHAR(32), summary TEXT)")
+        raw.execute("INSERT INTO recipe_profiles VALUES ('r_1', 'c_1', '旧流程说明')")
     eng = create_engine(f"sqlite:///{path}")
     with eng.begin() as conn:
         added = _add_missing_columns(conn)
     assert "customers.summary_by" in added and "customers.mascot" in added
+    assert "customers.summary_policy_version" in added
+    assert "recipe_profiles.summary_policy_version" in added
     with sqlite3.connect(path) as raw:
-        row = raw.execute("SELECT name, summary_by, summary FROM customers").fetchone()
-    assert row == ("老客户", "ai", "")
+        row = raw.execute("SELECT name, summary_by, summary, summary_policy_version FROM customers").fetchone()
+        profile = raw.execute("SELECT recipe_id, summary, summary_by, summary_policy_version FROM recipe_profiles").fetchone()
+    assert row == ("老客户", "ai", "", 0)
+    assert profile == ("r_1", "旧流程说明", "ai", 0)

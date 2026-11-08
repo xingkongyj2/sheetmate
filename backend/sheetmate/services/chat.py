@@ -36,7 +36,7 @@ from sheetmate.agent.thinking import THINKING_TOOL_BUDGET, execute_thinking
 from sheetmate.agent.tools import AgentContext, ToolRegistry
 from sheetmate.config import settings
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import Conversation, Customer, FileRecord, Message, User
+from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeProfile, RecipeRecord, User
 from sheetmate.engine.images import model_image_data_url
 from sheetmate.engine.reader import ReadError
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
@@ -104,6 +104,21 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
         library = recipe_service.library_for(db, conv.customer_id)
         mode = conv.mode
         customer_info = {"id": customer.id, "name": customer.name, "summary": customer.summary} if customer else None
+        if customer is not None and not conv.recipe_id:
+            primary = recipe_service.resolve_customer_recipe(db, customer.id)
+            conv.recipe_id = primary.recipe_id if primary else None
+        recipe_id = conv.recipe_id
+        if customer_info is not None:
+            customer_info["recipe_id"] = recipe_id
+            selected_record = db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id,
+                                                                      RecipeRecord.customer_id == customer.id)
+                                         .order_by(RecipeRecord.version.desc()).limit(1)).first() if recipe_id else None
+            if selected_record is not None:
+                recipe_service.resolve_customer_recipe(db, customer.id, recipe_id)
+                recipe_service.ensure_profile(db, selected_record)
+            profile = db.get(RecipeProfile, recipe_id) if recipe_id else None
+            if recipe_id:
+                customer_info["summary"] = profile.summary if profile and profile.customer_id == customer.id else ""
         available = {record.id for record in file_service.list_files(
             db, customer_id=conv.customer_id, conversation_id=conv.id,
         )}
@@ -113,7 +128,7 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
         if table.source == "uploaded" and table.file_id and table.file_id not in available:
             ws.drop(table.name)
     host = ConversationHost(user_id=user_id, conversation_id=conversation_id,
-                            customer_id=customer_info["id"] if customer_info else None, ws=ws)
+                            customer_id=customer_info["id"] if customer_info else None, ws=ws, recipe_id=recipe_id)
     ctx = AgentContext(mode=mode, ws=ws, library=library, host=host, llm=llm, conversation_id=conversation_id,
                        customer=customer_info, max_repair=settings.repair_max_attempts, verify_rounds=settings.verify_max_rounds)
     return ctx, host
@@ -401,7 +416,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     if intent.action == "chat":
         return
     # 记忆抽取放到独立的后台任务里，不占用这次请求的连接
-    task = asyncio.create_task(_learn_memories(llm, user_id, conversation_id, ctx.host.customer_id, message, answer))
+    task = asyncio.create_task(_learn_memories(llm, user_id, conversation_id, ctx.host.customer_id, message, answer,
+                                               recipe_id=ctx.host.recipe_id))
     _background.add(task)
     task.add_done_callback(_background.discard)
 
@@ -699,7 +715,8 @@ async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str
     return title
 
 
-async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer_id: str | None, message: str, answer: str) -> None:
+async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer_id: str | None, message: str, answer: str,
+                          *, recipe_id: str | None = None) -> None:
     try:
         items = await asyncio.wait_for(extract_memories(llm, message, answer), timeout=30)
     except (asyncio.TimeoutError, Exception):
@@ -707,9 +724,12 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
     if not items:
         return
     with session_scope() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None or (customer_id and db.get(Customer, customer_id) is None):
+            return
         for item in items:
             memory_service.set_memory(db, category=item["category"], key=item["key"], value=item["value"], user_id=user_id,
-                                      customer_id=customer_id, conversation_id=conversation_id)
+                                      customer_id=customer_id, conversation_id=conversation_id, recipe_id=recipe_id)
 
 
 # ---------------------------------------------------------------------------

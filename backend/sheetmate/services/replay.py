@@ -62,6 +62,8 @@ def _load_recipe_for_user(db, user: User, recipe_id: str, version: int | None = 
     require_script_references(db, user, recipe.to_dict())
     if recipe.customer_id:
         require_customer(db, user, recipe.customer_id)
+        recipe_service.resolve_customer_recipe(db, recipe.customer_id, recipe.id)
+        recipe_service.ensure_profile(db, recipe_service.get_record(db, recipe.id))
     elif user.role != "admin":
         record = recipe_service.get_record(db, recipe_id)
         conv_id = record.conversation_id or recipe.learned_from.get("conversation_id")
@@ -75,7 +77,7 @@ def match(user: User, recipe_id: str, file_ids: list[str]) -> dict[str, Any]:
     with session_scope() as db:
         recipe = _load_recipe_for_user(db, user, recipe_id)
         records = [_file_for_user(db, user, fid) for fid in dict.fromkeys(file_ids)]
-        mapping = memory_service.field_mapping_for(db, recipe.customer_id)
+        mapping = memory_service.field_mapping_for(db, recipe.customer_id, recipe_id=recipe.id)
         candidates = _candidates(records)
         hits = match_inputs(recipe, candidates, mapping)
         return {
@@ -94,7 +96,7 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
     with session_scope() as db:
         recipe = _load_recipe_for_user(db, user, recipe_id, version)
         records = {fid: _file_for_user(db, user, fid) for fid in file_ids}
-        mapping = memory_service.field_mapping_for(db, recipe.customer_id)
+        mapping = memory_service.field_mapping_for(db, recipe.customer_id, recipe_id=recipe.id)
         chosen: dict[str, str] = dict(inputs or {})
         unknown = set(chosen) - set(recipe.input_aliases())
         if unknown:
@@ -135,6 +137,7 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
                 repairer = None
         ws = run_service.run_workspaces.get(run_id)
         runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=repairer,
+                              field_mapping_authoritative=bool(recipe.customer_id),
                               max_repair=settings.repair_max_attempts, run_id=run_id)
         async for event in runner.run(sources, output_path=out_path, history=history):
             await job.emit(event)
@@ -162,19 +165,24 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
         recipe = Recipe.model_validate(snapshot) if isinstance(snapshot, dict) else recipe_service.get_recipe(db, run.recipe_id, run.recipe_version)
         require_script_references(db, user, recipe.to_dict())
         library = recipe_service.library_for(db, recipe.customer_id)
-        mapping = memory_service.field_mapping_for(db, recipe.customer_id)
+        mapping = memory_service.field_mapping_for(db, recipe.customer_id, recipe_id=recipe.id)
         if not (settings.runs_dir / f"{run_id}.duckdb").exists():
             raise NotFound("这次运行的中间数据已经不在了，请重新执行")
         try:
             recipe.step(step_id)
         except KeyError as exc:
             raise ServiceError(f"流程没有第 {step_id} 步") from exc
-        out_path = run_service.output_path(run, file_service.safe_filename(f"{recipe.name}_结果_重跑_{uuid4().hex[:8]}.xlsx"))
         # 断点续跑只重算第 step_id 步及之后；前面步骤的明细和输入信息沿用原记录
         kept_steps = [s for s in (run.steps or []) if int(s.get("step_id") or 0) < step_id]
         kept_inputs = (run.validation or {}).get("inputs", [])
         kept_artifacts = [a for a in (run.validation or {}).get("artifacts", []) if int(a.get("step_id") or 0) < step_id]
-        run.status = "running"
+        resumed = run_service.create_run(db, kind="replay", user_id=user.id, customer_id=run.customer_id,
+                                         conversation_id=run.conversation_id, recipe_id=run.recipe_id,
+                                         recipe_version=run.recipe_version, input_file_ids=list(run.input_file_ids or []),
+                                         request_text=f"从第 {step_id} 步重跑「{recipe.name}」")
+        resumed.validation = {"resumed_from": {"run_id": run.id, "step_id": step_id}}
+        resumed_run_id = resumed.id
+        out_path = run_service.output_path(resumed, file_service.safe_filename(f"{recipe.name}_结果_重跑_{uuid4().hex[:8]}.xlsx"))
     edited = False
     if params:
         step = recipe.step(step_id)
@@ -182,8 +190,13 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
         edited = step.params != params
 
     async def work(job: Job) -> None:
-        ws = run_service.run_workspaces.get(run_id)
-        runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=None, run_id=run_id)
+        original_ws = run_service.run_workspaces.get(run_id)
+        ws = run_service.run_workspaces.get(resumed_run_id)
+        for table in original_ws.list_tables():
+            metadata = {key: value for key, value in table.to_dict().items() if key not in {"name", "columns", "rows"}}
+            ws.put_dataframe(table.name, original_ws.df(table.name), **metadata)
+        runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=None, run_id=resumed_run_id,
+                              field_mapping_authoritative=bool(recipe.customer_id))
         runner.report["inputs"] = []
         runner.restore_sources(kept_inputs, lambda fid: _file_path(fid, user))
         runner.restore_artifacts(kept_artifacts)
@@ -195,7 +208,7 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
         runner.report["inputs"] = kept_inputs
         await _finish(job, user.id, runner, runner.output_path or out_path, note=f"手动调整第 {step_id} 步参数后重跑", save_recipe=save_recipe)
 
-    return jobs.start(f"run:{run_id}", work)
+    return jobs.start(f"run:{resumed_run_id}", work)
 
 
 async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, note: str, *, save_recipe: bool = False) -> None:

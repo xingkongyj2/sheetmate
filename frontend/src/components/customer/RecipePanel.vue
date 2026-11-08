@@ -2,8 +2,8 @@
 /**
  * 客户页里的一个流程：说明、流程图、运行记录、校验规则、版本历史、用新文件执行。
  */
-import { Braces, ClipboardList, History, Info, Play, ShieldCheck, Trash2 } from '@lucide/vue'
-import { ref } from 'vue'
+import { Braces, ClipboardList, History, Info, Play, ShieldCheck, Star, Trash2 } from '@lucide/vue'
+import { computed, ref } from 'vue'
 
 import { recipeApi } from '@/api'
 import { errorText } from '@/api/http'
@@ -12,13 +12,20 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import RecipeRunsDialog from '@/components/customer/RecipeRunsDialog.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { percent, timeAgo } from '@/composables/chatModel'
+import { inspectorStates } from '@/composables/recipeFlowInspector'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
 type CustomerRecipe = CustomerDetail['recipes'][number]
 
-const props = defineProps<{ recipe: CustomerRecipe; files?: FileInfo[] }>()
-const emit = defineEmits<{ run: [recipeId: string]; changed: [] }>()
+const props = defineProps<{
+  recipe: CustomerRecipe
+  files?: FileInfo[]
+  primary?: boolean
+  settingPrimary?: boolean
+  refresh?: () => Promise<void>
+}>()
+const emit = defineEmits<{ run: [recipeId: string]; changed: []; setPrimary: [recipeId: string] }>()
 const toast = useToast()
 const { confirmDelete } = useConfirm()
 
@@ -26,6 +33,8 @@ const showJson = ref(false)
 const showDetails = ref(false)
 const showRuns = ref(false)
 const versions = ref<Awaited<ReturnType<typeof recipeApi.get>>['versions'] | null>(null)
+const latestRun = computed(() => props.recipe.runs.find((run) => run.recipe_version === props.recipe.version))
+const states = computed(() => inspectorStates([], latestRun.value?.steps ?? []))
 async function showVersions() {
   try {
     versions.value = (await recipeApi.get(props.recipe.recipe_id)).versions
@@ -36,16 +45,20 @@ async function showVersions() {
 
 async function removeRecipe() {
   const recipeId = props.recipe.recipe_id
+  const refresh = props.refresh
   if (!await confirmDelete({
     title: '删除这个流程？',
     target: props.recipe.name,
     description: '这个流程及其所有版本都会被删除，文件和运行记录会保留。删除后无法恢复。',
     confirmText: '删除流程',
-    action: () => recipeApi.remove(recipeId),
+    action: async () => {
+      await recipeApi.remove(recipeId)
+      await refresh?.()
+    },
   })) return
   showDetails.value = false
   toast.success('已删除流程')
-  emit('changed')
+  if (!refresh) emit('changed')
 }
 </script>
 
@@ -54,8 +67,10 @@ async function removeRecipe() {
     <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
       <div class="recipe-panel-title flex min-w-0 flex-1 items-center gap-2">
         <h3 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h3>
+        <span v-if="primary" class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[#6265DC]/8 px-2 py-1 text-[10px] text-[#6265DC]"><Star class="size-3 fill-current" />主流程</span>
       </div>
       <div class="recipe-panel-actions ml-auto flex max-w-full shrink-0 flex-wrap items-center gap-1">
+        <button v-if="!primary" type="button" class="btn-text mr-1 h-8 gap-1.5 whitespace-nowrap px-2 py-0 text-xs" :disabled="settingPrimary" @click="emit('setPrimary', recipe.recipe_id)"><Star class="size-3.5" />设为主流程</button>
         <button class="btn-ink mr-1 h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="emit('run', recipe.recipe_id)"><Play class="size-3.5" />用新文件执行</button>
         <button type="button" class="icon-btn" title="处理详情" aria-label="处理详情" @click="showDetails = true"><Info class="size-4" /></button>
         <button type="button" class="icon-btn" title="运行记录" aria-label="运行记录" aria-haspopup="dialog" :aria-expanded="showRuns" @click="showRuns = true"><ClipboardList class="size-4" /></button>
@@ -67,7 +82,8 @@ async function removeRecipe() {
       <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>
       <RecipeFlow
         :flow="recipe.flow"
-        :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id, recipe: recipe.recipe, files }"
+        :states="states"
+        :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id, recipe: recipe.recipe, files, runId: latestRun?.run_id }"
         @changed="emit('changed')"
       />
     </div>

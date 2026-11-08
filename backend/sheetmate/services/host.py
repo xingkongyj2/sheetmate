@@ -12,7 +12,7 @@ from typing import Any
 from sqlalchemy import select
 
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import Conversation, Customer, FileRecord, Run, User
+from sheetmate.db.models import Conversation, Customer, FileRecord, RecipeProfile, Run, User
 from sheetmate.engine.file_copies import FileCopies
 from sheetmate.engine.reader import ReadError
 from sheetmate.engine.workbook_builder import write_created_workbook
@@ -33,10 +33,12 @@ from sheetmate.services.errors import NotFound, ServiceError
 class ConversationHost:
     """一次对话请求的宿主（也实现 PipelineHost 协议）。"""
 
-    def __init__(self, *, user_id: int, conversation_id: str, customer_id: str | None, ws: Workspace):
+    def __init__(self, *, user_id: int, conversation_id: str, customer_id: str | None, ws: Workspace,
+                 recipe_id: str | None = None):
         self.user_id = user_id
         self.conversation_id = conversation_id
         self.customer_id = customer_id
+        self.recipe_id = recipe_id
         self.ws = ws
         self.saved_recipes: list[dict[str, Any]] = []
         self.deleted_recipes: list[dict[str, Any]] = []
@@ -102,6 +104,8 @@ class ConversationHost:
             ):
                 raise ServiceError("这个文件不属于当前客户或会话")
             file_service.retain_for_conversation(db, record, self.conversation_id)
+            if self.customer_id and self.recipe_id:
+                file_service.retain_for_recipe(db, record, self.customer_id, self.recipe_id)
             source = Path(record.stored_path)
             path = self.analysis.file_copy(source) if self.analysis else (self.files.file_copy(source) if self.files else None)
             loaded = file_service.load_into_workspace(self.ws, record, path=path)
@@ -311,12 +315,15 @@ class ConversationHost:
             records = recipe_service.latest_records(db, customer_id=self.customer_id) if self.customer_id else []
             records += [r for r in recipe_service.latest_records(db, conversation_id=self.conversation_id)
                         if r.recipe_id not in {x.recipe_id for x in records}]
+            for record in records:
+                if record.customer_id:
+                    recipe_service.ensure_profile(db, record)
             briefs = [recipe_service.recipe_brief(r) for r in records]
             recipes = [recipe_service.record_to_recipe(r) for r in records]
+            mappings = [memory_service.field_mapping_for(db, r.customer_id, recipe_id=r.recipe_id) for r in records]
         candidates = [Candidate(key=t.name, columns=t.column_names, filename=t.filename, sheet=t.sheet)
                       for t in self.ws.list_tables() if t.source == "uploaded" and t.role == "input"]
-        mapping = self.field_mapping()
-        for brief, recipe in zip(briefs, recipes):
+        for brief, recipe, mapping in zip(briefs, recipes, mappings):
             if candidates and recipe.inputs:
                 hits = match_inputs(recipe, candidates, mapping)
                 if len(hits) == len(recipe.inputs):
@@ -330,6 +337,8 @@ class ConversationHost:
                 record = recipe_service.get_record(db, recipe_id)
                 if record.conversation_id != self.conversation_id and not (self.customer_id and record.customer_id == self.customer_id):
                     return pending
+                if record.customer_id:
+                    recipe_service.ensure_profile(db, record)
                 recipe = recipe_service.get_recipe(db, recipe_id)
             except NotFound:
                 return pending
@@ -338,9 +347,13 @@ class ConversationHost:
         return pending if pending is not None and pending.version >= recipe.version else recipe
 
     def latest_conversation_recipe(self) -> Recipe | None:
-        recent = self._recent_recipe()
+        recent = self._recent_recipe(self.recipe_id)
         if recent is not None:
             return recent
+        if self.recipe_id:
+            selected = self.get_recipe(self.recipe_id)
+            if selected is not None:
+                return selected
         with session_scope() as db:
             records = recipe_service.latest_records(db, conversation_id=self.conversation_id)
             return recipe_service.record_to_recipe(records[0]) if records else None
@@ -401,6 +414,7 @@ class ConversationHost:
                 last_run.recipe_id = recipe.id
                 last_run.recipe_version = recipe.version
                 last_run.validation = {**(last_run.validation or {}), "recipe_snapshot": recipe.to_dict()}
+        self.activate_recipe(recipe)
         self._last_recipe = recipe.model_copy(deep=True)
         self.saved_recipes = [item for item in self.saved_recipes if item["recipe_id"] != brief["recipe_id"]]
         self.saved_recipes.append(brief)
@@ -445,7 +459,16 @@ class ConversationHost:
     def pipeline_host(self) -> ConversationHost:
         return self
 
+    def activate_recipe(self, recipe: Recipe) -> None:
+        """执行和修订沿用目标流程的资料，避免跨流程读写记忆。"""
+        self.recipe_id = recipe.id
+        with session_scope() as db:
+            conversation = db.get(Conversation, self.conversation_id)
+            if conversation is not None:
+                conversation.recipe_id = recipe.id
+
     def open_run(self, kind: str, recipe: Recipe, request_text: str = "") -> RunHandle:
+        self.activate_recipe(recipe)
         input_files = [t.file_id for t in self.ws.list_tables() if t.file_id and t.role == "input"]
         with session_scope() as db:
             run = run_service.create_run(db, kind=kind, user_id=self.user_id, customer_id=self.customer_id,
@@ -485,20 +508,19 @@ class ConversationHost:
             persisted_report = {**report, "files": delivered} if register_output else report
             run_service.finish_run(db, handle.run_id, persisted_report, verification=verification,
                                    output_file_id=record.id if record else None, diff=diff, outputs_metrics=metrics)
+            snapshot = recipe.model_copy(deep=True)
+            snapshot.metadata["last_run"] = {"run_id": handle.run_id, "status": report.get("status")}
+            snapshot.metadata["verification"] = verification
+            snapshot.learned_from["input_bindings"] = {
+                item["alias"]: {"file_id": item.get("file_id") or (item.get("source") or {}).get("file_id"),
+                                "sheet": item.get("sheet")} for item in report.get("inputs", [])}
+            run = db.get(Run, handle.run_id)
+            assert run is not None
+            actual_inputs = [i.get("file_id") or (i.get("source") or {}).get("file_id") for i in report.get("inputs", [])]
+            run.input_file_ids = list(dict.fromkeys(fid for fid in actual_inputs if fid))
+            run.validation = {**(run.validation or {}), "recipe_snapshot": snapshot.to_dict(), "files": delivered}
             if register_output:
-                snapshot = recipe.model_copy(deep=True)
-                snapshot.metadata["last_run"] = {"run_id": handle.run_id, "status": report.get("status")}
-                snapshot.metadata["verification"] = verification
-                snapshot.learned_from["input_bindings"] = {
-                    item["alias"]: {"file_id": item.get("file_id") or (item.get("source") or {}).get("file_id"),
-                                    "sheet": item.get("sheet")} for item in report.get("inputs", [])}
                 recipe.learned_from["input_bindings"] = dict(snapshot.learned_from["input_bindings"])
-                run = db.get(Run, handle.run_id)
-                assert run is not None
-                actual_inputs = [i.get("file_id") or (i.get("source") or {}).get("file_id") for i in report.get("inputs", [])]
-                run.input_file_ids = list(dict.fromkeys(fid for fid in actual_inputs if fid))
-                run.validation = {**(run.validation or {}), "recipe_snapshot": snapshot.to_dict()}
-                run.validation = {**run.validation, "files": delivered}
                 if not run.validation.get("recipe_deleted"):
                     self._last_recipe = snapshot
                 elif self._last_recipe is not None and self._last_recipe.id == recipe.id:
@@ -524,22 +546,26 @@ class ConversationHost:
 
     def field_mapping(self) -> dict[str, list[str]]:
         with session_scope() as db:
-            return memory_service.field_mapping_for(db, self.customer_id)
+            return memory_service.field_mapping_for(db, self.customer_id, recipe_id=self.recipe_id)
+
+    def field_mapping_authoritative(self) -> bool:
+        with session_scope() as db:
+            return bool(self.customer_id and self.recipe_id and db.get(RecipeProfile, self.recipe_id) is not None)
 
     def memory_text(self, query: str) -> str:
         with session_scope() as db:
             return memory_service.memory_text(db, user_id=self.user_id, customer_id=self.customer_id,
-                                              conversation_id=self.conversation_id, query=query)
+                                              conversation_id=self.conversation_id, recipe_id=self.recipe_id, query=query)
 
     def remember(self, category: str, key: str, value: str) -> str:
         with session_scope() as db:
             memory_service.set_memory(db, category=category, key=key, value=value, user_id=self.user_id,
-                                      customer_id=self.customer_id, conversation_id=self.conversation_id)
+                                      customer_id=self.customer_id, conversation_id=self.conversation_id, recipe_id=self.recipe_id)
         return "客户记忆" if self.customer_id else "本会话记忆"
 
     def save_field_mapping(self, standard: str, aliases: list[str]) -> str:
         if not self.customer_id:
             raise ServiceError("字段映射是按客户保存的：请先把会话绑定到客户")
         with session_scope() as db:
-            row = memory_service.upsert_field_mapping(db, self.customer_id, standard, aliases, source="ai")
+            row = memory_service.upsert_field_mapping(db, self.customer_id, standard, aliases, source="ai", recipe_id=self.recipe_id)
             return f"已保存字段映射：{row.standard} ← {'、'.join(row.aliases)}"

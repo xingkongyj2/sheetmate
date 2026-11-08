@@ -42,10 +42,13 @@ async def extract_memories(llm: Any, message: str, answer: str) -> list[dict[str
 
 
 def select_relevant(items: list[dict[str, Any]], query: str, limit: int = 30) -> list[dict[str, Any]]:
-    """偏好和业务规则总是带上；其他类别按关键词相关性筛选（TabClaw 的筛选规则，补充了中文按字匹配）。"""
+    """人工规则全部保留；AI 参考按相关性筛选，数量限制只作用于 AI。"""
     text = (query or "").lower()
+    human = [item for item in items if item.get("source") == "human"]
     chosen = []
     for item in items:
+        if item.get("source") == "human":
+            continue
         if item["category"] in {"preferences", "domain_knowledge"}:
             chosen.append(item)
             continue
@@ -54,7 +57,7 @@ def select_relevant(items: list[dict[str, Any]], query: str, limit: int = 30) ->
         hit = any(w in blob for w in words) or any(len(chunk) >= 2 and chunk in text for chunk in _chunks(item["key"]))
         if hit:
             chosen.append(item)
-    return chosen[:limit]
+    return [*human, *chosen[:limit]]
 
 
 def _chunks(text: str) -> list[str]:
@@ -63,7 +66,18 @@ def _chunks(text: str) -> list[str]:
 
 
 def format_memories(items: list[dict[str, Any]], field_mapping: dict[str, list[str]] | None = None) -> str:
-    lines = [f"- [{CATEGORY_LABELS.get(i['category'], i['category'])}·{i.get('scope_label', '')}] {i['key']}：{i['value']}" for i in items]
+    lines = []
+    human = [i for i in items if i.get("source") == "human"]
+    auxiliary = [i for i in items if i.get("source") != "human"]
+    if human:
+        lines.append("用户维护的记忆（最高优先级）：处理本流程时必须遵守；与 AI 参考冲突时以这些内容为准，AI 不得改写。")
+        for item in human:
+            text = item['value'] if item['key'].startswith("note_") else f"{item['key']}：{item['value']}"
+            lines.append(f"- [{item.get('scope_label', '')}] {text}")
+    if auxiliary:
+        lines.append("AI 参考记忆（辅助参考，不得覆盖用户维护的记忆）：")
+        lines.extend(f"- [{CATEGORY_LABELS.get(i['category'], i['category'])}·{i.get('scope_label', '')}] {i['key']}：{i['value']}"
+                     for i in auxiliary)
     if field_mapping:
         lines.append("- [字段映射] " + "；".join(f"{std} ← {'/'.join(aliases)}" for std, aliases in field_mapping.items()))
     return "\n".join(lines)

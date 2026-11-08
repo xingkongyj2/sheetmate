@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 一次运行的详情：每一步的输入输出、提示、修复记录；可以查看中间表、修改参数后从某一步重跑（断点续跑） */
 import { Download, Eye, LoaderCircle } from '@lucide/vue'
-import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { fileApi, runApi } from '@/api'
 import { errorText } from '@/api/http'
@@ -21,12 +21,16 @@ const emit = defineEmits<{ close: []; changed: [] }>()
 const toast = useToast()
 
 const run = ref<RunDetail | null>(null)
+const activeRunId = ref(props.runId)
 const tables = ref<{ name: string; rows: number }[]>([])
 const selected = ref<StepReport | null>(null)
 const rerunning = ref(false)
 const log = ref<string[]>([])
 const preview = ref<FileInfo | null>(null)
 const loadingPreview = ref(false)
+let loadVersion = 0
+let mounted = true
+onBeforeUnmount(() => { mounted = false; loadVersion++ })
 
 async function previewOutput(fileId: string) {
   if (loadingPreview.value) return
@@ -41,15 +45,24 @@ async function previewOutput(fileId: string) {
 }
 
 async function load() {
+  const version = ++loadVersion
+  const runId = activeRunId.value
   try {
-    const data = await runApi.get(props.runId)
+    const data = await runApi.get(runId)
+    if (!mounted || version !== loadVersion || activeRunId.value !== runId) return
     run.value = data.run
     tables.value = data.tables
   } catch (err) {
-    toast.error(errorText(err))
+    if (mounted && version === loadVersion) toast.error(errorText(err))
   }
 }
 onMounted(load)
+watch(() => props.runId, (id) => {
+  activeRunId.value = id
+  selected.value = null
+  run.value = null
+  void load()
+})
 
 const hasTables = computed(() => tables.value.length > 0)
 const outputFiles = computed(() => {
@@ -60,10 +73,13 @@ const outputFiles = computed(() => {
 })
 
 async function rerun(step: StepReport, params: Record<string, unknown>) {
+  if (rerunning.value) return
+  const sourceRunId = run.value?.run_id ?? activeRunId.value
   selected.value = null
   rerunning.value = true
   log.value = [`从第 ${step.step_id} 步重跑…`]
-  const handle = runApi.rerun(props.runId, step.step_id, params, (e) => {
+  const handle = runApi.rerun(sourceRunId, step.step_id, params, (e) => {
+    if (e.type === 'recipe_run_start') activeRunId.value = e.run_id
     if (e.type === 'recipe_step_done') log.value.push(`第 ${e.step_id} 步完成：${e.rows_out} 行`)
     if (e.type === 'recipe_step_error') log.value.push(`第 ${e.step_id} 步出错：${e.error}`)
     if (e.type === 'recipe_run_done') log.value.push(`结束：${e.summary}`)
@@ -117,6 +133,11 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
             <StatusPill v-if="s.status" :status="s.status" />
           </button>
           <ScriptFile v-for="script in scriptReferences(s.params)" :key="script.script_id" :script="script" compact />
+          <div v-for="file in (s.output_files ?? []).filter((item) => item.file_id)" :key="file.file_id" class="ml-9 flex items-center gap-2 rounded-lg bg-paper/60 px-3 py-2 text-xs">
+            <span class="min-w-0 flex-1 truncate" :title="file.filename || file.name">{{ file.filename || file.name }}</span>
+            <button type="button" class="shrink-0 text-[#6265dc] disabled:opacity-50" :disabled="loadingPreview" :aria-label="`查看环节文件 ${file.filename || file.name}`" @click="previewOutput(file.file_id!)">查看</button>
+            <a :href="file.download_url || fileApi.downloadUrl(file.file_id!)" class="shrink-0 text-mute hover:text-[#6265dc]" :aria-label="`下载环节文件 ${file.filename || file.name}`"><Download class="size-3.5" /></a>
+          </div>
           </div>
         </div>
       </div>
@@ -147,7 +168,7 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
       :status="selected.status"
       :report="selected"
       :params="selected.params"
-      :run-id="runId"
+      :run-id="run?.run_id ?? activeRunId"
       :error="selected.error"
       :can-rerun="!!run?.recipe_id && !rerunning"
       @close="selected = null"

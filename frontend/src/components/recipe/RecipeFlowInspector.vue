@@ -9,7 +9,7 @@ import DataTable from '@/components/common/DataTable.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import { duration, type StepState } from '@/composables/chatModel'
 import { executionFileSize } from '@/composables/executionPresentation'
-import { completeInspectorRecipe, inspectorFileIds, inspectorFileMatches, inspectorStates, inspectorStep } from '@/composables/recipeFlowInspector'
+import { completeInspectorRecipe, inspectorCustomerFiles, inspectorFileIds, inspectorFileMatches, inspectorStates, inspectorStep } from '@/composables/recipeFlowInspector'
 import type { FlowSelection, RecipeFlowContext } from '@/composables/recipeFlowInteraction'
 import { recipeToolKind, recipeToolLabel } from '@/composables/recipeTools'
 import { scriptReferences, scriptTitle } from '@/composables/scriptPresentation'
@@ -53,6 +53,7 @@ const fullRecipe = computed(() => runRecipe.value ?? (completeInspectorRecipe(su
 const effectiveStates = computed(() => inspectorStates(props.states, runReports.value))
 const step = computed(() => props.selection.kind === 'step' ? inspectorStep(props.flow, effectiveStates.value, fullRecipe.value, props.selection.id) : null)
 const fileNode = computed(() => props.selection.kind === 'file' ? props.selection.file : null)
+const selectionKey = computed(() => props.selection.kind === 'step' ? `step:${props.selection.id}` : `file:${props.selection.file.key}`)
 const referencedFileIds = computed(() => fileNode.value ? inspectorFileIds(fileNode.value, effectiveStates.value) : [])
 const title = computed(() => step.value?.name || fileNode.value?.name || '节点详情')
 const scripts = computed(() => step.value ? scriptReferences([step.value.flowStep, step.value.planned, step.value.params, step.value.report?.result]) : [])
@@ -164,6 +165,20 @@ const availableFiles = computed(() => {
   for (const file of fullFiles.value) files.set(file.file_id, file)
   return [...files.values()]
 })
+const stepFiles = computed<FileInfo[]>(() => {
+  const files = new Map<string, FileInfo>()
+  for (const artifact of step.value?.report?.output_files ?? []) {
+    const id = artifact.file_id
+    if (!id) continue
+    files.set(id, availableFiles.value.find((file) => file.file_id === id) ?? {
+      file_id: id, filename: artifact.filename || artifact.name || '过程文件', kind: 'output', kind_label: '过程文件',
+      size: 0, sheets: [], created_at: null, download_url: artifact.download_url || fileApi.downloadUrl(id),
+      customer_id: props.context?.customerId ?? null, conversation_id: props.context?.conversationId ?? null,
+      run_id: props.context?.runId ?? null, intermediate: true, step_id: step.value?.id,
+    })
+  }
+  return [...files.values()]
+})
 const matchedFiles = computed(() => {
   const node = fileNode.value
   if (!node) return []
@@ -188,9 +203,9 @@ const inputDescriptions = computed(() => {
   return props.flow.inputs.filter((input) => node.aliases.includes(input.alias) || input.alias === node.name || input.source_file === node.name || (!!node.pattern && input.file_pattern === node.pattern))
 })
 
-watch([() => props.context?.customerId, () => props.context?.conversationId], () => { resourceFiles.value = []; resolvedFiles.value = [] })
+watch([() => props.context?.customerId, () => props.context?.conversationId, () => props.context?.recipeId, () => props.context?.runId], () => { resourceFiles.value = []; resolvedFiles.value = [] })
 watch([
-  () => fileNode.value?.key,
+  () => selectionKey.value,
   () => referencedFileIds.value.join('|'),
   () => props.context?.customerId,
   () => props.context?.conversationId,
@@ -221,8 +236,10 @@ watch([
   if (matchedFiles.value.length || (!props.context?.conversationId && !props.context?.customerId)) return
   loadingFiles.value = true
   const requests: Promise<FileInfo[]>[] = []
-  if (props.context.conversationId) requests.push(conversationApi.get(props.context.conversationId).then((detail) => detail.files))
-  if (props.context.customerId) requests.push(customerApi.get(props.context.customerId).then((customer) => [...customer.files, ...customer.outputs]))
+  const recipeId = props.context.recipeId
+  // Customer workflow resources include their conversation inputs and retained step files.
+  if (props.context.conversationId && !(props.context.customerId && recipeId)) requests.push(conversationApi.get(props.context.conversationId).then((detail) => detail.files))
+  if (props.context.customerId) requests.push(customerApi.get(props.context.customerId).then((customer) => inspectorCustomerFiles(customer, recipeId)))
   const results = await Promise.allSettled(requests)
   if (!active) return
   resourceFiles.value = [...resourceFiles.value, ...results.flatMap((result) => result.status === 'fulfilled' ? result.value : [])]
@@ -235,17 +252,17 @@ watch([
 
 async function preview(file: FileInfo) {
   if (openingFile.value) return
-  const key = fileNode.value?.key
+  const key = selectionKey.value
   const generation = previewGeneration
   openingFile.value = file.file_id
   fileError.value = ''
   try {
     const full = fullFiles.value.find((item) => item.file_id === file.file_id) ?? await fileApi.get(file.file_id)
-    if (!mounted || generation !== previewGeneration || fileNode.value?.key !== key) return
+    if (!mounted || generation !== previewGeneration || selectionKey.value !== key) return
     resolvedFiles.value = [...resolvedFiles.value.filter((item) => item.file_id !== full.file_id), full]
     emit('preview', full)
-  } catch (error) { if (mounted && generation === previewGeneration && fileNode.value?.key === key) fileError.value = errorText(error) }
-  finally { if (mounted && generation === previewGeneration && fileNode.value?.key === key) openingFile.value = null }
+  } catch (error) { if (mounted && generation === previewGeneration && selectionKey.value === key) fileError.value = errorText(error) }
+  finally { if (mounted && generation === previewGeneration && selectionKey.value === key) openingFile.value = null }
 }
 
 function paramValue(value: unknown): string {
@@ -322,6 +339,16 @@ function paramValue(value: unknown): string {
         <section v-if="step.report?.preview?.columns?.length" class="flow-inspector-section">
           <h4>结果预览 <span class="font-normal text-faint">{{ step.report.preview.total.toLocaleString() }} 行</span></h4>
           <DataTable :columns="step.report.preview.columns" :rows="step.report.preview.rows" max-height="260px" dense />
+        </section>
+        <section v-if="stepFiles.length" class="flow-inspector-section">
+          <h4>过程文件</h4>
+          <div v-for="file in stepFiles" :key="file.file_id" class="flex items-center gap-2 rounded-xl bg-paper px-3 py-2.5">
+            <FileSpreadsheet class="size-4 shrink-0 text-[#6265dc]" />
+            <span class="min-w-0 flex-1 truncate text-xs" :title="file.filename">{{ file.filename }}</span>
+            <button type="button" class="shrink-0 text-xs text-[#6265dc] disabled:opacity-50" :disabled="!!openingFile" :aria-label="`查看过程文件 ${file.filename}`" @click="preview(file)"><LoaderCircle v-if="openingFile === file.file_id" class="size-3.5 animate-spin" /><template v-else>查看</template></button>
+            <a :href="file.download_url" class="shrink-0 text-mute hover:text-[#6265dc]" :aria-label="`下载过程文件 ${file.filename}`" title="下载"><ArrowDownToLine class="size-3.5" /></a>
+          </div>
+          <p v-if="fileError" class="mt-2 text-xs leading-6 text-error" role="alert">{{ fileError }}</p>
         </section>
         <section v-if="step.report?.stdout || step.report?.stderr" class="flow-inspector-section"><h4>运行日志</h4><pre v-if="step.report.stdout" class="max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-paper p-3 font-mono text-[11px] leading-6">{{ step.report.stdout }}</pre><pre v-if="step.report.stderr" class="mt-2 max-h-52 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-error/5 p-3 font-mono text-[11px] leading-6 text-error">{{ step.report.stderr }}</pre></section>
       </template>

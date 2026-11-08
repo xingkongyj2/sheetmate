@@ -685,12 +685,15 @@ async def _stream_revise_recipe(args: dict[str, Any], ctx: AgentContext) -> Asyn
     recipe = ctx.host.get_recipe(str(args["recipe_id"])) if args.get("recipe_id") else ctx.host.latest_conversation_recipe()
     if recipe is None:
         raise ValueError("没有找到要修订的流程。请先用 build_recipe 生成，或提供 recipe_id")
+    activate = getattr(ctx.host, "activate_recipe", None)
+    if activate is not None:
+        activate(recipe)
     mapping = _resolve_inputs(ctx, recipe, args.get("inputs"))
     expected_tables = [str(t) for t in (args.get("expected_tables") or _default_expected(ctx))]
     previous = recipe.metadata.get("requirement") or recipe.description or ""
     requirement = (
         f"历史处理说明（仅沿用未被本次要求覆盖的部分）：\n{previous}\n\n"
-        f"本次修改要求（与历史说明或客户记忆冲突时以本次要求为准）：\n{instruction}"
+        f"本次修改要求（沿用用户维护的流程记忆；未明确取舍的冲突先澄清，用户已明确本次例外则直接执行）：\n{instruction}"
     )
     file_aliases = {i.alias for i in recipe.inputs if i.kind == "file"}
     lctx = _learn_context(ctx, requirement, {k: v for k, v in mapping.items() if k not in file_aliases}, expected_tables, mode="revise",
@@ -789,6 +792,9 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
     recipe = ctx.host.get_recipe(recipe_id)
     if recipe is None:
         raise ValueError(f"没有找到流程 {recipe_id}")
+    activate = getattr(ctx.host, "activate_recipe", None)
+    if activate is not None:
+        activate(recipe)
     mapping = _resolve_inputs(ctx, recipe, args.get("inputs"))
     host = ctx.host.pipeline_host()
     handle = host.open_run("replay", recipe, f"在对话中执行「{recipe.name}」")
@@ -796,6 +802,7 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
 
     repairer = LLMStepRepairer(ctx.llm) if args.get("allow_repair", True) else None
     runner = RecipeRunner(recipe, ctx.library, handle.ws, field_mapping=ctx.host.field_mapping(),
+                          field_mapping_authoritative=bool(getattr(ctx.host, "field_mapping_authoritative", lambda: False)()),
                           repairer=repairer, max_repair=ctx.max_repair, run_id=handle.run_id)
     sources = {}
     for alias, table in mapping.items():

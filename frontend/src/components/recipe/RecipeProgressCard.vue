@@ -77,9 +77,9 @@ const busyText = computed(() => {
 </script>
 
 <template>
-  <div class="card-soft min-w-0 animate-rise overflow-hidden">
+  <div class="card-soft relative min-w-0 animate-rise overflow-hidden">
     <!-- 标题 -->
-    <div class="flex items-center gap-3 border-b border-line bg-paper/60 px-4 py-3">
+    <div class="flex items-center gap-3 border-b border-line bg-paper/60 py-3 pl-4" :class="flow ? 'pr-[138px]' : 'pr-4'">
       <FunObject kind="blocks" :size="30" class="shrink-0" />
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <span class="truncate text-[14px] font-semibold leading-6">{{ progress.saved?.name || progress.recipeName || MODE_LABEL[progress.mode] }}</span>
@@ -87,7 +87,6 @@ const busyText = computed(() => {
         <span v-else-if="progress.saved" class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ progress.saved.version }}</span>
         <span v-else-if="progress.mode === 'replay' && progress.recipeVersion" class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ progress.recipeVersion }}</span>
       </div>
-      <StatusPill :status="pillStatus" :label="STATUS_LABEL[progress.status]" class="shrink-0 whitespace-nowrap" />
     </div>
 
     <div v-if="flow || busy || progress.runSummary || progress.questions?.length || failure || hasDetails" class="space-y-3 px-4 py-3.5">
@@ -123,7 +122,7 @@ const busyText = computed(() => {
       </div>
 
       <!-- 流程始终可见，保存后的历史快照也可以查看每个步骤。 -->
-      <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" :context="{
+      <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" toolbar-placement="card" :context="{
         title: progress.saved?.name || progress.recipeName,
         recipeId: progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id,
         version: progress.saved?.version ?? progress.recipeVersion ?? progress.recipe?.version,
@@ -171,15 +170,18 @@ const busyText = computed(() => {
     </div>
 
     <!-- 操作 -->
-    <div v-if="resultFiles.length || (progress.saved && customerId)" class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
-      <div v-for="file in resultFiles" :key="file.file_id" class="flex max-w-full flex-wrap items-center gap-2">
-        <span v-if="resultFiles.length > 1" class="min-w-0 break-words text-xs text-mute">{{ file.filename }}</span>
-        <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果</button>
-        <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载结果 Excel</a>
+    <div class="flex flex-wrap items-center gap-2 border-t border-line px-4 py-3">
+      <StatusPill :status="pillStatus" :label="STATUS_LABEL[progress.status]" class="shrink-0 whitespace-nowrap" />
+      <div v-if="resultFiles.length || (progress.saved && customerId)" class="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
+        <div v-for="file in resultFiles" :key="file.file_id" class="flex max-w-full flex-wrap items-center gap-2">
+          <span v-if="resultFiles.length > 1" class="min-w-0 break-words text-xs text-mute">{{ file.filename }}</span>
+          <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果</button>
+          <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载结果 Excel</a>
+        </div>
+        <RouterLink v-if="progress.saved && customerId" :to="{ name: 'customer', params: { id: customerId }, query: { tab: 'recipes' } }" class="btn-text">
+          在客户页查看<ExternalLink class="size-3.5" />
+        </RouterLink>
       </div>
-      <RouterLink v-if="progress.saved && customerId" :to="{ name: 'customer', params: { id: customerId }, query: { tab: 'recipes' } }" class="btn-text ml-auto">
-        在客户页查看<ExternalLink class="size-3.5" />
-      </RouterLink>
     </div>
 
   </div>

@@ -60,7 +60,7 @@ async function upload(e: Event) {
   uploading.value = true
   try {
     for (const f of list) {
-      const info = await customerApi.uploadFile(props.customerId, f, 'input')
+      const info = await customerApi.uploadFile(props.customerId, f, 'input', recipeId.value)
       localFiles.value.unshift(info)
       chosen.value.push(info.file_id)
     }
