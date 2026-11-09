@@ -402,7 +402,11 @@ def test_modify_mode_publishes_selected_earlier_run_after_failed_refinement(clie
     assert stored["report"]["status"] == runs[0]["status"]
     assert len(stored["report"]["steps"]) == len(selected["report"]["steps"])
     assert all("preview" not in step and "sql" not in step for step in stored["report"]["steps"])
-    assert "最近一次流程已执行完成" in message["content"]
+    # The selected file survives, but an empty final model response is an
+    # incomplete response rather than a silently successful end to the task.
+    assert "尚未完成最终结果确认" in message["content"]
+    assert message["meta"]["execution"]["status"] == "failed"
+    assert message["meta"]["execution"]["code"] == "empty_response"
     assert "与提供的人工样例仍有差异" in message["content"]
     assert not any(event["type"] == "recipe_saved" for event in events)
     assert client.get(f"/api/conversations/{conversation}").json()["conversation"]["recipes"] == []

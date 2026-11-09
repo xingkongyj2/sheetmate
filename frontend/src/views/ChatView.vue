@@ -23,7 +23,7 @@ import TableViewer from '@/components/common/TableViewer.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { attachmentMessage } from '@/composables/attachmentFiles'
-import { applyEvent, finishMessage, fromStoredMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
+import { applyEvent, finishMessage, restoreConversationMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
 import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
 import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
@@ -148,14 +148,14 @@ async function load(silent = false) {
     detail.value = data
     acknowledgeUploads(data.files)
     if (!streaming.value) {
-      messages.value = fromStoredMessages(data.messages, data.running_job?.message_id).map((m) => reactive(m) as UiMessage)
+      const restored = restoreConversationMessages(data.messages, data.running_job)
+      messages.value = restored.messages.map((m) => reactive(m) as UiMessage)
       scrollToBottom(true) // 打开会话（包括后台任务跑完刷新）都停在最新一条
       reconnecting.value = false
       store.patchConversation(props.id, { running: data.running, title: data.title })
       const job = data.running_job
       if (job) {
-        const assistant = reactive(newAssistant()) as UiMessage
-        messages.value.push(assistant)
+        const assistant = messages.value.at(-1)!
         selectedKey.value = assistant.key
         void receiveStream(assistant, (onEvent) => conversationApi.events(props.id, job.id, onEvent), true)
       }

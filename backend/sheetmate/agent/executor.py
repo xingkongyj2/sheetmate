@@ -1,7 +1,7 @@
 """ReAct 工具循环（移植自 TabClaw agent/executor.py）。
 
 一轮循环：流式调用 LLM → 收集文本增量和 tool_call 分片 → 有工具调用就执行工具、把结果作为 role=tool 回传 → 再调 LLM；
-没有工具调用时，当前文本就是最终回答。默认最多 max_iterations 轮；使用脚本时增加有界的修正轮数。
+没有工具调用时，先核对实际完成依据，再决定继续还是收尾。默认最多 max_iterations 轮；使用脚本时增加有界的修正轮数。
 
 保留了 TabClaw 的两个细节：
 - 工具调用参数是分片流式返回的，按 index 拼接完整后再 json.loads
@@ -10,16 +10,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import re
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+from uuid import uuid4
 
+from sheetmate.agent.completion import MAX_COMPLETION_RETRIES, check_completion, continuation, text_content
 from sheetmate.agent.content import model_history, user_content
-from sheetmate.agent.llm import LLMError, parse_json
+from sheetmate.agent.llm import LLMError, parse_json, translate_error
 from sheetmate.agent.prompts import (
     AGENT_SYSTEM,
     AGENT_TABLE_LINE,
@@ -71,6 +74,7 @@ class _ScriptAttempt:
 class _ToolBudget:
     used: int = 0
     protocol_retries: int = 0
+    results: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 class AgentExecutor:
@@ -103,7 +107,7 @@ class AgentExecutor:
         """直接执行（不带计划）。"""
         messages = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history[-12:]),
                     {"role": "user", "content": user_content(message, ctx.image_parts)}]
-        async for event in self.agent_stream(messages, self.registry.for_context(ctx), ctx):
+        async for event in self.agent_stream(messages, self.registry.for_context(ctx), ctx, scope=message):
             yield event
 
     async def execute_plan(self, ctx: AgentContext, message: str, steps: list[dict[str, Any]],
@@ -130,7 +134,9 @@ class AgentExecutor:
             waiting = False
             question = ""
             unresolved_tools: set[str] = set()
-            async for event in self.agent_stream(conversation, tools, ctx, transcript=transcript, budget=budget):
+            incomplete = False
+            async for event in self.agent_stream(conversation, tools, ctx, transcript=transcript, budget=budget,
+                                                 scope=step_message, stop_scope="step"):
                 if event["type"] == "text_chunk":
                     step_text += event["content"]  # 每一步的文字小结是过程，不是给用户的最终回答
                     continue
@@ -148,6 +154,8 @@ class AgentExecutor:
                 if event["type"] == "clarify":
                     waiting = True
                     question = event.get("question", "需要确认后才能继续")
+                if event["type"] == "execution_stop" and event.get("status") == "incomplete":
+                    incomplete = True
                 if event["type"] == "tool_result" and event.get("error_kind") not in {"protocol", "schema"}:
                     if event["ok"]:
                         unresolved_tools.discard(event["tool"])
@@ -155,19 +163,19 @@ class AgentExecutor:
                         unresolved_tools.add(event["tool"])
             conversation.extend(transcript)
             budget_exhausted = budget.used >= self.max_tool_calls
-            status = "waiting" if waiting else "warning" if unresolved_tools or budget_exhausted else "done"
+            status = "waiting" if waiting else "warning" if unresolved_tools or budget_exhausted or incomplete else "done"
             yield {"type": "step_done", "step_num": i, "status": status, "summary": question if waiting else step_text.strip()}
             if waiting:
                 return
-            if budget_exhausted:
+            if budget_exhausted or incomplete:
                 break
         yield {"type": "reflect_start"}
         conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message)}
         reflect = REFLECT_MESSAGE.format(message=message, total=executed_steps)
         if executed_steps < len(steps):
-            reflect += f"\n工具调用预算已用尽；计划中还有 {len(steps) - executed_steps} 个步骤未执行，不得称已完成。"
+            reflect += f"\n计划中还有 {len(steps) - executed_steps} 个步骤未执行，不得称已完成。"
         async for event in self.agent_stream(conversation + [{"role": "user", "content": reflect}], tools, ctx,
-                                             budget=budget):
+                                             budget=budget, scope=f"原始任务：{message}\n请根据实际执行结果整理最终回答。"):
             yield event
         yield {"type": "reflect_done"}
 
@@ -177,7 +185,8 @@ class AgentExecutor:
 
     async def agent_stream(self, messages: list[dict[str, Any]], tools: list[Tool], ctx: AgentContext,
                            transcript: list[dict[str, Any]] | None = None,
-                           budget: _ToolBudget | None = None) -> AsyncIterator[dict[str, Any]]:
+                           budget: _ToolBudget | None = None, scope: str | None = None,
+                           stop_scope: str = "task") -> AsyncIterator[dict[str, Any]]:
         """transcript 不为空时，把这一轮新增的消息（工具调用、工具结果、最终回答）追加进去，供计划模式接续上下文。"""
         msgs = list(messages)
         start = len(msgs)
@@ -194,6 +203,17 @@ class AgentExecutor:
         policy = getattr(getattr(self.llm, "cfg", None), "runtime_policy", None)
         protocol_retry_limit = getattr(policy, "tool_protocol_retries", 2)
         protocol_pending = False
+        completion_retries = 0
+        scope = scope or next((text_content(item.get("content")) for item in reversed(messages)
+                               if item.get("role") == "user"), "当前任务")
+        finish_reason: str | None = None
+
+        def stop(status: str, code: str, summary: str, *, verified: bool = False) -> dict[str, Any]:
+            return {"type": "execution_stop", "status": status, "code": code, "summary": summary,
+                    "finish_reason": finish_reason, "iteration": iteration, "iteration_limit": iteration_limit,
+                    "tool_calls_used": budget.used, "tool_calls_limit": self.max_tool_calls,
+                    "scope": stop_scope, "verified": verified}
+
         while iteration < iteration_limit:
             budget_exhausted = recovery.exhausted or budget.used >= self.max_tool_calls
             available = [tool for name, tool in tool_map.items()
@@ -204,13 +224,19 @@ class AgentExecutor:
             except ToolSchemaError as exc:
                 if transcript is not None:
                     transcript.extend(msgs[start:])
-                yield {"type": "error", "content": str(exc)}
+                yield stop("failed", "tool_schema", str(exc))
+                yield {"type": "error", "content": str(exc), "code": "tool_schema"}
                 return
             # 最后一轮只允许依据已有结果回答；服务商违规返回工具时会如实终止。
             final_round = not protocol_pending and (
                 budget_exhausted or (iteration == iteration_limit - 1 and definitions is not None)
             )
             iteration += 1
+            limit_code = ("recovery_exhausted" if recovery.exhausted else
+                          "tool_budget_exhausted" if budget.used >= self.max_tool_calls else "max_iterations") if final_round else ""
+            limit_summary = {"recovery_exhausted": "本轮恢复次数已用尽，任务尚未确认全部完成。",
+                             "tool_budget_exhausted": "本轮操作次数已用尽，任务尚未确认全部完成。",
+                             "max_iterations": "本轮执行轮数已达到上限，任务尚未确认全部完成。"}.get(limit_code, "")
             if final_round:
                 if budget_exhausted:
                     msgs.append({"role": "user", "content": RECOVERY_BUDGET_MESSAGE})
@@ -221,11 +247,21 @@ class AgentExecutor:
             # 即使 tool_choice=none，也不能提前把尚未执行的声明当作最终回答。
             live = not tools and not protocol_pending
             suppress = False
+            finish_reason = None
+            saw_choice = False
+            model_started = time.perf_counter()
+            model_call = {"call_id": uuid4().hex, "iteration": iteration,
+                          "model": getattr(self.llm, "model", None) or getattr(getattr(self.llm, "cfg", None), "model", ""),
+                          "iteration_limit": iteration_limit, "tool_calls_used": budget.used,
+                          "tool_calls_limit": self.max_tool_calls}
+            yield {"type": "model_call_start", **model_call}
             try:
                 async for chunk in self.llm.stream_chat(msgs, tools=definitions, tool_choice="none" if final_round else None):
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
                     if choice is None:
                         continue
+                    saw_choice = True
+                    finish_reason = getattr(choice, "finish_reason", None) or finish_reason
                     delta = choice.delta
                     piece = getattr(delta, "reasoning_content", None)
                     if piece:
@@ -245,16 +281,43 @@ class AgentExecutor:
                                 slot["name"] += tc.function.name
                             if tc.function.arguments:
                                 slot["arguments"] += tc.function.arguments
-            except LLMError as exc:
-                yield {"type": "error", "content": str(exc)}
+                # Also validate substituted clients; the production client validates the transport itself.
+                if not saw_choice:
+                    raise LLMError("模型服务返回了空响应，本轮没有执行结果。", code="empty_response")
+                if finish_reason is None:
+                    raise LLMError("模型响应流提前结束，未收到结束原因，本轮响应不完整。", code="stream_incomplete")
+                if finish_reason not in {"stop", "tool_calls"}:
+                    code = {"length": "output_limit", "content_filter": "content_filter"}.get(finish_reason, "unexpected_finish_reason")
+                    raise LLMError("模型响应未正常完成，任务尚未完成。", code=code, finish_reason=finish_reason)
+                if finish_reason == "tool_calls" and not calls_acc:
+                    raise LLMError("模型声明了工具调用但没有返回实际操作，任务尚未完成。", code="tool_protocol", finish_reason=finish_reason)
+                if not content.strip() and not calls_acc:
+                    raise LLMError("模型没有返回正文或可执行操作，任务尚未完成。", code="empty_response", finish_reason=finish_reason)
+            except asyncio.CancelledError:
+                yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason,
+                       "status": "cancelled", "code": "cancelled", "summary": "模型调用已取消。",
+                       "duration_ms": int((time.perf_counter() - model_started) * 1000)}
+                raise
+            except Exception as raw:
+                exc = translate_error(raw)
+                finish_reason = getattr(exc, "finish_reason", None) or finish_reason
+                code = getattr(exc, "code", "llm_error")
+                yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason,
+                       "status": "error", "code": code, "summary": str(exc),
+                       "duration_ms": int((time.perf_counter() - model_started) * 1000)}
+                yield stop("failed", code, str(exc))
+                yield {"type": "error", "content": str(exc), "code": code, "finish_reason": finish_reason}
                 return
+            yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason, "status": "ok",
+                   "code": "model_response", "summary": "模型已返回响应。",
+                   "duration_ms": int((time.perf_counter() - model_started) * 1000)}
 
             display = _TOOL_RE.sub("", content).strip()
             reply: dict[str, Any] = {"role": "assistant", "content": display}
             if reasoning:
                 reply["reasoning_content"] = reasoning
             calls = [
-                {"id": slot["id"] or f"call_{idx}", "type": "function",
+                {"id": slot["id"] or f"call_{model_call['call_id']}_{idx}", "type": "function",
                  "function": {"name": slot["name"], "arguments": slot["arguments"]}}
                 for idx, slot in sorted(calls_acc.items())
             ]
@@ -269,7 +332,9 @@ class AgentExecutor:
                     if budget.protocol_retries >= protocol_retry_limit:
                         if transcript is not None:
                             transcript.extend(msgs[start:])
-                        yield {"type": "error", "content": "工具调用参数多次未通过校验，相关操作尚未执行，任务未完成。"}
+                        summary = "工具调用参数多次未通过校验，相关操作尚未执行，任务未完成。"
+                        yield stop("failed", "tool_protocol", summary)
+                        yield {"type": "error", "content": summary, "code": "tool_protocol"}
                         return
                     budget.protocol_retries += 1
                     iteration_limit += 1
@@ -282,12 +347,43 @@ class AgentExecutor:
                         msgs.append(reply)
                     msgs.append({"role": "user", "content": AUTONOMOUS_RECOVERY_MESSAGE})
                     continue
+                if tools:
+                    yield {"type": "activity", "text": "正在确认任务完成情况"}
+                    check_id = uuid4().hex
+                    yield {"type": "completion_check_start", **model_call, "call_id": check_id,
+                           "purpose": "completion_check"}
+                    check = await check_completion(self.llm, msgs, display, scope=scope, results=budget.results)
+                    yield {**check.event(), "call_id": check_id}
+                    if not check.completed:
+                        if check.verified and check.can_continue and not final_round and completion_retries < MAX_COMPLETION_RETRIES:
+                            completion_retries += 1
+                            if display:
+                                msgs.append(reply)
+                                yield {"type": "note", "content": display}
+                            msgs.append({"role": "user", "content": continuation(check)})
+                            continue
+                        code = limit_code or ("premature_stop" if check.verified else "completion_unverified")
+                        summary = limit_summary or check.reason
+                        if display:
+                            msgs.append(reply)
+                            yield {"type": "note", "content": display, "retracted": True}
+                        if transcript is not None:
+                            transcript.extend(msgs[start:])
+                        yield stop("incomplete", code, summary)
+                        answer = f"本轮尚未确认全部完成。{summary}"
+                        if check.remaining:
+                            answer += "\n\n仍需完成：" + "；".join(check.remaining)
+                        yield {"type": "text_chunk", "content": answer}
+                        yield {"type": "final_text", "content": answer}
+                        return
                 if display and not live:
                     yield {"type": "text_chunk", "content": display}
                 if transcript is not None:
                     transcript.extend(m for m in msgs[start:] if m.get("content") != FINAL_ROUND_MESSAGE)
                     if display:
                         transcript.append(reply)
+                yield stop("completed", limit_code or "model_stop", "任务完成情况已核对。" if tools else "本轮回答已结束。",
+                           verified=bool(tools))
                 yield {"type": "final_text", "content": display}
                 return
             try:
@@ -303,7 +399,8 @@ class AgentExecutor:
                 msgs.extend({"role": "tool", "tool_call_id": call["id"], "content": str(exc)} for call in calls)
                 if transcript is not None:
                     transcript.extend(msgs[start:])
-                yield {"type": "error", "content": str(exc)}
+                yield stop("failed", "tool_schema", str(exc))
+                yield {"type": "error", "content": str(exc), "code": "tool_schema"}
                 return
             if any(error is not None for error in errors):
                 # 整批预检：即使只有一个调用结构错误，本响应也不能产生部分副作用。
@@ -328,12 +425,16 @@ class AgentExecutor:
                 if forbidden_calls:
                     if transcript is not None:
                         transcript.extend(msgs[start:])
-                    yield {"type": "error", "content": "模型在禁止工具调用的收尾阶段仍返回了操作请求，相关操作尚未执行，不能确认任务完成。"}
+                    summary = "模型在禁止工具调用的收尾阶段仍返回了操作请求，相关操作尚未执行，不能确认任务完成。"
+                    yield stop("incomplete", limit_code or "tool_protocol", limit_summary or summary)
+                    yield {"type": "error", "content": summary, "code": "tool_protocol"}
                     return
                 if budget.protocol_retries >= protocol_retry_limit:
                     if transcript is not None:
                         transcript.extend(msgs[start:])
-                    yield {"type": "error", "content": "工具调用参数多次未通过校验，相关操作尚未执行，任务未完成。"}
+                    summary = "工具调用参数多次未通过校验，相关操作尚未执行，任务未完成。"
+                    yield stop("failed", "tool_protocol", summary)
+                    yield {"type": "error", "content": summary, "code": "tool_protocol"}
                     return
                 budget.protocol_retries += 1
                 protocol_pending = True
@@ -446,6 +547,10 @@ class AgentExecutor:
                        "debug_result": externalize_script_text(result.text, python=name in {_SCRIPT_TOOL, "inspect_python_script"}),
                        "duration_ms": int((time.perf_counter() - started) * 1000)}
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})
+                budget.results[call["id"]] = {"tool": name, "ok": result.ok, "result": externalize_script_text(result.text, python=name == _SCRIPT_TOOL)}
+                for invalid_id in recovery.invalid_results:
+                    if invalid_id in budget.results:
+                        budget.results[invalid_id]["invalid"] = True
                 end_turn = end_turn or result.end_turn
                 if name != RECONSIDER_TOOL and not method_blocked:
                     recovery.observe(name, result, call_id=call["id"], diagnostic=name in _DIAGNOSTIC_TOOLS,
@@ -482,12 +587,17 @@ class AgentExecutor:
                 if transcript is not None:
                     transcript.extend(msgs[start:])
                 # 工具前的说明已经作为 note 交付；确认问题由 clarify 卡片展示。
+                yield stop("waiting", "awaiting_user", "需要用户回答后继续处理。")
                 yield {"type": "final_text", "content": ""}
                 return
             if ctx.mode == "modify" and not built and not nudged and explored >= _NUDGE_AFTER:
                 # 收束没有产出修改文件的探索；由模型选择 Recipe 或 Python 完成交付。
                 msgs.append({"role": "user", "content": MODIFY_NUDGE.format(count=explored)})
                 nudged = True
+
+        if transcript is not None:
+            transcript.extend(msgs[start:])
+        yield stop("incomplete", "max_iterations", "本轮执行轮数已达到上限，任务尚未完成。")
 
 
 def _script_key(args: dict[str, Any], ctx: AgentContext) -> str | None:

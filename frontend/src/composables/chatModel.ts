@@ -7,12 +7,36 @@
  * - artifacts 产物：结果表、文件、处理流程卡片、澄清问题
  * 刷新页面时用数据库里存的事件重新归并，得到同样的界面。
  */
-import type { AgentEvent, DiffCard, PublicOperationDetail, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
+import type { AgentEvent, DiffCard, ExecutionState, PublicOperationDetail, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
 import { scriptReferences } from './scriptPresentation.ts'
 import { recipeProcessDetails, type RecipeProcessDetail } from './recipeProcessDetails'
+import { mergeExecutionStop, readExecutionState } from './executionStatus.ts'
 
 export type ToolStatus = 'running' | 'ok' | 'error'
 export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' | 'error' | 'stopped'
+export type AgentStatus = 'running' | 'done' | 'error' | 'incomplete' | 'waiting' | 'cancelled' | 'interrupted' | 'unknown'
+
+export const AGENT_STATUS_LABELS: Record<AgentStatus, string> = {
+  running: '执行中', done: '已完成', error: '失败', incomplete: '未完成', waiting: '待确认',
+  cancelled: '已停止', interrupted: '已中断', unknown: '状态未知',
+}
+
+function agentStatus(event: AgentEvent): AgentStatus {
+  if (event.error || event.status === 'failed' || event.status === 'error') return 'error'
+  if (event.status == null || event.status === 'completed' || event.status === 'done') return 'done'
+  return ['running', 'incomplete', 'waiting', 'cancelled', 'interrupted'].includes(event.status) ? event.status : 'unknown'
+}
+
+/** 专员的未完成状态也传递给所属过程块，不能被显示成已完成。 */
+export function agentStageStatus(items: TimelineItem[]): PlanStatus | undefined {
+  const states = items.flatMap((item) => item.kind === 'agent' ? [item.status] : [])
+  if (states.includes('running')) return 'running'
+  if (states.includes('error')) return 'error'
+  if (states.some((status) => status === 'incomplete' || status === 'unknown')) return 'warning'
+  if (states.some((status) => status === 'cancelled' || status === 'interrupted')) return 'stopped'
+  if (states.includes('waiting')) return 'waiting'
+  return states.length ? 'done' : undefined
+}
 
 export type TimelineItem =
   | { kind: 'note'; key: string; text: string; step?: number }
@@ -35,7 +59,7 @@ export type TimelineItem =
       step?: number
     }
   | { kind: 'plan'; key: string; num: number; total: number; description: string; status: PlanStatus; summary?: string }
-  | { kind: 'agent'; key: string; id: string; table: string; status: 'running' | 'done' | 'error'; conclusion?: string }
+  | { kind: 'agent'; key: string; id: string; table: string; status: AgentStatus; conclusion?: string }
   | { kind: 'info'; key: string; text: string; tone?: 'memory' | 'mapping' | 'compact' | 'reflect' | 'aggregate'; step?: number }
 
 export interface StepState {
@@ -159,6 +183,8 @@ export interface UiMessage {
   checklist?: boolean
   /** 思考模式：回答核对的结果。 */
   audit?: AuditResult
+  /** 整体完成状态由后端汇总，流结束本身不代表业务已完成。 */
+  execution?: ExecutionState
   error?: string
   createdAt?: string
 }
@@ -462,6 +488,21 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
     return
   }
   switch (e.type) {
+    case 'execution_status': {
+      const state = readExecutionState(e)
+      if (state) {
+        msg.execution = state
+        msg.meta.execution = { ...state }
+      }
+      break
+    }
+    case 'execution_stop': {
+      const state = readExecutionState(e)
+      if (state && !msg.events?.some((event) => event.type === 'execution_status')) {
+        msg.execution = mergeExecutionStop(msg.execution, state)
+      }
+      break
+    }
     case 'text_chunk':
       msg.content += e.content
       break
@@ -615,7 +656,7 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
     case 'agent_done': {
       const item = msg.timeline.find((t) => t.kind === 'agent' && t.id === e.agent_id)
       if (item && item.kind === 'agent') {
-        item.status = e.error ? 'error' : 'done'
+        item.status = agentStatus(e)
         item.conclusion = e.conclusion
       }
       break
@@ -755,12 +796,20 @@ function activePlan(msg: UiMessage) {
 export function finishMessage(msg: UiMessage): void {
   msg.streaming = false
   msg.activity = ''
+  if (msg.execution?.status === 'running') {
+    msg.execution = { ...msg.execution, status: 'incomplete', code: 'missing_execution_status',
+      summary: '处理连接已经结束，但没有收到任务完成确认。' }
+    msg.meta.execution = { ...msg.execution }
+  }
   closeBlock(msg)
   for (const item of msg.timeline) {
     if (item.kind === 'tool' && item.status === 'running') item.status = 'error'
     if (item.kind === 'plan' && item.status === 'running') {
-      item.status = msg.error && !msg.error.includes('已停止') ? 'error' : 'stopped'
+      item.status = msg.execution?.status === 'waiting' ? 'waiting'
+        : msg.execution?.status === 'incomplete' ? 'warning'
+          : msg.execution?.status === 'failed' || msg.error && !msg.error.includes('已停止') ? 'error' : 'stopped'
     }
+    if (item.kind === 'agent' && item.status === 'running') item.status = 'error'
   }
   for (const artifact of msg.artifacts) {
     if (artifact.kind === 'recipe' && !['done', 'failed'].includes(artifact.progress.status)) {
@@ -792,12 +841,16 @@ type StoredMessage = { id: number; role: 'user' | 'assistant'; content: string; 
 
 /** 用数据库里的消息重建界面消息 */
 export function fromStored(stored: StoredMessage): UiMessage {
+  const storedExecution = readExecutionState(stored.meta?.execution)
   const msg: UiMessage = {
-    key: `db_${stored.id}`, id: stored.id, role: stored.role, content: '', meta: stored.meta ?? {}, streaming: false,
+    key: `db_${stored.id}`, id: stored.id, role: stored.role, content: '', meta: { ...stored.meta }, streaming: false,
     timeline: [], artifacts: [], blocks: stored.role === 'assistant' ? newAssistant().blocks : [], createdAt: stored.created_at,
   }
   if (stored.role === 'assistant') {
     for (const e of stored.events ?? []) applyEvent(msg, e)
+    // 元数据保存的是最终总体状态，优先于回放中的单项结束记录。
+    msg.execution = storedExecution ?? msg.execution
+    if (msg.execution) msg.meta.execution = { ...msg.execution }
   }
   msg.content = stored.content
   if (stored.role === 'assistant' && stored.content.trim()) {
@@ -826,6 +879,29 @@ export function fromStoredMessages(stored: StoredMessage[], throughMessageId?: n
     if (item.role === 'user' && item.id === throughMessageId) break
   }
   return messages
+}
+
+/** 后台 SSE 从首条事件回放；复用已保存助手的身份，清空其快照内容以免重复追加。 */
+export function restoreConversationMessages(stored: StoredMessage[], job?: { id: string; message_id: number } | null): { messages: UiMessage[]; assistant?: UiMessage } {
+  if (!job) return { messages: fromStoredMessages(stored) }
+  const checkpoint = [...stored].reverse().find((item) => item.role === 'assistant' &&
+    (item.meta?.job_id === job.id || !item.meta?.job_id && item.meta?.request_message_id === job.message_id))
+  const requestIndex = stored.findIndex((item) => item.role === 'user' && item.id === job.message_id)
+  const history = requestIndex >= 0 ? stored.slice(0, requestIndex + 1) : stored.filter((item) => item !== checkpoint)
+  const messages = fromStoredMessages(history)
+  const assistant = newAssistant()
+  if (checkpoint) {
+    assistant.id = checkpoint.id
+    assistant.key = `db_${checkpoint.id}`
+    assistant.createdAt = checkpoint.created_at
+    assistant.meta = { ...checkpoint.meta }
+  }
+  assistant.meta.request_message_id = job.message_id
+  assistant.meta.job_id = job.id
+  assistant.execution = { status: 'running', code: 'reconnecting', summary: '正在恢复执行记录' }
+  assistant.meta.execution = { ...assistant.execution }
+  messages.push(assistant)
+  return { messages, assistant }
 }
 
 // ---------------------------------------------------------------------------

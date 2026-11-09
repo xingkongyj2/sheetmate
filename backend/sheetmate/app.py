@@ -28,10 +28,15 @@ from sheetmate.services.seed import bootstrap
 async def lifespan(_: FastAPI):
     # 初始化里会同步跑一遍示例流程（内部用 asyncio.run），放到线程里执行，避免和服务的事件循环冲突
     await asyncio.to_thread(bootstrap)
+    from sheetmate.services.chat import recover_interrupted_executions
+
+    await asyncio.to_thread(recover_interrupted_executions)
     yield
     from sheetmate.services.conversations import conversation_workspaces
     from sheetmate.services.runs import run_workspaces
+    from sheetmate.services.jobs import jobs
 
+    await jobs.shutdown()
     conversation_workspaces.close_all()
     run_workspaces.close_all()
 

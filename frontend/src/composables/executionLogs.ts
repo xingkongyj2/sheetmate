@@ -1,6 +1,7 @@
 import type { AgentEvent, ScriptReference } from '../api/types.ts'
 import type { TimelineItem, UiMessage } from './chatModel.ts'
 import { scriptReferences, withoutScriptCode } from './scriptPresentation.ts'
+import { executionExportStatus, messageExecution } from './executionStatus.ts'
 
 export type LogFilter = 'all' | 'tools' | 'errors'
 export type LogStatus = 'running' | 'success' | 'error' | 'warning' | 'info'
@@ -28,6 +29,9 @@ export interface ExecutionLog {
 
 const EVENT_LABELS: Record<string, string> = {
   note: '处理说明', error: '执行错误', start: '开始处理', done: '处理结束',
+  model_call_start: '模型调用开始', model_call_done: '模型调用结束', execution_stop: '执行停止', execution_status: '执行状态',
+  completion_check: '任务完成核对',
+  completion_check_start: '任务完成核对开始',
   plan_start: '执行计划', step_start: '计划步骤开始', step_done: '计划步骤结束',
   table: '数据产物', file: '交付文件', script: '脚本文件', clarify: '待确认问题',
   memory_saved: '记忆已保存', field_mapping_saved: '字段映射已保存', compacted: '上下文已压缩',
@@ -76,8 +80,9 @@ function eventStatus(event: AgentEvent): LogStatus {
   const status = String(event.status ?? event.report?.status ?? '')
   if (event.ok === false || event.type === 'error' || event.type.endsWith('_error') || event.type.endsWith('_failed') ||
       event.error || ['error', 'failed', 'fail', 'escalated', 'gave_up'].includes(status)) return 'error'
-  if (['warning', 'warn', 'stopped', 'waiting'].includes(status)) return 'warning'
-  if (['done', 'success', 'pass', 'repaired'].includes(status) || event.type.endsWith('_saved')) return 'success'
+  if (['warning', 'warn', 'stopped', 'waiting', 'incomplete', 'cancelled', 'interrupted', 'unverified'].includes(status)) return 'warning'
+  if (status === 'running') return 'running'
+  if (['done', 'success', 'pass', 'repaired', 'completed', 'ok'].includes(status) || event.type.endsWith('_saved')) return 'success'
   return 'info'
 }
 
@@ -109,9 +114,14 @@ function timelineEvents(items: TimelineItem[]): AgentEvent[] {
 export function buildExecutionLogs(message: UiMessage | null): ExecutionLog[] {
   if (!message) return []
   const events = message.events?.length ? message.events : timelineEvents(message.timeline)
+  const execution = messageExecution(message)
+  const latestStatus = [...events].reverse().find((event) => event.type === 'execution_status')
+  const diagnostics = execution && (!latestStatus || latestStatus.status !== execution.status ||
+    latestStatus.code !== execution.code || latestStatus.summary !== execution.summary)
+    ? [...events, { ...execution, type: 'execution_status' }] : events
   const entries: ExecutionLog[] = []
   const calls = new Map<string, ExecutionLog>()
-  for (const [index, original] of events.entries()) {
+  for (const [index, original] of diagnostics.entries()) {
     const event = withoutScriptCode(original) as AgentEvent
     if (['text_chunk', 'thinking', 'recipe_thinking', 'final_text'].includes(event.type)) continue
     if (event.type === 'tool_call') {
@@ -142,12 +152,15 @@ export function buildExecutionLogs(message: UiMessage | null): ExecutionLog[] {
       }
     }
     const parts: LogSection[] = []
+    if (['model_call_start', 'model_call_done', 'execution_stop', 'execution_status', 'completion_check', 'completion_check_start'].includes(event.type)) {
+      parts.push(section('结束状态与原因', event))
+    }
     if (event.params) parts.push(...parameterSections(event.params))
     if (event.sql) parts.push(section('执行 SQL', event.sql, 'SQL'))
     entries.push({
       key: `event-${index}`, sequence: index + 1, category: 'event',
       title: EVENT_LABELS[event.type] ?? event.type, type: event.type, status: eventStatus(event),
-      summary: eventSummary(event), callId: event.tool_call_id ?? event.id, duration: event.duration_ms,
+      summary: eventSummary(event), callId: event.call_id ?? event.tool_call_id ?? event.id, duration: event.duration_ms,
       sections: parts, raw: event,
       scripts: scriptReferences(event),
     })
@@ -169,5 +182,6 @@ export function filterExecutionLogs(entries: ExecutionLog[], filter: LogFilter, 
 
 export function exportExecutionLogs(message: UiMessage, entries: ExecutionLog[]): string {
   return JSON.stringify({ message_id: message.id ?? message.key, created_at: message.createdAt ?? null,
-    status: message.streaming ? 'running' : message.error ? 'error' : 'done', logs: entries.map((entry) => entry.raw) }, null, 2)
+    status: executionExportStatus(message), execution: messageExecution(message) ?? null,
+    logs: entries.map((entry) => entry.raw) }, null, 2)
 }

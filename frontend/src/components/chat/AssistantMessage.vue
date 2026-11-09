@@ -15,6 +15,7 @@ import { assistantDisplayBlocks, groupAssistantBlocks, type AssistantDisplayGrou
 import { processGroupCategories, processGroupHeader } from '@/composables/assistantProcessPresentation'
 import type { UiMessage } from '@/composables/chatModel'
 import { fileKindLabel, standaloneFiles } from '@/composables/filePresentation'
+import { executionNotice } from '@/composables/executionStatus'
 import { missingLLMKeyPresentation } from '@/composables/llmErrorPresentation'
 import { copyMarkdown } from '@/composables/markdown'
 import { messageMarkdown, PLAN_STATUS_LABELS, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
@@ -28,6 +29,7 @@ import { useProgressiveReply } from '@/composables/useProgressiveReply'
 import RecipeStageDetails from './RecipeStageDetails.vue'
 import RecipeViewCard from './RecipeViewCard.vue'
 import TimelineList from './TimelineList.vue'
+import ExecutionStatusNotice from './ExecutionStatusNotice.vue'
 
 const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; conversationId?: string | null; mascot?: string | null; answersDisabled?: boolean; answersClosed?: boolean }>()
 const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo]; refresh: [] }>()
@@ -87,6 +89,8 @@ const activity = computed(() => {
 })
 const audit = computed(() => auditLine(props.message.audit))
 const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
+const stopped = computed(() => executionNotice(props.message))
+const showError = computed(() => !!missingKeyError.value || !!props.message.error && (!stopped.value || props.message.error.includes('设置') || props.message.error.includes('API Key')))
 
 function stageSummary(stage: AssistantStage): string {
   const summaries = [userFacingSummary(stage.summary, '', 1600)]
@@ -118,7 +122,7 @@ const runningTool = computed(() => [...props.message.timeline].reverse().find((t
 const mood = computed(() => {
   if (typing.value) return runningTool.value ? 'working' : 'thinking'
   const latest = attempts.value.at(-1)
-  return props.message.error || (latest && recipeFailure(latest.progress)) ? 'idle' : 'happy'
+  return props.message.error || stopped.value || (latest && recipeFailure(latest.progress)) ? 'idle' : 'happy'
 })
 
 // 回复表格统一由正文 Markdown 展示，计算数据可在执行明细中查看。
@@ -249,7 +253,9 @@ onBeforeUnmount(() => {
         </section>
       </template>
 
-      <div v-if="!typing && (message.error || missingKeyError)" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
+      <ExecutionStatusNotice v-if="!typing && !showError" :message="message" />
+
+      <div v-if="!typing && showError" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
         <CircleAlert class="mt-0.5 size-4 shrink-0" />
         <span>
           {{ errorMessage }}

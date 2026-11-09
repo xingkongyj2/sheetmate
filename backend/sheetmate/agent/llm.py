@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import openai
+import httpx
 from openai import AsyncOpenAI
 
 from sheetmate.agent.content import user_content
@@ -32,9 +33,18 @@ log = logging.getLogger(__name__)
 class LLMError(RuntimeError):
     """调用模型失败。message 是给用户看的中文说明。"""
 
+    code = "llm_error"
+
+    def __init__(self, message: str, *, code: str | None = None, finish_reason: str | None = None):
+        super().__init__(message)
+        self.code = code or type(self).code
+        self.finish_reason = finish_reason
+
 
 class LLMTimeout(LLMError):
     """A request/deadline timeout, preserved for auxiliary-stage degradation."""
+
+    code = "timeout"
 
 
 class LLMNotConfigured(LLMError):
@@ -76,15 +86,15 @@ def translate_error(exc: Exception) -> LLMError:
     if isinstance(exc, LLMError):
         return exc
     if isinstance(exc, openai.AuthenticationError):
-        return LLMError("API Key 无效或已过期，请到「设置」里检查。")
+        return LLMError("API Key 无效或已过期，请到「设置」里检查。", code="authentication")
     if isinstance(exc, openai.PermissionDeniedError):
-        return LLMError("这个 API Key 没有权限调用当前模型。")
+        return LLMError("这个 API Key 没有权限调用当前模型。", code="permission_denied")
     if isinstance(exc, openai.RateLimitError):
-        return LLMError("模型服务限流或额度不足，请稍后再试或检查账户余额。")
-    if isinstance(exc, openai.APITimeoutError):
+        return LLMError("模型服务限流或额度不足，请稍后再试或检查账户余额。", code="rate_limit")
+    if isinstance(exc, (openai.APITimeoutError, httpx.TimeoutException, TimeoutError)):
         return LLMTimeout("模型响应超时，请稍后再试。")
-    if isinstance(exc, openai.APIConnectionError):
-        return LLMError("连接不上模型服务，请检查网络或「设置」里的接口地址。")
+    if isinstance(exc, (openai.APIConnectionError, httpx.TransportError, ConnectionError)):
+        return LLMError("连接不上模型服务，请检查网络或「设置」里的接口地址。", code="connection_error")
     if isinstance(exc, openai.APIStatusError):
         if exc.status_code in {400, 422} and re.search(
             r"(?:image|vision|multimodal).{0,100}(?:not supported|unsupported|not support)|"
@@ -92,12 +102,12 @@ def translate_error(exc: Exception) -> LLMError:
             r"content.{0,100}expected.{0,30}string.{0,60}(?:array|list)",
             str(exc.message), re.IGNORECASE,
         ):
-            return LLMError("当前模型或接口不支持图片输入，请在「设置」中切换为支持图片的模型后重试。")
+            return LLMError("当前模型或接口不支持图片输入，请在「设置」中切换为支持图片的模型后重试。", code="unsupported_input")
         if exc.status_code == 402:
-            return LLMError("模型账户余额不足，请充值后再试。")
+            return LLMError("模型账户余额不足，请充值后再试。", code="quota_exceeded")
         if exc.status_code == 404:
-            return LLMError("模型名称或接口地址不对，请到「设置」里检查。")
-        return LLMError(f"模型服务返回错误（{exc.status_code}）：{_short(exc.message)}")
+            return LLMError("模型名称或接口地址不对，请到「设置」里检查。", code="model_not_found")
+        return LLMError(f"模型服务返回错误（{exc.status_code}）：{_short(exc.message)}", code="api_error")
     return LLMError(f"调用模型出错：{_short(str(exc))}")
 
 
@@ -329,18 +339,67 @@ class LLMClient:
                           tool_choice: str | None = None) -> AsyncIterator[Any]:
         """流式，逐个产出原始 chunk。tool_choice="none" 时模型只能回答文字。"""
         kwargs = self._kwargs(messages, tools, stream=True, tool_choice=tool_choice if tools else None)
+        finish_reason: str | None = None
         try:
             stream = await self.client.chat.completions.create(**kwargs)
+            failure: BaseException | None = None
             try:
+                saw_choice, has_content, has_reasoning = False, False, False
+                calls: dict[int, dict[str, str]] = {}
                 async for chunk in stream:
                     self._add_usage(getattr(chunk, "usage", None))
-                    if any(choice.finish_reason == "length" for choice in getattr(chunk, "choices", [])):
-                        raise LLMError("模型输出达到长度上限，本轮响应不完整，请增加输出上限后重试。")
+                    # 与执行器一致，只消费首个候选；usage-only chunk 不代表正文或结束。
+                    choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
+                    if choice is not None:
+                        saw_choice = True
+                        delta = choice.delta
+                        has_content = has_content or bool((getattr(delta, "content", None) or "").strip())
+                        has_reasoning = has_reasoning or bool(getattr(delta, "reasoning_content", None))
+                        for call in getattr(delta, "tool_calls", None) or []:
+                            slot = calls.setdefault(call.index, {"name": "", "arguments": ""})
+                            if call.function is not None:
+                                slot["name"] += call.function.name or ""
+                                slot["arguments"] += call.function.arguments or ""
+                        reason = getattr(choice, "finish_reason", None)
+                        if reason is not None:
+                            finish_reason = reason
+                            if reason == "length":
+                                raise LLMError("模型输出达到长度上限，本轮响应不完整，请增加输出上限后重试。",
+                                               code="output_limit", finish_reason=reason)
+                            if reason == "content_filter":
+                                raise LLMError("模型服务因内容过滤停止了输出，本轮响应不完整。",
+                                               code="content_filter", finish_reason=reason)
+                            if reason not in {"stop", "tool_calls"}:
+                                raise LLMError("模型服务返回了无法识别的结束原因，不能确认本轮响应完整。",
+                                               code="unexpected_finish_reason", finish_reason=reason)
                     yield chunk
+                if not saw_choice:
+                    raise LLMError("模型服务返回了空响应，本轮没有执行结果。", code="empty_response")
+                if finish_reason is None:
+                    raise LLMError("模型回复流提前结束，未收到正常结束原因，本轮响应不完整。", code="stream_incomplete")
+                if finish_reason == "tool_calls" and not calls:
+                    raise LLMError("模型声明了工具调用，但没有返回实际操作，本轮尚未执行。", code="tool_protocol")
+                if calls and any(not call["name"].strip() or not call["arguments"].strip() for call in calls.values()):
+                    raise LLMError("模型返回的工具调用不完整，相关操作尚未执行。", code="tool_protocol")
+                if not has_content and not calls:
+                    message = ("模型只返回了思考内容，没有返回回答或实际操作，本轮尚未完成。" if has_reasoning else
+                               "模型服务返回的回复内容为空，本轮没有执行结果。")
+                    raise LLMError(message, code="empty_response")
+            except BaseException as exc:
+                failure = exc
+                raise
             finally:
-                await stream.close()
+                try:
+                    await stream.close()
+                except BaseException:
+                    if failure is None:
+                        raise
+                    log.warning("关闭模型回复流时发生异常，已保留原始停止原因")
         except Exception as exc:
-            raise translate_error(exc) from exc
+            error = translate_error(exc)
+            if error.finish_reason is None:
+                error.finish_reason = finish_reason
+            raise error from exc
 
     async def complete_json(self, prompt: str, system: str | None = None, retries: int | None = None, *,
                             image_parts: list[dict[str, Any]] | None = None, max_tokens: int | None = None,

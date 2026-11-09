@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from contextlib import ExitStack, aclosing
 from pathlib import Path
 from typing import Any
@@ -59,6 +60,7 @@ _MAX_MESSAGE_IMAGES = 10
 _MAX_HISTORY_IMAGES = 8
 _MAX_IMAGE_REQUEST_BYTES = 20 * 1024 * 1024
 _KEEP_EVENTS = {
+    "model_call_start", "model_call_done", "completion_check_start", "completion_check", "execution_stop", "execution_status",
     "note", "reply", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
     "reflect_start", "reflect_done", "think_start", "plan_review", "step_check", "audit_start", "audit_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
@@ -164,6 +166,8 @@ def start_chat(user: User, conversation_id: str, message: str, *,
 async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
                     message_id: int, thinking: bool = False) -> None:
     recorder = WorkflowRecorder(message)
+    recorder.request_message_id = message_id
+    recorder.job_id = job.id
     stored: list[dict[str, Any]] = []
     text_parts: list[str] = []
     reply_parts: list[str] = []
@@ -171,6 +175,27 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     candidate_final = ""
     final_text = ""
     analysis: AnalysisWorkspace | None = None
+    run_id = None
+    last_checkpoint = 0.0
+
+    def checkpoint(*, force: bool = False) -> None:
+        nonlocal last_checkpoint
+        if force or time.monotonic() - last_checkpoint >= 1:
+            _save_assistant(conversation_id, "".join(text_parts).strip() or final_text, stored, recorder, run_id, finalize=False)
+            last_checkpoint = time.monotonic()
+
+    async def finish_execution(content: str) -> None:
+        recorder.finish(content)
+        await emit({"type": "execution_status", **recorder.execution()})
+
+    def cancel_execution() -> None:
+        user_stop = job.cancel_source == "user"
+        recorder.error = "用户停止了生成" if user_stop else "执行被系统中断，尚未完成"
+        recorder.record_stop({"status": "cancelled" if user_stop else "interrupted",
+                              "code": "user_stop" if user_stop else "system_cancelled",
+                              "summary": recorder.error, "source": job.cancel_source or "system"})
+
+    checkpoint(force=True)
 
     async def finish_reply() -> None:
         if not reply_parts:
@@ -178,6 +203,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         event = {"type": "reply", "content": "".join(reply_parts)}
         reply_parts.clear()
         stored.append(_slim(event))
+        checkpoint(force=True)
         await job.emit(event)
 
     async def emit(event: dict[str, Any]) -> None:
@@ -203,6 +229,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 reply_parts.append(content)
             final_text = "".join(text_parts).strip()
             await finish_reply()
+            checkpoint(force=True)
             return  # reply 结束当前正文块，兼顾实时展示与历史恢复。
         elif event["type"] in _KEEP_EVENTS:
             stored.append(_slim(event))
@@ -210,6 +237,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             name = event.get("table", {}).get("name")
             if name and analysis.ws.exists(name):
                 analysis.publish(name)
+        checkpoint(force=event["type"] != "text_chunk" and event["type"] not in {"thinking", "recipe_thinking"})
         await job.emit(event)
 
     try:
@@ -241,6 +269,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 answer = "本次没有删除流程。"
             await emit({"type": "text_chunk", "content": answer})
             await emit({"type": "final_text", "content": answer})
+            await finish_execution(answer)
             _save_assistant(conversation_id, answer, stored, recorder, None)
             if deleted:
                 await job.emit({"type": "recipes_changed", "recipes": [],
@@ -256,7 +285,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             assert conv is not None and request is not None
             records = _attachment_records(db, conv, (request.meta or {}).get("attachments", []))
             ctx.image_parts = _image_parts(records)
-        history = await _history(conversation_id, llm, emit)
+        history = await _history(conversation_id, llm, emit, current_message_id=message_id)
         _limit_history_images(history, ctx.image_parts)
         files = host.list_files()
         references = file_references(conversation_id, message_id, files)
@@ -280,6 +309,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             if answer:
                 await emit({"type": "text_chunk", "content": answer})
             await emit({"type": "final_text", "content": answer})
+            await finish_execution(answer)
             _save_assistant(conversation_id, answer, stored, recorder, None)
             await job.emit({"type": "done"})
             return
@@ -287,14 +317,16 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             ctx.save_recipe_requested = await infer_recipe_persistence(llm, message, history)
             host.save_recipe_requested = ctx.save_recipe_requested
     except asyncio.CancelledError:
-        recorder.error = "用户停止了生成"
+        cancel_execution()
+        await finish_execution("")
         _save_assistant(conversation_id, "（已停止，尚未处理文件）", stored, recorder, None)
         raise
     except Exception as exc:
-        event = {"type": "error", "content": str(exc)}
+        event = {"type": "error", "content": str(exc), "code": getattr(exc, "code", "execution_error")}
         if isinstance(exc, LLMNotConfigured):
             event["code"] = exc.code
         await emit(event)
+        await finish_execution("")
         _save_assistant(conversation_id, f"⚠️ {exc}", stored, recorder, None)
         await job.emit({"type": "done"})
         return
@@ -310,7 +342,6 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     thinking = thinking and intent.action == "process"
     executor = AgentExecutor(llm, _registry, max_iterations=settings.agent_max_iterations,
                              **({"max_tool_calls": THINKING_TOOL_BUDGET} if thinking else {}))
-    run_id = None
 
     async def guard_creation_delivery(*, interrupted: bool = False) -> str:
         nonlocal candidate_final
@@ -318,6 +349,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         summary = summary or _script_fallback(stored, mode=ctx.mode, interrupted=interrupted)
         if not summary:
             return ""
+        recorder.record_stop({"status": "incomplete", "code": "missing_delivery", "summary": summary})
         previous = candidate_final or "".join(candidate_parts).strip() or final_text or "".join(text_parts).strip()
         candidate_parts.clear()
         candidate_final = ""
@@ -374,7 +406,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                     else:
                         await emit(event)
     except asyncio.CancelledError:
-        recorder.error = "用户停止了生成"
+        cancel_execution()
         answer = await guard_creation_delivery(interrupted=True)
         if not answer:
             await publish_candidate()
@@ -383,12 +415,13 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             await emit({"type": "text_chunk", "content": separator + summary})
             answer = "".join(text_parts).strip()
             await emit({"type": "final_text", "content": answer})
+        await finish_execution(answer)
         _save_assistant(conversation_id, answer, stored, recorder, run_id)
         if host.deleted_recipes:
             customer_service.schedule_summary_refresh(host.customer_id)
         raise
     except Exception as exc:
-        await emit({"type": "error", "content": f"处理出错：{exc}"})
+        await emit({"type": "error", "content": f"处理出错：{exc}", "code": getattr(exc, "code", "execution_error")})
 
     answer = await guard_creation_delivery()
     if not answer:
@@ -404,6 +437,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     if not answer and recorder.error:
         answer = f"⚠️ {recorder.error}"
     await finish_reply()
+    await finish_execution(answer)
     _save_assistant(conversation_id, answer, stored, recorder, run_id)
     title = await _maybe_title(conversation_id, llm, message, answer)
     if title:
@@ -578,25 +612,98 @@ def _slim(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _save_assistant(conversation_id: str, content: str, events: list[dict[str, Any]], recorder: WorkflowRecorder,
-                    run_id: str | None) -> None:
-    record = recorder.to_dict()
+                    run_id: str | None, *, finalize: bool = True) -> None:
+    if finalize:
+        recorder.finish(content)
+    record = recorder.to_dict(final=finalize)
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
         if conv is None:
             return
-        conv_service.add_message(db, conv, "assistant", content, events=events,
-                                 meta={"mode": conv.mode, "digest": recorder.digest(), "tool_sequence": record["tool_sequence"], "run_id": run_id})
-        if run_id:
-            if record["steps"]:
+        meta = {"mode": conv.mode, "digest": recorder.digest(), "tool_sequence": record["tool_sequence"], "run_id": run_id,
+                "execution": record["execution"], "request_message_id": recorder.request_message_id, "job_id": recorder.job_id}
+        assistant = db.get(Message, recorder.message_id) if recorder.message_id else None
+        if assistant is None:
+            assistant = conv_service.add_message(db, conv, "assistant", content, events=events, meta=meta)
+            recorder.message_id = assistant.id
+        else:
+            assistant.content = content
+            assistant.events = list(events)
+            assistant.meta = meta
+        if run_id and finalize:
+            if record["steps"] or record["execution"].get("status") != "completed":
                 run_service.finish_analysis_run(db, run_id, record)
             else:
                 run = db.get(run_service.Run, run_id)
                 if run is not None:
                     db.delete(run)
+        elif run_id:
+            run = db.get(run_service.Run, run_id)
+            if run is not None:
+                run.steps = record["steps"]
+                run.tool_sequence = record["tool_sequence"]
+                run.validation = {**(run.validation or {}), "execution": record["execution"]}
 
 
 def _contains_unconfigured_llm_error(text: str) -> bool:
     return contains_llm_not_configured_text(text)
+
+
+def recover_interrupted_executions() -> None:
+    """A persisted running checkpoint survived its process; the exact interruption cause is unknown."""
+    reason = "服务已重启，上次执行未完成；停止的具体原因未知。"
+    with session_scope() as db:
+        for assistant in db.scalars(select(Message).where(
+            Message.role == "assistant", Message.meta["execution"]["status"].as_string() == "running",
+        )):
+            meta = dict(assistant.meta or {})
+            execution = dict(meta.get("execution") or {})
+            if execution.get("status") != "running":
+                continue
+            execution.update(status="interrupted", code="process_restart", summary=reason, source="unknown")
+            status = {"type": "execution_status", **execution}
+            assistant.meta = {**meta, "execution": execution}
+            assistant.events = [*(assistant.events or []), status]
+            if not assistant.content:
+                assistant.content = reason
+        # Include scripts/recipes whose process stopped between writing a run and linking its message.
+        for run in db.scalars(select(run_service.Run).where(run_service.Run.status == "running")):
+            execution = dict((run.validation or {}).get("execution") or {})
+            execution.update(status="interrupted", code="process_restart", summary=reason, source="unknown")
+            run.status = "interrupted"
+            run.error = reason
+            run.validation = {**(run.validation or {}), "execution": execution}
+            run.finished_at = run_service.now()
+
+
+def persist_unfinished_job(job: Job, *, status: str, code: str, summary: str) -> dict[str, Any] | None:
+    """Last-resort persistence when orchestration fails outside its normal finalization path."""
+    with session_scope() as db:
+        conv = db.get(Conversation, job.key)
+        if conv is None:
+            return
+        assistant = next((item for item in db.scalars(select(Message).where(
+            Message.conversation_id == job.key, Message.role == "assistant").order_by(Message.id.desc()))
+            if (item.meta or {}).get("job_id") == job.id), None)
+        if assistant is not None and ((assistant.meta or {}).get("execution") or {}).get("status") != "running":
+            return
+        meta = dict(assistant.meta or {}) if assistant is not None else {"job_id": job.id, "request_message_id": job.message_id}
+        execution = {**(meta.get("execution") or {}), "status": status, "code": code, "summary": summary,
+                     "source": job.cancel_source or "system"}
+        event = {"type": "execution_status", **execution}
+        if assistant is None:
+            conv_service.add_message(db, conv, "assistant", summary, events=[event], meta={**meta, "execution": execution})
+        else:
+            assistant.meta = {**meta, "execution": execution}
+            assistant.events = [*(assistant.events or []), event]
+            if not assistant.content:
+                assistant.content = summary
+            run_id = meta.get("run_id")
+            run = db.get(run_service.Run, run_id) if run_id else None
+            if run is not None and run.status == "running":
+                run.status, run.error, run.finished_at = status, summary, run_service.now()
+                run.validation = {**(run.validation or {}), "execution": execution}
+        return event
 
 
 def _limit_history_images(history: list[dict[str, Any]], current: list[dict[str, Any]]) -> None:
@@ -613,7 +720,7 @@ def _limit_history_images(history: list[dict[str, Any]], current: list[dict[str,
             item.pop("image_parts", None)
 
 
-async def _history(conversation_id: str, llm: Any, emit: Any) -> list[dict[str, Any]]:
+async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message_id: int | None = None) -> list[dict[str, Any]]:
     """组装历史：压缩摘要 + 之后的消息（不含刚保存的这条用户消息）。助手消息附上本轮执行摘要，方便追问。"""
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
@@ -627,8 +734,12 @@ async def _history(conversation_id: str, llm: Any, emit: Any) -> list[dict[str, 
             summary_until = 0
             conv.context_summary = ""
             conv.summary_until = 0
-        rows = list(db.scalars(select(Message).where(Message.conversation_id == conversation_id, Message.id > summary_until)
-                               .order_by(Message.id)))[:-1]
+        query = select(Message).where(Message.conversation_id == conversation_id, Message.id > summary_until)
+        if current_message_id is not None:
+            query = query.where(Message.id < current_message_id)
+        rows = list(db.scalars(query.order_by(Message.id)))
+        if current_message_id is None:
+            rows = rows[:-1]
     items = [{"id": m.id, "role": m.role, "content": _history_content(m)}
         for m in rows if not is_llm_not_configured_message(m.role, m.content, m.events)]
     if len(items) > COMPACT_THRESHOLD:
@@ -689,7 +800,10 @@ def _history_content(message: Message) -> str:
         return content
     digest = (message.meta or {}).get("digest")
     if digest:
-        content += "\n" + digest
+        content += "\n" + digest + "（仅记录已执行操作，不代表用户目标已全部完成）"
+    execution = (message.meta or {}).get("execution") or {}
+    if execution.get("status") in {"incomplete", "failed", "cancelled", "interrupted", "waiting"}:
+        content += f"\n（本轮状态：{execution['status']}；原因：{execution.get('summary') or execution.get('code') or '未知'}）"
     # 澄清卡的选项不在正文或工具摘要中；保留它们才能理解下一轮的数字回答。
     for event in message.events or []:
         if event.get("type") != "clarify":

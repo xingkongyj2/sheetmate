@@ -17,7 +17,6 @@ from typing import Any
 
 from sheetmate.agent.content import model_history, user_content
 from sheetmate.agent.executor import AgentExecutor, build_system_prompt
-from sheetmate.agent.llm import LLMError
 from sheetmate.agent.prompts import AGGREGATOR_PROMPT, MULTI_AGENT_KEYWORDS, SPECIALIST_MESSAGE
 from sheetmate.agent.tools import AgentContext
 from sheetmate.engine.field_mapping import normalize_name
@@ -73,6 +72,7 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
     done_marker = object()
     queue: asyncio.Queue[Any] = asyncio.Queue()
     conclusions: dict[str, str] = {}
+    budget = executor.new_budget()
 
     async def run_agent(table_name: str) -> None:
         scoped = replace(ctx, table_filter={table_name})
@@ -82,17 +82,26 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
                         {"role": "user", "content": user_content(SPECIALIST_MESSAGE.format(table=table_name, message=message), scoped.image_parts)}]
             tools = executor.registry.for_context(scoped)
             conclusion = ""
-            async for event in executor.agent_stream(messages, tools, scoped):
+            status, reason = "completed", ""
+            async for event in executor.agent_stream(messages, tools, scoped, budget=budget, stop_scope="agent"):
                 if event["type"] == "final_text":
                     conclusion = event["content"]
                     continue
                 if event["type"] == "text_chunk":
                     continue  # 专员的过程文本不直接显示在回答里，只在执行明细里看结论
+                if event["type"] == "execution_stop":
+                    status, reason = event.get("status", "incomplete"), event.get("summary", "")
                 await queue.put({**event, "agent_id": table_name})
+            if status != "completed":
+                conclusion = conclusion or reason or "本项尚未完成。"
             conclusions[table_name] = conclusion
-            await queue.put({"type": "agent_done", "agent_id": table_name, "conclusion": conclusion})
+            await queue.put({"type": "agent_done", "agent_id": table_name, "conclusion": conclusion,
+                             "status": status, "error": status == "failed"})
         except Exception as exc:
             conclusions[table_name] = f"（分析出错：{exc}）"
+            await queue.put({"type": "execution_stop", "scope": "agent", "agent_id": table_name,
+                             "status": "failed", "code": getattr(exc, "code", "agent_error"),
+                             "summary": conclusions[table_name], "verified": False})
             await queue.put({"type": "agent_done", "agent_id": table_name, "conclusion": conclusions[table_name], "error": True})
         finally:
             await queue.put(done_marker)
@@ -116,16 +125,9 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
     labels = {t.name: t.label or t.name for t in tables}
     parts = [f"**「{name}」（{labels.get(name, name)}）专员的结论：**\n{text}" for name, text in conclusions.items() if text]
     prompt = AGGREGATOR_PROMPT.format(count=len(conclusions), message=message, conclusions="\n\n---\n\n".join(parts) or "（无）")
-    full = ""
-    try:
-        image_parts = [part for item in history[-6:] for part in item.get("image_parts", [])] + ctx.image_parts
-        async for chunk in executor.llm.stream_chat([{"role": "user", "content": user_content(prompt, image_parts)}]):
-            choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
-            if choice is None or not choice.delta.content:
-                continue
-            full += choice.delta.content
-            yield {"type": "text_chunk", "content": choice.delta.content}
-    except LLMError as exc:
-        yield {"type": "error", "content": str(exc)}
-        return
-    yield {"type": "final_text", "content": full}
+    image_parts = [part for item in history[-6:] for part in item.get("image_parts", [])] + ctx.image_parts
+    aggregate_messages = [{"role": "system", "content": build_system_prompt(ctx, message)},
+                          {"role": "user", "content": user_content(prompt, image_parts)}]
+    async for event in executor.agent_stream(aggregate_messages, executor.registry.for_context(ctx), ctx,
+                                             budget=budget, scope=f"原始任务：{message}\n汇总并完成所有目标。"):
+        yield event

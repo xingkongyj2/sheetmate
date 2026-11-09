@@ -462,6 +462,42 @@ export interface PublicOperationDetail {
   ordered?: boolean
 }
 
+export type ExecutionStatus = 'running' | 'completed' | 'incomplete' | 'waiting' | 'failed' | 'cancelled' | 'interrupted' | 'unknown'
+
+/** 整次任务的状态；与一次模型调用或单个步骤结束分开保存。 */
+export interface ExecutionState {
+  status: ExecutionStatus
+  code?: string
+  summary?: string
+  finish_reason?: string | null
+  last_step?: string | Record<string, unknown> | null
+  model?: string
+  iteration?: number
+  iteration_limit?: number
+  tool_calls_used?: number
+  tool_calls_limit?: number
+  [key: string]: unknown
+}
+
+export interface ModelCallEvent extends AgentEvent {
+  type: 'model_call_start' | 'model_call_done'
+  call_id: string
+  model?: string
+  iteration: number
+  iteration_limit: number
+  tool_calls_used: number
+  tool_calls_limit: number
+  status?: 'ok' | 'error' | 'cancelled'
+  code?: string
+  summary?: string
+  finish_reason?: string | null
+  duration_ms?: number
+}
+
+export interface ExecutionEvent extends AgentEvent, ExecutionState {
+  type: 'execution_stop' | 'execution_status'
+}
+
 export interface AgentEvent {
   type: string
   details?: PublicOperationDetail[]

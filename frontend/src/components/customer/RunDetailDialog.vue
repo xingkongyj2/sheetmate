@@ -10,9 +10,11 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import ScriptFile from '@/components/common/ScriptFile.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
-import { duration, percent } from '@/composables/chatModel'
+import { duration, percent, type UiMessage } from '@/composables/chatModel'
+import { readExecutionState } from '@/composables/executionStatus'
 import { scriptReferences } from '@/composables/scriptPresentation'
 import { useToast } from '@/composables/useToast'
+import ExecutionStatusNotice from '@/components/chat/ExecutionStatusNotice.vue'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
@@ -65,6 +67,11 @@ watch(() => props.runId, (id) => {
 })
 
 const hasTables = computed(() => tables.value.length > 0)
+const executionMessage = computed<UiMessage | null>(() => {
+  const execution = readExecutionState(run.value?.validation?.execution)
+  return run.value && execution ? { key: run.value.run_id, role: 'assistant', content: '', meta: {},
+    streaming: execution.status === 'running', timeline: [], artifacts: [], execution } : null
+})
 const outputFiles = computed(() => {
   const files = (run.value?.validation?.files ?? []).flatMap((file) => file.file_id ? [{ id: file.file_id, name: file.filename || file.name || '运行结果' }] : [])
   const primary = run.value?.output_file_id
@@ -114,7 +121,8 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
         <div class="rounded-xl bg-paper px-3 py-2"><div class="text-[11px] text-faint">运行校验</div><div class="truncate">{{ run.validation?.summary ?? '—' }}</div></div>
       </div>
       <p v-if="run.request_text" class="text-sm text-mute">{{ run.request_text }}</p>
-      <div v-if="run.summary || run.error" class="whitespace-pre-wrap rounded-xl bg-error/5 px-3 py-2.5 text-[13px] text-error">{{ run.summary || run.error }}</div>
+      <ExecutionStatusNotice v-if="executionMessage" :message="executionMessage" />
+      <div v-if="run.summary || run.error && !executionMessage" class="whitespace-pre-wrap rounded-xl px-3 py-2.5 text-[13px]" :class="run.error && !executionMessage ? 'bg-error/5 text-error' : 'bg-paper text-mute'">{{ run.summary || run.error }}</div>
 
       <div v-if="run.steps.length">
         <div class="label-mini mb-2">每一步{{ hasTables ? '（点开可以查看中间表、修改参数后从这一步重跑）' : '' }}</div>

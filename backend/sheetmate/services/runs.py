@@ -27,6 +27,7 @@ run_workspaces = WorkspaceManager(settings.runs_dir, max_open=12)
 
 STATUS_LABELS = {
     "running": "运行中", "success": "成功", "warning": "完成（有提示）", "failed": "失败", "escalated": "需要人工处理",
+    "incomplete": "未完成", "cancelled": "已停止", "interrupted": "已中断", "waiting": "等待确认",
 }
 KIND_LABELS = {"analysis": "分析", "modify": "生成流程", "replay": "重复执行", "create": "建表", "script": "Python 脚本"}
 
@@ -151,11 +152,18 @@ def finish_analysis_run(db: Session, run_id: str, record: dict[str, Any]) -> Non
     run = db.get(Run, run_id)
     if run is None:
         return
-    run.status = "failed" if record.get("error") else "success"
+    execution = record.get("execution") or {}
+    status = execution.get("status")
+    run.status = ("success" if status == "completed" and not record.get("error") else
+                  status if status in {"incomplete", "cancelled", "interrupted", "waiting", "failed"} else
+                  "failed" if record.get("error") else "incomplete")
     run.steps = externalize_script_references(record.get("steps", []))
     _bind_scripts(run)
     run.tool_sequence = record.get("tool_sequence", "")
     run.error = record.get("error", "")
+    if run.status in {"failed", "incomplete", "interrupted", "cancelled"}:
+        run.error = run.error or execution.get("summary", "")
+    run.validation = {**(run.validation or {}), "execution": execution}
     run.summary = record.get("final_text", "")[:1000]
     run.duration_ms = int(record.get("duration_ms", 0))
     run.output_file_id = (record.get("files") or [None])[-1]

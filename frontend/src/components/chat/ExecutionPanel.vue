@@ -12,6 +12,7 @@ import type { RecipeProgress, UiMessage } from '@/composables/chatModel'
 import { executionFileGroups, executionRecipeSections, executionTableKey, executionTables } from '@/composables/executionPresentation'
 import { progressFlow } from '@/composables/recipeFlow'
 import { useConfirm } from '@/composables/useConfirm'
+import ExecutionStatusNotice from './ExecutionStatusNotice.vue'
 
 type Tab = 'recipes' | 'files' | 'data'
 const props = withDefaults(defineProps<{
@@ -95,6 +96,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     </div>
 
     <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto p-4">
+      <ExecutionStatusNotice v-if="message" class="mb-4" :message="message" />
       <template v-if="tab === 'recipes'">
         <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="mb-6 min-w-0 space-y-3">
           <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">

@@ -21,6 +21,7 @@ class Job:
     message_id: int | None = None
     task: asyncio.Task | None = None
     finished: bool = False
+    cancel_source: str | None = None
     _history: list[dict[str, Any]] = field(default_factory=list)
     _changed: asyncio.Condition = field(default_factory=asyncio.Condition)
 
@@ -66,9 +67,37 @@ class JobManager:
             try:
                 await work(job)
             except asyncio.CancelledError:
-                await job.emit({"type": "error", "content": "已停止"})
+                status = "cancelled" if job.cancel_source == "user" else "interrupted"
+                code = "user_stop" if job.cancel_source == "user" else "system_cancelled"
+                summary = "已停止" if job.cancel_source == "user" else "执行被系统中断"
+                needs_error = job.message_id is None
+                if job.message_id is not None:
+                    from sheetmate.services.chat import persist_unfinished_job
+
+                    event = persist_unfinished_job(job, status=status, code=code, summary=summary)
+                    if event:
+                        await job.emit(event)
+                        needs_error = True
+                    else:
+                        final = next((event for event in reversed(job._history) if event.get("type") == "execution_status"), {})
+                        needs_error = final.get("status") in {"cancelled", "interrupted"} and not any(
+                            event.get("type") == "error" and event.get("code") == code for event in job._history
+                        )
+                if needs_error:
+                    await job.emit({"type": "error", "content": summary, "code": code})
             except Exception as exc:  # 兜底，保证前端能收到结束信号
-                await job.emit({"type": "error", "content": f"处理出错：{exc}"})
+                summary = f"处理出错：{exc}"
+                code = getattr(exc, "code", "execution_error")
+                needs_error = job.message_id is None
+                if job.message_id is not None:
+                    from sheetmate.services.chat import persist_unfinished_job
+
+                    event = persist_unfinished_job(job, status="failed", code=code, summary=summary)
+                    if event:
+                        await job.emit(event)
+                        needs_error = True
+                if needs_error:
+                    await job.emit({"type": "error", "content": summary, "code": code})
             finally:
                 await job.finish()
                 if self._jobs.get(key) is job:
@@ -83,8 +112,19 @@ class JobManager:
         if job is None or job.task is None or job.finished:
             return False
         if not job.task.cancelling():
+            job.cancel_source = "user"
             job.task.cancel()
         return True
+
+    async def shutdown(self) -> None:
+        tasks = []
+        for job in list(self._jobs.values()):
+            if job.task is not None and not job.task.done():
+                job.cancel_source = job.cancel_source or "shutdown"
+                job.task.cancel()
+                tasks.append(job.task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
 
 jobs = JobManager()

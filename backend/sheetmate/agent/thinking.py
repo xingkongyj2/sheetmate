@@ -112,12 +112,15 @@ class _Run:
     question: str = ""
     failed: bool = False
     error: str = ""
+    incomplete: bool = False
 
     def observe(self, event: dict[str, Any], ledger: _Ledger) -> None:
         kind = event["type"]
         if kind == "clarify":
             self.waiting = True
             self.question = event.get("question") or "需要确认后才能继续"
+        elif kind == "execution_stop" and event.get("status") == "incomplete":
+            self.incomplete = True
         elif kind == "tool_result":
             if event.get("error_kind") in {"protocol", "schema"}:
                 self.protocol_results.add(event["id"])
@@ -293,11 +296,12 @@ def check_record(plan: Plan, ledger: _Ledger) -> str:
 
 
 async def _stream(executor: AgentExecutor, messages: list[dict[str, Any]], tools: list[Any], ctx: AgentContext, budget: Any,
-                  run: _Run, ledger: _Ledger, *, step: int | None, activity: str = "") -> AsyncIterator[dict[str, Any]]:
+                  run: _Run, ledger: _Ledger, *, step: int | None, scope: str, activity: str = "") -> AsyncIterator[dict[str, Any]]:
     """跑一次 ReAct 循环。step 不为空时是某一项：文字是这一项的汇报，不是最终回答；
     为空时是最终回答阶段：回答文字先扣在 run.held 里，等核对完再放出。
     activity 不为空时，每次工具返回之后补一条临时状态：模型接着分析、写汇报时界面上没有别的变化，要让用户知道还在做什么。"""
-    async for event in executor.agent_stream(messages, tools, ctx, transcript=run.transcript, budget=budget):
+    async for event in executor.agent_stream(messages, tools, ctx, transcript=run.transcript, budget=budget,
+                                             scope=scope, stop_scope="step" if step is not None else "task"):
         kind = event["type"]
         if kind == "text_chunk":
             if step is None:
@@ -391,7 +395,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         exhausted = False
         for attempt in range(MAX_STEP_FIXES + 1):
             run = _Run()
-            async for event in _stream(executor, conversation, tools, ctx, budget, run, ledger, step=num, activity=doing):
+            async for event in _stream(executor, conversation, tools, ctx, budget, run, ledger, step=num, activity=doing,
+                                       scope=f"本项目标：{description}\n验收：{step.get('check') or '依据实际结果完成本项'}"):
                 yield event
             conversation.extend(run.transcript)
             digest = _tool_digest(run.transcript, run.results_ok, num, run.protocol_results)
@@ -451,10 +456,10 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         ledger.summaries[num] = report + (f"\n（核对仍有问题：{'；'.join(verdict.issues[:3])}）" if not verdict.passed and verdict.issues else "")
         ledger.checks.append((public_sentence(description, 60) or f"第 {num} 项",
                               _record_line(step_digest=step_digest, verdict=verdict, retried=retried, first_issues=first_issues)))
-        status = "warning" if run.unresolved or not verdict.passed or exhausted else "done"
+        status = "warning" if run.incomplete or run.unresolved or not verdict.passed or exhausted else "done"
         # 汇报和核对结果已经作为正文发出，step_done 只带状态（界面据此给清单打勾）
         yield {"type": "step_done", "step_num": num, "status": status, "summary": ""}
-        if exhausted:
+        if exhausted or run.incomplete:
             break
         carry = verdict.carry_over
 
@@ -466,10 +471,11 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     template = THINK_REFLECT_MESSAGE if plan.checklist else THINK_REFLECT_MESSAGE_SMALL  # 过程回顾沿用计划展示决定
     reflect = template.format(message=message, total=executed, record=record)
     if executed < total:
-        reflect += f"\n工具调用预算已用尽；计划中还有 {total - executed} 个步骤未执行，不得称已完成。"
+        reflect += f"\n计划中还有 {total - executed} 个步骤未执行，不得称已完成。"
     reflect_messages = [*conversation, {"role": "user", "content": reflect}]
     final = _Run()
-    async for event in _stream(executor, reflect_messages, tools, ctx, budget, final, ledger, step=None, activity="正在整理结论"):
+    async for event in _stream(executor, reflect_messages, tools, ctx, budget, final, ledger, step=None, activity="正在整理结论",
+                               scope=f"原始任务：{message}\n根据实际执行证据整理最终回答，核对全部目标是否完成。"):
         yield event
     held = final.held
     ledger.digests.extend(_tool_digest(final.transcript, final.results_ok, 0, final.protocol_results))
@@ -484,7 +490,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
             fix = _Run()
             fix_messages = [*reflect_messages, *final.transcript, {"role": "user", "content": THINK_AUDIT_FIX_MESSAGE.format(
                 issues="\n".join(f"- {issue}" for issue in audit.issues))}]
-            async for event in _stream(executor, fix_messages, tools, ctx, budget, fix, ledger, step=None, activity="正在核实更正"):
+            async for event in _stream(executor, fix_messages, tools, ctx, budget, fix, ledger, step=None, activity="正在核实更正",
+                                       scope=f"原始任务：{message}\n核实更正回答并确认全部目标已完成。"):
                 yield event
             if not fix.failed and (fix.waiting or _answer_text(fix.held)):
                 held = fix.held  # 澄清时 held 里只有空的 final_text，回答由澄清卡片代替；更正轮没给出回答就保留原回答
