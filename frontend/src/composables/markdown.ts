@@ -1,8 +1,9 @@
 import DOMPurify from 'dompurify'
-import { marked } from 'marked'
+
+import { markdownParser } from './markdownParser'
 
 export function renderMarkdown(source: string): string {
-  return DOMPurify.sanitize(marked.parse(source || '', { async: false, gfm: true, breaks: true }) as string)
+  return DOMPurify.sanitize(markdownParser.parse(source || '', { async: false }))
 }
 
 function formattedPayload(markdown: string): { html: string; text: string } {

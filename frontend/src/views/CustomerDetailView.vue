@@ -238,9 +238,9 @@ async function onEdited() {
       <section v-if="tab === 'logic'" class="mt-6">
         <div class="rounded-[26px] bg-white p-5 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-6">
           <div class="mb-4 flex flex-wrap items-center gap-x-3 gap-y-2">
-            <div class="flex min-w-0 flex-1 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-faint">
-              <span v-if="customer.summary_updated_at">更新于 {{ timeAgo(customer.summary_updated_at) }}</span>
-              <span v-if="customer.summary_by !== 'human'" title="相关资料变化时会自动更新">自动更新</span>
+            <div class="flex min-w-0 flex-1 items-baseline gap-x-3 text-xs text-faint">
+              <h2 v-if="primaryRecipe" class="min-w-0 truncate text-[16px] font-semibold leading-relaxed text-ink" :title="primaryRecipe.name">{{ primaryRecipe.name }}</h2>
+              <span v-if="customer.summary_updated_at" class="shrink-0 whitespace-nowrap">{{ customer.summary_by === 'human' ? '更新于' : '自动更新于' }} {{ timeAgo(customer.summary_updated_at) }}</span>
             </div>
             <div class="ml-auto flex shrink-0 gap-1">
               <button class="btn-text" :disabled="summarizing" @click="regenerate">

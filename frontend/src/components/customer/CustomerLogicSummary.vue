@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { CircleCheck, Files, Lightbulb, ListChecks, Target } from '@lucide/vue'
-import { marked } from 'marked'
 import { computed } from 'vue'
 
 import MarkdownView from '@/components/common/MarkdownView.vue'
+import { markdownParser } from '@/composables/markdownParser'
 
 type SectionKind = 'overview' | 'materials' | 'steps' | 'results' | 'notes' | 'other'
 type Section = { kind: SectionKind; title: string; body: string }
@@ -28,7 +28,7 @@ function sectionKind(title: string): SectionKind | null {
 }
 
 const sections = computed(() => {
-  const tokens = marked.lexer(props.source, { gfm: true })
+  const tokens = markdownParser.lexer(props.source)
   const definitions = Object.entries(tokens.links).map(([label, link]) => {
     const title = link.title ? ` ${JSON.stringify(link.title)}` : ''
     return `[${label.replace(/\]/g, '\\]')}]: <${link.href.replace(/>/g, '%3E')}>${title}`
