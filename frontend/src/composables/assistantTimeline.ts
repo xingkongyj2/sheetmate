@@ -1,4 +1,5 @@
 import type { PlanStatus, TimelineItem, UiMessage } from './chatModel'
+import { agentStageStatus } from './chatModel'
 import { PLAN_STATUS_LABELS, recipeAttempts, recipeFailure } from './messagePresentation'
 import { userFacingText } from './timelinePresentation'
 
@@ -97,6 +98,8 @@ function stageStatus(stage: AssistantStage): PlanStatus {
       stage.attempts.some((attempt) => ACTIVE_RECIPE_STATUSES.has(attempt.progress.status))) return 'running'
   if (stage.items.some((item) => (item.kind === 'tool' || item.kind === 'agent') && item.status === 'error') ||
       stage.attempts.some((attempt) => recipeFailure(attempt.progress))) return 'error'
+  const agentStatus = agentStageStatus(stage.items)
+  if (agentStatus && agentStatus !== 'done') return agentStatus
   const plan = stage.items.find((item) => item.kind === 'plan')
   if (plan?.kind === 'plan') return plan.status
   return 'done'

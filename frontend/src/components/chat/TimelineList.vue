@@ -3,7 +3,7 @@
 import { Brain, Check, ChevronRight, CircleAlert, ListChecks, LoaderCircle, MessageSquareText, Sparkles, Users } from '@lucide/vue'
 import { computed, ref } from 'vue'
 
-import { duration, type TimelineItem } from '@/composables/chatModel'
+import { AGENT_STATUS_LABELS, duration, type TimelineItem } from '@/composables/chatModel'
 import { PLAN_STATUS_LABELS } from '@/composables/messagePresentation'
 import { toolPresentation, userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import MarkdownView from '@/components/common/MarkdownView.vue'
@@ -95,8 +95,9 @@ function repeatsParentTitle(...titles: (string | undefined)[]): boolean {
       <div v-else-if="item.kind === 'agent'" class="py-1">
         <button type="button" class="flex items-center gap-2" :aria-expanded="!!open[item.key]" @click="open[item.key] = !open[item.key]">
           <LoaderCircle v-if="item.status === 'running'" class="size-3.5 animate-spin text-info" />
-          <Users v-else class="size-3.5" :class="item.status === 'error' ? 'text-error' : 'text-success'" />
+          <Users v-else class="size-3.5" :class="item.status === 'error' ? 'text-error' : item.status === 'done' ? 'text-success' : item.status === 'waiting' ? 'text-info' : 'text-[#b7770c]'" />
           <span class="font-medium">专员 · {{ item.table }}</span>
+          <span class="text-xs" :class="item.status === 'error' ? 'text-error' : item.status === 'done' ? 'text-success' : 'text-mute'">{{ AGENT_STATUS_LABELS[item.status] }}</span>
           <ChevronRight v-if="item.conclusion" class="size-3 text-faint transition" :class="{ 'rotate-90': open[item.key] }" />
         </button>
         <p v-if="open[item.key] && item.conclusion" class="mt-1 whitespace-pre-wrap border-l-2 border-line pl-3 text-xs leading-relaxed text-mute">{{ userFacingText(item.conclusion) }}</p>

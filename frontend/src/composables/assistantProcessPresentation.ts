@@ -1,5 +1,6 @@
 import type { AssistantDisplayGroup, AssistantStage } from './assistantTimeline'
 import type { PlanStatus, RecipeProgress, TimelineItem } from './chatModel'
+import { agentStageStatus } from './chatModel'
 import { PLAN_STATUS_LABELS, recipeFailure } from './messagePresentation'
 import { toolPresentation, userFacingText } from './timelinePresentation'
 
@@ -58,6 +59,8 @@ function publicStatus(stage: AssistantStage): PlanStatus {
   if (stage.items.some((item) => (item.kind === 'tool' || item.kind === 'agent') && item.status === 'error') ||
       stage.attempts.some(({ progress }) => recipeFailure(progress) || progress.validation?.status === 'fail' ||
         progress.verify?.status === 'fail' && !progress.verify.informational)) return 'error'
+  const agentStatus = agentStageStatus(stage.items)
+  if (agentStatus && agentStatus !== 'done') return agentStatus
   if (stage.attempts.some(({ progress }) => progress.runStatus === 'warning' || progress.validation?.status === 'warn' ||
       progress.verify?.status === 'warn' && !progress.verify.informational)) return 'warning'
   const plan = stage.items.find((item) => item.kind === 'plan') ?? stage.plan
