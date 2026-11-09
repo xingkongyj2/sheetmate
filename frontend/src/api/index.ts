@@ -144,6 +144,22 @@ export const conversationApi = {
 }
 
 // ---------------------------------------------------------------- 文件
+export interface DataPreviewPage {
+  filename: string
+  sheet: string
+  sheets: string[]
+  total: number
+  total_exact: boolean
+  has_more: boolean
+  offset: number
+  limit: number
+  column_offset: number
+  raw: true
+  columns: string[]
+  rows: unknown[][]
+  warnings: string[]
+}
+
 export const fileApi = {
   get: async (id: string) => (await http.get<{ file: FileInfo }>(`/files/${id}`)).data.file,
   content: async (id: string, signal?: AbortSignal) =>
@@ -156,6 +172,17 @@ export const fileApi = {
     form.append('file', file)
     return (await http.post<{ preview: { filename: string; sheet: string; sheets: string[]; total: number; columns: string[]; rows: unknown[][] } }>(
       '/files/preview-upload', form, { params: { sheet, offset, limit }, signal })).data.preview
+  },
+  previewData: async (id: string, sheet?: string, offset = 0, limit = 100, signal?: AbortSignal) =>
+    (await http.get<{ preview: DataPreviewPage }>(`/files/${id}/preview`, {
+      params: { sheet, offset, limit, raw: true }, signal,
+    })).data.preview,
+  previewDataUpload: async (file: File, sheet?: string, offset = 0, limit = 100, signal?: AbortSignal) => {
+    const form = new FormData()
+    form.append('file', file)
+    return (await http.post<{ preview: DataPreviewPage }>('/files/preview-upload', form, {
+      params: { sheet, offset, limit, raw: true }, signal,
+    })).data.preview
   },
   remove: async (id: string, customerId?: string, recipeId?: string) =>
     http.delete(`/files/${id}`, { params: { customer_id: customerId, recipe_id: recipeId } }),

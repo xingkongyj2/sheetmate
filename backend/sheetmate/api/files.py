@@ -20,6 +20,7 @@ from sheetmate.engine.reader import ReadError, read_workbook
 from sheetmate.engine.sqlutil import frame_rows
 from sheetmate.services import files as file_service
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
+from sheetmate.services.raw_preview import preview_data
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
@@ -27,12 +28,13 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 @router.post("/preview-upload")
 def preview_upload(file: UploadFile = File(...), sheet: str | None = None,
                    offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
+                   raw: bool = False,
                    user: User = Depends(current_user)) -> dict[str, Any]:
     """首页旧 XLS 的临时数据预览，不创建会话或文件记录。"""
     filename = file_service.safe_filename(file.filename or "file")
-    if Path(filename).suffix.lower() != ".xls":
+    if not raw and Path(filename).suffix.lower() != ".xls":
         raise ServiceError("临时数据预览只支持 .xls 文件")
-    max_mb = min(settings.max_upload_mb, 25)
+    max_mb = settings.max_upload_mb if raw else min(settings.max_upload_mb, 25)
     data = file.file.read(max_mb * 1024 * 1024 + 1)
     if len(data) > max_mb * 1024 * 1024:
         raise ServiceError(f"文件超过 {max_mb} MB，请拆分后再预览")
@@ -41,6 +43,8 @@ def preview_upload(file: UploadFile = File(...), sheet: str | None = None,
     with TemporaryDirectory(prefix="sheetmate_preview_") as directory:
         path = Path(directory) / filename
         path.write_bytes(data)
+        if raw:
+            return {"ok": True, "preview": preview_data(path, filename=filename, sheet=sheet, offset=offset, limit=limit)}
         try:
             sheets = read_workbook(path)
         except ReadError as exc:
@@ -68,10 +72,14 @@ def file_info(file_id: str, db: Session = Depends(get_db), user: User = Depends(
 
 
 @router.get("/{file_id}/preview")
-def file_preview(file_id: str, sheet: str | None = None, offset: int = 0, limit: int = 50,
+def file_preview(file_id: str, sheet: str | None = None, offset: int = Query(0, ge=0),
+                 limit: int = Query(50, ge=1, le=500), raw: bool = False,
                  db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     record = file_service.get_file(db, file_id)
     _check(db, user, record)
+    if raw:
+        return {"ok": True, "preview": {"file_id": record.id, **preview_data(
+            Path(record.stored_path), filename=record.filename, sheet=sheet, offset=offset, limit=limit)}}
     return {"ok": True, "preview": file_service.preview(record, sheet, offset, min(limit, 500))}
 
 

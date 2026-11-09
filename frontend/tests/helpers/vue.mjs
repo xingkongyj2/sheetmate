@@ -37,6 +37,9 @@ export function mount(component, initialProps, components = {}) {
     get textContent() { return this.text },
     get childNodes() { return this.children },
     get firstChild() { return this.children[0] ?? null },
+    get tagName() { return tag.toUpperCase() },
+    get options() { return this.children.filter(child => child.tag === 'option') },
+    addEventListener() {}, removeEventListener() {},
     focus() {}, replaceChildren(fragment) { this.children = fragment?.childNodes ?? [] } })
   const root = node('root')
   const body = node('body')

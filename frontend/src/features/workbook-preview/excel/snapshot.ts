@@ -1,9 +1,21 @@
 import type { ICellData, IColumnData, IRange, IRowData, IStyleData, IWorkbookData, IWorksheetData } from '@univerjs/core'
-import type { Cell, CellValue, Workbook, Worksheet } from 'exceljs'
+import type { Cell, CellValue, Row, Workbook, Worksheet } from 'exceljs'
 
 import { colorToHex, columnWidthToPixels, convertStyle, readThemeColors } from './style.ts'
 import { PREVIEW_LIMITS, WorkbookPreviewError } from './types.ts'
 import type { ParsedWorkbook } from './types.ts'
+
+// ExcelJS 4.4.0's model getters rebuild every cell model (Workbook.model even
+// does this twice). Read only its stored sparse collections instead: the public
+// includeEmpty iterators allocate missing cells and eachCell omits styled blanks.
+// Keep these version-specific fields in this adapter and cover them with real
+// ExcelJS workbooks in workbookSnapshot.test.mjs.
+type PreviewWorksheet = Worksheet & {
+  _rows: Array<Row | undefined>
+  _merges: Record<string, { range: string }>
+  conditionalFormattings?: unknown[]
+}
+type PreviewRow = Row & { style: Cell['style']; _cells: Array<Cell | undefined> }
 
 function tooLarge(message: string): never {
   throw new WorkbookPreviewError(`${message}，请下载原始文件查看。`)
@@ -62,20 +74,13 @@ function cellValue(cell: Cell, date1904: boolean, warnings: Set<string>, formula
   return storedValue(value, date1904, warnings)
 }
 
-function checkDimensions(sheet: Worksheet): void {
-  if (sheet.rowCount > PREVIEW_LIMITS.rows) tooLarge(`「${sheet.name}」行数超过 ${PREVIEW_LIMITS.rows.toLocaleString()} 行的预览范围`)
-  if (sheet.columnCount > PREVIEW_LIMITS.columns) tooLarge(`「${sheet.name}」列数超过 ${PREVIEW_LIMITS.columns} 列的预览范围`)
-}
-
 /** Map a loaded ExcelJS workbook into a sparse, read-only Univer snapshot. */
 export function buildWorkbookSnapshot(source: Workbook, filename: string): ParsedWorkbook {
   const worksheets = source.worksheets
   if (!worksheets.length) throw new WorkbookPreviewError('这个文件没有可预览的工作表。')
   if (worksheets.length > PREVIEW_LIMITS.sheets) tooLarge(`工作表超过 ${PREVIEW_LIMITS.sheets} 张的预览范围`)
-  worksheets.forEach(checkDimensions)
   const warnings = new Set<string>()
-  const sourceModel = source.model
-  const theme = readThemeColors(sourceModel.themes)
+  const theme = readThemeColors((source as Workbook & { _themes?: unknown })._themes)
   const date1904 = !!source.properties.date1904
   const workbook: IWorkbookData = {
     id: `preview-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
@@ -111,24 +116,49 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string): Parse
   const formulas = { count: 0, missing: 0, examples: [] as string[] }
   for (const worksheet of worksheets) {
     const id = `sheet-${worksheet.id}`
-    const sheetModel = worksheet.model
+    const storedSheet = worksheet as PreviewWorksheet
     const cellData: IWorksheetData['cellData'] = {}
     const rowData: IWorksheetData['rowData'] = {}
     const columnData: IWorksheetData['columnData'] = {}
-    let maxRow = worksheet.rowCount, maxColumn = worksheet.columnCount
+    let maxRow = 0, maxColumn = 0, omittedFormatting = false
+    const mergeData = Object.values(storedSheet._merges).map((range) => convertRange(range.range)).filter((range): range is IRange => !!range)
+    for (const range of mergeData) {
+      if (range.endRow >= PREVIEW_LIMITS.rows || range.endColumn >= PREVIEW_LIMITS.columns) tooLarge(`「${worksheet.name}」合并区域超出预览范围`)
+      maxRow = Math.max(maxRow, range.endRow + 1)
+      maxColumn = Math.max(maxColumn, range.endColumn + 1)
+    }
 
-    // findRows preserves sparse slots and style-only rows without creating the
-    // blank rows/cells that eachRow/eachCell(includeEmpty) would allocate.
-    worksheet.findRows(1, worksheet.rowCount)?.forEach((row) => {
-      const rowStyle = styleId({ numFmt: row.numFmt, font: row.font, fill: row.fill, border: row.border, alignment: row.alignment })
+    // Object.values visits stored entries without copying a million-slot sparse
+    // row range or walking all missing cells up to the last formatted column.
+    for (const row of Object.values(storedSheet._rows)) {
+      if (!row) continue
+      const rowInRange = row.number <= PREVIEW_LIMITS.rows
+      const storedRow = row as PreviewRow
+      const rowStyle = styleId(storedRow.style)
       const rowInfo: Partial<IRowData> = {}
       if (row.height !== undefined) rowInfo.h = Math.max(1, row.height * 4 / 3)
       if (row.hidden) rowInfo.hd = 1
       if (rowStyle) rowInfo.s = rowStyle
-      if (Object.keys(rowInfo).length) rowData[row.number - 1] = rowInfo
-      for (let column = 1; column <= row.cellCount; column++) {
-        const cell = row.findCell(column)
+      if (Object.keys(rowInfo).length) {
+        if (rowInRange) {
+          rowData[row.number - 1] = rowInfo
+          maxRow = Math.max(maxRow, row.number)
+        } else omittedFormatting = true
+      }
+      for (const cell of Object.values(storedRow._cells)) {
         if (!cell) continue
+        // ExcelJS 4.4's declaration says string, but its getter returns number.
+        const column = Number(cell.col)
+        if (!rowInRange || column > PREVIEW_LIMITS.columns) {
+          // Formatting at the bottom/right edge is common in otherwise small
+          // Excel files. Omit only blank formatting; never silently omit data.
+          if (cell.value !== null && cell.value !== undefined && !(cell.isMerged && cell.master.address !== cell.address)) {
+            if (!rowInRange) tooLarge(`「${worksheet.name}」行数超过 ${PREVIEW_LIMITS.rows.toLocaleString()} 行的预览范围`)
+            tooLarge(`「${worksheet.name}」列数超过 ${PREVIEW_LIMITS.columns} 列的预览范围`)
+          }
+          if (styleId(cell.style)) omittedFormatting = true
+          continue
+        }
         const value = cellValue(cell, date1904, warnings, formulas)
         let cellStyle = styleId(cell.style)
         const raw = cell.value
@@ -147,8 +177,10 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string): Parse
         if (++cellCount > PREVIEW_LIMITS.cells) tooLarge(`工作簿有效单元格超过 ${PREVIEW_LIMITS.cells.toLocaleString()} 个的预览范围`)
         const cells = cellData[row.number - 1] ??= {}
         cells[column - 1] = { ...value, ...(cellStyle ? { s: cellStyle } : {}) }
+        maxRow = Math.max(maxRow, row.number)
+        maxColumn = Math.max(maxColumn, column)
       }
-    })
+    }
     worksheet.columns?.forEach((column, index) => {
       const columnStyle = column.style && styleId(column.style)
       const columnInfo: Partial<IColumnData> = {}
@@ -156,17 +188,15 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string): Parse
       if (column.hidden) columnInfo.hd = 1
       if (columnStyle) columnInfo.s = columnStyle
       if (Object.keys(columnInfo).length) {
-        if (index >= PREVIEW_LIMITS.columns) tooLarge(`「${worksheet.name}」列格式超过 ${PREVIEW_LIMITS.columns} 列的预览范围`)
+        if (index >= PREVIEW_LIMITS.columns) {
+          omittedFormatting = true
+          return
+        }
         columnData[index] = columnInfo
         maxColumn = Math.max(maxColumn, index + 1)
       }
     })
-    const mergeData = sheetModel.merges.map((range) => convertRange(String(range))).filter((range): range is IRange => !!range)
-    for (const range of mergeData) {
-      if (range.endRow >= PREVIEW_LIMITS.rows || range.endColumn >= PREVIEW_LIMITS.columns) tooLarge(`「${worksheet.name}」合并区域超出预览范围`)
-      maxRow = Math.max(maxRow, range.endRow + 1)
-      maxColumn = Math.max(maxColumn, range.endColumn + 1)
-    }
+    if (omittedFormatting) warnings.add(`「${worksheet.name}」超出预览范围的空白行列格式已省略。`)
     const view = worksheet.views?.[0]
     const xSplit = view?.state === 'frozen' ? view.xSplit ?? 0 : 0
     const ySplit = view?.state === 'frozen' ? view.ySplit ?? 0 : 0
@@ -192,7 +222,7 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string): Parse
     workbook.sheetOrder.push(id)
     workbook.sheets[id] = sheet
     if (worksheet.getImages().length) warnings.add('文件中的图片暂不在表格预览中显示，请下载原文件查看。')
-    if ((sheetModel as typeof sheetModel & { conditionalFormattings?: unknown[] }).conditionalFormattings?.length) warnings.add('条件格式暂未应用，预览显示单元格的基础样式。')
+    if (storedSheet.conditionalFormattings?.length) warnings.add('条件格式暂未应用，预览显示单元格的基础样式。')
   }
   if (formulas.missing) warnings.add(`${formulas.missing} 个公式单元格没有已保存的计算结果（如 ${formulas.examples.join('、')}），预览已作标记。`)
   if (!worksheets.some((sheet) => sheet.state === 'visible')) {
