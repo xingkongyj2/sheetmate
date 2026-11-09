@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+from sheetmate.conversation_log import ConversationTrace, current_trace, error_data, record_event
 from sheetmate.services.errors import Conflict
 
 
@@ -21,11 +22,15 @@ class Job:
     message_id: int | None = None
     task: asyncio.Task | None = None
     finished: bool = False
+    started: bool = False
     cancel_source: str | None = None
+    trace: ConversationTrace | None = None
     _history: list[dict[str, Any]] = field(default_factory=list)
     _changed: asyncio.Condition = field(default_factory=asyncio.Condition)
 
     async def emit(self, event: dict[str, Any]) -> None:
+        if self.trace is not None:
+            self.trace.record("sse.event", "sheetmate.services.jobs.Job.emit", event, job_id=self.id)
         async with self._changed:
             self._history.append(event)
             self._changed.notify_all()
@@ -61,13 +66,24 @@ class JobManager:
     def start(self, key: str, work: Callable[[Job], Awaitable[None]], *, message_id: int | None = None) -> Job:
         if self.running(key):
             raise Conflict("上一个任务还在处理中，请稍等它完成")
-        job = Job(key, message_id=message_id)
+        job = Job(key, message_id=message_id, trace=current_trace())
+        record_event("job.scheduled", "sheetmate.services.jobs.JobManager.start",
+                     {"job_id": job.id, "request_message_id": message_id})
 
         async def runner() -> None:
+            job.started = True
+            status = "completed"
+            record_event("job.started", "sheetmate.services.jobs.JobManager.runner", {"job_id": job.id})
             try:
+                # A just-created task cancelled before its first instruction never
+                # runs finally. Let it enter the runner to persist/log the stop.
+                if job.cancel_source is not None:
+                    raise asyncio.CancelledError
                 await work(job)
             except asyncio.CancelledError:
                 status = "cancelled" if job.cancel_source == "user" else "interrupted"
+                record_event("job.cancelled", "sheetmate.services.jobs.JobManager.runner",
+                             {"status": status, "source": job.cancel_source or "system"})
                 code = "user_stop" if job.cancel_source == "user" else "system_cancelled"
                 summary = "已停止" if job.cancel_source == "user" else "执行被系统中断"
                 needs_error = job.message_id is None
@@ -86,6 +102,8 @@ class JobManager:
                 if needs_error:
                     await job.emit({"type": "error", "content": summary, "code": code})
             except Exception as exc:  # 兜底，保证前端能收到结束信号
+                status = "failed"
+                record_event("job.error", "sheetmate.services.jobs.JobManager.runner", error_data(exc))
                 summary = f"处理出错：{exc}"
                 code = getattr(exc, "code", "execution_error")
                 needs_error = job.message_id is None
@@ -100,6 +118,12 @@ class JobManager:
                     await job.emit({"type": "error", "content": summary, "code": code})
             finally:
                 await job.finish()
+                execution = next((event for event in reversed(job._history)
+                                  if event.get("type") == "execution_status"), {})
+                record_event("turn.end", "sheetmate.services.jobs.JobManager.runner",
+                             {"job_id": job.id, "request_message_id": job.message_id,
+                              "status": execution.get("status", status), "execution": execution,
+                              "cancel_source": job.cancel_source})
                 if self._jobs.get(key) is job:
                     del self._jobs[key]
 
@@ -113,7 +137,11 @@ class JobManager:
             return False
         if not job.task.cancelling():
             job.cancel_source = "user"
-            job.task.cancel()
+            if job.trace is not None:
+                job.trace.record("job.stop_requested", "sheetmate.services.jobs.JobManager.stop",
+                                 {"job_id": job.id, "source": "user"})
+            if job.started:
+                job.task.cancel()
         return True
 
     async def shutdown(self) -> None:
@@ -121,7 +149,11 @@ class JobManager:
         for job in list(self._jobs.values()):
             if job.task is not None and not job.task.done():
                 job.cancel_source = job.cancel_source or "shutdown"
-                job.task.cancel()
+                if job.trace is not None:
+                    job.trace.record("job.stop_requested", "sheetmate.services.jobs.JobManager.shutdown",
+                                     {"job_id": job.id, "source": job.cancel_source})
+                if job.started:
+                    job.task.cancel()
                 tasks.append(job.task)
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)

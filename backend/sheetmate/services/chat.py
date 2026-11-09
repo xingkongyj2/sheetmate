@@ -36,6 +36,9 @@ from sheetmate.agent.summarizer import COMPACT_THRESHOLD, compact_history, fallb
 from sheetmate.agent.thinking import THINKING_TOOL_BUDGET, execute_thinking
 from sheetmate.agent.tools import AgentContext, ToolRegistry
 from sheetmate.config import settings
+from sheetmate.conversation_log import (
+    bind_trace, current_trace, error_data, new_turn, record_event, trace_phase, traced,
+)
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeProfile, RecipeRecord, User
 from sheetmate.engine.images import model_image_data_url
@@ -99,6 +102,7 @@ def _image_parts(records: list[FileRecord]) -> list[dict[str, Any]]:
     return parts
 
 
+@traced
 def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentContext, ConversationHost]:
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
@@ -138,12 +142,37 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
                             customer_id=customer_info["id"] if customer_info else None, ws=ws, recipe_id=recipe_id)
     ctx = AgentContext(mode=mode, ws=ws, library=library, host=host, llm=llm, conversation_id=conversation_id,
                        customer=customer_info, max_repair=settings.repair_max_attempts, verify_rounds=settings.verify_max_rounds)
+    record_event("chat.context", "sheetmate.services.chat.build_context",
+                 {"user_id": user_id, "mode": mode, "customer": customer_info, "recipe_id": recipe_id,
+                  "tables": ws.list_tables(), "available_file_ids": sorted(available)})
     return ctx, host
 
 
 def start_chat(user: User, conversation_id: str, message: str, *,
                plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None,
-               thinking: bool = False) -> Job:
+               thinking: bool = False, http_request: dict[str, Any] | None = None) -> Job:
+    # Authorise before creating a log; untrusted ids must not create arbitrary files.
+    with session_scope() as db:
+        conv_service.get_conversation(db, user, conversation_id)
+    trace = new_turn(conversation_id)
+    with bind_trace(trace):
+        record_event("turn.start", "sheetmate.services.chat.start_chat", {"user_id": user.id, "source": "chat"})
+        if http_request is not None:
+            record_event("http.request", "sheetmate.api.conversations.chat", http_request)
+        record_event("chat.input", "sheetmate.services.chat.start_chat",
+                     {"message": message, "plan_steps": plan_steps, "attachments": attachments, "thinking": thinking})
+        try:
+            return _start_chat(user, conversation_id, message, plan_steps=plan_steps,
+                               attachments=attachments, thinking=thinking)
+        except BaseException as exc:
+            record_event("turn.error", "sheetmate.services.chat.start_chat", error_data(exc))
+            record_event("turn.end", "sheetmate.services.chat.start_chat", {"status": "rejected"})
+            raise
+
+
+def _start_chat(user: User, conversation_id: str, message: str, *,
+                plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None,
+                thinking: bool = False) -> Job:
     text = (message or "").strip()
     if not text:
         raise ServiceError("消息不能为空")
@@ -155,11 +184,16 @@ def start_chat(user: User, conversation_id: str, message: str, *,
         for record in _attachment_records(db, conv, submitted):
             file_service.retain_for_conversation(db, record, conv.id)
         meta: dict[str, Any] = {"attachments": submitted}
+        trace = current_trace()
+        if trace is not None:
+            meta["log_turn_id"] = trace.turn_id
         if plan_steps:
             meta["plan"] = plan_steps
         if thinking:
             meta["thinking"] = True
         message_id = conv_service.add_message(db, conv, "user", text, meta=meta).id
+        record_event("chat.user.saved", "sheetmate.services.chat._start_chat",
+                     {"message_id": message_id, "content": text, "meta": meta})
     user_id = user.id
 
     async def work(job: Job) -> None:
@@ -168,6 +202,7 @@ def start_chat(user: User, conversation_id: str, message: str, *,
     return jobs.start(conversation_id, work, message_id=message_id)
 
 
+@traced
 async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
                     message_id: int, thinking: bool = False) -> None:
     recorder = WorkflowRecorder(message)
@@ -215,6 +250,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
 
     async def emit(event: dict[str, Any]) -> None:
         nonlocal final_text
+        if event.get("type") != "text_chunk":
+            record_event("chat.event.input", "sheetmate.services.chat._run_chat.emit", event)
         event = externalize_script_references(event)
         if event.get("type") == "file" and event.get("delivery_status") == "candidate":
             if event.get("file_id") in delivery_candidates:
@@ -336,7 +373,12 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         _limit_history_images(history, ctx.image_parts)
         files = host.list_files()
         references = file_references(conversation_id, message_id, files)
+        record_event("chat.intent.input", "sheetmate.agent.intent.infer_request",
+                     {"message": message, "history_count": len(history), "history_source": "chat.history",
+                      "plan_steps": plan_steps,
+                      "files": files, "file_references": references})
         intent = await infer_request(llm, ctx, message, history, plan_steps, files=files, file_references=references)
+        record_event("chat.intent.result", "sheetmate.agent.intent.infer_request", intent)
         ctx.mode = intent.mode
         host.defer_delivery = intent.action == "process"
         if intent.files is not None:
@@ -370,6 +412,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         _save_assistant(conversation_id, "（已停止，尚未处理文件）", stored, recorder, None)
         raise
     except Exception as exc:
+        record_event("chat.error", "sheetmate.services.chat._run_chat.context", error_data(exc))
         event = {"type": "error", "content": str(exc), "code": getattr(exc, "code", "execution_error")}
         if isinstance(exc, LLMNotConfigured):
             event["code"] = exc.code
@@ -441,6 +484,9 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 stream = execute_multi(executor, ctx, message, history)
             else:
                 stream = executor.execute(ctx, message, history)
+            record_event("chat.route", "sheetmate.services.chat._run_chat",
+                         {"action": intent.action, "mode": ctx.mode, "thinking": thinking,
+                          "plan_steps": plan_steps, "handler": stream.ag_code.co_qualname if hasattr(stream, "ag_code") else type(stream).__name__})
             async with aclosing(stream):
                 async for event in stream:
                     # 新建/修改的完成声明要先核对实际交付，再作为固定正文发布。
@@ -474,6 +520,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             customer_service.schedule_summary_refresh(host.customer_id)
         raise
     except Exception as exc:
+        record_event("chat.error", "sheetmate.services.chat._run_chat.execute", error_data(exc))
         await emit({"type": "error", "content": f"处理出错：{exc}", "code": getattr(exc, "code", "execution_error")})
 
     answer = await guard_creation_delivery()
@@ -493,6 +540,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         _save_assistant(conversation_id, answer, stored, recorder, run_id)
         raise
     except Exception as exc:
+        record_event("chat.error", "sheetmate.services.chat._run_chat.finalize_deliveries", error_data(exc))
         delivery_problem = "最终交付文件未能确认，本轮未交付正式结果。"
         reason = str(exc).strip()[:200]
         if reason:
@@ -717,6 +765,9 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
             return
         meta = {"mode": conv.mode, "digest": recorder.digest(), "tool_sequence": record["tool_sequence"], "run_id": run_id,
                 "execution": record["execution"], "request_message_id": recorder.request_message_id, "job_id": recorder.job_id}
+        trace = current_trace()
+        if trace is not None:
+            meta["log_turn_id"] = trace.turn_id
         assistant = db.get(Message, recorder.message_id) if recorder.message_id else None
         if assistant is None:
             assistant = conv_service.add_message(db, conv, "assistant", content, events=events, meta=meta)
@@ -738,6 +789,9 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
                 run.steps = record["steps"]
                 run.tool_sequence = record["tool_sequence"]
                 run.validation = {**(run.validation or {}), "execution": record["execution"]}
+        if finalize:
+            record_event("chat.assistant.saved", "sheetmate.services.chat._save_assistant",
+                         {"message_id": assistant.id, "content": content, "meta": meta, "events": events})
 
 
 def _contains_unconfigured_llm_error(text: str) -> bool:
@@ -761,6 +815,11 @@ def recover_interrupted_executions() -> None:
             assistant.events = [*(assistant.events or []), status]
             if not assistant.content:
                 assistant.content = reason
+            if meta.get("log_turn_id"):
+                trace = new_turn(assistant.conversation_id, turn_id=meta["log_turn_id"])
+                trace.record("turn.recovered", "sheetmate.services.chat.recover_interrupted_executions", status)
+                trace.record("turn.end", "sheetmate.services.chat.recover_interrupted_executions",
+                             {"status": "interrupted", "execution": execution})
         # Include scripts/recipes whose process stopped between writing a run and linking its message.
         for run in db.scalars(select(run_service.Run).where(run_service.Run.status == "running")):
             execution = dict((run.validation or {}).get("execution") or {})
@@ -815,6 +874,7 @@ def _limit_history_images(history: list[dict[str, Any]], current: list[dict[str,
             item.pop("image_parts", None)
 
 
+@traced
 async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message_id: int | None = None) -> list[dict[str, Any]]:
     """组装历史：压缩摘要 + 之后的消息（不含刚保存的这条用户消息）。助手消息附上本轮执行摘要，方便追问。"""
     with session_scope() as db:
@@ -886,6 +946,10 @@ async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message
                         item["image_parts"] = parts
                         encoded_size += image_bytes
                         remaining -= len(chosen)
+    record_event("chat.history", "sheetmate.services.chat._history",
+                 {"messages": [{key: value for key, value in item.items() if key != "image_parts"} for item in history],
+                  "image_part_counts": [len(item.get("image_parts", [])) for item in history],
+                  "image_payload_source": "llm.request"})
     return history
 
 
@@ -908,6 +972,7 @@ def _history_content(message: Message) -> str:
     return content
 
 
+@traced
 async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str) -> str | None:
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
@@ -917,6 +982,7 @@ async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str
         title = await asyncio.wait_for(make_title(llm, message, answer), timeout=15)
     except (asyncio.TimeoutError, Exception):
         title = fallback_title(message)
+    record_event("chat.title", "sheetmate.services.chat._maybe_title", {"title": title})
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
         if conv is not None:
@@ -924,12 +990,16 @@ async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str
     return title
 
 
+@traced
 async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer_id: str | None, message: str, answer: str,
                           *, recipe_id: str | None = None) -> None:
-    try:
-        items = await asyncio.wait_for(extract_memories(llm, message, answer), timeout=30)
-    except (asyncio.TimeoutError, Exception):
-        return
+    with trace_phase("background_memory"):
+        try:
+            items = await asyncio.wait_for(extract_memories(llm, message, answer), timeout=30)
+        except Exception as exc:
+            record_event("memory.error", "sheetmate.services.chat._learn_memories", error_data(exc))
+            return
+    record_event("memory.extracted", "sheetmate.services.chat._learn_memories", items)
     if not items:
         return
     with session_scope() as db:
@@ -945,6 +1015,8 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
         for item in items:
             memory_service.set_memory(db, category=item["category"], key=item["key"], value=item["value"], user_id=user_id,
                                       customer_id=customer_id, conversation_id=conversation_id, recipe_id=recipe_id)
+        record_event("memory.saved", "sheetmate.services.memory.set_memory",
+                     {"items": items, "customer_id": customer_id, "recipe_id": recipe_id})
 
 
 # ---------------------------------------------------------------------------
@@ -952,9 +1024,23 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
 # ---------------------------------------------------------------------------
 
 
-async def clarify(user: User, conversation_id: str, message: str) -> dict[str, Any]:
+async def clarify(user: User, conversation_id: str, message: str, *, http_request: dict[str, Any] | None = None) -> dict[str, Any]:
     with session_scope() as db:
         conv_service.get_conversation(db, user, conversation_id)
-    llm = get_llm()
-    ctx, _ = build_context(user.id, conversation_id, llm)
-    return await check_clarification(llm, ctx, message)
+    with bind_trace(new_turn(conversation_id)), trace_phase("clarification"):
+        record_event("turn.start", "sheetmate.services.chat.clarify", {"user_id": user.id, "message": message})
+        if http_request is not None:
+            record_event("http.request", "sheetmate.api.conversations.clarify", http_request)
+        status = "failed"
+        try:
+            llm = get_llm()
+            ctx, _ = build_context(user.id, conversation_id, llm)
+            result = await check_clarification(llm, ctx, message)
+            record_event("http.response", "sheetmate.api.conversations.clarify", result)
+            status = "completed"
+            return result
+        except BaseException as exc:
+            record_event("turn.error", "sheetmate.services.chat.clarify", error_data(exc))
+            raise
+        finally:
+            record_event("turn.end", "sheetmate.services.chat.clarify", {"status": status})

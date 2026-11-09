@@ -218,7 +218,7 @@ sheetmate/
 │   │   ├── api/                   HTTP 接口：auth / settings / customers / conversations / files / recipes / runs
 │   │   └── demo/samples.py        示例文件生成（快递月结账单场景）
 │   ├── tests/                     引擎、Recipe、脚本隔离、接口 + Agent 全链路测试（用假 LLM，不需要 Key）
-│   └── data/                      本地数据（运行后生成）：app.db、uploads/、outputs/、workspaces/、runs/
+│   └── data/                      本地数据（运行后生成）：app.db、uploads/、outputs/、workspaces/、runs/、log/
 └── frontend/                      Vue 3 + Vite + TypeScript + Tailwind 4 + daisyUI 5 + Lucide 图标
     └── src/
         ├── api/                   接口封装、类型、POST 流式读取（SSE）
@@ -234,6 +234,14 @@ sheetmate/
 ```
 
 ---
+
+## 对话日志
+
+默认写入 `backend/data/log/<对话ID>.log`；设置 `SHEETMATE_DATA_DIR` 后写入对应数据目录的 `log/`。每个对话一个 UTF-8 文件，持续追加后续轮次。用户的一次请求及其 AI 回复为一个 `TURN BEGIN / TURN END` 区块，区块之间用四个空行分隔；时间戳、事件名称和完整函数路径标明执行顺序，数据以缩进 JSON 保留原值。
+
+日志涵盖聊天请求的 HTTP 方法、路径、查询串、请求头及原始 body（保留空格、显式空值和额外字段），上下文与意图判断，真正提交给模型的完整消息和工具 Schema，模型原始返回及流式分片，工具参数验证、实际实现函数、完整结果、反馈给模型的数据，最终落库回复和发送给前端的 SSE 事件。模型与工具调用通过 `call_id` 关联；耗时、结束原因、错误堆栈、用户停止和服务关闭均会记录。格式错误的已鉴权请求也保留原文和拒绝原因。
+
+后台记忆抽取和客户总结归入触发它们的原轮次，即使下一轮已经开始也不会混写到下一轮。每个事件即时写入，日志中的 `turn.end` 事件才表示本轮业务已结束；结构性的 `TURN END` 只用于区分区块。服务重启时，会给已保存的未结束执行补充中断原因。Authorization、Cookie、API Key 等认证字段脱敏，业务数据不按界面展示限制截断；图片完整内容保留在实际模型请求中，其他上下文节点通过引用避免重复。日志写入失败会报告到服务标准日志，聊天仍继续。
 
 ## Recipe 长什么样
 

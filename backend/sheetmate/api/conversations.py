@@ -4,22 +4,57 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, UploadFile
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from sheetmate.api.deps import current_user, sse_response
-from sheetmate.db.database import get_db
+from sheetmate.db.database import get_db, session_scope
 from sheetmate.db.models import User
+from sheetmate.conversation_log import bind_trace, http_request_data, new_turn, record_event
 from sheetmate.services import chat as chat_service
 from sheetmate.services import conversations as conv_service
 from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
-from sheetmate.services.auth import require_customer
+from sheetmate.services.auth import COOKIE_NAME, require_customer
 from sheetmate.services.errors import Conflict, ServiceError
 from sheetmate.services.jobs import jobs
 
-router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+class ConversationLogRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+        if not self.path.endswith(("/{conversation_id}/chat", "/{conversation_id}/clarify")):
+            return handler
+
+        async def handle(request: Request):
+            # Preserve the body before Pydantic can reject it. Only authorised
+            # conversations are written, including invalid JSON / missing fields.
+            original = await http_request_data(request)
+            request.scope["sheetmate.http_request"] = original
+            try:
+                return await handler(request)
+            except RequestValidationError as exc:
+                conversation_id = request.path_params.get("conversation_id")
+                try:
+                    with session_scope() as db:
+                        user = current_user(db=db, sm_session=request.cookies.get(COOKIE_NAME))
+                        conv_service.get_conversation(db, user, conversation_id)
+                except ServiceError:
+                    raise exc
+                with bind_trace(new_turn(conversation_id)):
+                    function = "sheetmate.api.conversations.ConversationLogRoute.handle"
+                    record_event("turn.start", function, {"user_id": user.id, "source": "validation"})
+                    record_event("http.request", function, original)
+                    record_event("http.response", function, {"status_code": 422, "errors": exc.errors()})
+                    record_event("turn.end", function, {"status": "rejected", "reason": "request_validation"})
+                raise
+
+        return handle
+
+
+router = APIRouter(prefix="/api/conversations", tags=["conversations"], route_class=ConversationLogRoute)
 
 
 class CreateBody(BaseModel):
@@ -83,7 +118,7 @@ async def get_conversation(conversation_id: str, db: Session = Depends(get_db), 
 
 
 @router.get("/{conversation_id}/events")
-async def conversation_events(conversation_id: str, job_id: str, db: Session = Depends(get_db),
+async def conversation_events(conversation_id: str, job_id: str, request: Request, db: Session = Depends(get_db),
                               user: User = Depends(current_user)):
     conv = conv_service.get_conversation(db, user, conversation_id)
     if conv.customer_id:
@@ -91,6 +126,8 @@ async def conversation_events(conversation_id: str, job_id: str, db: Session = D
     job = jobs.get(conv.id)
     if job is None or job.id != job_id:
         raise Conflict("任务状态已更新，请重新加载对话")
+    if job.trace is not None:
+        job.trace.record("http.request", "sheetmate.api.conversations.conversation_events", await http_request_data(request))
     return sse_response(job)
 
 
@@ -175,19 +212,27 @@ def set_table_role(conversation_id: str, name: str, body: RoleBody, source_conve
 
 
 @router.post("/{conversation_id}/chat")
-async def chat(conversation_id: str, body: ChatBody, user: User = Depends(current_user)):
+async def chat(conversation_id: str, body: ChatBody, request: Request, user: User = Depends(current_user)):
     # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）
     job = chat_service.start_chat(user, conversation_id, body.message, plan_steps=body.plan_steps,
-                                  attachments=body.attachments, thinking=body.thinking)
+                                  attachments=body.attachments, thinking=body.thinking,
+                                  http_request=await http_request_data(request))
     return sse_response(job)
 
 
 @router.post("/{conversation_id}/clarify")
-async def clarify(conversation_id: str, body: MessageBody, user: User = Depends(current_user)) -> dict[str, Any]:
-    return {"ok": True, **await chat_service.clarify(user, conversation_id, body.message)}
+async def clarify(conversation_id: str, body: MessageBody, request: Request, user: User = Depends(current_user)) -> dict[str, Any]:
+    return {"ok": True, **await chat_service.clarify(user, conversation_id, body.message,
+                                                  http_request=await http_request_data(request))}
 
 
 @router.post("/{conversation_id}/stop")
-def stop(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+async def stop(conversation_id: str, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     conv_service.get_conversation(db, user, conversation_id)
-    return {"ok": True, "stopped": jobs.stop(conversation_id)}
+    job = jobs.get(conversation_id)
+    if job is not None and job.trace is not None:
+        job.trace.record("http.request", "sheetmate.api.conversations.stop", await http_request_data(request))
+    result = {"ok": True, "stopped": jobs.stop(conversation_id)}
+    if job is not None and job.trace is not None:
+        job.trace.record("http.response", "sheetmate.api.conversations.stop", result)
+    return result

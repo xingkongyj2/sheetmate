@@ -18,16 +18,20 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
+import traceback
 from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from uuid import uuid4
 
 import pandas as pd
 from jsonschema import Draft202012Validator
 
 from sheetmate.agent.structured import StructuredOutputError, validate_payload
+from sheetmate.conversation_log import record_event
 from sheetmate.engine.analysis import column_stats, table_info, table_info_text, value_counts
 from sheetmate.engine.formulas import Formula, FormulaLibrary, ParamSpec
 from sheetmate.engine.runner import apply_formula
@@ -1146,22 +1150,46 @@ class ToolRegistry:
         return None
 
 
-async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> AsyncIterator[Any]:
+async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext, *,
+                       call_id: str | None = None) -> AsyncIterator[Any]:
     """统一执行：同步工具放线程里跑；流式工具逐个转发事件。最后一定产出一个 ToolResult。"""
+    call_id = call_id or uuid4().hex
+    started = time.perf_counter()
+    implementation = tool.stream or tool.run
+    function = (f"{getattr(implementation, '__module__', type(implementation).__module__)}."
+                f"{getattr(implementation, '__qualname__', type(implementation).__qualname__)}") if implementation else ""
+    metadata = {"call_id": call_id, "tool": tool.name, "implementation": function,
+                "conversation_id": ctx.conversation_id}
+    record_event("tool.input", "sheetmate.agent.tools.execute_tool",
+                 {"arguments": args, "schema": tool.parameters, "mode": ctx.mode}, **metadata)
+    status = "interrupted"
+    validated = False
     try:
-        args = validate_tool_args(tool, args)
-    except StructuredOutputError as exc:
-        yield tool_argument_error(tool.name, "schema", exc.errors)
-        return
-    try:
+        try:
+            args = validate_tool_args(tool, args)
+        except StructuredOutputError as exc:
+            result = tool_argument_error(tool.name, "schema", exc.errors)
+            status = "rejected"
+            record_event("tool.result", "sheetmate.agent.tools.execute_tool", result, **metadata)
+            yield result
+            return
+        validated = True
+        record_event("tool.validated", "sheetmate.agent.tools.validate_tool_args", args, **metadata)
         if tool.stream is not None:
             got_result = False
             async for item in tool.stream(args, ctx):
                 if isinstance(item, ToolResult):
                     got_result = True
+                    status = "ok" if item.ok else "failed"
+                    record_event("tool.result", function, item, **metadata)
+                else:
+                    record_event("tool.event", function, item, **metadata)
                 yield item
             if not got_result:
-                yield ToolResult("工具没有返回结果", ok=False)
+                result = ToolResult("工具没有返回结果", ok=False)
+                status = "failed"
+                record_event("tool.result", "sheetmate.agent.tools.execute_tool", result, **metadata)
+                yield result
         else:
             assert tool.run is not None
             worker = asyncio.create_task(asyncio.to_thread(tool.run, args, ctx))
@@ -1174,7 +1202,26 @@ async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> A
                 except Exception:
                     pass
                 raise
+            status = "ok" if result.ok else "failed"
+            record_event("tool.result", function, result, **metadata)
             yield result
+    except (asyncio.CancelledError, GeneratorExit) as exc:
+        status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "interrupted"
+        record_event("tool.cancelled", "sheetmate.agent.tools.execute_tool",
+                     {"reason": type(exc).__name__}, **metadata)
+        raise
     except Exception as exc:  # 工具出错时把错误当结果交给 LLM，让它自己纠正
         message = str(exc) or type(exc).__name__
-        yield ToolResult(f"工具 `{tool.name}` 出错：{message}", ok=False, summary=message[:200])
+        status = "error"
+        record_event("tool.error", function if validated else "sheetmate.agent.tools.validate_tool_args",
+                     {"error_type": type(exc).__name__, "error": message, "traceback": traceback.format_exc()}, **metadata)
+        if not validated:
+            # A broken local schema is a configuration fault, not a business
+            # tool failure that the model can repair by changing its arguments.
+            raise
+        result = ToolResult(f"工具 `{tool.name}` 出错：{message}", ok=False, summary=message[:200])
+        record_event("tool.result", "sheetmate.agent.tools.execute_tool", result, **metadata)
+        yield result
+    finally:
+        record_event("tool.done", "sheetmate.agent.tools.execute_tool",
+                     {"status": status, "duration_ms": int((time.perf_counter() - started) * 1000)}, **metadata)

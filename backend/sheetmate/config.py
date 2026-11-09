@@ -86,6 +86,11 @@ class Settings:
         return self.data_dir / "outputs"
 
     @property
+    def logs_dir(self) -> Path:
+        """每个对话一个日志，内部按用户请求分轮记录。"""
+        return self.data_dir / "log"
+
+    @property
     def workspaces_dir(self) -> Path:
         """会话工作区（每个会话一个 DuckDB 文件）。"""
         return self.data_dir / "workspaces"
