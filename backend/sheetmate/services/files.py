@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import openpyxl
-from sqlalchemy import event, or_, select
+from sqlalchemy import event, func, or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.config import settings
-from sheetmate.db.models import Conversation, FileConversation, FileCustomer, FileRecipe, FileRecord, RecipeRecord, Run, User
+from sheetmate.db.models import Conversation, Customer, FileConversation, FileCustomer, FileRecipe, FileRecord, RecipeRecord, Run, User
 from sheetmate.engine.file_copies import temporary_file_copies
 from sheetmate.engine.images import IMAGE_SUFFIXES, image_profile
 from sheetmate.engine.profile import profile_workbook
@@ -71,6 +71,11 @@ def safe_filename(name: str) -> str:
     return base[-120:]
 
 
+def current_file_condition():
+    """已被修订结果替代的旧输出只供历史追溯，不占用当前文件列表和名称。"""
+    return func.coalesce(FileRecord.profile["delivery_status"].as_string(), "") != "superseded"
+
+
 def unique_filename(db: Session, filename: str, *, customer_id: str | None = None,
                     conversation_id: str | None = None, user_id: int | None = None,
                     exclude_file_id: str | None = None) -> str:
@@ -99,7 +104,7 @@ def unique_filename(db: Session, filename: str, *, customer_id: str | None = Non
         conditions.extend([FileRecord.conversation_id.in_(conversation_ids), FileRecord.id.in_(linked)])
     if not conditions:
         conditions.append(FileRecord.created_by == user_id)
-    query = select(FileRecord.filename).where(or_(*conditions))
+    query = select(FileRecord.filename).where(or_(*conditions), current_file_condition())
     if exclude_file_id:
         query = query.where(FileRecord.id != exclude_file_id)
     # 会话在同一个事务里可登记多个结果，先刷入前面的记录，后面的文件名才能正确顺延。
@@ -250,21 +255,78 @@ def file_dict(record: FileRecord) -> dict[str, Any]:
         } else None,
         "intermediate": bool((record.profile or {}).get("intermediate")),
         "delivery_status": (record.profile or {}).get("delivery_status"),
+        "superseded_by_file_ids": (record.profile or {}).get("superseded_by_file_ids", []),
         "step_id": (record.profile or {}).get("step_id"),
         "step_name": (record.profile or {}).get("step_name"),
     }
 
 
 def finalize_delivery(db: Session, *, conversation_id: str, candidate_file_ids: list[str],
-                      final_file_ids: list[str], summary: str) -> None:
-    """只改变本轮已生成文件的交付状态，文件和步骤记录保留用于核对。"""
-    finals = set(final_file_ids)
+                      final_file_ids: list[str], summary: str,
+                      replace_file_ids: list[str] | None = None) -> list[str]:
+    """确认交付后替换指定旧结果；独立文件和执行记录保留供历史追溯。"""
+    candidates: dict[str, FileRecord] = {}
+    finals = list(dict.fromkeys(final_file_ids))
+    replacements = list(dict.fromkeys(replace_file_ids or []))
+    if not set(finals) <= set(candidate_file_ids) or (replacements and not finals):
+        raise ServiceError("尚未确认新的正式结果，不能替换已有文件。")
     for file_id in dict.fromkeys(candidate_file_ids):
         record = db.get(FileRecord, file_id)
         if record is None or record.kind != "output" or record.conversation_id != conversation_id:
             raise ServiceError("无法确认本轮生成文件的归属，尚未交付结果。")
+        if file_id in finals and not Path(record.stored_path).is_file():
+            raise ServiceError("新的正式结果文件不存在，不能替换已有文件。")
+        candidates[file_id] = record
+    conversation = db.get(Conversation, conversation_id) if replacements else None
+    replacements_to_check: list[FileRecord] = []
+    for file_id in replacements:
+        record = db.get(FileRecord, file_id)
+        profile = (record.profile or {}) if record else {}
+        if (record is None or conversation is None or record.kind != "output" or file_id in candidates
+                or profile.get("intermediate") or profile.get("delivery_status") not in {None, "final"}
+                or not can_access_in_conversation(db, record, conversation_id=conversation_id,
+                                                  customer_id=conversation.customer_id)
+                or not Path(record.stored_path).is_file()):
+            raise ServiceError("只能替换当前会话或客户可访问的已交付结果文件。")
+        replacements_to_check.append(record)
+    retired = [record for record in replacements_to_check
+               if _replacement_visible_to_all_references(db, record, [candidates[file_id] for file_id in finals])]
+    # 所有归属与文件状态检查通过后再修改，避免某一目标无效时部分退休。
+    for file_id, record in candidates.items():
         record.profile = {**(record.profile or {}), "delivery_status": "final" if file_id in finals else "intermediate",
                           "intermediate": file_id not in finals, "delivery_summary": summary[:1000]}
+    for record in retired:
+        record.profile = {**(record.profile or {}), "delivery_status": "superseded", "intermediate": True,
+                          "superseded_by_file_ids": finals}
+    if retired:
+        # 旧结果退出名称占用后恢复工具声明的文件名；输入原件及其他独立结果仍参与避重。
+        db.flush()
+        for file_id in finals:
+            record = candidates[file_id]
+            record.filename = unique_filename(db, (record.profile or {}).get("original_filename") or record.filename,
+                customer_id=record.customer_id, conversation_id=conversation_id, user_id=record.created_by,
+                exclude_file_id=record.id)
+    return [record.id for record in retired]
+
+
+def _replacement_visible_to_all_references(db: Session, record: FileRecord, finals: list[FileRecord]) -> bool:
+    """不向其他范围传播本轮数据；无法访问新结果的引用方继续保留其当前结果。"""
+    customer_ids = {record.customer_id} - {None}
+    customer_ids.update(db.scalars(select(FileCustomer.customer_id).where(FileCustomer.file_id == record.id)))
+    customer_ids.update(db.scalars(select(FileRecipe.customer_id).where(
+        FileRecipe.file_id == record.id, FileRecipe.excluded.is_(False))))
+    if any(not can_access_in_customer(db, final, customer_id)
+           for customer_id in customer_ids if db.get(Customer, customer_id) is not None for final in finals):
+        return False
+    conversation_ids = {record.conversation_id} - {None}
+    conversation_ids.update(db.scalars(select(FileConversation.conversation_id).where(
+        FileConversation.file_id == record.id)))
+    for conversation_id in conversation_ids:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is not None and any(not can_access_in_conversation(db, final,
+                conversation_id=conversation_id, customer_id=conversation.customer_id) for final in finals):
+            return False
+    return True
 
 
 def file_media_type(record: FileRecord) -> str:
@@ -551,7 +613,8 @@ def preview(record: FileRecord, sheet: str | None = None, offset: int = 0, limit
 
 
 def list_files(db: Session, *, customer_id: str | None = None, conversation_id: str | None = None,
-               kinds: tuple[str, ...] | None = None, available_only: bool = True) -> list[FileRecord]:
+               kinds: tuple[str, ...] | None = None, available_only: bool = True,
+               include_superseded: bool = False) -> list[FileRecord]:
     conds = []
     if customer_id:
         conds.append(customer_file_condition(customer_id))
@@ -561,6 +624,8 @@ def list_files(db: Session, *, customer_id: str | None = None, conversation_id: 
     if not conds:
         return []
     stmt = select(FileRecord).where(or_(*conds)).order_by(FileRecord.created_at.desc())
+    if not include_superseded:
+        stmt = stmt.where(current_file_condition())
     if kinds:
         stmt = stmt.where(FileRecord.kind.in_(kinds))
     records = [record for record in db.scalars(stmt) if not available_only or Path(record.stored_path).is_file()]

@@ -109,7 +109,8 @@ def delete_customer(db: Session, customer: Customer) -> None:
 def card(db: Session, customer: Customer) -> dict[str, Any]:
     """客户卡片：名称、IP 形象、文件数、流程数、最近活动、处理逻辑摘要。"""
     file_count = db.scalar(select(func.count()).select_from(FileRecord).where(
-        file_service.customer_file_condition(customer.id), FileRecord.kind != "output")) or 0
+        file_service.customer_file_condition(customer.id), file_service.current_file_condition(),
+        FileRecord.kind != "output")) or 0
     recipes = recipe_service.latest_records(db, customer_id=customer.id)
     primary_id = recipe_service.ensure_primary_recipe(db, customer)
     conv_count = db.scalar(select(func.count()).select_from(Conversation).where(Conversation.customer_id == customer.id)) or 0
@@ -156,7 +157,8 @@ def detail(db: Session, customer: Customer) -> dict[str, Any]:
     primary_id = recipe_service.ensure_primary_recipe(db, customer)
     files = file_service.list_files(db, customer_id=customer.id)
     output_count = db.scalar(select(func.count()).select_from(FileRecord).where(
-        file_service.customer_file_condition(customer.id), FileRecord.kind == "output")) or 0
+        file_service.customer_file_condition(customer.id), file_service.current_file_condition(),
+        FileRecord.kind == "output")) or 0
     records = recipe_service.latest_records(db, customer_id=customer.id)
     recipes = []
     for record in records:

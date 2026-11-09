@@ -37,7 +37,8 @@ export interface FileInfo {
   media_type?: string
   preview_url?: string | null
   intermediate?: boolean
-  delivery_status?: 'candidate' | 'final' | 'intermediate'
+  delivery_status?: 'candidate' | 'final' | 'intermediate' | 'superseded'
+  superseded_by_file_ids?: string[]
   step_id?: number | null
   step_name?: string | null
 }
@@ -63,7 +64,7 @@ export interface RecipeArtifact {
   file_id?: string
   filename?: string
   download_url?: string
-  delivery_status?: 'candidate' | 'final' | 'intermediate'
+  delivery_status?: 'candidate' | 'final' | 'intermediate' | 'superseded'
   intermediate?: boolean
 }
 
@@ -511,6 +512,8 @@ export interface DeliveryManifestEvent extends AgentEvent {
   type: 'delivery_manifest'
   candidate_file_ids: string[]
   final_file_ids: string[]
+  replaced_file_ids?: string[]
+  files?: FileInfo[]
   status: 'confirmed' | 'unverified' | 'incomplete'
   summary: string
 }
@@ -537,6 +540,7 @@ export interface LLMAdvancedConfig {
 
 export interface LLMConfigUpdate {
   provider_id: LLMProviderId
+  enabled?: boolean
   api_key?: string
   base_url?: string
   model?: string
@@ -549,6 +553,7 @@ export interface LLMConfigUpdate {
 
 export interface LLMProviderConfig extends LLMAdvancedConfig {
   id: LLMProviderId
+  enabled: boolean
   name: string
   description: string
   base_url: string

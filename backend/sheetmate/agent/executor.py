@@ -782,7 +782,7 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
         cols = ", ".join(t.column_names[:14]) + (f" …（共 {len(t.columns)} 列）" if len(t.columns) > 14 else "")
         tag = _ROLE_TAGS.get(t.role, "")
         if t.created_by == "create_workbook":
-            tag += f"，建表生成，file_id={t.file_id}（可查看布局并另建新版）"
+            tag += f"，建表生成，file_id={t.file_id}（可查看布局并继续调整）"
         elif t.created_by == _SCRIPT_TOOL:
             tag += f"，脚本生成，file_id={t.file_id}（结果表可继续用公式或 SQL；文件副本可供必要的脚本处理）"
             script_run_id = (t.header or {}).get("script_run_id")
@@ -793,7 +793,15 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
                 tag += f"，run_id={script_run_id}"
         table_lines.append(AGENT_TABLE_LINE.format(name=t.name, label=t.label, rows=t.rows, cols=len(t.columns),
                                                    tag=tag, columns=cols))
-    files = [f for f in ctx.host.list_files() if not f.get("tables")]
+    available_files = ctx.host.list_files()
+    files = [f for f in available_files if not f.get("tables")]
+    replacements = [{"file_id": file["file_id"], "filename": file["filename"]} for file in available_files
+                    if file["file_id"] in ctx.replace_file_ids]
+    saving_rule = (
+        "\n本轮更新这些已有结果：" + json.dumps(replacements, ensure_ascii=False)
+        + "。基于用户指定对象继续调整或重算，沿用结果名称；新结果核对成功后由系统替换当前交付，不自行删除文件。"
+        if replacements else "\n本轮未选定替换目标；需要生成文件时作为独立结果交付，已有适用文件直接使用。"
+    )
     file_lines = [f"- file_id={f['file_id']}「{f['filename']}」（{f.get('scope_label', '')}）"
                   + ("，图片附件（非工作簿，无工作表）" if (f.get("media_type") or "").startswith("image/") else "")
                   + (f"，脚本 run_id={f['script_run_id']}（可查看脚本后继续调整）" if f.get("script_run_id") else "")
@@ -815,7 +823,7 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
             "\n用户已经确认删除这些流程 ID：" + "、".join(sorted(ctx.delete_recipe_ids)) + "。直接执行，不重复询问。"
             if ctx.delete_recipe_ids else
             "\n用户要求删除流程时，直接调用 delete_recipe 或 delete_recipes，由工具列出目标并请求一次确认。删除全部流程用 delete_recipes(all=true)。不需要开启额外授权，确认后系统直接执行。"
-        ),
+        ) + saving_rule,
         customer_block=build_customer_block(ctx),
         tables_block="\n".join(table_lines) or ("（还没有表，可直接根据用户文字或资料新建工作簿）" if ctx.mode == "create"
                                                else "（还没有表；可回答问题，需要处理现有数据时再加载 Excel / CSV）"),

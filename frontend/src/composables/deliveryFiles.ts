@@ -1,11 +1,12 @@
 import type { RecipeArtifact } from '@/api/types'
 import type { FileArtifact, RecipeProgress } from './chatModel'
 
-export type FileDeliveryStatus = 'candidate' | 'final' | 'intermediate'
+export type FileDeliveryStatus = 'candidate' | 'final' | 'intermediate' | 'superseded'
 
 /** Explicit file requests may inspect a retained intermediate; automatic deliveries show final files only. */
 export function isDeliveredFile(file: { delivery_status?: FileDeliveryStatus; intermediate?: boolean; explicit?: boolean }): boolean {
-  return file.explicit === true || (!file.intermediate && file.delivery_status !== 'candidate' && file.delivery_status !== 'intermediate')
+  return file.explicit === true || (!file.intermediate && file.delivery_status !== 'candidate' &&
+    file.delivery_status !== 'intermediate' && file.delivery_status !== 'superseded')
 }
 
 export function progressDeliveryFiles(progress: RecipeProgress): FileArtifact[] {

@@ -213,6 +213,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     final_text = ""
     delivery_candidates: dict[str, dict[str, Any]] = {}
     delivery_finished = False
+    replace_file_ids: list[str] = []
     analysis: AnalysisWorkspace | None = None
     run_id = None
     last_checkpoint = 0.0
@@ -305,13 +306,16 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 summary = f"最终交付核对失败：{str(exc).strip()[:200] or type(exc).__name__}"
             status = "confirmed" if confirmed else "unverified"
         with session_scope() as db:
-            file_service.finalize_delivery(db, conversation_id=conversation_id,
-                candidate_file_ids=list(delivery_candidates), final_file_ids=finals if confirmed else [], summary=summary)
+            replaced = file_service.finalize_delivery(db, conversation_id=conversation_id,
+                candidate_file_ids=list(delivery_candidates), final_file_ids=finals if confirmed else [], summary=summary,
+                replace_file_ids=replace_file_ids if confirmed else [])
+            final_files = [file_service.file_dict(file_service.get_file(db, file_id)) for file_id in finals] if confirmed else []
         if status == "unverified":
             recorder.record_stop({"status": "incomplete", "code": "delivery_unverified", "summary": summary,
                                   "scope": "task", "verified": False})
         await emit({"type": "delivery_manifest", "candidate_file_ids": list(delivery_candidates),
-                    "final_file_ids": finals if confirmed else [], "status": status, "summary": summary})
+                    "final_file_ids": finals if confirmed else [], "status": status, "summary": summary,
+                    "replaced_file_ids": replaced, "files": final_files})
         delivery_finished = True
         if status == "unverified":
             return "已生成文件，但最终交付版本尚未确认，本轮未交付正式结果。" + summary
@@ -381,6 +385,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         record_event("chat.intent.result", "sheetmate.agent.intent.infer_request", intent)
         ctx.mode = intent.mode
         host.defer_delivery = intent.action == "process"
+        replace_file_ids = list(intent.replace_file_ids)
+        ctx.replace_file_ids = intent.replace_file_ids
         if intent.files is not None:
             selected_files = select_files(intent.files, files, references)
             with session_scope() as db:
@@ -428,7 +434,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             conv.mode = ctx.mode
         request = db.get(Message, message_id)
         if request is not None:
-            request.meta = {**(request.meta or {}), "mode": ctx.mode, "action": intent.action}
+            request.meta = {**(request.meta or {}), "mode": ctx.mode, "action": intent.action,
+                            "replace_file_ids": replace_file_ids}
     # 思考模式：计划的各项、补做和自检共用一份更大的工具预算；闲聊（chat）不规划
     thinking = thinking and intent.action == "process"
     executor = AgentExecutor(llm, _registry, max_iterations=settings.agent_max_iterations,

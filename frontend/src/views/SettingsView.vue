@@ -21,6 +21,7 @@ const testingProvider = ref<LLMProviderId | null>(null)
 const testResults = reactive<Partial<Record<LLMProviderId, { ok: boolean; text: string } | null>>>({})
 
 interface ProviderDraft extends LLMAdvancedConfig {
+  enabled: boolean
   api_key: string
   base_url: string
   model: string
@@ -52,6 +53,7 @@ function onTabKeydown(event: KeyboardEvent) {
 
 function draftFrom(provider: LLMProviderConfig): ProviderDraft {
   return {
+    enabled: provider.enabled,
     api_key: provider.api_key,
     base_url: provider.base_url,
     model: provider.model || '',
@@ -97,6 +99,11 @@ function isComplete(provider: LLMProviderConfig) {
   return !!draft?.api_key.trim() && !!draft.base_url.trim() && !!draft.model.trim() && !validationMessage(provider)
 }
 
+function canSave(provider: LLMProviderConfig) {
+  const draft = drafts[provider.id]
+  return !!draft && !validationMessage(provider) && (!draft.enabled || isComplete(provider))
+}
+
 function validationMessage(provider: LLMProviderConfig): string {
   const draft = drafts[provider.id]
   if (!draft) return ''
@@ -120,13 +127,14 @@ function onModelChanged(provider: LLMProviderConfig) {
 }
 
 async function save(provider: LLMProviderConfig) {
-  if (anyBusy.value || !isComplete(provider)) return
+  if (anyBusy.value || !canSave(provider)) return
   const draft = drafts[provider.id]
   if (!draft) return
   savingProvider.value = provider.id
   try {
     const next = await settingsApi.saveLLM({
       provider_id: provider.id,
+      enabled: draft.enabled,
       api_key: draft.api_key,
       base_url: draft.base_url,
       model: draft.model,
@@ -155,6 +163,7 @@ async function test(provider: LLMProviderConfig) {
   try {
     const result = await settingsApi.testLLM({
       provider_id: provider.id,
+      enabled: draft.enabled,
       api_key: draft.api_key,
       base_url: draft.base_url,
       model: draft.model,
@@ -279,17 +288,31 @@ async function test(provider: LLMProviderConfig) {
                 </label>
               </div>
 
-              <label v-if="isThinkingSupported(provider)" class="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
-                <span class="text-sm font-medium">思考</span>
-                <input
-                  v-model="drafts[provider.id]!.thinking_enabled"
-                  type="checkbox"
-                  role="switch"
-                  class="toggle toggle-sm shrink-0"
-                  :disabled="savingProvider === provider.id || testingProvider === provider.id"
-                  @change="resetTestResult(provider.id)"
-                />
-              </label>
+              <div>
+                <div class="grid gap-3" :class="isThinkingSupported(provider) ? 'grid-cols-2' : ''">
+                  <label class="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
+                    <span class="text-sm font-medium">启用</span>
+                    <input
+                      v-model="drafts[provider.id]!.enabled"
+                      type="checkbox"
+                      role="switch"
+                      class="toggle toggle-sm shrink-0"
+                      :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                    />
+                  </label>
+                  <label v-if="isThinkingSupported(provider)" class="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
+                    <span class="text-sm font-medium">思考</span>
+                    <input
+                      v-model="drafts[provider.id]!.thinking_enabled"
+                      type="checkbox"
+                      role="switch"
+                      class="toggle toggle-sm shrink-0"
+                      :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                      @change="resetTestResult(provider.id)"
+                    />
+                  </label>
+                </div>
+              </div>
 
               <details class="rounded-xl border border-line px-4 py-3">
                 <summary class="cursor-pointer text-sm font-medium">高级配置</summary>
@@ -342,7 +365,7 @@ async function test(provider: LLMProviderConfig) {
                 <button class="btn-line" :disabled="anyBusy || !isComplete(provider)" @click="test(provider)">
                   <LoaderCircle v-if="testingProvider === provider.id" class="size-4 animate-spin" /><Zap v-else class="size-4" />测试
                 </button>
-                <button class="btn-ink" :disabled="anyBusy || !isComplete(provider)" @click="save(provider)">
+                <button class="btn-ink" :disabled="anyBusy || !canSave(provider)" @click="save(provider)">
                   <LoaderCircle v-if="savingProvider === provider.id" class="size-4 animate-spin" /><Save v-else class="size-4" />保存
                 </button>
               </div>

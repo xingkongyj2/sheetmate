@@ -24,6 +24,7 @@ class RequestIntent:
     mode: str
     files: FileSelection | None = None
     action: str = "process"
+    replace_file_ids: tuple[str, ...] = ()
 
 
 def _file_selection(value: Any) -> FileSelection:
@@ -72,7 +73,15 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
         return RequestIntent("analyze", _file_selection(result.get("files")), action="show_files")
     if action != "process":
         raise LLMError("暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。")
-    return RequestIntent(mode)
+    replacements = result.get("replace_file_ids", [])
+    available = {file["file_id"]: file for file in files or []}
+    if (not isinstance(replacements, list) or any(not isinstance(file_id, str) or file_id not in available
+            or available[file_id].get("kind") != "output"
+            or available[file_id].get("intermediate")
+            or available[file_id].get("delivery_status") not in {None, "final"}
+            for file_id in replacements)):
+        raise LLMError("无法确认要更新的已有结果，本次尚未处理文件。只能更新当前可访问的已交付结果，上传原件保持不变。")
+    return RequestIntent(mode, replace_file_ids=tuple(dict.fromkeys(replacements)))
 
 
 async def infer_mode(llm: Any, ctx: AgentContext, message: str, history: list[dict[str, Any]],

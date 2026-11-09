@@ -23,7 +23,7 @@ import TableViewer from '@/components/common/TableViewer.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { attachmentMessage } from '@/composables/attachmentFiles'
-import { applyEvent, finishMessage, restoreConversationMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
+import { applyDeliveryManifest, applyEvent, finishMessage, restoreConversationMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
 import { useToast } from '@/composables/useToast'
 import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
 import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
@@ -309,6 +309,7 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
     const deletionTargets = event.type === 'stream_snapshot' ? messages.value.filter((message) => message !== assistant) : messages.value
     for (const item of events) {
       if (item.type === 'recipe_deleted') markRecipeDeleted(deletionTargets, item.recipe_id)
+      if (item.type === 'delivery_manifest') applyDeliveryManifest(messages.value, item)
     }
     if (title && detail.value) {
       detail.value.title = title.title

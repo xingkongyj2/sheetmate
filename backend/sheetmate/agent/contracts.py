@@ -24,6 +24,7 @@ INTENT_SCHEMA = {
         # 旧协议仅返回 mode 时仍表示处理任务，不让合法历史服务配置失效。
         "action": {"type": "string", "enum": ["process", "chat", "show_files"]},
         "files": _FILE_SELECTION,
+        "replace_file_ids": {"type": "array", "items": _NONEMPTY_TEXT, "uniqueItems": True, "maxItems": 20},
     },
     "required": ["mode"],
     "allOf": [{

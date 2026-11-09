@@ -120,6 +120,7 @@ class AgentContext:
     delete_recipe_ids: set[str] = field(default_factory=set)  # 用户对持久化待删除清单确认后，允许本轮删除的流程
     image_parts: list[dict[str, Any]] = field(default_factory=list)  # 当前消息的图片，仅放入多模态请求，不写入提示词文本
     file_memory: str = ""  # 已授权但尚未加载的原件结构与探测事实，每轮按文件版本刷新
+    replace_file_ids: tuple[str, ...] = ()  # 本轮成功交付后更新的旧结果，由处理意图判断提供
 
     def visible_tables(self) -> list[TableInfo]:
         tables = self.ws.list_tables()

@@ -51,13 +51,14 @@ class LLMTimeout(LLMError):
 
 class LLMNotConfigured(LLMError):
     code = "llm_not_configured"
-    message = "还没有配置模型的 API Key。请在「设置」里填写并保存 API Key。"
+    message = "还没有启用可用的模型。请在「设置」里填写并保存模型的 API Key，并开启「启用」。"
 
     def __init__(self) -> None:
         super().__init__(self.message)
 
 
 _LEGACY_LLM_NOT_CONFIGURED_MESSAGES = (
+    "还没有配置模型的 API Key。请在「设置」里填写并保存 API Key。",
     "还没有配置模型的 API Key。请在「设置」里填写 DeepSeek API Key（或在 .env 中设置 DEEPSEEK_API_KEY）。",
 )
 

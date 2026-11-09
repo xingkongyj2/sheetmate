@@ -176,8 +176,8 @@ const busyText = computed(() => {
       <div v-if="resultFiles.length || (progress.saved && customerId)" class="ml-auto flex max-w-full flex-wrap items-center justify-end gap-2">
         <div v-for="file in resultFiles" :key="file.file_id" class="flex max-w-full flex-wrap items-center gap-2">
           <span v-if="resultFiles.length > 1" class="min-w-0 break-words text-xs text-mute">{{ file.filename }}</span>
-          <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看结果</button>
-          <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载结果 Excel</a>
+          <button type="button" class="btn-line h-7 gap-1 rounded-lg px-2.5 py-0 text-xs" :disabled="!!openingFile" :aria-label="`查看 ${file.filename}`" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-3.5 animate-spin" /><Eye v-else class="size-3.5" />查看</button>
+          <a :href="file.download_url" class="btn-ink h-7 gap-1 rounded-lg px-2.5 py-0 text-xs" :aria-label="`下载 ${file.filename}`"><Download class="size-3.5" />下载</a>
         </div>
         <RouterLink v-if="progress.saved && customerId" :to="{ name: 'customer', params: { id: customerId }, query: { tab: 'recipes' } }" class="btn-text">
           在客户页查看<ExternalLink class="size-3.5" />

@@ -21,6 +21,7 @@ from sheetmate.config import (
     get_all_llm_settings,
     get_llm_provider_settings,
     save_llm_settings,
+    select_llm_settings,
 )
 from sheetmate.db.models import User
 from sheetmate.model_policy import LLMCapabilities, LLMMaxTokens, LLMRuntimePolicy, LLMTimeout
@@ -48,6 +49,7 @@ class LLMBody(BaseModel):
     base_url: str | None = None
     model: str | None = None
     thinking_enabled: bool | None = None
+    enabled: bool | None = None
     timeout: LLMTimeout | None = None
     max_tokens: LLMMaxTokens | None = None
     capabilities: LLMCapabilities | None = None
@@ -64,6 +66,7 @@ def _provider_view(provider: dict[str, Any], cfg: LLMSettings) -> dict[str, Any]
         **provider,
         **_policy_view(cfg),
         "configured": cfg.configured,
+        "enabled": cfg.enabled,
         "api_key": cfg.api_key,
         "key_hint": cfg.key_hint(),
         "base_url": cfg.base_url,
@@ -75,12 +78,12 @@ def _provider_view(provider: dict[str, Any], cfg: LLMSettings) -> dict[str, Any]
 
 def _view() -> dict[str, Any]:
     configs = get_all_llm_settings()
-    active = next((configs[provider["id"]] for provider in PROVIDERS if configs[provider["id"]].configured),
-                  configs["deepseek"])
+    active = select_llm_settings(configs)
     active_provider_id = active.provider_id if active.configured else None
     return {
         # 保留当前生效配置的顶层字段，兼容旧版前端。
         "configured": active.configured,
+        "enabled": active.enabled,
         "active_provider_id": active_provider_id,
         "base_url": active.base_url,
         "model": active.model,
@@ -104,7 +107,7 @@ def put_llm_config(body: LLMBody, response: Response, _: User = Depends(current_
     response.headers["Cache-Control"] = "no-store"
     save_llm_settings(body.provider_id, body.api_key, body.base_url, body.model, body.thinking_enabled,
                       timeout=body.timeout, max_tokens=body.max_tokens,
-                      capabilities=body.capabilities, runtime_policy=body.runtime_policy)
+                      capabilities=body.capabilities, runtime_policy=body.runtime_policy, enabled=body.enabled)
     return {"ok": True, **_view()}
 
 
@@ -113,6 +116,7 @@ async def test_llm(body: LLMBody, response: Response, _: User = Depends(current_
     response.headers["Cache-Control"] = "no-store"
     current = get_llm_provider_settings(body.provider_id)
     cfg = replace(current,
+                  enabled=current.enabled if body.enabled is None else body.enabled,
                   api_key=current.api_key if body.api_key is None else body.api_key.strip(),
                   base_url=current.base_url if body.base_url is None else body.base_url.strip(),
                   model=current.model if body.model is None else body.model.strip(),

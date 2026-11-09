@@ -33,8 +33,8 @@ def _export_cell(value: Any) -> Any:
 
 def creation_parameters() -> dict[str, Any]:
     schema = workbook_tool_schema()
-    schema["properties"]["filename"] = {"type": "string", "description": "新文件名，可含 .xlsx；文件始终单独生成。"}
-    schema["properties"]["base_file_id"] = {"type": "string", "description": "可选：基于本技能已生成文件的布局快照另建新版，保留未指定的内容与工作表。先 inspect_workbook_creation 查看布局。"}
+    schema["properties"]["filename"] = {"type": "string", "description": "结果文件名，可含 .xlsx；更新同一结果时沿用原名称，独立交付才使用新名称。"}
+    schema["properties"]["base_file_id"] = {"type": "string", "description": "可选：基于本技能已生成文件的布局快照继续调整，保留未指定的内容与工作表；是否替换原结果由本轮用户意图决定。先 inspect_workbook_creation 查看布局。"}
     sheet_schema = schema["properties"]["sheets"]["items"]
     cell_schema = deepcopy(sheet_schema["properties"]["rows"]["items"]["items"])
     sheet_schema["properties"].update({

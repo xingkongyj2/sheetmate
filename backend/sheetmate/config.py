@@ -155,6 +155,7 @@ class LLMSettings:
     provider_id: str = "deepseek"
     capabilities: LLMCapabilities = field(default_factory=LLMCapabilities)
     runtime_policy: LLMRuntimePolicy = field(default_factory=LLMRuntimePolicy)
+    enabled: bool = True
 
     @property
     def thinking_supported(self) -> bool:
@@ -215,7 +216,7 @@ def _write_settings_file(data: dict) -> None:
 
 _LLM_FIELDS = {
     "api_key", "base_url", "model", "temperature", "timeout", "max_tokens", "extra_body", "thinking_enabled",
-    "capabilities", "runtime_policy",
+    "capabilities", "runtime_policy", "enabled",
 }
 _llm_settings_lock = RLock()
 _timeout_adapter = TypeAdapter(LLMTimeout)
@@ -276,6 +277,9 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
     thinking_enabled = overrides.get("thinking_enabled")
     if not isinstance(thinking_enabled, bool):
         thinking_enabled = False
+    enabled = overrides.get("enabled", True)
+    if not isinstance(enabled, bool):
+        enabled = True
     base_url = str(overrides.get("base_url") or default_base_url).strip()
     model = str(overrides.get("model") or default_model).strip()
     try:
@@ -298,6 +302,7 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         provider_id=provider_id,
         capabilities=_saved_policy(LLMCapabilities, overrides.get("capabilities")),
         runtime_policy=_saved_policy(LLMRuntimePolicy, overrides.get("runtime_policy")),
+        enabled=enabled,
     )
     cfg.thinking_enabled = thinking_enabled and cfg.thinking_supported
     return cfg
@@ -315,17 +320,22 @@ def get_all_llm_settings() -> dict[str, LLMSettings]:
             for provider_id in LLM_PROVIDER_PRIORITY}
 
 
+def select_llm_settings(providers: dict[str, LLMSettings]) -> LLMSettings:
+    """Select only enabled, configured providers using the fixed priority order."""
+    return next((providers[provider_id] for provider_id in LLM_PROVIDER_PRIORITY
+                 if providers[provider_id].enabled and providers[provider_id].configured),
+                LLMSettings(api_key="", base_url=DEEPSEEK_BASE_URL, model=DEEPSEEK_DEFAULT_MODEL, enabled=False))
+
+
 def get_llm_settings() -> LLMSettings:
-    """Return the first configured provider using the fixed priority order."""
-    providers = get_all_llm_settings()
-    return next((providers[provider_id] for provider_id in LLM_PROVIDER_PRIORITY if providers[provider_id].configured),
-                providers["deepseek"])
+    return select_llm_settings(get_all_llm_settings())
 
 
 def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | None, model: str | None,
                       thinking_enabled: bool | None = None, *, timeout: float | None = None,
                       max_tokens: int | None = None, capabilities: LLMCapabilities | dict | None = None,
-                      runtime_policy: LLMRuntimePolicy | dict | None = None) -> LLMSettings:
+                      runtime_policy: LLMRuntimePolicy | dict | None = None,
+                      enabled: bool | None = None) -> LLMSettings:
     """Save one provider. None keeps a field; an empty API key clears it."""
     _provider_defaults(provider_id)  # validate before touching the file
     # FastAPI runs sync handlers in separate threads. Keep saves to different
@@ -342,6 +352,8 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
             llm["model"] = model.strip()
         if thinking_enabled is not None:
             llm["thinking_enabled"] = thinking_enabled
+        if enabled is not None:
+            llm["enabled"] = enabled
         if timeout is not None:
             llm["timeout"] = _timeout_adapter.validate_python(timeout)
         if max_tokens is not None:

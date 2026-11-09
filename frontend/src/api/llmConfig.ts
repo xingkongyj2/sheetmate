@@ -55,13 +55,14 @@ export function parseLLMConfig(value: unknown): LLMConfig {
       ids.has(provider.id) || typeof provider.name !== 'string' || typeof provider.description !== 'string' ||
       typeof provider.api_key !== 'string' || typeof provider.base_url !== 'string' ||
       typeof provider.model !== 'string' || typeof provider.configured !== 'boolean' ||
+      (provider.enabled !== undefined && typeof provider.enabled !== 'boolean') ||
       typeof provider.thinking_supported !== 'boolean' || typeof provider.thinking_enabled !== 'boolean' ||
       !isStringArray(provider.models) ||
       (provider.thinking_models !== undefined && !isStringArray(provider.thinking_models))) {
       throw new Error(VERSION_ERROR)
     }
     ids.add(provider.id)
-    return { ...provider, ...advancedConfig(provider) }
+    return { ...provider, enabled: provider.enabled ?? true, ...advancedConfig(provider) }
   })
   return { ...value, ...advancedConfig(value), providers } as unknown as LLMConfig
 }

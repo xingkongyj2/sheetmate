@@ -224,7 +224,7 @@ def run_dict(run: Run, *, with_steps: bool = True) -> dict[str, Any]:
         def delivered(file_id: str | None) -> bool:
             record = records.get(file_id)
             profile = (record.profile or {}) if record else {}
-            return record is not None and not profile.get("intermediate") and profile.get("delivery_status") not in {"candidate", "intermediate"}
+            return record is not None and not profile.get("intermediate") and profile.get("delivery_status") not in {"candidate", "intermediate", "superseded"}
 
         if not delivered(run.output_file_id):
             data["output_file_id"] = next((item["file_id"] for item in reversed(snapshots)

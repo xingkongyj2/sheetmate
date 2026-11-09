@@ -626,28 +626,16 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'file': {
-      const status = msg.deliveryStatuses?.[e.file_id] ?? e.delivery_status
+      const status = e.delivery_status === 'superseded' ? 'superseded' : msg.deliveryStatuses?.[e.file_id] ?? e.delivery_status
       const file: FileArtifact = { file_id: e.file_id, toolCallId: e.tool_call_id, filename: e.filename, kind: e.kind, kind_label: e.kind_label, download_url: e.download_url, sheets: e.sheets, run_id: e.run_id,
-        delivery_status: status, intermediate: status ? status === 'intermediate' : e.intermediate, explicit: e.explicit === true }
+        delivery_status: status, intermediate: status ? status === 'intermediate' || status === 'superseded' : e.intermediate, explicit: e.explicit === true }
       const progress = e.tool_call_id ? findProgress(msg, e.tool_call_id) : undefined
       if (progress) addProgressFile(progress, file)
       else msg.artifacts.push({ kind: 'file', key: uid('a'), file })
       break
     }
     case 'delivery_manifest': {
-      const candidates = new Set(textList(e.candidate_file_ids))
-      const finals = new Set(e.status === 'confirmed' ? textList(e.final_file_ids).filter((id) => candidates.has(id)) : [])
-      const statuses = msg.deliveryStatuses ??= {}
-      for (const id of candidates) statuses[id] = finals.has(id) ? 'final' : 'intermediate'
-      for (const artifact of msg.artifacts) {
-        const files = artifact.kind === 'file' ? [artifact.file] : artifact.kind === 'recipe'
-          ? [...(artifact.progress.files ?? []), ...(artifact.progress.file ? [artifact.progress.file] : [])] : []
-        for (const file of files) {
-          if (!candidates.has(file.file_id)) continue
-          file.delivery_status = statuses[file.file_id]
-          file.intermediate = file.delivery_status === 'intermediate'
-        }
-      }
+      applyDeliveryManifest([msg], e)
       break
     }
     case 'clarify':
@@ -849,6 +837,43 @@ export function markRecipeDeleted(messages: UiMessage[], recipeId: string): void
   }
 }
 
+/** A confirmed replacement retires earlier deliveries across the conversation. */
+export function applyDeliveryManifest(messages: UiMessage[], event: AgentEvent): void {
+  if (event.type !== 'delivery_manifest') return
+  const candidates = new Set(textList(event.candidate_file_ids))
+  const finals = new Set(event.status === 'confirmed' ? textList(event.final_file_ids).filter((id) => candidates.has(id)) : [])
+  const replaced = new Set(finals.size ? textList(event.replaced_file_ids).filter((id) => !candidates.has(id)) : [])
+  const metadata = new Map<string, Record<string, unknown>>((Array.isArray(event.files) ? event.files : [])
+    .filter((file): file is Record<string, unknown> => !!file && typeof file === 'object' &&
+      typeof file.file_id === 'string' && finals.has(file.file_id))
+    .map((file) => [file.file_id as string, file]))
+  for (const message of messages) {
+    const statuses = message.deliveryStatuses ??= {}
+    for (const id of candidates) {
+      if (statuses[id] !== 'superseded') statuses[id] = finals.has(id) ? 'final' : 'intermediate'
+    }
+    for (const id of replaced) statuses[id] = 'superseded'
+    for (const artifact of message.artifacts) {
+      const files = artifact.kind === 'file' ? [artifact.file] : artifact.kind === 'recipe'
+        ? [...(artifact.progress.files ?? []), ...(artifact.progress.file ? [artifact.progress.file] : [])] : []
+      for (const file of files) {
+        // Database state can already know about a later turn during history replay.
+        if (file.delivery_status === 'superseded') statuses[file.file_id] = 'superseded'
+        const status = statuses[file.file_id]
+        if (!status) continue
+        file.delivery_status = status
+        file.intermediate = status === 'intermediate' || status === 'superseded'
+        const current = metadata.get(file.file_id)
+        if (current && status === 'final') {
+          if (typeof current.filename === 'string') file.filename = current.filename
+          if (typeof current.download_url === 'string') file.download_url = current.download_url
+          if (Array.isArray(current.sheets)) file.sheets = current.sheets as FileArtifact['sheets']
+        }
+      }
+    }
+  }
+}
+
 function activePlan(msg: UiMessage) {
   return msg.timeline.find((item): item is Extract<TimelineItem, { kind: 'plan' }> => item.kind === 'plan' && item.status === 'running')
 }
@@ -934,6 +959,7 @@ export function fromStoredMessages(stored: StoredMessage[], throughMessageId?: n
   for (const item of stored) {
     const message = fromStored(item)
     for (const event of item.role === 'assistant' ? item.events ?? [] : []) {
+      if (event.type === 'delivery_manifest') applyDeliveryManifest(messages, event)
       if (event.type === 'recipe_deleted' && typeof event.recipe_id === 'string') {
         markRecipeDeleted(messages, event.recipe_id)
       }
@@ -953,6 +979,9 @@ export function restoreConversationMessages(stored: StoredMessage[], job?: { id:
   const history = requestIndex >= 0 ? stored.slice(0, requestIndex + 1) : stored.filter((item) => item !== checkpoint)
   const messages = fromStoredMessages(history)
   const assistant = checkpoint ? fromStored(checkpoint, { streaming: true }) : newAssistant()
+  for (const event of checkpoint?.events ?? []) {
+    if (event.type === 'delivery_manifest') applyDeliveryManifest(messages, event)
+  }
   assistant.meta.request_message_id = job.message_id
   assistant.meta.job_id = job.id
   assistant.execution = { status: 'running', code: 'reconnecting', summary: '正在恢复执行记录' }

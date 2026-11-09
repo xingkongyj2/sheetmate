@@ -2,7 +2,7 @@
 /**
  * 助手消息：阶段回复与折叠的处理记录按发生顺序穿插，最后展示回答和交付结果。
  */
-import { Check, ChevronRight, CircleAlert, CircleHelp, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, CircleHelp, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion, Table2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref } from 'vue'
 
 import { fileApi } from '@/api'
@@ -80,6 +80,11 @@ const { groups: displayGroups, pending: revealing } = useProgressiveReply(
   (props.message.streaming || props.message.id == null) && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
   { initialVisible: props.message.id != null, immediateRevision: () => props.message.replayRevision },
 )
+function isFollowedByProcess(index: number): boolean {
+  return displayGroups.value.slice(index + 1).find((group) =>
+    group.kind === 'process' || (group.kind === 'text' && !!group.text.trim()),
+  )?.kind === 'process'
+}
 const typing = computed(() => props.message.streaming || revealing.value)
 const activity = computed(() => {
   if (!props.message.streaming) return ''
@@ -154,8 +159,8 @@ onBeforeUnmount(() => {
     </div>
     <div class="assistant-content w-full min-w-0 space-y-3">
       <!-- 按发生顺序只合并相邻同类步骤，正文保持原位。 -->
-      <template v-for="group in displayGroups" :key="group.key">
-        <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">
+      <template v-for="(group, index) in displayGroups" :key="group.key">
+        <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :class="{ 'assistant-stage--before-process': isFollowedByProcess(index) }" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">
           <details class="assistant-process group/process">
             <summary class="flex w-fit max-w-full cursor-pointer list-none items-start gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden" :title="processHeaders.get(group.key)?.title">
               <LoaderCircle v-if="processHeaders.get(group.key)?.status === 'running'" class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
@@ -194,17 +199,24 @@ onBeforeUnmount(() => {
         <RecipeViewCard v-for="artifact in recipeViews" :key="artifact.key" :view="artifact.view" :files="files" :customer-id="customerId" :conversation-id="conversationId" @refresh="emit('refresh')" />
         <RecipeProgressCard v-for="attempt in deliveries" :key="attempt.key" :progress="attempt.progress" :files="files" :customer-id="customerId" :conversation-id="conversationId" @preview-file="(file) => emit('previewFile', file)" @refresh="emit('refresh')" />
 
-        <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft flex flex-wrap items-center gap-3 px-4 py-3" data-testid="file-delivery">
-          <FileSpreadsheet class="size-5 text-fun-green" />
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-2">
+        <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft min-w-0 space-y-2.5 px-3.5 py-3" data-testid="file-delivery">
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+            <div class="flex min-w-0 flex-1 basis-48 items-center gap-2">
+              <FileSpreadsheet class="size-[18px] shrink-0 text-fun-green" aria-hidden="true" />
               <div class="min-w-0 truncate text-[13px] font-semibold" :title="file.filename">{{ file.filename }}</div>
-              <span v-if="fileKindLabel(file.kind)" class="tag shrink-0">{{ fileKindLabel(file.kind) }}</span>
+              <span v-if="fileKindLabel(file.kind)" class="tag shrink-0 whitespace-nowrap">{{ fileKindLabel(file.kind) }}</span>
             </div>
-            <div class="text-[11px] text-faint">{{ (file.sheets ?? []).map((s) => `${s.sheet} ${s.rows} 行`).join(' · ') }}</div>
+            <div class="ml-auto flex shrink-0 items-center gap-1.5">
+              <button type="button" class="btn-line h-7 gap-1 rounded-lg px-2.5 py-0 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink/40" :disabled="!!openingFile" :aria-label="`查看 ${file.filename}`" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-3.5 animate-spin" /><Eye v-else class="size-3.5" />查看</button>
+              <a :href="file.download_url" class="btn-ink h-7 gap-1 rounded-lg px-2.5 py-0 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink/40" :aria-label="`下载 ${file.filename}`"><Download class="size-3.5" />下载</a>
+            </div>
           </div>
-          <button type="button" class="btn-line py-2" :disabled="!!openingFile" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-4 animate-spin" /><Eye v-else class="size-4" />查看</button>
-          <a :href="file.download_url" class="btn-ink py-2"><Download class="size-4" />下载</a>
+          <ul v-if="file.sheets?.length" class="flex min-w-0 flex-wrap gap-1.5" aria-label="工作表">
+            <li v-for="sheet in file.sheets" :key="sheet.sheet" class="inline-flex min-w-0 max-w-full items-start gap-1.5 rounded-md border border-line/70 bg-paper/60 px-2 py-0.5 text-[11px] leading-5 text-mute">
+              <Table2 class="mt-1 size-3 shrink-0 text-fun-green" aria-hidden="true" />
+              <span class="min-w-0 break-words [overflow-wrap:anywhere]">{{ sheet.sheet }}</span>
+            </li>
+          </ul>
         </div>
       </template>
       <template v-if="!typing">
@@ -294,8 +306,8 @@ onBeforeUnmount(() => {
   margin-top: 0;
 }
 
-.assistant-stage:first-child > .assistant-process > summary {
-  min-height: var(--assistant-avatar-size);
+.assistant-content.space-y-3 > .assistant-stage--before-process {
+  margin-block-end: 0.25rem;
 }
 
 .process-title-running {

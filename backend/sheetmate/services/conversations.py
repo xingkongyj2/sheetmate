@@ -124,13 +124,17 @@ def _historical_recipe_flows(db: Session, conv: Conversation) -> dict[tuple[str,
     return flows
 
 
-def message_dict(m: Message, *, recipe_flows: dict[tuple[str, int], dict[str, Any]] | None = None) -> dict[str, Any]:
+def message_dict(m: Message, *, recipe_flows: dict[tuple[str, int], dict[str, Any]] | None = None,
+                 file_records: dict[str, FileRecord] | None = None) -> dict[str, Any]:
     migrated = recipe_service.strip_recipe_statuses(externalize_script_references(m.events or []))
     if migrated != m.events:
         m.events = migrated
     bind_script_references(migrated, conversation_id=m.conversation_id)
     events = []
     for event in m.events or []:
+        if isinstance(event, dict) and event.get("type") == "file" and event.get("file_id") in (file_records or {}):
+            # Keep execution evidence intact while reflecting a later replacement in file cards.
+            event = {**event, **file_service.file_dict(file_records[event["file_id"]])}
         key = _recipe_event_key(event)
         flow = event.get("flow") if isinstance(event, dict) else None
         if key in (recipe_flows or {}) and (not isinstance(flow, dict) or "input_files" not in flow or "output_files" not in flow):
@@ -191,9 +195,13 @@ def detail(db: Session, conv: Conversation) -> dict[str, Any]:
     tables.sort(key=lambda t: (t["created_at"], t.get("run_id", ""), t.get("conversation_id") or ""))
     runs = db.scalars(select(Run).where(Run.conversation_id == conv.id).order_by(Run.created_at.desc()).limit(20))
     recipe_flows = _historical_recipe_flows(db, conv)
+    historical_file_ids = {event["file_id"] for message in conv.messages for event in message.events or []
+                           if isinstance(event, dict) and event.get("type") == "file" and isinstance(event.get("file_id"), str)}
+    historical_files = {record.id: record for record in db.scalars(select(FileRecord).where(
+        FileRecord.id.in_(historical_file_ids)))} if historical_file_ids else {}
     return {
         **conversation_dict(db, conv),
-        "messages": [message_dict(m, recipe_flows=recipe_flows) for m in conv.messages],
+        "messages": [message_dict(m, recipe_flows=recipe_flows, file_records=historical_files) for m in conv.messages],
         "tables": tables,
         "files": [file_service.file_dict(f) for f in files],
         "recipes": [recipe_service.recipe_brief(r) for r in recipes],
