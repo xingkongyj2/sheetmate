@@ -27,9 +27,12 @@ def test_deleting_conversation_reclaims_private_data_and_preserves_shared_file(c
     from sheetmate.db.models import Conversation, FileConversation, FileCustomer, FileRecord, RecipeRecord, Run
     from sheetmate.services import conversations as conversation_service
     from sheetmate.services import runs as run_service
+    from sheetmate.conversation_log import new_turn
 
     conversation_id = _new_conversation(client)
     other_conversation_id = _new_conversation(client)
+    trace = new_turn(conversation_id)
+    trace.record("test", "deletion_cleanup", {"text": "private trace"})
     recipe_id = f"recipe_{uuid4().hex[:10]}"
     private_path = tmp_path / "private.xlsx"
     shared_path = tmp_path / "shared.xlsx"
@@ -78,6 +81,7 @@ def test_deleting_conversation_reclaims_private_data_and_preserves_shared_file(c
     assert shared_path.exists()
     assert not conversation_workspace.exists()
     assert not run_workspace.exists()
+    assert not trace.path.exists()
 
     # The final conversation reference releasing the file should reclaim its row and disk data.
     response = client.delete(f"/api/conversations/{other_conversation_id}")
@@ -106,10 +110,13 @@ def test_deleting_customer_cleans_customer_records_and_only_unreferenced_files(c
     )
     from sheetmate.services import runs as run_service
     from sheetmate.services import conversations as conversation_service
+    from sheetmate.conversation_log import new_turn
 
     customer_id = _new_customer(client, f"待删除客户-{uuid4().hex[:8]}")
     other_customer_id = _new_customer(client, f"保留客户-{uuid4().hex[:8]}")
     conversation_id = _new_conversation(client, customer_id)
+    trace = new_turn(conversation_id)
+    trace.record("test", "deletion_cleanup", {"text": "customer trace"})
     recipe_id = f"recipe_{uuid4().hex[:10]}"
     private_path = tmp_path / "customer-private.xlsx"
     shared_path = tmp_path / "customer-shared.xlsx"
@@ -172,3 +179,4 @@ def test_deleting_customer_cleans_customer_records_and_only_unreferenced_files(c
     assert shared_path.exists()
     assert not run_workspace.exists()
     assert not conversation_workspace.exists()
+    assert not trace.path.exists()
