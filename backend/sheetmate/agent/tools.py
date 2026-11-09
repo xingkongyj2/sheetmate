@@ -19,7 +19,6 @@ import asyncio
 import json
 import re
 import time
-import traceback
 from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -47,6 +46,8 @@ from sheetmate.recipe.schema import Recipe
 MAX_TOOL_TEXT = 6000
 PREVIEW_ROWS = 50
 RUN_STATUS_LABELS = {"success": "成功", "warning": "完成（有提示）", "failed": "失败", "escalated": "需要人工处理", "running": "运行中"}
+_LOG_DATA_EVENTS = {"file", "table", "script", "clarify", "memory_saved", "field_mapping_saved",
+                    "recipe_saved", "recipe_completed", "recipe_deleted", "recipe_failed", "recipe_run_done"}
 
 
 def _status_label(status: str) -> str:
@@ -118,6 +119,7 @@ class AgentContext:
     save_recipe_requested: bool = False  # 仅来自用户明确的保存意图，模型工具参数不能授权
     delete_recipe_ids: set[str] = field(default_factory=set)  # 用户对持久化待删除清单确认后，允许本轮删除的流程
     image_parts: list[dict[str, Any]] = field(default_factory=list)  # 当前消息的图片，仅放入多模态请求，不写入提示词文本
+    file_memory: str = ""  # 已授权但尚未加载的原件结构与探测事实，每轮按文件版本刷新
 
     def visible_tables(self) -> list[TableInfo]:
         tables = self.ws.list_tables()
@@ -297,7 +299,7 @@ def _tool_table_info(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     keys = data.get("keys", {})
     checks = [f"「{name}」非空且没有重复值，可作为候选主键。" for name in keys.get("candidates", [])]
     checks.extend(f"「{item['column']}」有 {item['duplicate_values']} 个重复值，单值最多出现 {item['max_repeat']} 次。" for item in keys.get("duplicated", []))
-    return ToolResult(_clip(table_info_text(data)), summary=f"「{data['name']}」{data['rows']} 行 × {data['cols']} 列",
+    return ToolResult(table_info_text(data), summary=f"「{data['name']}」{data['rows']} 行 × {data['cols']} 列",
                       public_details=[public_detail_section("查看对象", [_table_detail(ctx.ws.require(data["name"]))]),
                                       public_detail_section("字段检查", columns),
                                       *([public_detail_section("主键检查", checks)] if checks else [])])
@@ -1036,13 +1038,13 @@ def _static_tools() -> list[Tool]:
         *python_script_tools(),
         workbook_creation_tool(),
         workbook_inspection_tool(),
-        Tool("table_info", "查看一张表的结构：列名、类型、空值、不同值数量、样本、候选主键和前几行。处理任何表之前先调用它。",
+        Tool("table_info", "［表格探测技能］读取当前表版本的结构化长期记忆：全部列名、类型、空值、不同值数量、样本、候选主键和前几行。首次补测后自动持久保存，表未更新直接复用。系统已提供所需结构时直接使用，仅缺少必要信息时调用。",
              _obj({"table": {**_STR, "description": "表名"}}, ["table"]), both, run=_tool_table_info,
              label=lambda a: f"查看结构 · {a.get('table', '')}"),
-        Tool("value_counts", "统计某一列的取值分布（出现次数和占比）。",
+        Tool("value_counts", "统计某一列的取值分布（出现次数和占比），按当前表版本和参数保存并复用探测结果。已有相同范围分布时直接使用。",
              _obj({"table": _STR, "column": _STR, "limit": {"type": "integer", "description": "最多返回多少个取值，默认 20"}},
                   ["table", "column"]), both, run=_tool_value_counts, label=lambda a: f"取值分布 · {a.get('column', '')}"),
-        Tool("column_stats", "数值列的描述统计：最小、最大、均值、分位数、空值比例。",
+        Tool("column_stats", "列的描述统计：最小、最大、均值、分位数、空值比例，按当前表版本和字段保存并复用。已有所需统计时直接使用。",
              _obj({"table": _STR, "columns": {**_STR_LIST, "description": "可选，只统计这些列"}}, ["table"]), both,
              run=_tool_column_stats, label=lambda a: f"描述统计 · {a.get('table', '')}"),
         Tool("preview_table", "读取表的若干行供分析核对，不代表交付完整表格。正式明细和较大结果通过文件卡片预览下载；不要为展示工作簿而反复读取或拼接行数据。",
@@ -1160,41 +1162,40 @@ async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext, *,
                 f"{getattr(implementation, '__qualname__', type(implementation).__qualname__)}") if implementation else ""
     metadata = {"call_id": call_id, "tool": tool.name, "implementation": function,
                 "conversation_id": ctx.conversation_id}
-    record_event("tool.input", "sheetmate.agent.tools.execute_tool",
-                 {"arguments": args, "schema": tool.parameters, "mode": ctx.mode}, **metadata)
+    record_event("tool.input", function, args, **metadata)
     status = "interrupted"
     validated = False
+    outcome: ToolResult | None = None
+    failure: dict[str, str] | None = None
+    data_events: list[dict[str, Any]] = []
     try:
         try:
             args = validate_tool_args(tool, args)
         except StructuredOutputError as exc:
-            result = tool_argument_error(tool.name, "schema", exc.errors)
+            outcome = tool_argument_error(tool.name, "schema", exc.errors)
             status = "rejected"
-            record_event("tool.result", "sheetmate.agent.tools.execute_tool", result, **metadata)
-            yield result
+            yield outcome
             return
         validated = True
-        record_event("tool.validated", "sheetmate.agent.tools.validate_tool_args", args, **metadata)
         if tool.stream is not None:
             got_result = False
             async for item in tool.stream(args, ctx):
                 if isinstance(item, ToolResult):
                     got_result = True
+                    outcome = item
                     status = "ok" if item.ok else "failed"
-                    record_event("tool.result", function, item, **metadata)
-                else:
-                    record_event("tool.event", function, item, **metadata)
+                elif isinstance(item, dict) and item.get("type") in _LOG_DATA_EVENTS:
+                    data_events.append(deepcopy(item))
                 yield item
             if not got_result:
-                result = ToolResult("工具没有返回结果", ok=False)
+                outcome = ToolResult("工具没有返回结果", ok=False)
                 status = "failed"
-                record_event("tool.result", "sheetmate.agent.tools.execute_tool", result, **metadata)
-                yield result
+                yield outcome
         else:
             assert tool.run is not None
             worker = asyncio.create_task(asyncio.to_thread(tool.run, args, ctx))
             try:
-                result = await asyncio.shield(worker)
+                outcome = await asyncio.shield(worker)
             except asyncio.CancelledError:
                 ctx.ws.interrupt()
                 try:
@@ -1202,26 +1203,26 @@ async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext, *,
                 except Exception:
                     pass
                 raise
-            status = "ok" if result.ok else "failed"
-            record_event("tool.result", function, result, **metadata)
-            yield result
+            status = "ok" if outcome.ok else "failed"
+            yield outcome
     except (asyncio.CancelledError, GeneratorExit) as exc:
-        status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "interrupted"
-        record_event("tool.cancelled", "sheetmate.agent.tools.execute_tool",
-                     {"reason": type(exc).__name__}, **metadata)
+        if outcome is None:
+            status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "interrupted"
+            failure = {"reason": type(exc).__name__}
         raise
     except Exception as exc:  # 工具出错时把错误当结果交给 LLM，让它自己纠正
         message = str(exc) or type(exc).__name__
         status = "error"
-        record_event("tool.error", function if validated else "sheetmate.agent.tools.validate_tool_args",
-                     {"error_type": type(exc).__name__, "error": message, "traceback": traceback.format_exc()}, **metadata)
+        failure = {"error_type": type(exc).__name__, "error": message}
         if not validated:
             # A broken local schema is a configuration fault, not a business
             # tool failure that the model can repair by changing its arguments.
             raise
-        result = ToolResult(f"工具 `{tool.name}` 出错：{message}", ok=False, summary=message[:200])
-        record_event("tool.result", "sheetmate.agent.tools.execute_tool", result, **metadata)
-        yield result
+        outcome = ToolResult(f"工具 `{tool.name}` 出错：{message}", ok=False, summary=message[:200])
+        yield outcome
     finally:
-        record_event("tool.done", "sheetmate.agent.tools.execute_tool",
-                     {"status": status, "duration_ms": int((time.perf_counter() - started) * 1000)}, **metadata)
+        event = "tool.result" if outcome is not None else "tool.cancelled" if status in {"cancelled", "interrupted"} else "tool.error"
+        extra_events = [item for item in data_events if outcome is None or item not in outcome.events]
+        record_event(event, function if validated else "sheetmate.agent.tools.validate_tool_args", outcome or failure,
+                     status=status, duration_ms=int((time.perf_counter() - started) * 1000),
+                     **({"events": extra_events} if extra_events else {}), **metadata)

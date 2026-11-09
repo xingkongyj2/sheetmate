@@ -29,8 +29,6 @@ class Job:
     _changed: asyncio.Condition = field(default_factory=asyncio.Condition)
 
     async def emit(self, event: dict[str, Any]) -> None:
-        if self.trace is not None:
-            self.trace.record("sse.event", "sheetmate.services.jobs.Job.emit", event, job_id=self.id)
         async with self._changed:
             self._history.append(event)
             self._changed.notify_all()
@@ -67,13 +65,10 @@ class JobManager:
         if self.running(key):
             raise Conflict("上一个任务还在处理中，请稍等它完成")
         job = Job(key, message_id=message_id, trace=current_trace())
-        record_event("job.scheduled", "sheetmate.services.jobs.JobManager.start",
-                     {"job_id": job.id, "request_message_id": message_id})
 
         async def runner() -> None:
             job.started = True
             status = "completed"
-            record_event("job.started", "sheetmate.services.jobs.JobManager.runner", {"job_id": job.id})
             try:
                 # A just-created task cancelled before its first instruction never
                 # runs finally. Let it enter the runner to persist/log the stop.
@@ -122,7 +117,8 @@ class JobManager:
                                   if event.get("type") == "execution_status"), {})
                 record_event("turn.end", "sheetmate.services.jobs.JobManager.runner",
                              {"job_id": job.id, "request_message_id": job.message_id,
-                              "status": execution.get("status", status), "execution": execution,
+                              "status": execution.get("status", status),
+                              "code": execution.get("code"), "summary": execution.get("summary"),
                               "cancel_source": job.cancel_source})
                 if self._jobs.get(key) is job:
                     del self._jobs[key]
@@ -137,9 +133,6 @@ class JobManager:
             return False
         if not job.task.cancelling():
             job.cancel_source = "user"
-            if job.trace is not None:
-                job.trace.record("job.stop_requested", "sheetmate.services.jobs.JobManager.stop",
-                                 {"job_id": job.id, "source": "user"})
             if job.started:
                 job.task.cancel()
         return True
@@ -149,9 +142,6 @@ class JobManager:
         for job in list(self._jobs.values()):
             if job.task is not None and not job.task.done():
                 job.cancel_source = job.cancel_source or "shutdown"
-                if job.trace is not None:
-                    job.trace.record("job.stop_requested", "sheetmate.services.jobs.JobManager.shutdown",
-                                     {"job_id": job.id, "source": job.cancel_source})
                 if job.started:
                     job.task.cancel()
                 tasks.append(job.task)

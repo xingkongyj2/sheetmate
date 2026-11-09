@@ -328,12 +328,13 @@ class LLMClient:
         call_id = uuid.uuid4().hex
         started = time.monotonic()
         status = "error"
+        response = None
+        failure = None
         try:
             kwargs = self._kwargs(messages, tools, **extra)
-            record_event("llm.request", function, kwargs, call_id=call_id, base_url=self.cfg.base_url,
-                         timeout=self.cfg.timeout, sdk_retries=self.cfg.runtime_policy.sdk_retries)
+            record_event("llm.request", function, kwargs, call_id=call_id)
             resp = await self.client.chat.completions.create(**kwargs)
-            record_event("llm.response", function, resp, call_id=call_id)
+            response = resp
             self._add_usage(resp.usage)
             if not resp.choices:
                 raise LLMError("模型服务返回了空响应，请检查接口兼容性后重试。")
@@ -343,18 +344,17 @@ class LLMClient:
             object.__setattr__(message, "_sheetmate_finish_reason", resp.choices[0].finish_reason)
             status = "completed"
             return message
-        except asyncio.CancelledError as exc:
+        except asyncio.CancelledError:
             status = "cancelled"
-            record_event("llm.error", function, {"type": type(exc).__name__, "message": str(exc)}, call_id=call_id)
             raise
         except Exception as exc:
             status = "error"
             error = translate_error(exc)
-            record_event("llm.error", function, {"type": type(exc).__name__, "message": str(exc),
-                         "code": error.code, "translated_message": str(error)}, call_id=call_id)
+            failure = {"type": type(exc).__name__, "code": error.code, "message": str(error)}
             raise error from exc
         finally:
-            record_event("llm.done", function, {"status": status}, call_id=call_id,
+            record_event("llm.response", function, response, call_id=call_id, status=status,
+                         **({"error": failure} if failure else {}),
                          duration_ms=round((time.monotonic() - started) * 1000, 3))
 
     async def stream_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
@@ -365,21 +365,25 @@ class LLMClient:
         started = time.monotonic()
         status = "error"
         chunk_count = 0
+        usage = None
+        response_model = self.model
+        error_info = None
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         calls: dict[int, dict[str, str]] = {}
         kwargs = self._kwargs(messages, tools, stream=True, tool_choice=tool_choice if tools else None)
         finish_reason: str | None = None
         try:
-            record_event("llm.request", function, kwargs, call_id=call_id, base_url=self.cfg.base_url,
-                         timeout=self.cfg.timeout, sdk_retries=self.cfg.runtime_policy.sdk_retries)
+            record_event("llm.request", function, kwargs, call_id=call_id)
             stream = await self.client.chat.completions.create(**kwargs)
             failure: BaseException | None = None
             try:
                 saw_choice, has_content, has_reasoning = False, False, False
                 async for chunk in stream:
                     chunk_count += 1
-                    record_event("llm.chunk", function, chunk, call_id=call_id, chunk_index=chunk_count)
+                    response_model = getattr(chunk, "model", None) or response_model
+                    if getattr(chunk, "usage", None) is not None:
+                        usage = chunk.usage
                     self._add_usage(getattr(chunk, "usage", None))
                     # 与执行器一致，只消费首个候选；usage-only chunk 不代表正文或结束。
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
@@ -437,25 +441,23 @@ class LLMClient:
                     log.warning("关闭模型回复流时发生异常，已保留原始停止原因")
         except (asyncio.CancelledError, GeneratorExit) as exc:
             status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "consumer_closed"
-            record_event("llm.error", function, {"type": type(exc).__name__, "message": str(exc)}, call_id=call_id)
             raise
         except Exception as exc:
             status = "error"
             error = translate_error(exc)
             if error.finish_reason is None:
                 error.finish_reason = finish_reason
-            record_event("llm.error", function, {"type": type(exc).__name__, "message": str(exc),
-                         "code": error.code, "translated_message": str(error), "finish_reason": finish_reason},
-                         call_id=call_id)
+            error_info = {"type": type(exc).__name__, "code": error.code, "message": str(error)}
             raise error from exc
         finally:
             record_event("llm.response", function, {
+                "model": response_model,
                 "content": "".join(content_parts), "reasoning_content": "".join(reasoning_parts),
                 "tool_calls": [{"index": index, **call} for index, call in calls.items()],
-                "finish_reason": finish_reason, "chunk_count": chunk_count,
-            }, call_id=call_id, assembled=True)
-            record_event("llm.done", function, {"status": status, "finish_reason": finish_reason},
-                         call_id=call_id, duration_ms=round((time.monotonic() - started) * 1000, 3))
+                "finish_reason": finish_reason, "usage": usage,
+            }, call_id=call_id, status=status, chunk_count=chunk_count,
+                         **({"error": error_info} if error_info else {}),
+                         duration_ms=round((time.monotonic() - started) * 1000, 3))
 
     async def complete_json(self, prompt: str, system: str | None = None, retries: int | None = None, *,
                             image_parts: list[dict[str, Any]] | None = None, max_tokens: int | None = None,
@@ -535,13 +537,11 @@ class LLMClient:
                     validate_payload(value, schema)
                 if validator is not None:
                     validator(value)
-                record_event("llm.structured.validated", "sheetmate.agent.llm.LLMClient._complete_json",
-                             {"value": value, "schema_name": schema_name, "format": output_format})
                 return value
             except ValueError as exc:
                 last_error = str(exc)
                 record_event("llm.structured.invalid", "sheetmate.agent.llm.LLMClient._complete_json",
-                             {"content": content, "error": last_error, "schema_name": schema_name,
+                             {"error": last_error, "schema_name": schema_name,
                               "repairs_left": repairs_left, "format": output_format})
                 if repairs_left <= 0:
                     break

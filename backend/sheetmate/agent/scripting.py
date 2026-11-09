@@ -15,7 +15,7 @@ from sheetmate.engine.script_store import normalize_script_title
 class ScriptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    code: StrictStr = Field(min_length=1, max_length=64_000, description="Python 完整脚本。可用 pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、result、check(condition,message)、deliver_files 和 display_tables；后两者默认空列表，只显式列入需要用户查看的最终文件/结果表。")
+    code: StrictStr = Field(min_length=1, max_length=64_000, description="Python 完整脚本。按业务通用规则计算，从实际输入动态取得数据与范围；除用户明确指定的常量外，不写死本次月份、行数、名单或计算结果。可用 pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、result、check(condition,message)、deliver_files 和 display_tables；后两者默认空列表，只显式列入需要用户查看的最终文件/结果表。")
     title: StrictStr = Field(default="", max_length=20, description="脚本文件的简短标题，应概括这次处理的目标；超过 20 个字符会自动截断。")
     script_id: StrictStr | None = Field(default=None, pattern=r"^scr_[0-9a-f]{32}$", description="已有脚本文件的唯一 ID；通常由系统自动填写。修改代码后会保存为新的脚本文件。")
     description: StrictStr = Field(min_length=1, max_length=2000, description="本次脚本要完成的用户目标及关键校验。")
@@ -130,6 +130,7 @@ def python_script_tools():
              "［Python 工具］公式和 SQL 优先；仅用于它们不好做或能力范围之外的步骤，例如特殊结构提取、复杂逐单元格排版或自定义算法，或用户明确指定 Python。"
              "常规筛选、计算、匹配、汇总用公式或 SQL，普通分析结果用 export_excel，声明式建表能完成时用 create_workbook；不能仅因脚本灵活或需要保留格式就默认调用。明确超出能力范围时无需先试错；混合任务只为必要部分写脚本。"
              "成功脚本的实际代码、输入绑定、输出与校验可在用户明确要求时用 save_as_recipe 保存为重复流程。脚本中 pd/np/openpyxl 已加载；tables 是传入 DataFrame 副本，files 是按别名传入的文件副本路径；"
+             "脚本表达可复用的业务规则，根据输入动态取得月份、分类和数据边界；只有用户明确指定时才能固定业务值，不把探测到的样例数据写死为下一次处理规则。"
              "OUTPUT_DIR 是运行目录，写入文件不会自动交付。deliver_files 默认[]，只有明确列入的最终文件才提供下载，例如 deliver_files=[OUTPUT_DIR / '武汉行程.xlsx']；probe.xlsx 等测试文件留在临时目录。"
              "result_tables['结果名']=DataFrame 可回传内部数据继续用 SQL/公式；display_tables 默认[]，只把需要用户查看的最终结果表名列入，其他表不展示。"
              "result 可保存简短 JSON 摘要，check(condition,message) 记录校验，失败会阻止本次交付。"

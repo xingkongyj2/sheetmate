@@ -10,15 +10,11 @@ from __future__ import annotations
 
 import base64
 import contextvars
-import functools
-import inspect
 import json
 import logging
 import os
 import re
 import threading
-import time
-import traceback
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, fields, is_dataclass
@@ -97,7 +93,7 @@ def _normalise(value: Any, seen: set[int] | None = None) -> Any:
 
 def error_data(exc: BaseException) -> dict[str, Any]:
     return {"type": f"{type(exc).__module__}.{type(exc).__qualname__}", "message": str(exc),
-            "code": getattr(exc, "code", None), "traceback": "".join(traceback.format_exception(exc))}
+            "code": getattr(exc, "code", None)}
 
 
 def _file_name(conversation_id: str) -> str:
@@ -120,12 +116,11 @@ class ConversationTrace:
     def record(self, event: str, function: str, data: Any = None, **metadata: Any) -> None:
         try:
             stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
-            payload = {"conversation_id": self.conversation_id, "turn_id": self.turn_id,
-                       **({"phase": _PHASE.get()} if _PHASE.get() else {}),
+            payload = {**({"phase": _PHASE.get()} if _PHASE.get() else {}),
                        **metadata, "data": data}
             # Header strings are supplied by code, never by a user or model.
             entry = f"[{stamp}] {event} | {function}\n" + json.dumps(
-                _normalise(payload), ensure_ascii=False, indent=2, allow_nan=False) + "\n"
+                _normalise(payload), ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
             self._write(entry.encode("utf-8"))
         except Exception:
             log.exception("无法写入对话日志 conversation=%s turn=%s", self.conversation_id, self.turn_id)
@@ -210,18 +205,15 @@ def record_event(event: str, function: str, data: Any = None, **metadata: Any) -
 
 
 async def http_request_data(request: Any) -> dict[str, Any]:
-    """Read Starlette's cached original body, before Pydantic defaults/normalisation."""
+    """Retain request values once, without HTTP transport metadata."""
     cached = request.scope.get("sheetmate.http_request")
     if cached is not None:
         return cached
-    headers = [{"name": name.decode("latin-1"),
-                "value": "[REDACTED]" if _secret_field(name.decode("latin-1")) else value.decode("latin-1")}
-               for name, value in request.scope.get("headers", [])]
     body = await request.body()
-    return {"method": request.method, "path": request.url.path,
-            "query_string": request.scope.get("query_string", b"").decode("latin-1"),
-            "http_version": request.scope.get("http_version"), "headers": headers,
-            "raw_body": body.decode("utf-8", errors="backslashreplace")}
+    try:
+        return {"body": json.loads(body)}
+    except (ValueError, UnicodeDecodeError):
+        return {"raw_body": body.decode("utf-8", errors="backslashreplace")}
 
 
 @contextmanager
@@ -231,33 +223,3 @@ def trace_phase(name: str) -> Iterator[None]:
         yield
     finally:
         _PHASE.reset(token)
-
-
-def traced(function: Any) -> Any:
-    """Record key function boundaries without introspecting sessions/workspaces."""
-    name = f"{function.__module__}.{function.__qualname__}"
-
-    @contextmanager
-    def span() -> Iterator[None]:
-        started = time.monotonic()
-        record_event("function.enter", name)
-        try:
-            yield
-        except BaseException as exc:
-            record_event("function.error", name, error_data(exc))
-            raise
-        finally:
-            record_event("function.exit", name, duration_ms=round((time.monotonic() - started) * 1000, 2))
-
-    if inspect.iscoroutinefunction(function):
-        @functools.wraps(function)
-        async def async_call(*args: Any, **kwargs: Any) -> Any:
-            with span():
-                return await function(*args, **kwargs)
-        return async_call
-
-    @functools.wraps(function)
-    def sync_call(*args: Any, **kwargs: Any) -> Any:
-        with span():
-            return function(*args, **kwargs)
-    return sync_call

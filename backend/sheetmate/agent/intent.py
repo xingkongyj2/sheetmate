@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from sheetmate.agent.content import history_window
 from sheetmate.agent.contracts import INTENT_SCHEMA
 from sheetmate.agent.llm import LLMError
 from sheetmate.agent.prompts import INTENT_PROMPT
@@ -42,7 +43,8 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
                         file_references: list[dict[str, Any]] | None = None) -> RequestIntent:
     context = {
         "customer": ctx.customer,
-        "history": [{"role": item["role"], "content": str(item.get("content", ""))[-4000:]} for item in history[-8:]],
+        "history": [{"role": item["role"], "content": str(item.get("content", "")) if item.get("context_summary")
+                     else str(item.get("content", ""))[-4000:]} for item in history_window(history, 8)],
         "tables": [{"name": table.name, "role": table.role, "columns": table.column_names,
                     "file_id": table.file_id, "filename": table.filename, "created_by": table.created_by}
                    for table in ctx.visible_tables()],

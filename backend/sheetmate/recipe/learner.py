@@ -309,6 +309,35 @@ def _fix_params(params: dict[str, Any], formula: str, library: FormulaLibrary) -
     return fixed
 
 
+def _dynamic_schema_outputs(steps: list[RecipeStep], library: FormulaLibrary) -> set[str]:
+    """只沿已知保留输入其他字段的内置算子传播动态分类，显式选列/汇总等终止传播。"""
+    preserves_table_columns = {
+        "drop_columns", "rename_columns", "filter_rows", "drop_duplicates", "sort_rows",
+        "fill_null", "trim_text", "cast_columns", "compute_column", "map_values",
+        "split_column", "concat_columns", "add_serial", "lookup", "top_n", "append_total",
+    }
+    dynamic: set[str] = set()
+    for step in sorted(steps, key=lambda item: item.id):
+        if not step.enabled or not library.has(step.formula) or library.resolve(step.formula).builtin is None:
+            # 客户公式、SQL 和脚本的输出结构不能仅根据依赖推断。
+            continue
+        if step.formula == "pivot_wide" and not step.params.get("values"):
+            dynamic.add(step.output)
+        elif step.formula in preserves_table_columns:
+            # lookup 只保留左表全部列，右表仅带出显式选择的列。
+            source = step.params.get("table")
+            if isinstance(source, str) and source in dynamic:
+                dynamic.add(step.output)
+        elif step.formula == "join_tables":
+            if any(isinstance(step.params.get(key), str) and step.params[key] in dynamic for key in ("left", "right")):
+                dynamic.add(step.output)
+        elif step.formula == "concat_tables":
+            tables = step.params.get("tables")
+            if isinstance(tables, list) and any(isinstance(table, str) and table in dynamic for table in tables):
+                dynamic.add(step.output)
+    return dynamic
+
+
 def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnContext, base: Recipe | None = None) -> list[OutputSheet]:
     outputs: list[OutputSheet] = []
     table_outputs = [name for step in steps for name in step_output_tables(step)]
@@ -335,13 +364,15 @@ def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnCon
         name = next(iter(ctx.expected)) if len(ctx.expected) == 1 else "结果"
         outputs.append(OutputSheet(name=name, source=last))
     previous = {o.name: o for o in (base.output_spec if base else [])}
+    dynamic_outputs = _dynamic_schema_outputs(steps, ctx.library)
     for out in outputs:
         if ctx.mode == "revise":
             # 修订：模型给了列就用模型的；没给就沿用修订前的列顺序
             if out.columns is None and out.name in previous:
                 out.columns = previous[out.name].columns
-        elif out.name in ctx.expected:
-            # 学习：输出列按人工结果的列和顺序对齐（SheetAgent 的自动重排）
+        elif out.columns is None and out.name in ctx.expected and out.source not in dynamic_outputs:
+            # 动态分类不能被样例中的列清单裁掉；明确声明的输出列仍按用户要求保留。
+            # 其他学习结果沿用人工结果的列顺序。
             out.columns = [str(c) for c in ctx.expected[out.name].columns]
     return outputs
 

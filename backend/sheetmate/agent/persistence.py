@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from sheetmate.agent.content import history_window
 
 RECIPE_PERSISTENCE_PROMPT = """你是 SheetMate 的重复流程保存授权判断助手。
 根据当前用户消息与最近对话，判断用户是否主动要求把本次处理保存或更新为以后可重复执行的流程（Recipe）。
@@ -25,8 +26,9 @@ RECIPE_PERSISTENCE_PROMPT = """你是 SheetMate 的重复流程保存授权判�
 async def infer_recipe_persistence(llm: Any, message: str, history: list[dict[str, Any]]) -> bool:
     context = {
         "message": message,
-        "history": [{"role": item.get("role", ""), "content": str(item.get("content", ""))[-4000:]}
-                    for item in history[-8:]],
+        "history": [{"role": item.get("role", ""), "content": str(item.get("content", "")) if item.get("context_summary")
+                     else str(item.get("content", ""))[-4000:]}
+                    for item in history_window(history, 8)],
     }
     try:
         result = await llm.complete_json(RECIPE_PERSISTENCE_PROMPT + "\n\n" + json.dumps(context, ensure_ascii=False))

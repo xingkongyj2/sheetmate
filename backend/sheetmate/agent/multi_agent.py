@@ -78,7 +78,7 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
         scoped = replace(ctx, table_filter={table_name})
         try:
             await queue.put({"type": "agent_start", "agent_id": table_name, "table_name": table_name})
-            messages = [{"role": "system", "content": build_system_prompt(scoped, message)}, *model_history(history[-6:]),
+            messages = [{"role": "system", "content": build_system_prompt(scoped, message)}, *model_history(history, limit=6),
                         {"role": "user", "content": user_content(SPECIALIST_MESSAGE.format(table=table_name, message=message), scoped.image_parts)}]
             tools = executor.registry.for_context(scoped)
             conclusion = ""

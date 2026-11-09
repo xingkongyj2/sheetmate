@@ -1032,7 +1032,7 @@ def _register() -> dict[str, BuiltinFormula]:
                    "aggfunc": {"type": "enum", "values": ["sum", "first", "count", "max", "min", "avg"], "default": "sum", "desc": "同一格有多个值时怎么合并"},
                    "carry_columns": {"type": "columns", "of": "table", "desc": "跟随主键带上的列（每个主键取第一行的值）"},
                    "fill_value": {"type": "any", "desc": "没有值的格子填什么，例如 0", "schema": {"type": "number"}},
-                   "values": {"type": "list", "desc": "固定要拆出的取值及顺序；不填表示数据里出现的全部取值。固定后重复执行更稳定"},
+                   "values": {"type": "list", "desc": "默认不填，运行时动态使用数据里的全部取值；只有用户明确指定固定分类或输出列时才填写固定取值及顺序，未列出的新分类不会拆出"},
                    "column_suffix": {"type": "str", "desc": "可选：新列名后缀"}},
                   ["长转宽", "拆列", "透视", "pivot", "一单多行"],
                   {"table": "费用明细", "index": ["运单号"], "pivot_column": "费用类型", "value_column": "金额", "fill_value": 0}),

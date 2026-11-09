@@ -43,6 +43,7 @@ from sheetmate.agent.prompts import (
 )
 from sheetmate.agent.recovery import MAX_METHODS, METHOD_FAILURE_LIMIT, RECONSIDER_TOOL, RecoveryState
 from sheetmate.agent.scripting import ScriptRequest
+from sheetmate.agent.table_probe import table_probe_context
 from sheetmate.agent.structured import StructuredOutputError
 from sheetmate.agent.tools import (
     AgentContext, Tool, ToolRegistry, ToolResult, ToolSchemaError, execute_tool, tool_argument_error, validate_tool_args,
@@ -100,22 +101,18 @@ class AgentExecutor:
     async def converse(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """普通对话和意图询问，不提供任务执行工具。"""
         system = (CHAT_SYSTEM + "\n\n## 当前客户资料\n" + build_customer_block(ctx)
-                  + "\n\n## 已保存的长期记忆与当前流程规则\n" + (ctx.host.memory_text(message) or "（当前可用范围尚未保存记忆条目）"))
-        messages = [{"role": "system", "content": system}, *model_history(history[-12:]),
+                  + "\n\n## 已保存的长期记忆与当前流程规则\n" + (ctx.host.memory_text(message) or "（当前可用范围尚未保存记忆条目）")
+                  + "\n\n" + table_probe_context(ctx.ws, ctx.visible_tables(),
+                                               ctx.file_memory if ctx.table_filter is None else ""))
+        messages = [{"role": "system", "content": system}, *model_history(history),
                     {"role": "user", "content": user_content(message, ctx.image_parts)}]
-        record_event("agent.context", "sheetmate.agent.executor.AgentExecutor.converse",
-                     {"mode": ctx.mode, "customer": ctx.customer, "message_count": len(messages),
-                      "payload_source": "llm.request"})
         async for event in self.agent_stream(messages, [], ctx):
             yield event
 
     async def execute(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """直接执行（不带计划）。"""
-        messages = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history[-12:]),
+        messages = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history),
                     {"role": "user", "content": user_content(message, ctx.image_parts)}]
-        record_event("agent.context", "sheetmate.agent.executor.AgentExecutor.execute",
-                     {"mode": ctx.mode, "customer": ctx.customer, "message_count": len(messages),
-                      "payload_source": "llm.request"})
         async for event in self.agent_stream(messages, self.registry.for_context(ctx), ctx, scope=message):
             yield event
 
@@ -123,11 +120,8 @@ class AgentExecutor:
                            history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """按用户确认的计划逐步执行，每步一次 ReAct，最后自检（TabClaw execute_plan）。"""
         tools = self.registry.for_context(ctx)
-        conversation = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history[-12:]),
+        conversation = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(history),
                         {"role": "user", "content": user_content(f"原始需求：{message}\n下面按计划逐步执行。", ctx.image_parts)}]
-        record_event("agent.context", "sheetmate.agent.executor.AgentExecutor.execute_plan",
-                     {"mode": ctx.mode, "customer": ctx.customer, "steps": steps,
-                      "message_count": len(conversation), "payload_source": "llm.request"})
         budget = _ToolBudget()
         executed_steps = 0
         yield {"type": "plan_start", "steps": [{"id": index, "description": str(step.get("description") or f"第 {index} 步")}
@@ -220,11 +214,6 @@ class AgentExecutor:
                                if item.get("role") == "user"), "当前任务")
         finish_reason: str | None = None
         stream_id = uuid4().hex
-        record_event("agent.start", "sheetmate.agent.executor.AgentExecutor.agent_stream",
-                     {"message_count": len(msgs), "tool_names": list(tool_map),
-                      "scope": scope, "stop_scope": stop_scope, "payload_source": "llm.request",
-                      "mode": ctx.mode, "iteration_limit": iteration_limit,
-                      "tool_calls_limit": self.max_tool_calls}, stream_id=stream_id)
 
         def stop(status: str, code: str, summary: str, *, verified: bool = False) -> dict[str, Any]:
             event = {"type": "execution_stop", "status": status, "code": code, "summary": summary,
@@ -274,10 +263,6 @@ class AgentExecutor:
                           "model": getattr(self.llm, "model", None) or getattr(getattr(self.llm, "cfg", None), "model", ""),
                           "iteration_limit": iteration_limit, "tool_calls_used": budget.used,
                           "tool_calls_limit": self.max_tool_calls}
-            record_event("agent.model_start", "sheetmate.agent.executor.AgentExecutor.agent_stream",
-                         {"message_count": len(msgs), "tool_names": [tool.name for tool in available],
-                          "payload_source": "llm.request", "tool_choice": "none" if final_round else None,
-                          "final_round": final_round, **model_call}, stream_id=stream_id)
             yield {"type": "model_call_start", **model_call}
             try:
                 async for chunk in self.llm.stream_chat(msgs, tools=definitions, tool_choice="none" if final_round else None):
@@ -318,9 +303,6 @@ class AgentExecutor:
                 if not content.strip() and not calls_acc:
                     raise LLMError("模型没有返回正文或可执行操作，任务尚未完成。", code="empty_response", finish_reason=finish_reason)
             except asyncio.CancelledError:
-                record_event("agent.model_cancelled", "sheetmate.agent.executor.AgentExecutor.agent_stream",
-                             {"content": content, "reasoning_content": reasoning, "tool_calls": calls_acc,
-                              "finish_reason": finish_reason, **model_call}, stream_id=stream_id)
                 yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason,
                        "status": "cancelled", "code": "cancelled", "summary": "模型调用已取消。",
                        "duration_ms": int((time.perf_counter() - model_started) * 1000)}
@@ -329,10 +311,6 @@ class AgentExecutor:
                 exc = translate_error(raw)
                 finish_reason = getattr(exc, "finish_reason", None) or finish_reason
                 code = getattr(exc, "code", "llm_error")
-                record_event("agent.model_error", "sheetmate.agent.executor.AgentExecutor.agent_stream",
-                             {"error": str(exc), "code": code, "content": content,
-                              "reasoning_content": reasoning, "tool_calls": calls_acc,
-                              "finish_reason": finish_reason, **model_call}, stream_id=stream_id)
                 yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason,
                        "status": "error", "code": code, "summary": str(exc),
                        "duration_ms": int((time.perf_counter() - model_started) * 1000)}
@@ -352,9 +330,6 @@ class AgentExecutor:
                  "function": {"name": slot["name"], "arguments": slot["arguments"]}}
                 for idx, slot in sorted(calls_acc.items())
             ]
-            record_event("agent.model_result", "sheetmate.agent.executor.AgentExecutor.agent_stream",
-                         {"raw_content": content, "display_content": display, "reasoning_content": reasoning,
-                          "tool_calls": calls, "finish_reason": finish_reason, **model_call}, stream_id=stream_id)
             if not tools:
                 calls = []  # 普通闲聊从未提供执行工具，保留正文并忽略服务商多余的调用。
             forbidden_calls = bool(calls) and (not definitions or final_round)
@@ -387,9 +362,6 @@ class AgentExecutor:
                     yield {"type": "completion_check_start", **model_call, "call_id": check_id,
                            "purpose": "completion_check"}
                     check = await check_completion(self.llm, msgs, display, scope=scope, results=budget.results)
-                    record_event("agent.completion_check", "sheetmate.agent.completion.check_completion",
-                                 {"scope": scope, "answer": display, "actual_results": budget.results,
-                                  "result": check}, call_id=check_id, stream_id=stream_id)
                     yield {**check.event(), "call_id": check_id}
                     if not check.completed:
                         if check.verified and check.can_continue and not final_round and completion_retries < MAX_COMPLETION_RETRIES:
@@ -434,13 +406,13 @@ class AgentExecutor:
                     assistant["reasoning_content"] = reasoning
                 msgs.append(assistant)
                 msgs.extend({"role": "tool", "tool_call_id": call["id"], "content": str(exc)} for call in calls)
+                for call in calls:
+                    _record_unexecuted_tool(call, ToolResult(str(exc), ok=False, error_kind="schema"), status="rejected")
                 if transcript is not None:
                     transcript.extend(msgs[start:])
                 yield stop("failed", "tool_schema", str(exc))
                 yield {"type": "error", "content": str(exc), "code": "tool_schema"}
                 return
-            record_event("agent.tools_preflight", "sheetmate.agent.executor._preflight_call",
-                         {"calls": calls, "results": errors, "forbidden_calls": forbidden_calls}, stream_id=stream_id)
             if any(error is not None for error in errors):
                 # 整批预检：即使只有一个调用结构错误，本响应也不能产生部分副作用。
                 assistant = {"role": "assistant", "content": display or None, "tool_calls": calls}
@@ -452,6 +424,7 @@ class AgentExecutor:
                     result = error or tool_argument_error(name, "protocol", [
                         {"path": "/", "message": "同一响应中的其他调用未通过校验，本调用尚未执行，请一起重新发出。"},
                     ])
+                    _record_unexecuted_tool(call, result, status="rejected")
                     # 不调用 display/public_params，也不保存脚本或计入业务失败。
                     yield {"type": "tool_call", "id": call["id"], "tool": name,
                            "label": "核对处理参数", "params": {}, "debug_params": {},
@@ -461,9 +434,6 @@ class AgentExecutor:
                            "debug_result": result.text, "duration_ms": 0,
                            "error_kind": result.error_kind, "error_details": result.error_details}
                     msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})
-                    record_event("agent.tool_feedback", "sheetmate.agent.executor.AgentExecutor.agent_stream",
-                                 {"result": result, "message": msgs[-1], "executed": False},
-                                 tool=name, call_id=call["id"], stream_id=stream_id)
                 if forbidden_calls:
                     if transcript is not None:
                         transcript.extend(msgs[start:])
@@ -502,13 +472,11 @@ class AgentExecutor:
                     break
                 budget.used += 1
                 result: ToolResult | None = None
+                executed = False
                 name = call["function"]["name"]
                 args = _parse_args(call["function"]["arguments"])
                 tool = tool_map.get(name)
                 debug_params: Any = args if args is not None else call["function"]["arguments"]
-                record_event("agent.tool_arguments", "sheetmate.agent.executor._parse_args",
-                             {"raw_arguments": call["function"]["arguments"], "parsed_arguments": args},
-                             tool=name, call_id=call["id"], stream_id=stream_id)
                 script_ref: dict[str, Any] = {}
                 if name == _SCRIPT_TOOL and args is not None:
                     try:
@@ -558,15 +526,18 @@ class AgentExecutor:
                             public_details=attempt.result.public_details,
                         )
                     else:
+                        executed = True
                         async for item in execute_tool(tool, args, ctx, call_id=call["id"]):
                             if isinstance(item, ToolResult):
                                 result = item
                             else:
                                 yield {**item, "tool_call_id": call["id"]}
                 assert result is not None
-                record_event("agent.tool_result", "sheetmate.agent.executor.AgentExecutor.agent_stream",
-                             {"result": result, "reused": repeated_script, "method_blocked": method_blocked},
-                             tool=name, call_id=call["id"], stream_id=stream_id)
+                if not executed:
+                    _record_unexecuted_tool(
+                        call, result, status="reused" if repeated_script else "blocked" if method_blocked else "rejected",
+                        arguments=args, duration_ms=int((time.perf_counter() - started) * 1000),
+                    )
                 if script_key and not repeated_script:
                     if attempt is None:
                         attempt = _ScriptAttempt(result)
@@ -595,8 +566,6 @@ class AgentExecutor:
                        "debug_result": externalize_script_text(result.text, python=name in {_SCRIPT_TOOL, "inspect_python_script"}),
                        "duration_ms": int((time.perf_counter() - started) * 1000)}
                 msgs.append({"role": "tool", "tool_call_id": call["id"], "content": result.text})
-                record_event("agent.tool_feedback", "sheetmate.agent.executor.AgentExecutor.agent_stream", msgs[-1],
-                             tool=name, call_id=call["id"], stream_id=stream_id)
                 budget.results[call["id"]] = {"tool": name, "ok": result.ok, "result": externalize_script_text(result.text, python=name == _SCRIPT_TOOL)}
                 for invalid_id in recovery.invalid_results:
                     if invalid_id in budget.results:
@@ -672,6 +641,19 @@ def _approach_switch_message(recovery: RecoveryState) -> str:
     return APPROACH_SWITCH_MESSAGE.format(
         method=recovery.current.name, failures=recovery.current.failures, limit=METHOD_FAILURE_LIMIT,
         remaining=MAX_METHODS - len(recovery.methods),
+    )
+
+
+def _record_unexecuted_tool(call: dict[str, Any], result: ToolResult, *, status: str,
+                            arguments: dict[str, Any] | None = None, duration_ms: int = 0) -> None:
+    """未进入 execute_tool 的调用仍保留参数和最终反馈，避免误判为实际执行。"""
+    if arguments is None:
+        arguments = _parse_args(call["function"]["arguments"])
+    record_event(
+        "tool.result", "sheetmate.agent.executor.AgentExecutor.agent_stream",
+        {"arguments": arguments if arguments is not None else call["function"]["arguments"], "result": result},
+        tool=call["function"]["name"], call_id=call["id"], executed=False,
+        status=status, duration_ms=duration_ms,
     )
 
 
@@ -840,4 +822,4 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
         files_block="\n".join(file_lines) or "（没有）",
         memory_block=ctx.host.memory_text(message) or "（没有）",
         recipes_block=recipes_block,
-    ) + (THINKING_RULES if thinking else "")
+    ) + "\n\n" + table_probe_context(ctx.ws, tables, ctx.file_memory if ctx.table_filter is None else "") + (THINKING_RULES if thinking else "")

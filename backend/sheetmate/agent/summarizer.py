@@ -25,7 +25,8 @@ def fallback_title(message: str) -> str:
 
 
 async def compact_history(llm: Any, history: list[dict[str, Any]]) -> str | None:
-    lines = [f"[{m['role']}] {str(m.get('content') or '')[:400]}" for m in history if m.get("content")]
+    # 表结构和操作证据常在消息后半段；先截断再总结会永久丢失这些信息。
+    lines = [f"[{m['role']}] {str(m.get('content') or '')}" for m in history if m.get("content")]
     if not lines:
         return None
     try:

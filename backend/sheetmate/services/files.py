@@ -22,11 +22,13 @@ from sheetmate.engine.images import IMAGE_SUFFIXES, image_profile
 from sheetmate.engine.profile import profile_workbook
 from sheetmate.engine.reader import SUPPORTED_SUFFIXES, ReadError, SheetData, read_workbook
 from sheetmate.engine.sqlutil import frame_rows, sanitize_table_name
+from sheetmate.engine.table_memory import restore_memory, seed_profile
 from sheetmate.engine.workspace import TableInfo, Workspace
 from sheetmate.engine.writer import SheetSpec, write_excel
 from sheetmate.recipe.schema import file_pattern_from_name
 from sheetmate.services.auth import can_access_customer, require_customer
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
+from sheetmate.services.table_memory import FILE_MEMORY_KEY, FILE_VERSION_KEY, content_digest, file_version
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +186,7 @@ def register_output(db: Session, *, path: Path, filename: str, customer_id: str 
 def profile_file(path: Path) -> dict[str, Any]:
     """文件画像（不含数据预览，预览按需读取）。"""
     if path.suffix.lower() in IMAGE_SUFFIXES:
-        return image_profile(path)
+        return {**image_profile(path), FILE_VERSION_KEY: file_version(path)}
     try:
         sheets = _read_file_copy(path)
     except ReadError as exc:
@@ -197,10 +199,11 @@ def profile_file(path: Path) -> dict[str, Any]:
                 workbook.close()
         except Exception as invalid:
             raise exc from invalid
-        return {"sheets": [], "file_only": True}
+        return {"sheets": [], "file_only": True, FILE_VERSION_KEY: file_version(path)}
     profile = profile_workbook(sheets, preview_rows=0)
     for sheet in profile["sheets"]:
         sheet.pop("preview", None)
+    profile[FILE_VERSION_KEY] = file_version(path)
     return profile
 
 
@@ -547,9 +550,25 @@ def table_base_name(filename: str) -> str:
 
 def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None = None) -> list[TableInfo]:
     """把文件的每个 sheet 存成工作区里的一张表。期望结果文件的表名用「期望_sheet名」。"""
-    if (getattr(record, "profile", None) or {}).get("file_only"):
+    source = Path(record.stored_path)
+    profile = dict(getattr(record, "profile", None) or {})
+    version = file_version(source, profile.get(FILE_VERSION_KEY))
+    same_version = (profile.get(FILE_VERSION_KEY) or {}).get("sha256") == version["sha256"]
+    original_bytes = path is None or content_digest(path) == version["sha256"]
+    if profile.get("file_only") and same_version and original_bytes:
         return []
-    sheets = read_workbook(path) if path is not None else _read_file_copy(Path(record.stored_path))
+    sheets = read_workbook(path) if path is not None else _read_file_copy(source)
+    if original_bytes:
+        if not same_version:
+            # 旧画像没有可验证的版本，或原件已更新：仅对本次实际读取的数据重新画像。
+            refreshed = profile_workbook(sheets, preview_rows=0)
+            for sheet_profile in refreshed["sheets"]:
+                sheet_profile.pop("preview", None)
+            profile = {key: value for key, value in profile.items()
+                       if key not in {"sheets", "file_only", FILE_MEMORY_KEY}}
+            profile.update(refreshed)
+        profile[FILE_VERSION_KEY] = version
+        record.profile = profile
     for info in ws.list_tables():  # 同一个文件重复加载时先清掉旧表
         if info.file_id == record.id:
             ws.drop(info.name)
@@ -567,12 +586,23 @@ def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None 
         info = ws.put_dataframe(
             name, sheet.df, label=f"{record.filename} · {sheet.name}", source="uploaded",
             role="expected" if record.kind == "expected" else "input", file_id=record.id, filename=record.filename,
-            sheet=sheet.name, header=sheet.header.to_dict(),
+            sheet=sheet.name, header=sheet.header.to_dict(), file_version=version["sha256"] if original_bytes else "",
             description=("人工做好的期望结果" if record.kind == "expected" else
                          "系统生成的工作簿，可继续作为输入处理" if record.kind == "output" else "上传的原始数据")
                         + (f"，标题：{sheet.header.title}" if sheet.header.title else ""),
         )
-        tables.append(info)
+        if original_bytes:
+            saved = profile.get(FILE_MEMORY_KEY) or {}
+            restored = saved.get("sha256") == version["sha256"] and restore_memory(
+                ws, name, (saved.get("sheets") or {}).get(sheet.name, {}),
+            )
+            if not restored:
+                sheet_profile = next((item for item in profile.get("sheets", []) if item.get("sheet") == sheet.name), None)
+                if sheet_profile:
+                    seed_profile(ws, name, {**sheet_profile, "preview": {
+                        "columns": info.column_names, "rows": frame_rows(sheet.df, 5),
+                    }})
+        tables.append(ws.require(name))
     return tables
 
 

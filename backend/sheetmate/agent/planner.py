@@ -19,6 +19,7 @@ from typing import Any
 
 import pandas as pd
 
+from sheetmate.agent.content import history_window
 from sheetmate.agent.contracts import PLAN_REVIEW_SCHEMA, PLAN_SCHEMA
 from sheetmate.agent.executor import build_system_prompt
 from sheetmate.agent.llm import LLMError, aux_json
@@ -275,7 +276,8 @@ def fallback_plan(ctx: AgentContext, message: str, reason: str = "") -> Plan:
 
 
 def _history_context(history: list[dict[str, Any]], count: int = 6, limit: int = 1500) -> list[dict[str, str]]:
-    return [{"role": item["role"], "content": str(item.get("content", ""))[-limit:]} for item in history[-count:]]
+    return [{"role": item["role"], "content": str(item.get("content", "")) if item.get("context_summary")
+             else str(item.get("content", ""))[-limit:]} for item in history_window(history, count)]
 
 
 def _image_kwargs(ctx: AgentContext, history: list[dict[str, Any]]) -> dict[str, Any]:

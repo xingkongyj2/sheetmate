@@ -46,8 +46,9 @@ class ConversationLogRoute(APIRoute):
                 with bind_trace(new_turn(conversation_id)):
                     function = "sheetmate.api.conversations.ConversationLogRoute.handle"
                     record_event("turn.start", function, {"user_id": user.id, "source": "validation"})
-                    record_event("http.request", function, original)
-                    record_event("http.response", function, {"status_code": 422, "errors": exc.errors()})
+                    record_event("chat.input", function, original)
+                    record_event("chat.rejected", function, {"errors": [
+                        {key: value for key, value in error.items() if key != "input"} for error in exc.errors()]})
                     record_event("turn.end", function, {"status": "rejected", "reason": "request_validation"})
                 raise
 
@@ -126,8 +127,6 @@ async def conversation_events(conversation_id: str, job_id: str, request: Reques
     job = jobs.get(conv.id)
     if job is None or job.id != job_id:
         raise Conflict("任务状态已更新，请重新加载对话")
-    if job.trace is not None:
-        job.trace.record("http.request", "sheetmate.api.conversations.conversation_events", await http_request_data(request))
     return sse_response(job)
 
 
@@ -229,10 +228,5 @@ async def clarify(conversation_id: str, body: MessageBody, request: Request, use
 @router.post("/{conversation_id}/stop")
 async def stop(conversation_id: str, request: Request, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     conv_service.get_conversation(db, user, conversation_id)
-    job = jobs.get(conversation_id)
-    if job is not None and job.trace is not None:
-        job.trace.record("http.request", "sheetmate.api.conversations.stop", await http_request_data(request))
     result = {"ok": True, "stopped": jobs.stop(conversation_id)}
-    if job is not None and job.trace is not None:
-        job.trace.record("http.response", "sheetmate.api.conversations.stop", result)
     return result

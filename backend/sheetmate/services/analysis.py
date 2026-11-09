@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -7,14 +8,20 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sheetmate.engine.file_copies import FileCopies
+from sheetmate.engine.table_memory import copy_table_memory, merge_table_memory
 from sheetmate.engine.workspace import Workspace
+from sheetmate.services.table_memory import persist_workspace_memories
+
+logger = logging.getLogger(__name__)
 
 
 def _copy_table(source: Workspace, target: Workspace, name: str) -> None:
-    meta = source.require(name).to_dict()
+    info = source.require(name)
+    meta = info.to_dict()
     for key in ("name", "rows", "columns"):
         meta.pop(key, None)
     target.put_dataframe(name, source.df(name), **meta)
+    copy_table_memory(info, target, name)
 
 
 @dataclass
@@ -42,9 +49,18 @@ def analysis_workspace(source: Workspace) -> Iterator[AnalysisWorkspace]:
     with TemporaryDirectory(prefix="sheetmate_analysis_") as directory:
         root = Path(directory)
         scratch = Workspace(root / "working.duckdb")
+        expected_revisions: dict[str, tuple[str, str]] = {}
         try:
             for table in source.list_tables():
                 _copy_table(source, scratch, table.name)
+                expected_revisions[table.name] = (table.revision, scratch.require(table.name).revision)
             yield AnalysisWorkspace(source, scratch, root)
         finally:
-            scratch.close()
+            try:
+                merge_table_memory(source, scratch, expected_revisions)
+                persist_workspace_memories(source)
+            except Exception:
+                # 记忆维护失败不能遮蔽本次处理或用户取消的实际结果。
+                logger.warning("无法保存本轮表格探测记忆", exc_info=True)
+            finally:
+                scratch.close()

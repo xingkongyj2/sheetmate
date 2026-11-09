@@ -15,9 +15,11 @@ import json
 import threading
 import time
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import duckdb
 import pandas as pd
@@ -56,6 +58,7 @@ class TableInfo:
     rows: int = 0
     columns: list[dict[str, str]] = field(default_factory=list)  # [{"name", "type"}]
     file_id: str | None = None
+    file_version: str = ""  # 原件内容哈希；只有从该原件完整读取时才设置
     filename: str = ""
     sheet: str | None = None
     header: dict[str, Any] | None = None  # 读取时的表头信息（生成 Recipe 输入定义用）
@@ -65,6 +68,9 @@ class TableInfo:
     # 由公式生成的表记下「公式 + 参数」，分析模式里可以据此把结果沉淀成 Recipe
     step: dict[str, Any] | None = None
     created_at: float = field(default_factory=time.time)
+    # 表的内容版本与结构化探测记忆独立于对话历史。只有实际重建表才更换版本。
+    revision: str = ""
+    probe_memory: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -138,6 +144,12 @@ class Workspace:
         except duckdb.Error:
             pass
 
+    @contextmanager
+    def locked(self):
+        """对读取版本、分析与保存记忆等复合操作持有同一把可重入锁。"""
+        with self._lock:
+            yield self
+
     def exists(self, name: str) -> bool:
         with self._lock:
             rows = self._run("SELECT count(*) FROM duckdb_tables() WHERE table_name = ? AND schema_name = 'main'", [name])
@@ -188,8 +200,13 @@ class Workspace:
 
     def copy_table(self, source: str, target: str, **meta: Any) -> TableInfo:
         """复制一张表（用于把会话里的表带进运行工作区等场景）。"""
-        self.require(source)
-        return self.create_table_as(target, f"SELECT * FROM {quote_ident(source)}", **meta)
+        from sheetmate.engine.table_memory import copy_table_memory
+
+        with self._lock:
+            source_info = self.require(source)
+            self.create_table_as(target, f"SELECT * FROM {quote_ident(source)}", **meta)
+            copy_table_memory(source_info, self, target)
+            return self.require(target)
 
     def drop(self, name: str) -> None:
         with self._lock:
@@ -197,13 +214,23 @@ class Workspace:
             self._run(f"DELETE FROM {_CATALOG} WHERE name = ?", [name])
 
     def update_meta(self, name: str, **meta: Any) -> TableInfo:
-        info = self.require(name)
-        for key, value in meta.items():
-            if hasattr(info, key):
-                setattr(info, key, value)
         with self._lock:
+            info = self.require(name)
+            for key, value in meta.items():
+                if hasattr(info, key) and key not in {"name", "revision", "probe_memory"}:
+                    setattr(info, key, value)
             self._save_info(info)
         return info
+
+    def save_probe_memory(self, name: str, memory: dict[str, Any], *, expected_revision: str) -> bool:
+        """仅将探测写回同一内容版本，防止分析副本覆盖已经更新的原表记忆。"""
+        with self._lock:
+            info = self.info(name)
+            if info is None or info.revision != expected_revision:
+                return False
+            info.probe_memory = memory
+            self._save_info(info)
+            return True
 
     # ------------------------------------------------------------------
     # 读取
@@ -258,19 +285,21 @@ class Workspace:
         return int(self.fetch(f"SELECT count(*) FROM {quote_ident(name)}")[0][0])
 
     def info(self, name: str) -> TableInfo | None:
-        rows = self.fetch(f"SELECT meta FROM {_CATALOG} WHERE name = ?", [name])
-        if not rows or not self.exists(name):
-            return None
-        return TableInfo.from_dict(json.loads(rows[0][0]))
+        with self._lock:
+            rows = self.fetch(f"SELECT meta FROM {_CATALOG} WHERE name = ?", [name])
+            if not rows or not self.exists(name):
+                return None
+            return self._decode_info(rows[0][0])
 
     def list_tables(self) -> list[TableInfo]:
-        rows = self.fetch(f"SELECT name, meta FROM {_CATALOG}")
-        existing = {
-            r[0] for r in self.fetch("SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'")
-        }
-        infos = [TableInfo.from_dict(json.loads(meta)) for name, meta in rows if name in existing]
-        infos.sort(key=lambda t: t.created_at)
-        return infos
+        with self._lock:
+            rows = self.fetch(f"SELECT name, meta FROM {_CATALOG}")
+            existing = {
+                r[0] for r in self.fetch("SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main'")
+            }
+            infos = [self._decode_info(meta) for name, meta in rows if name in existing]
+            infos.sort(key=lambda t: t.created_at)
+            return infos
 
     # ------------------------------------------------------------------
     # 内部
@@ -278,15 +307,24 @@ class Workspace:
 
     def _register(self, name: str, **meta: Any) -> TableInfo:
         """登记表信息。每次重建表都重新登记（不继承旧表的来源信息，避免张冠李戴）。"""
-        info = TableInfo(name=name)
+        info = TableInfo(name=name, revision=uuid4().hex)
         for key, value in meta.items():
-            if hasattr(info, key) and value is not None:
+            if hasattr(info, key) and value is not None and key not in {"name", "revision", "probe_memory"}:
                 setattr(info, key, value)
         if not info.label:
             info.label = name
         info.columns = self.columns(name)
         info.rows = self.row_count(name)
         self._save_info(info)
+        return info
+
+    def _decode_info(self, meta: str) -> TableInfo:
+        info = TableInfo.from_dict(json.loads(meta))
+        if not info.revision:
+            # 旧工作区无须迁移数据库；第一次访问时补齐稳定、持久的内容版本。
+            info.revision = uuid4().hex
+            info.probe_memory = {}
+            self._save_info(info)
         return info
 
     def _save_info(self, info: TableInfo) -> None:
