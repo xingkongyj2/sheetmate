@@ -38,8 +38,17 @@ class Job:
             self.finished = True
             self._changed.notify_all()
 
-    async def events(self) -> AsyncIterator[dict[str, Any]]:
+    async def events(self, *, snapshot: bool = False) -> AsyncIterator[dict[str, Any]]:
+        """订阅任务；恢复页面时把已有事件一次性发出，再继续实时事件。
+
+        快照和续传游标在同一把锁里取得，避免快照之后、订阅之前产生的事件丢失或重复。
+        """
         cursor = 0
+        if snapshot:
+            async with self._changed:
+                history = list(self._history)
+                cursor = len(history)
+            yield {"type": "stream_snapshot", "events": history}
         while True:
             async with self._changed:
                 await self._changed.wait_for(lambda: cursor < len(self._history) or self.finished)
@@ -136,6 +145,18 @@ class JobManager:
             if job.started:
                 job.task.cancel()
         return True
+
+    async def stop_and_wait(self, keys: list[str]) -> None:
+        """Stop active scoped jobs and wait until they can no longer write resources."""
+        tasks = []
+        for key in set(keys):
+            job = self._jobs.get(key)
+            if job is None or job.finished or job.task is None:
+                continue
+            self.stop(key)
+            tasks.append(job.task)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def shutdown(self) -> None:
         tasks = []

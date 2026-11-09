@@ -13,13 +13,22 @@ interface TextState {
   visible: number
 }
 
-/** Reveal live replies in order, including replies delivered in one final burst. */
-export function useProgressiveReply(source: () => AssistantDisplayGroup[], animate: boolean) {
+interface ProgressiveReplyOptions {
+  /** Existing text on mount was already received before this view opened. */
+  initialVisible?: boolean
+  /** Increment after replacing text with a restored snapshot; future appends still animate. */
+  immediateRevision?: () => number | undefined
+}
+
+/** Reveal new replies in order while displaying restored text immediately. */
+export function useProgressiveReply(source: () => AssistantDisplayGroup[], animate: boolean, options: ProgressiveReplyOptions = {}) {
   // Snapshot text fields: streaming mutates a block in place without changing its array.
   const target = computed(() => source().map((group) => group.kind === 'text' ? { ...group } : group))
   const states = shallowRef(new Map<string, TextState>())
   let timer: ReturnType<typeof setTimeout> | undefined
   let step = MIN_STEP
+  let firstSync = true
+  let previousRevision: number | undefined
 
   const pending = computed(() => animate && target.value.some((group) => {
     if (group.kind !== 'text' || !group.text) return false
@@ -68,23 +77,28 @@ export function useProgressiveReply(source: () => AssistantDisplayGroup[], anima
   }
 
   if (animate) {
-    watch(target, (incoming) => {
+    watch([target, () => options.immediateRevision?.()], ([incoming, revision]) => {
+      const revealAll = (firstSync && options.initialVisible === true) || revision !== previousRevision
+      firstSync = false
+      previousRevision = revision
       const next = new Map<string, TextState>()
       let remaining = 0
       for (const group of incoming) {
         if (group.kind !== 'text') continue
         const previous = states.value.get(group.key)
         let state = previous
-        if (!state || state.text !== group.text) {
+        if (revealAll || !state || state.text !== group.text) {
           const characters = Array.from(segmenter.segment(group.text), ({ segment }) => segment)
           const shown = previous?.characters.slice(0, previous.visible).join('') ?? ''
-          let visible = 0
+          let visible = revealAll ? characters.length : 0
           let offset = 0
           // Final-text corrections retain only the already shown common prefix.
-          for (const character of characters) {
-            if (!shown.startsWith(character, offset)) break
-            offset += character.length
-            visible++
+          if (!revealAll) {
+            for (const character of characters) {
+              if (!shown.startsWith(character, offset)) break
+              offset += character.length
+              visible++
+            }
           }
           state = { text: group.text, characters, visible }
         }

@@ -140,7 +140,7 @@ export const conversationApi = {
   chat: (id: string, body: { message: string; attachments?: string[]; thinking?: boolean }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/conversations/${id}/chat`, body, onEvent),
   events: (id: string, jobId: string, onEvent: (e: AgentEvent) => void) =>
-    getStream(`/conversations/${id}/events?job_id=${encodeURIComponent(jobId)}`, onEvent),
+    getStream(`/conversations/${id}/events?job_id=${encodeURIComponent(jobId)}&snapshot=true`, onEvent),
 }
 
 // ---------------------------------------------------------------- 文件

@@ -35,16 +35,29 @@ logger = logging.getLogger(__name__)
 
 @event.listens_for(Session, "after_commit")
 def _remove_deleted_files(db: Session) -> None:
-    for path in db.info.pop("deleted_file_paths", set()):
+    paths = set(db.info.pop("deleted_file_paths", set())) | set(db.info.pop("deleted_aux_paths", set()))
+    for path in paths:
         try:
             Path(path).unlink(missing_ok=True)
         except OSError:
             logger.warning("无法清理已解除所有关联的文件 %s", path, exc_info=True)
+    for callback in db.info.pop("after_commit_cleanup", []):
+        try:
+            callback()
+        except Exception:
+            logger.warning("提交后清理数据失败", exc_info=True)
 
 
 @event.listens_for(Session, "after_rollback")
 def _cancel_deleted_files(db: Session) -> None:
     db.info.pop("deleted_file_paths", None)
+    db.info.pop("deleted_aux_paths", None)
+    db.info.pop("after_commit_cleanup", None)
+
+
+def defer_after_commit(db: Session, callback) -> None:
+    """Run non-transactional storage cleanup only after the owning DB transaction commits."""
+    db.info.setdefault("after_commit_cleanup", []).append(callback)
 
 KIND_LABELS = {"input": "输入文件", "expected": "期望结果", "output": "生成结果", "doc": "处理说明"}
 _UNSAFE = re.compile(r"[^\w一-鿿.\-()（） ]+")
@@ -455,6 +468,26 @@ def delete_if_unowned(db: Session, record: FileRecord) -> bool:
     if db.scalar(select(FileCustomer.file_id).where(FileCustomer.file_id == record.id).limit(1)):
         return False
     if db.scalar(select(FileConversation.file_id).where(FileConversation.file_id == record.id).limit(1)):
+        return False
+    # 流程输入是独立引用；流程仍存在时，不能回收它使用的原件。
+    if db.scalar(select(FileRecipe.file_id).where(FileRecipe.file_id == record.id).limit(1)):
+        return False
+    if record.run_id and db.scalar(select(Run.id).where(Run.id == record.run_id)) is not None:
+        return False
+
+    def contains_file_id(value: Any) -> bool:
+        if isinstance(value, dict):
+            return value.get("file_id") == record.id or any(contains_file_id(item) for item in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(contains_file_id(item) for item in value)
+        return value == record.id
+
+    # Legacy runs/recipes may hold file IDs in JSON without a normalized link row.
+    if any(record.id in (run.input_file_ids or []) or run.output_file_id == record.id
+           or contains_file_id(run.steps or []) or contains_file_id(run.validation or {})
+           for run in db.scalars(select(Run))):
+        return False
+    if any(contains_file_id(recipe.body or {}) for recipe in db.scalars(select(RecipeRecord))):
         return False
     path = record.stored_path
     db.delete(record)

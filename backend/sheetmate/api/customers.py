@@ -7,12 +7,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from sheetmate.agent.llm import LLMError, get_llm
 from sheetmate.api.deps import current_user
 from sheetmate.db.database import get_db
-from sheetmate.db.models import User
+from sheetmate.db.models import Conversation, Run, User
 from sheetmate.services import customers as customer_service
 from sheetmate.services import files as file_service
 from sheetmate.services import formulas as formula_service
@@ -21,6 +22,7 @@ from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services.auth import require_customer
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
+from sheetmate.services.jobs import jobs
 
 router = APIRouter(prefix="/api/customers", tags=["customers"])
 memories_router = APIRouter(prefix="/api/memories", tags=["memories"])
@@ -96,10 +98,15 @@ def update_customer(customer_id: str, body: CustomerBody, db: Session = Depends(
 
 
 @router.delete("/{customer_id}")
-def delete_customer(customer_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+async def delete_customer(customer_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     customer = require_customer(db, user, customer_id)
     if user.role != "admin" and customer.created_by != user.id:
         raise Forbidden("只有创建者或管理员可以删除客户")
+    conversation_ids = list(db.scalars(select(Conversation.id).where(Conversation.customer_id == customer_id)))
+    run_ids = list(db.scalars(select(Run.id).where(
+        or_(Run.customer_id == customer_id, Run.conversation_id.in_(conversation_ids))
+    ))) if conversation_ids else list(db.scalars(select(Run.id).where(Run.customer_id == customer_id)))
+    await jobs.stop_and_wait([*conversation_ids, *(f"run:{run_id}" for run_id in run_ids)])
     customer_service.delete_customer(db, customer)
     return {"ok": True}
 

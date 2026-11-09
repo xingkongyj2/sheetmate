@@ -176,6 +176,8 @@ export interface UiMessage {
   content: string
   meta: Record<string, unknown>
   streaming: boolean
+  /** 恢复快照后递增：已收到的文字立即显示，随后新增文字继续流式展示。 */
+  replayRevision?: number
   timeline: TimelineItem[]
   artifacts: Artifact[]
   blocks?: AssistantBlock[]
@@ -435,10 +437,37 @@ function argumentErrorKind(e: AgentEvent): 'protocol' | 'schema' | undefined {
 
 /** 把一个事件归并进助手消息（recipe_* 事件交给流程进度对象处理）。 */
 export function applyEvent(msg: UiMessage, e: AgentEvent): void {
+  if (e.type === 'stream_snapshot') {
+    if (Array.isArray(e.events)) restoreStreamSnapshot(msg, e.events)
+    return
+  }
   const timelineStart = msg.timeline.length
   const artifactStart = msg.artifacts.length
   mergeEvent(msg, e)
   appendBlocks(msg, e, timelineStart, artifactStart)
+}
+
+/** 一次恢复到服务端快照的完整状态；随后只追加快照边界之后的新事件。 */
+function restoreStreamSnapshot(msg: UiMessage, events: AgentEvent[]): void {
+  const restored = newAssistant()
+  restored.key = msg.key
+  restored.id = msg.id
+  restored.createdAt = msg.createdAt
+  restored.meta = { ...msg.meta }
+  restored.execution = { status: 'running', code: 'running', summary: '正在处理' }
+  restored.meta.execution = { ...restored.execution }
+  for (const event of events) {
+    if (event && typeof event.type === 'string' && event.type !== 'stream_snapshot') applyEvent(restored, event)
+  }
+  Object.assign(msg, restored, {
+    events: restored.events ?? [],
+    deliveryStatuses: restored.deliveryStatuses,
+    activity: restored.activity,
+    checklist: restored.checklist,
+    audit: restored.audit,
+    error: restored.error,
+    replayRevision: (msg.replayRevision ?? 0) + 1,
+  })
 }
 
 function mergeEvent(msg: UiMessage, e: AgentEvent): void {
@@ -871,10 +900,10 @@ function progressFor(msg: UiMessage, e: AgentEvent): RecipeProgress {
 type StoredMessage = { id: number; role: 'user' | 'assistant'; content: string; events: AgentEvent[]; meta: Record<string, unknown>; created_at: string }
 
 /** 用数据库里的消息重建界面消息 */
-export function fromStored(stored: StoredMessage): UiMessage {
+export function fromStored(stored: StoredMessage, options: { streaming?: boolean } = {}): UiMessage {
   const storedExecution = readExecutionState(stored.meta?.execution)
   const msg: UiMessage = {
-    key: `db_${stored.id}`, id: stored.id, role: stored.role, content: '', meta: { ...stored.meta }, streaming: false,
+    key: `db_${stored.id}`, id: stored.id, role: stored.role, content: '', meta: { ...stored.meta }, streaming: options.streaming === true,
     timeline: [], artifacts: [], blocks: stored.role === 'assistant' ? newAssistant().blocks : [], createdAt: stored.created_at,
   }
   if (stored.role === 'assistant') {
@@ -889,10 +918,13 @@ export function fromStored(stored: StoredMessage): UiMessage {
     const lastText = [...(msg.blocks ?? [])].reverse().find((block) => block.kind === 'text')
     if (replies.join('').trim() !== stored.content.trim() && replies.join('\n\n').trim() !== stored.content.trim() &&
         (lastText?.kind !== 'text' || lastText.text.trim() !== stored.content.trim())) {
-      appendText(msg, stored.content, 'reply', true)
+      // 检查点正文包含已落盘的段落和当前增量；只补末尾尚未写成 reply 的文字。
+      const prefix = replies.join('').trimStart()
+      const missing = options.streaming && stored.content.startsWith(prefix) ? stored.content.slice(prefix.length) : stored.content
+      appendText(msg, missing, 'reply', !options.streaming)
     }
   }
-  finishMessage(msg)
+  if (!options.streaming) finishMessage(msg)
   return msg
 }
 
@@ -912,7 +944,7 @@ export function fromStoredMessages(stored: StoredMessage[], throughMessageId?: n
   return messages
 }
 
-/** 后台 SSE 从首条事件回放；复用已保存助手的身份，清空其快照内容以免重复追加。 */
+/** 先直接展示持久化检查点，再用后台快照补齐全部内容并衔接实时事件。 */
 export function restoreConversationMessages(stored: StoredMessage[], job?: { id: string; message_id: number } | null): { messages: UiMessage[]; assistant?: UiMessage } {
   if (!job) return { messages: fromStoredMessages(stored) }
   const checkpoint = [...stored].reverse().find((item) => item.role === 'assistant' &&
@@ -920,13 +952,7 @@ export function restoreConversationMessages(stored: StoredMessage[], job?: { id:
   const requestIndex = stored.findIndex((item) => item.role === 'user' && item.id === job.message_id)
   const history = requestIndex >= 0 ? stored.slice(0, requestIndex + 1) : stored.filter((item) => item !== checkpoint)
   const messages = fromStoredMessages(history)
-  const assistant = newAssistant()
-  if (checkpoint) {
-    assistant.id = checkpoint.id
-    assistant.key = `db_${checkpoint.id}`
-    assistant.createdAt = checkpoint.created_at
-    assistant.meta = { ...checkpoint.meta }
-  }
+  const assistant = checkpoint ? fromStored(checkpoint, { streaming: true }) : newAssistant()
   assistant.meta.request_message_id = job.message_id
   assistant.meta.job_id = job.id
   assistant.execution = { status: 'running', code: 'reconnecting', summary: '正在恢复执行记录' }

@@ -8,13 +8,14 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.config import settings
-from sheetmate.db.models import Conversation, Customer, Message, RecipeRecord, Run, User
+from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeRecord, Run, User
 from sheetmate.engine.workspace import Workspace, WorkspaceManager
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.services import customers as customer_service
@@ -22,6 +23,8 @@ from sheetmate.services import files as file_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import runs as run_service
+from sheetmate.conversation_log import conversation_log_path
+from sheetmate.engine.script_store import queue_unreferenced_scope_scripts
 from sheetmate.services.auth import require_customer
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
 
@@ -274,15 +277,87 @@ def bind_to_customer(db: Session, conv: Conversation, user: User, *, customer_id
     return customer
 
 
+def _defer_owner_storage_cleanup(db: Session, roots: list[Path]) -> None:
+    """After commit, remove unregistered leftovers while preserving referenced files."""
+    db.flush()
+    preserved = {Path(path).resolve() for path in db.scalars(select(FileRecord.stored_path)) if path}
+
+    def cleanup() -> None:
+        for root in roots:
+            if not root.exists():
+                continue
+            for path in sorted(root.rglob("*"), reverse=True):
+                try:
+                    if path.is_file() and path.resolve() not in preserved:
+                        path.unlink(missing_ok=True)
+                    elif path.is_dir():
+                        path.rmdir()
+                except OSError:
+                    continue
+
+    file_service.defer_after_commit(db, cleanup)
+
+
+def _run_file_ids(run: Run) -> set[str]:
+    ids = set(run.input_file_ids or [])
+    if run.output_file_id:
+        ids.add(run.output_file_id)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            file_id = value.get("file_id")
+            if isinstance(file_id, str):
+                ids.add(file_id)
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(run.steps or [])
+    walk(run.validation or {})
+    return ids
+
+
 def delete_conversation(db: Session, conv: Conversation) -> None:
-    records = file_service.list_files(db, conversation_id=conv.id, available_only=False)
-    conversation_workspaces.delete(conv.id)
+    """Delete a conversation and every resource whose only scope is that conversation."""
+    conversation_id = conv.id
+    records = file_service.list_files(db, conversation_id=conversation_id, available_only=False)
+    run_rows = list(db.scalars(select(Run).where(Run.conversation_id == conversation_id)))
+    run_ids = [run.id for run in run_rows]
+    run_file_ids = {file_id for run in run_rows for file_id in _run_file_ids(run)}
+    run_records = list(db.scalars(select(FileRecord).where(
+        or_(FileRecord.run_id.in_(run_ids), FileRecord.id.in_(run_file_ids))
+    ))) if run_ids or run_file_ids else []
+    all_records = {record.id: record for record in [*records, *run_records]}
+
+    # 运行工作区不是外键，必须在删行前显式关闭并删除。
+    for run in run_rows:
+        file_service.defer_after_commit(db, lambda run_id=run.id: run_service.run_workspaces.delete(run_id))
+    if run_ids:
+        db.execute(delete(Run).where(Run.id.in_(run_ids)))
+
+    # 未绑定客户的流程只属于本会话；绑定客户后的流程由客户资源生命周期管理。
+    local_recipes = list(db.scalars(select(RecipeRecord).where(
+        RecipeRecord.conversation_id == conversation_id, RecipeRecord.customer_id.is_(None)
+    )))
+    for record in local_recipes:
+        db.delete(record)
+
+    file_service.defer_after_commit(db, lambda: conversation_workspaces.delete(conversation_id))
     db.delete(conv)
     db.flush()
-    for record in records:
-        # 数据库已 SET NULL 原始来源；同步 ORM，避免用到删除前的 customer/conversation 缓存。
-        db.refresh(record)
-        file_service.delete_if_unowned(db, record)
+    for record in all_records.values():
+        current = db.get(FileRecord, record.id)
+        if current is not None:
+            db.refresh(current)
+            file_service.delete_if_unowned(db, current)
+
+    # 日志和脚本文件没有数据库外键，跟随对应会话清理。
+    db.info.setdefault("deleted_aux_paths", set()).add(str(conversation_log_path(conversation_id)))
+    queue_unreferenced_scope_scripts(db, conversation_ids={conversation_id})
+    roots = [settings.outputs_dir / f"conv_{conversation_id}", settings.uploads_dir / f"conv_{conversation_id}"]
+    _defer_owner_storage_cleanup(db, roots)
 
 
 def add_message(db: Session, conv: Conversation, role: str, content: str, *, events: list[dict[str, Any]] | None = None,

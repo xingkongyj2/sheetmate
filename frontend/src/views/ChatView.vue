@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
  * 对话页：中间是消息流和输入框，右侧是执行明细。
- * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、执行明细开关。
+ * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和执行明细开关。
  */
-import { LoaderCircle, PanelRight, Pencil, Save } from '@lucide/vue'
+import { ListTree, LoaderCircle, PanelRight, Pencil, Save } from '@lucide/vue'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -49,6 +49,7 @@ const attachments = ref<Attachment[]>([])
 const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
 const recentlyUploaded = ref<FileInfo[]>([])
 const uploadedReferences = ref<TableReference[]>([])
+const checklistOpen = ref(true) // 任务目录默认显示，可用顶部图标隐藏
 const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角打开
 const panelTab = ref<'recipes' | 'files' | 'data'>('recipes')
 const selectedKey = ref<string | null>(null)
@@ -79,6 +80,9 @@ const checklist = computed(() => {
   const last = messages.value.at(-1)
   const items = checklistItems(last)
   return last && items.length ? { key: last.key, items, running: last.streaming } : null
+})
+watch(() => checklist.value?.key, (key) => {
+  if (key) checklistOpen.value = true
 })
 // 消息中的表名只在当前会话里解析；全客户的同名表由执行明细按来源定位。
 const messageTables = computed(() => conversationTables(detail.value?.tables ?? [], props.id))
@@ -300,12 +304,17 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
     if (disposed) return
     received = true
     applyEvent(assistant, event)
-    if (event.type === 'recipe_deleted') markRecipeDeleted(messages.value, event.recipe_id)
-    if (event.type === 'title' && detail.value) {
-      detail.value.title = event.title
-      store.patchConversation(props.id, { title: event.title })
+    const events: AgentEvent[] = event.type === 'stream_snapshot' && Array.isArray(event.events) ? event.events : [event]
+    const title = events.filter((item) => item.type === 'title').at(-1)
+    const deletionTargets = event.type === 'stream_snapshot' ? messages.value.filter((message) => message !== assistant) : messages.value
+    for (const item of events) {
+      if (item.type === 'recipe_deleted') markRecipeDeleted(deletionTargets, item.recipe_id)
     }
-    if (event.type === 'table' || event.type === 'file' || event.type === 'delivery_manifest' || event.type === 'recipes_changed' || event.type === 'recipe_deleted') refreshSide()
+    if (title && detail.value) {
+      detail.value.title = title.title
+      store.patchConversation(props.id, { title: title.title })
+    }
+    if (events.some((item) => ['table', 'file', 'delivery_manifest', 'recipes_changed', 'recipe_deleted'].includes(item.type))) refreshSide()
   })
   handle = currentHandle
   try {
@@ -443,13 +452,26 @@ function answer(option: string) {
           <Save class="size-3.5" />保存到客户
         </button>
 
+        <button
+          v-if="checklist"
+          type="button"
+          class="icon-btn size-7 shrink-0"
+          :class="{ '!bg-paper !text-ink': checklistOpen }"
+          :title="checklistOpen ? '隐藏任务目录' : '显示任务目录'"
+          aria-label="任务目录"
+          :aria-expanded="checklistOpen"
+          aria-controls="task-directory"
+          @click="checklistOpen = !checklistOpen"
+        >
+          <ListTree class="size-4" aria-hidden="true" />
+        </button>
         <button class="icon-btn size-7 shrink-0" :class="{ '!bg-paper !text-ink': panelOpen }" title="执行明细" aria-label="执行明细" @click="panelTab = 'recipes'; panelOpen = !panelOpen">
           <PanelRight class="size-4" />
         </button>
       </header>
 
-      <div class="chat-body min-h-0 flex-1" :class="{ 'has-progress': checklist }">
-      <aside v-if="checklist" class="chat-progress" aria-label="本轮任务进度">
+      <div class="chat-body min-h-0 flex-1">
+      <aside v-if="checklist" v-show="checklistOpen" id="task-directory" class="chat-progress" aria-label="本轮任务进度">
         <TaskChecklist :key="checklist.key" :items="checklist.items" :running="checklist.running" />
       </aside>
 
@@ -559,14 +581,17 @@ function answer(option: string) {
   container: chat-workspace / inline-size;
 }
 .chat-body {
+  position: relative;
+  isolation: isolate;
   display: flex;
   flex-direction: column;
 }
 .chat-progress {
-  width: calc(100% - 3rem);
-  max-width: 632px;
-  flex-shrink: 0;
-  margin: 16px auto 0;
+  position: absolute;
+  top: 24px;
+  right: 20px;
+  z-index: 20;
+  width: min(304px, calc(100% - 40px));
 }
 .chat-messages {
   --chat-message-width: calc(680px - 3rem);
@@ -574,21 +599,5 @@ function answer(option: string) {
   max-width: var(--chat-message-width);
   margin-left: max(4rem, calc((100% - var(--chat-message-width)) / 2));
   margin-right: 1.5rem;
-}
-@container chat-workspace (min-width: 1040px) {
-  .chat-body.has-progress {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 324px;
-    grid-template-rows: minmax(0, 1fr) auto;
-  }
-  .has-progress .chat-progress {
-    grid-column: 2;
-    grid-row: 1 / 3;
-    align-self: start;
-    width: auto;
-    margin: 24px 20px 20px 0;
-  }
-  .has-progress .chat-scroller { grid-column: 1; grid-row: 1; }
-  .has-progress .chat-input { grid-column: 1; grid-row: 2; }
 }
 </style>

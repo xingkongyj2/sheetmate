@@ -7,11 +7,12 @@ import random
 import re
 from typing import Any
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from sheetmate.agent.summarizer import customer_summary, fallback_customer_summary
 from sheetmate.db.database import session_scope
+from sheetmate.config import settings
 from sheetmate.db.models import Conversation, Customer, FileRecord, RecipeProfile, RecipeRecord, Run, User, UserCustomer, now
 from sheetmate.services import files as file_service
 from sheetmate.services import formulas as formula_service
@@ -61,22 +62,48 @@ def update_customer(customer: Customer, data: dict[str, Any], db: Session | None
 
 
 def delete_customer(db: Session, customer: Customer) -> None:
-    """解除客户归属，现存会话继续持有相同的文件原件。"""
-    file_service.retain_customer_files(db, customer.id)
+    """Delete the customer and all conversations/resources owned by it."""
+    # 先删除客户会话，确保消息、会话工作区、会话运行记录都不会悬空。
+    from sheetmate.services import conversations as conversation_service
+    conversations = list(db.scalars(select(Conversation).where(Conversation.customer_id == customer.id)))
+    conversation_ids = {conversation.id for conversation in conversations}
+    from sheetmate.services import conversations as conversation_service
+    for conversation in conversations:
+        conversation_service.delete_conversation(db, conversation)
+
     records = list(db.scalars(select(FileRecord).where(file_service.customer_file_condition(customer.id))))
     for record in records:
+        # 释放客户侧引用；其他客户/会话引用会继续保留原件。
         file_service.release_customer_reference(db, record, customer.id)
-    # 运行与执行快照没有外键自动置空；残留客户 ID 会让会话后续保存流程时外键失败。
-    for run in db.scalars(select(Run).where(Run.customer_id == customer.id)):
-        run.customer_id = None
-        validation = run.validation or {}
-        snapshot = validation.get("recipe_snapshot")
-        if isinstance(snapshot, dict) and snapshot.get("customer_id") == customer.id:
-            run.validation = {**validation, "recipe_snapshot": {**snapshot, "customer_id": None}}
+
+    # 客户级流程记录的 customer_id 是 SET NULL，必须显式删除，避免孤儿版本继续占据 data/app.db。
+    db.execute(delete(RecipeRecord).where(RecipeRecord.customer_id == customer.id))
+
+    # 没有会话归属的客户运行也必须清理运行工作区和运行文件。
+    standalone_runs = list(db.scalars(select(Run).where(Run.customer_id == customer.id)))
+    standalone_run_ids = [run.id for run in standalone_runs]
+    standalone_file_ids = {file_id for run in standalone_runs for file_id in conversation_service._run_file_ids(run)}
+    standalone_run_files = list(db.scalars(select(FileRecord).where(or_(
+        FileRecord.run_id.in_(standalone_run_ids), FileRecord.id.in_(standalone_file_ids)
+    )))) if standalone_run_ids or standalone_file_ids else []
+    for run in standalone_runs:
+        file_service.defer_after_commit(db, lambda run_id=run.id: run_service.run_workspaces.delete(run_id))
+    if standalone_run_ids:
+        db.execute(delete(Run).where(Run.id.in_(standalone_run_ids)))
+
     db.delete(customer)
     db.flush()
-    for record in records:
-        file_service.delete_if_unowned(db, record)
+    for record in {item.id: item for item in [*records, *standalone_run_files]}.values():
+        current = db.get(FileRecord, record.id)
+        if current is not None:
+            db.refresh(current)
+            file_service.delete_if_unowned(db, current)
+
+    from sheetmate.engine.script_store import queue_unreferenced_scope_scripts
+    queue_unreferenced_scope_scripts(db, customer_ids={customer.id}, conversation_ids=conversation_ids)
+    roots = [settings.outputs_dir / customer.id, settings.uploads_dir / customer.id]
+    # 会话目录由 delete_conversation 处理；客户目录在最后一个引用释放后再收缩。
+    conversation_service._defer_owner_storage_cleanup(db, roots)
 
 
 def card(db: Session, customer: Customer) -> dict[str, Any]:

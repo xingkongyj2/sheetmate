@@ -57,6 +57,13 @@ def test_deleting_conversation_reclaims_private_data_and_preserves_shared_file(c
         db.add(run)
         db.flush()
         run_id = run.id
+        run_file_path = tmp_path / "run-output.xlsx"
+        run_file_path.write_bytes(b"run output")
+        run_file = FileRecord(filename=run_file_path.name, stored_path=str(run_file_path),
+                              size=run_file_path.stat().st_size, conversation_id=conversation_id,
+                              run_id=run_id, kind="output", created_by=1)
+        db.add(run_file)
+        db.flush()
         # Leave both DuckDB files open so deletion must also evict cached workspaces.
         conversation_service.workspace(conversation_id).put_dataframe("source", pd.DataFrame({"value": [1]}))
         run_service.run_workspaces.get(run_id).put_dataframe("result", pd.DataFrame({"value": [1]}))
@@ -73,6 +80,7 @@ def test_deleting_conversation_reclaims_private_data_and_preserves_shared_file(c
         assert db.get(FileRecord, private_file.id) is None
         assert db.get(FileRecord, shared_file.id) is not None
         assert db.get(Run, run_id) is None
+        assert db.get(FileRecord, run_file.id) is None
         assert db.scalar(select(RecipeRecord.id).where(RecipeRecord.recipe_id == recipe_id)) is None
         assert db.get(FileConversation, (shared_file.id, other_conversation_id)) is not None
         assert db.get(FileCustomer, (shared_file.id, "missing-customer")) is None
@@ -81,6 +89,7 @@ def test_deleting_conversation_reclaims_private_data_and_preserves_shared_file(c
     assert shared_path.exists()
     assert not conversation_workspace.exists()
     assert not run_workspace.exists()
+    assert not run_file_path.exists()
     assert not trace.path.exists()
 
     # The final conversation reference releasing the file should reclaim its row and disk data.

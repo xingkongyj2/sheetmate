@@ -8,11 +8,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Request, Up
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from sheetmate.api.deps import current_user, sse_response
 from sheetmate.db.database import get_db, session_scope
-from sheetmate.db.models import User
+from sheetmate.db.models import Run, User
 from sheetmate.conversation_log import bind_trace, http_request_data, new_turn, record_event
 from sheetmate.services import chat as chat_service
 from sheetmate.services import conversations as conv_service
@@ -120,14 +121,14 @@ async def get_conversation(conversation_id: str, db: Session = Depends(get_db), 
 
 @router.get("/{conversation_id}/events")
 async def conversation_events(conversation_id: str, job_id: str, request: Request, db: Session = Depends(get_db),
-                              user: User = Depends(current_user)):
+                              user: User = Depends(current_user), snapshot: bool = False):
     conv = conv_service.get_conversation(db, user, conversation_id)
     if conv.customer_id:
         require_customer(db, user, conv.customer_id)
     job = jobs.get(conv.id)
     if job is None or job.id != job_id:
         raise Conflict("任务状态已更新，请重新加载对话")
-    return sse_response(job)
+    return sse_response(job, snapshot=snapshot)
 
 
 @router.put("/{conversation_id}")
@@ -138,9 +139,10 @@ def update_conversation(conversation_id: str, body: UpdateBody, db: Session = De
 
 
 @router.delete("/{conversation_id}")
-def delete_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+async def delete_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     conv = conv_service.get_conversation(db, user, conversation_id)
-    jobs.stop(conversation_id)
+    run_ids = list(db.scalars(select(Run.id).where(Run.conversation_id == conversation_id)))
+    await jobs.stop_and_wait([conversation_id, *(f"run:{run_id}" for run_id in run_ids)])
     conv_service.delete_conversation(db, conv)
     return {"ok": True}
 

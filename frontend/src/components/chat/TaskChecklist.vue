@@ -1,6 +1,6 @@
 <script setup lang="ts">
-/** 思考模式的进度卡：步骤和结果各用一句短文，完成后保留小结，由用户控制展开。 */
-import { Check, ChevronDown, CircleAlert, CircleHelp, LoaderCircle, Pause } from '@lucide/vue'
+/** 思考模式的进度卡：步骤和结果各用一句短文，显示开关由聊天页顶部控制。 */
+import { Check, CircleAlert, CircleHelp, LoaderCircle, Pause } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { checklistSummary, type ChecklistItem } from '@/composables/thinkingPresentation'
@@ -8,7 +8,6 @@ import { checklistSummary, type ChecklistItem } from '@/composables/thinkingPres
 const props = defineProps<{ items: ChecklistItem[]; running: boolean }>()
 
 const summary = computed(() => checklistSummary(props.items, props.running))
-const expanded = ref(typeof window === 'undefined' || !window.matchMedia('(max-height: 600px)').matches)
 const list = ref<HTMLElement | null>(null)
 let currentRow: HTMLElement | null = null
 let resizeObserver: ResizeObserver | undefined
@@ -16,16 +15,16 @@ const currentKey = computed(() => props.items.find((item) => item.status === 'ru
 
 // 只滚动清单自己，避免新步骤把聊天正文带走。
 async function keepCurrentVisible() {
-  if (!currentKey.value || !expanded.value) return
+  if (!currentKey.value) return
   await nextTick()
   const box = list.value
   const row = currentRow
-  if (!box || !row) return
+  if (!box || !row || !box.clientHeight) return
   const top = row.offsetTop - box.offsetTop
   if (top < box.scrollTop) box.scrollTop = top
   else if (top + row.offsetHeight > box.scrollTop + box.clientHeight) box.scrollTop = top + row.offsetHeight - box.clientHeight
 }
-watch([currentKey, expanded], keepCurrentVisible, { immediate: true })
+watch(currentKey, keepCurrentVisible, { immediate: true })
 onMounted(() => {
   if (typeof ResizeObserver === 'undefined' || !list.value) return
   resizeObserver = new ResizeObserver(() => { void keepCurrentVisible() })
@@ -49,20 +48,13 @@ const LABELS: Record<string, string> = {
     aria-label="任务进度"
     data-testid="task-checklist"
   >
-    <button
-      type="button"
-      class="flex w-full items-center gap-2 px-4 py-3 text-left focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ink"
-      :aria-expanded="expanded"
-      aria-label="展开或收起任务进度"
-      @click="expanded = !expanded"
-    >
+    <div class="flex items-center gap-2 px-4 py-3">
       <span class="shrink-0 text-[13px] font-medium text-mute">进度</span>
       <span class="shrink-0 text-[11px] tabular-nums text-faint">{{ summary.done }}/{{ summary.total }}</span>
-      <span class="min-w-0 flex-1 truncate text-[11px] text-faint" aria-live="polite">{{ expanded && running ? '进行中' : summary.label }}</span>
-      <ChevronDown class="size-3.5 shrink-0 text-faint transition-transform" :class="{ 'rotate-180': !expanded }" aria-hidden="true" />
-    </button>
+      <span class="min-w-0 flex-1 truncate text-[11px] text-faint" aria-live="polite">{{ running ? '进行中' : summary.label }}</span>
+    </div>
 
-    <ol v-show="expanded" ref="list" class="task-checklist-list overflow-y-auto px-4 pb-3">
+    <ol ref="list" class="task-checklist-list overflow-y-auto px-4 pb-3">
       <li
         v-for="item in items"
         :key="item.key"

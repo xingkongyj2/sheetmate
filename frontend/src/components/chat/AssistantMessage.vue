@@ -74,10 +74,11 @@ const replyGroups = computed<AssistantDisplayGroup[]>(() => [
   ...groups.value,
   ...(fallbackReply.value ? [{ kind: 'text' as const, key: `${props.message.key}_fallback`, text: fallbackReply.value, closed: !props.message.streaming }] : []),
 ])
-// Stored replies render immediately; a new reply can already be complete before its first render.
+// Previously received text is immediate; only newly streamed text reveals progressively.
 const { groups: displayGroups, pending: revealing } = useProgressiveReply(
   () => replyGroups.value,
   (props.message.streaming || props.message.id == null) && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+  { initialVisible: props.message.id != null, immediateRevision: () => props.message.replayRevision },
 )
 const typing = computed(() => props.message.streaming || revealing.value)
 const activity = computed(() => {

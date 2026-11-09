@@ -102,6 +102,11 @@ def _file_name(conversation_id: str) -> str:
     return "conversation-" + sha256(conversation_id.encode()).hexdigest() + ".log"
 
 
+def conversation_log_path(conversation_id: str) -> Path:
+    """Return the deterministic trace path for a conversation."""
+    return settings.logs_dir / _file_name(conversation_id)
+
+
 @dataclass
 class ConversationTrace:
     conversation_id: str
@@ -182,7 +187,7 @@ def _find_marker(stream: Any, size: int, marker: bytes) -> int | None:
 
 def new_turn(conversation_id: str, *, turn_id: str | None = None) -> ConversationTrace:
     return ConversationTrace(conversation_id, turn_id or uuid4().hex,
-                             settings.logs_dir / _file_name(conversation_id), _fresh=turn_id is None)
+                             conversation_log_path(conversation_id), _fresh=turn_id is None)
 
 
 def current_trace() -> ConversationTrace | None:
