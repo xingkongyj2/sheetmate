@@ -1,9 +1,10 @@
-import type { PlanStatus, RecipeProgress, RecipeViewArtifact, TimelineItem, UiMessage } from './chatModel'
+import type { PlanStatus, RecipeProgress, RecipeViewArtifact, UiMessage } from './chatModel'
 import { deliveredFiles, standaloneFiles, type FilePresentationContext } from './filePresentation'
 import { recipeViewReply } from './recipeViewPresentation'
 import { recipeDeliveries } from './recipeDeliveries'
 import { progressFlow } from './recipeFlow'
 import { toolPresentation, userFacingSummary, userFacingText } from './timelinePresentation'
+import { shortStepText, stepSummary } from './thinkingPresentation'
 
 export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
   pending: '待执行', running: '执行中', done: '已完成', warning: '需核对', waiting: '待确认', error: '失败', stopped: '已停止',
@@ -12,12 +13,10 @@ export const PLAN_STATUS_LABELS: Record<PlanStatus, string> = {
 export function planSteps(message: UiMessage) {
   return message.timeline.flatMap((item) => {
     if (item.kind !== 'plan') return []
-    const notes = message.timeline.filter((entry): entry is Extract<TimelineItem, { kind: 'note' }> =>
-      entry.kind === 'note' && entry.step === item.num)
-    const summary = item.summary ?? notes.at(-1)?.text ?? ''
     const status = item.status === 'pending' && !message.streaming ? '未执行' : PLAN_STATUS_LABELS[item.status]
     const calls = message.timeline.filter((entry) => entry.kind === 'tool' && entry.step === item.num).length
-    return [{ ...item, summary, statusLabel: status, calls }]
+    return [{ ...item, description: shortStepText(item.description, `第 ${item.num} 项`),
+      summary: stepSummary(message, item), statusLabel: status, calls }]
   }).sort((left, right) => left.num - right.num)
 }
 

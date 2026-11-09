@@ -1,15 +1,16 @@
 /**
- * 思考模式的展示：输入框上方的任务清单、回答下面的核对小标识。
+ * 思考模式的展示：右侧任务进度卡、回答下面的核对小标识。
  *
- * 都是纯函数：AI 根据展示整体进度的价值决定要不要列清单，后端把决定写在 plan_start.checklist 里，与步骤数无关；这里只负责整理界面数据。
+ * 都是纯函数：后端通过 plan_start.checklist 控制进度卡；这里只整理简短展示文字，保留原始执行记录。
  */
-import type { AuditResult, PlanStatus, UiMessage } from './chatModel'
+import type { AuditResult, PlanStatus, TimelineItem, UiMessage } from './chatModel'
 import { userFacingText } from './timelinePresentation'
 
 export interface ChecklistItem {
   key: string
   num: number
   description: string
+  summary: string
   status: PlanStatus
 }
 
@@ -23,12 +24,50 @@ export interface ChecklistSummary {
   tone: ChecklistTone
 }
 
-/** 要在输入框上方列任务清单的那条助手消息的各项；后端没有要求展示时返回空数组。 */
+export const STEP_TEXT_LIMIT = 30
+
+/** Compact display text only; the original plan and execution records stay intact. */
+export function shortStepText(value: string | undefined, fallback = ''): string {
+  const source = (value ?? '')
+    .replace(/^\s*(?:[-*+]\s*)?\[[ xX]\]\s*/gm, '')
+    .replace(/^\s*(?:#{1,6}|>+|[-*+]|\d+[.)、])\s+/gm, '')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+  const text = userFacingText(source, fallback, source.length)
+    .replace(/(`+)([^`]*?)\1/g, '$2')
+    .replace(/\*\*|__|~~|\*|_/g, '')
+    .replace(/<[^>]*>/g, '')
+    .replace(/\s+/g, ' ').trim() || fallback
+  const characters = Array.from(text)
+  return characters.length > STEP_TEXT_LIMIT
+    ? `${characters.slice(0, STEP_TEXT_LIMIT - 1).join('')}…`
+    : text
+}
+
+const STEP_SUMMARY_FALLBACK: Record<PlanStatus, string> = {
+  pending: '等待执行', running: '正在处理', done: '本步骤已完成', warning: '已处理，仍需核对',
+  waiting: '等待确认后继续', error: '本步骤未完成', stopped: '本步骤已停止',
+}
+
+/** Old completed steps may only have a note; other states must not inherit a success note. */
+export function stepSummary(message: UiMessage, item: Extract<TimelineItem, { kind: 'plan' }>): string {
+  const fallback = STEP_SUMMARY_FALLBACK[item.status]
+  if (item.status === 'pending' || item.status === 'running') return fallback
+  const summary = shortStepText(item.summary)
+  if (summary) return summary
+  if (item.status === 'done') {
+    const note = [...message.timeline].reverse().find((entry) => entry.kind === 'note' && entry.step === item.num)
+    if (note?.kind === 'note') return shortStepText(note.text, fallback)
+  }
+  return fallback
+}
+
+/** 当前助手消息的进度项；旧记录没有启用清单时返回空数组。 */
 export function checklistItems(message: UiMessage | undefined): ChecklistItem[] {
   if (!message || message.role !== 'assistant' || !message.checklist) return []
   return message.timeline.flatMap((item): ChecklistItem[] => item.kind === 'plan'
-    ? [{ key: item.key, num: item.num, description: userFacingText(item.description, `第 ${item.num} 项`, 120), status: item.status }]
-    : [])
+    ? [{ key: item.key, num: item.num, description: shortStepText(item.description, `第 ${item.num} 项`),
+      summary: stepSummary(message, item), status: item.status }]
+    : []).sort((left, right) => left.num - right.num)
 }
 
 const FINISHED: ReadonlySet<PlanStatus> = new Set(['done', 'warning'])

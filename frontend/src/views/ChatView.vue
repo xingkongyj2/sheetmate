@@ -74,7 +74,7 @@ const selectedMessage = computed(() => {
   return assistants.find((m) => m.key === selectedKey.value) ?? assistants[assistants.length - 1] ?? null
 })
 const customer = computed(() => detail.value?.customer ?? null)
-// AI 决定是否展示任务清单，后端通过事件传递决定
+// 思考模式的进度跟随本轮助手消息，刷新后也可恢复步骤总结。
 const checklist = computed(() => {
   const last = messages.value.at(-1)
   const items = checklistItems(last)
@@ -408,7 +408,7 @@ function answer(option: string) {
 
 <template>
   <div class="flex h-full min-h-0">
-    <div class="flex min-w-0 flex-1 flex-col">
+    <div class="chat-workspace flex min-w-0 flex-1 flex-col">
       <!-- 顶部 -->
       <header class="flex h-11 shrink-0 items-center gap-2 border-b border-line px-4">
         <div class="min-w-0 flex-1">
@@ -448,8 +448,13 @@ function answer(option: string) {
         </button>
       </header>
 
+      <div class="chat-body min-h-0 flex-1" :class="{ 'has-progress': checklist }">
+      <aside v-if="checklist" class="chat-progress" aria-label="本轮任务进度">
+        <TaskChecklist :key="checklist.key" :items="checklist.items" :running="checklist.running" />
+      </aside>
+
       <!-- 消息 -->
-      <div ref="scroller" class="min-h-0 flex-1 overflow-y-auto" @scroll.passive="onChatScroll">
+      <div ref="scroller" class="chat-scroller min-h-0 flex-1 overflow-y-auto" @scroll.passive="onChatScroll">
         <div ref="content" class="chat-messages pb-6 pt-8">
           <div v-if="loading" class="flex justify-center py-20 text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
 
@@ -494,9 +499,8 @@ function answer(option: string) {
       </div>
 
       <!-- 输入框 -->
-      <div class="mx-auto w-full max-w-[680px] shrink-0 px-6 pb-5">
+      <div class="chat-input mx-auto w-full max-w-[680px] shrink-0 px-6 pb-5">
         <div class="w-full">
-          <TaskChecklist v-if="checklist" :key="checklist.key" :items="checklist.items" :running="checklist.running" />
           <div class="relative z-10">
           <ChatComposer
             ref="composer"
@@ -520,6 +524,7 @@ function answer(option: string) {
           </div>
           <p class="mt-2 text-center text-[11px] text-faint">AI 生成的结果可能存在错误，请核对重要数据后再使用</p>
         </div>
+      </div>
       </div>
     </div>
 
@@ -550,11 +555,40 @@ function answer(option: string) {
 </template>
 
 <style scoped>
+.chat-workspace {
+  container: chat-workspace / inline-size;
+}
+.chat-body {
+  display: flex;
+  flex-direction: column;
+}
+.chat-progress {
+  width: calc(100% - 3rem);
+  max-width: 632px;
+  flex-shrink: 0;
+  margin: 16px auto 0;
+}
 .chat-messages {
   --chat-message-width: calc(680px - 3rem);
   width: calc(100% - 5.5rem);
   max-width: var(--chat-message-width);
   margin-left: max(4rem, calc((100% - var(--chat-message-width)) / 2));
   margin-right: 1.5rem;
+}
+@container chat-workspace (min-width: 1040px) {
+  .chat-body.has-progress {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 324px;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  .has-progress .chat-progress {
+    grid-column: 2;
+    grid-row: 1 / 3;
+    align-self: start;
+    width: auto;
+    margin: 24px 20px 20px 0;
+  }
+  .has-progress .chat-scroller { grid-column: 1; grid-row: 1; }
+  .has-progress .chat-input { grid-column: 1; grid-row: 2; }
 }
 </style>

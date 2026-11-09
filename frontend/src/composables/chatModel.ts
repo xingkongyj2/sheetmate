@@ -185,7 +185,7 @@ export interface UiMessage {
   deliveryStatuses?: Record<string, FileDeliveryStatus>
   /** 此刻在做什么；整轮执行中的通用回复提示由消息组件兜底。 */
   activity?: string
-  /** 思考模式：AI 决定是否在输入框上方列任务清单，与步骤数无关。 */
+  /** 思考模式：后端事件启用本轮进度卡，与步骤数无关。 */
   checklist?: boolean
   /** 思考模式：回答核对的结果。 */
   audit?: AuditResult
@@ -777,6 +777,10 @@ function appendBlocks(msg: UiMessage, e: AgentEvent, timelineStart: number, arti
     return
   }
   if (e.type === 'step_done') {
+    if (e.quiet) {
+      closeBlock(msg)
+      return
+    }
     const summary = e.summary?.trim()
     const lastText = [...(msg.blocks ?? [])].reverse().find((block) => block.kind === 'text')
     if (summary && lastText?.kind === 'text' && lastText.text.trim() === summary) closeBlock(msg)

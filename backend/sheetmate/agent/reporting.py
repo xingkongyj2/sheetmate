@@ -110,6 +110,55 @@ def public_sentence(text: str, limit: int = 160) -> str:
     return value if len(value) <= limit else value[: limit - 1] + "…"
 
 
+STEP_TEXT_LIMIT = 30
+
+
+def short_step_text(text: str, *, fallback: str = "", limit: int = STEP_TEXT_LIMIT) -> str:
+    """步骤面板和过程小结的一句短文；完整指令及执行证据由调用方另外保存。"""
+    value = tidy_report(text or "")
+    # 正文优先于标题；代码、表格不适合直接裁成给用户看的步骤摘要。
+    lines: list[str] = []
+    headings: list[str] = []
+    fenced = False
+    for line in value.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        if fenced or line.lstrip().startswith("|"):
+            continue
+        if re.match(r"^\s*#{1,6}\s+", line):
+            headings.append(re.sub(r"^\s*#{1,6}\s+", "", line))
+        else:
+            lines.append(line)
+    value = "\n".join([*lines, *headings])
+    value = re.sub(r"!?(?:\[([^\]]+)\])\([^\n)]*\)", r"\1", value)
+    value = re.sub(r"(?<!\w)[*_]{1,3}|[*_]{1,3}(?!\w)|`", "", value)
+    candidates = re.split(r"[\n。；;]+", value)
+    for candidate in candidates:
+        candidate = re.sub(r"^\s*(?:>\s*|[-+•]\s*|\d+[.、)]\s*)+", "", candidate)
+        shown = public_sentence(candidate, max(1, limit))
+        if shown:
+            return shown
+    return public_sentence(fallback, max(1, limit))
+
+
+def step_summary(status: str, *, report: str = "", checked: str = "", reason: str = "",
+                 issues: list[str] | tuple[str, ...] = ()) -> str:
+    """每个步骤的实际状态摘要，最多 30 字；未完成状态不会沿用成功话术。"""
+    if status == "done":
+        return short_step_text(checked or report, fallback="本项处理已完成")
+    prefix, fallback = {
+        "warning": ("待核实：", "本项结果尚未全部确认"),
+        "error": ("处理失败：", "本项未能完成"),
+        "waiting": ("待确认：", "请补充本项业务口径"),
+        "cancelled": ("已停止：", "本项处理已停止"),
+        "interrupted": ("已中断：", "本项处理尚未完成"),
+    }.get(status, ("待处理：", "本项处理尚未完成"))
+    detail = short_step_text(reason or (issues[0] if issues else ""), fallback=fallback,
+                             limit=STEP_TEXT_LIMIT - len(prefix))
+    return prefix + detail
+
+
 def quote(text: str) -> str:
     """整段放进引用块：界面里是带竖线的弱化文字，和正文区分开。"""
     return "\n".join(f"> {line}" if line.strip() else ">" for line in text.splitlines())

@@ -3,8 +3,7 @@
 - data_brief：规划前的数据勘察——每张表真实的列类型、空值率、样本、候选主键和重复键（只读、不用大模型）
 - make_plan / review_plan：思考模式的计划。先按数据画像起草（理解、默认口径、风险、每一项的说明和验收标准），
   再让大模型审查一轮，补遗漏、纠顺序、核对列名；全程不需要用户确认
-- 规划模型通过 show_plan 判断是否向用户展示任务清单，审查模型可以调整该判断；
-  展示清单时在最后回顾每一项，不再按步骤数量决定是否展示
+- 思考模式统一展示紧凑任务清单；规划和审查模型通过 show_plan 判断最终回答是否逐项回顾
 - check_clarification：判断需求是否有真正的歧义，有就给选项（TabClaw 保留，/clarify 接口使用）
 
 规划和审查都可以降级：大模型调用失败或返回的内容无法使用时，退回兜底计划 / 保留原计划，不会让整次请求失败。
@@ -24,7 +23,7 @@ from sheetmate.agent.contracts import PLAN_REVIEW_SCHEMA, PLAN_SCHEMA
 from sheetmate.agent.executor import build_system_prompt
 from sheetmate.agent.llm import LLMError, aux_json
 from sheetmate.agent.prompts import CLARIFY_PROMPT, THINK_PLAN_SYSTEM, THINK_REVIEW_SYSTEM
-from sheetmate.agent.reporting import public_sentence, strip_step_label
+from sheetmate.agent.reporting import public_sentence, short_step_text, strip_step_label
 from sheetmate.agent.tools import AgentContext
 from sheetmate.engine.analysis import table_info
 from sheetmate.engine.sqlutil import frame_to_text
@@ -110,7 +109,7 @@ class Plan:
     assumptions: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     steps: list[dict[str, Any]] = field(default_factory=list)  # {"id", "description", "check"}
-    show_plan: bool = False  # 规划/审查模型判断是否展示任务清单，未给出有效判断时隐藏
+    show_plan: bool = False  # 规划/审查模型判断最终回答是否逐项回顾
     reviewed: bool = False  # 审查确实执行并给出了结论
     changes: list[str] = field(default_factory=list)  # 审查时发现并修订的问题
     fallback: bool = False  # 规划失败后的兜底计划
@@ -134,7 +133,7 @@ class Plan:
         lines.append("步骤：\n" + "\n".join(steps))
         return "\n".join(lines)
 
-    # ---- 展示：任务清单由模型决定，每项说明保留简洁表达
+    # ---- 展示：面板每项只保留简短说明，完整业务指令仍在 steps 里
     @property
     def narrated(self) -> bool:
         """两项以上、且不是兜底计划：每一项开始时向用户说一句现在要做什么。只有一项时说了也只是重复需求。"""
@@ -142,7 +141,7 @@ class Plan:
 
     @property
     def checklist(self) -> bool:
-        """按模型判断展示任务清单和最终回顾；规划失败的兜底计划不展示。"""
+        """按模型判断是否在最终回答逐项回顾；兜底计划不回顾。"""
         return self.show_plan and not self.fallback
 
     @property
@@ -159,13 +158,18 @@ class Plan:
             if text and not _CONNECTOR.match(text) and len(self.steps) >= 2:
                 text = ("先" if num == 1 else "最后" if num == len(self.steps) else "接着") + text
         text = text.rstrip("。；;，, ")
+        text = short_step_text(text, limit=29)
         return f"{text}。" if text else ""
+
+    def display_description(self, num: int) -> str:
+        """面板只用短描述，执行助手仍读取 steps 中的完整业务指令。"""
+        return short_step_text(self.steps[num - 1]["description"], fallback="处理本项需求")
 
     def doing(self, num: int) -> str:
         """第 num 项进行中时「正在做什么」的短句（界面上随进度闪动的那一行）。"""
         text = _CONNECTOR.sub("", strip_step_label(self.steps[num - 1]["description"])).strip().rstrip("。；;，, ")
-        text = text if len(text) <= 40 else text[:39] + "…"
-        return f"正在{text}" if text and not text.startswith("正在") else text or "正在处理"
+        text = f"正在{text}" if text and not text.startswith("正在") else text or "正在处理"
+        return short_step_text(text, fallback="正在处理")
 
     def review_line(self) -> str:
         """计划审查的结果，如实写：审查没有做成就说没有做成，不能让用户以为审过了。"""
@@ -177,7 +181,7 @@ class Plan:
 
     def intro(self) -> str:
         """开场白（给用户看）：怎么理解的需求、按什么口径做、数据里要留意什么、计划审查的结果。
-        模型决定展示清单时，具体做哪几项由输入框上方的清单展示，这里不再重复列一遍；没有内容时返回空字符串。"""
+        具体做哪几项由进度清单展示，这里不重复列一遍；没有内容时返回空字符串。"""
         if self.fallback:
             why = public_sentence(self.reason, 80)
             return f"没能制定详细计划{f'（{why}）' if why else ''}，先按通用步骤处理。"
@@ -204,7 +208,7 @@ _CONNECTOR = re.compile(r"^(先|首先|然后|接着|接下来|再|之后|随后
 
 
 def plan_from_steps(steps: list[dict[str, Any]]) -> Plan:
-    """调用方自带步骤时仍执行和核对；跳过了模型规划，没有展示判断时默认隐藏清单。"""
+    """调用方自带步骤时仍执行和核对；跳过模型规划，最终回答默认不逐项回顾。"""
     return Plan(steps=_clean_steps(steps) or [{"id": 1, "description": "完成需求", "check": ""}])
 
 

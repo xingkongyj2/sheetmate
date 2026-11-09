@@ -12,8 +12,8 @@
 
 给用户看的内容像同事边做边讲，不是「第 N 步」的报告：
 - 开场白：对需求的理解、默认口径、数据里要留意的、计划审查的结果；
-- 每一项开始前一句话说明现在要做什么（两项及以上），做完一两句汇报，再跟一行核对结果（引用块）；
-- 规划和审查由 AI 判断展示整体进度是否有价值（show_plan），与步骤数无关；选择展示时在输入框上方列任务清单（plan_start.checklist），最后回顾每一项，否则保持简洁；
+- 每项说明和收尾总结均不超过 30 字；完整业务指令和执行证据留给执行与最终核对；
+- 思考模式固定展示紧凑进度清单（plan_start.checklist）；AI 的 show_plan 判断只控制最终回答是否逐项回顾；
 - 过程中大模型在忙、界面上没有别的变化时，用 activity 事件告诉用户当前在做什么（临时状态，不存库）；
 - 回答核对的结果（audit_done）是结构化事件，界面在回答下面显示为一行小标识，不追加进回答文字。
 所有辅助调用都有时限、都可以降级：超时、调用失败或返回无法解析的内容时，退回到更简单的做法，
@@ -47,7 +47,7 @@ from sheetmate.agent.prompts import (
     THINK_TASK_MESSAGE,
     THINK_VERIFY_SYSTEM,
 )
-from sheetmate.agent.reporting import grounded, public_sentence, step_check_note, tidy_report
+from sheetmate.agent.reporting import grounded, public_sentence, short_step_text, step_summary, tidy_report
 from sheetmate.agent.tools import AgentContext
 
 log = logging.getLogger(__name__)
@@ -317,7 +317,9 @@ async def _stream(executor: AgentExecutor, messages: list[dict[str, Any]], tools
             continue
         if kind == "note" and step is not None:
             run.text = ""
-            yield {**event, "step_num": step, "content": tidy_report(event.get("content", ""))}
+            content = short_step_text(event.get("content", ""))
+            if content:
+                yield {**event, "step_num": step, "content": content}
             continue
         run.observe(event, ledger)
         yield event
@@ -351,13 +353,14 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     if intro:
         yield _note(intro)
     total = len(plan.steps)
-    # checklist 沿用事件字段名，其值来自 AI 的 show_plan 展示决定，界面只管显示
-    yield {"type": "plan_start", "title": plan.title, "checklist": plan.checklist,
-           "steps": [{"id": s["id"], "description": s["description"]} for s in plan.steps]}
+    # 开启思考模式即显示紧凑进度；show_plan 仅影响最终回答是否逐项回顾。
+    yield {"type": "plan_start", "title": plan.title, "checklist": bool(plan.steps),
+           "steps": [{"id": s["id"], "description": plan.display_description(index)}
+                     for index, s in enumerate(plan.steps, 1)]}
 
     # ---- 3. 逐项执行并核对
     tools = executor.registry.for_context(ctx)
-    seen = "用户已经看到任务清单中的计划大纲。" if plan.checklist else "本轮不展示任务清单，不必额外复述完整计划。"
+    seen = "用户已经看到进度面板中的简短步骤，不必复述完整计划。"
     if plan.narrated:
         seen += "每一项开始时也会看到一句说明。"
     conversation: list[dict[str, Any]] = [
@@ -373,7 +376,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         executed = num
         description = step["description"]
         doing = plan.doing(num)
-        yield {"type": "step_start", "step_num": num, "total": total, "description": description, "quiet": True}
+        yield {"type": "step_start", "step_num": num, "total": total,
+               "description": plan.display_description(num), "quiet": True}
         lead = plan.lead_in(num) if plan.narrated else ""
         if lead:
             yield _note(lead, num)  # 这一项开始前先说一句现在要做什么
@@ -424,14 +428,12 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                 if verdict.timed_out:
                     health.degraded = True  # 模型服务卡住时，后面的核对不再各等一轮
             retry = not verdict.skipped and not verdict.passed and attempt < MAX_STEP_FIXES and not exhausted
-            # 给用户看：这一项的汇报，紧跟一行核对结果
+            # 完整报告用于后续执行与核对，面板稍后只展示一行摘要。
             report = tidy_report(run.text)
-            check = step_check_note(passed=None if verdict.skipped else verdict.passed, checked=verdict.checked,
-                                    issues=verdict.issues, retry=retry, reason=verdict.reason)
-            # 要补做时，这一轮有问题的汇报不展示（免得用户先看到一个可能不对的数字），只说发现了什么
-            body = check if retry else "\n\n".join(part for part in (report, check) if part)
-            if body:
-                yield _note(body, num)
+            # 要补做时不展示有问题的数字；完整报告和核对证据仍留在执行对话里。
+            if retry:
+                issue = short_step_text(verdict.issues[0] if verdict.issues else "结果与预期不符", limit=20)
+                yield _note(short_step_text(f"正在补充：{issue}"), num)
             if not verdict.skipped:
                 yield {"type": "step_check", "step_num": num, "passed": verdict.passed, "issues": verdict.issues,
                        "retry": retry, "checked": verdict.checked}
@@ -448,17 +450,26 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
             yield _activity(doing)
 
         if run.failed:
-            yield {"type": "step_done", "step_num": num, "status": "error", "summary": run.error}
+            summary = step_summary("error", reason=run.error)
+            yield _note(summary, num)
+            yield {"type": "step_done", "step_num": num, "status": "error", "summary": summary, "quiet": True}
             return
         if run.waiting:
-            yield {"type": "step_done", "step_num": num, "status": "waiting", "summary": run.question}
+            summary = step_summary("waiting", reason=run.question)
+            yield _note(summary, num)
+            yield {"type": "step_done", "step_num": num, "status": "waiting", "summary": summary, "quiet": True}
             return
         ledger.summaries[num] = report + (f"\n（核对仍有问题：{'；'.join(verdict.issues[:3])}）" if not verdict.passed and verdict.issues else "")
         ledger.checks.append((public_sentence(description, 60) or f"第 {num} 项",
                               _record_line(step_digest=step_digest, verdict=verdict, retried=retried, first_issues=first_issues)))
-        status = "warning" if run.incomplete or run.unresolved or not verdict.passed or exhausted else "done"
-        # 汇报和核对结果已经作为正文发出，step_done 只带状态（界面据此给清单打勾）
-        yield {"type": "step_done", "step_num": num, "status": status, "summary": ""}
+        status = "warning" if (run.incomplete or run.unresolved or not verdict.passed or exhausted
+                               or (verdict.skipped and verdict.reason)) else "done"
+        summary = step_summary(status, report=report,
+                               checked=verdict.checked if not verdict.skipped else "",
+                               reason=verdict.reason,
+                               issues=verdict.issues)
+        yield _note(summary, num)
+        yield {"type": "step_done", "step_num": num, "status": status, "summary": summary, "quiet": True}
         if exhausted or run.incomplete:
             break
         carry = verdict.carry_over
@@ -468,7 +479,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     yield _activity("正在整理结论")
     conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}
     record = check_record(plan, ledger)
-    template = THINK_REFLECT_MESSAGE if plan.checklist else THINK_REFLECT_MESSAGE_SMALL  # 过程回顾沿用计划展示决定
+    template = THINK_REFLECT_MESSAGE if plan.checklist else THINK_REFLECT_MESSAGE_SMALL
     reflect = template.format(message=message, total=executed, record=record)
     if executed < total:
         reflect += f"\n计划中还有 {total - executed} 个步骤未执行，不得称已完成。"

@@ -20,9 +20,9 @@ const completed = computed(() => steps.value.filter((step) => step.status === 'd
     <ol class="divide-y divide-line px-4">
       <li v-for="step in steps" :key="step.key" class="py-3.5">
         <div class="flex items-start gap-2.5">
-          <span class="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-paper text-[11px] font-semibold">
+          <span class="mt-0.5 flex size-5 shrink-0 items-center justify-center text-[11px] font-semibold" :class="step.status === 'done' ? 'rounded-[6px] bg-ink text-white' : 'rounded-full bg-paper'">
             <LoaderCircle v-if="step.status === 'running'" class="size-3.5 animate-spin text-info" />
-            <Check v-else-if="step.status === 'done'" class="size-3.5 text-success" />
+            <Check v-else-if="step.status === 'done'" class="size-3.5" :stroke-width="3" />
             <CircleAlert v-else-if="step.status === 'error' || step.status === 'warning'" class="size-3.5" :class="step.status === 'error' ? 'text-error' : 'text-[#9a6b00]'" />
             <CircleHelp v-else-if="step.status === 'waiting'" class="size-3.5 text-[#9a6b00]" />
             <Pause v-else-if="step.status === 'stopped'" class="size-3 text-mute" />
