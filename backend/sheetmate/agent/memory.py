@@ -2,7 +2,7 @@
 
 - preferences       偏好（总是注入，例如「金额保留两位小数」）
 - domain_knowledge  业务规则（例如「匹配不到归属的店铺记为新食研」）
-- user_context      背景（例如「用户是财务，每月 5 号对账」）
+- user_context      背景（总是注入，例如「用户是财务，每月 5 号对账」）
 - history_insights  经验（例如「这个客户的运单号偶尔带空格」）
 
 作用域：绑定客户的会话 → 记到客户；未绑定 → 记到会话（保存到客户时一起迁移）；用户级偏好对所有会话生效。
@@ -42,22 +42,23 @@ async def extract_memories(llm: Any, message: str, answer: str) -> list[dict[str
 
 
 def select_relevant(items: list[dict[str, Any]], query: str, limit: int = 30) -> list[dict[str, Any]]:
-    """人工规则全部保留；AI 参考按相关性筛选，数量限制只作用于 AI。"""
+    """人工规则全部保留；当前作用域的背景和规则优先于相关经验，数量限制只作用于 AI。"""
     text = (query or "").lower()
     human = [item for item in items if item.get("source") == "human"]
-    chosen = []
+    standing, relevant = [], []
+    words = [w for w in text.split() if len(w) > 1]
     for item in items:
         if item.get("source") == "human":
             continue
-        if item["category"] in {"preferences", "domain_knowledge"}:
-            chosen.append(item)
+        if item["category"] in {"preferences", "domain_knowledge", "user_context"}:
+            standing.append(item)
             continue
         blob = f"{item['key']} {item['value']}".lower()
-        words = [w for w in text.split() if len(w) > 1]
         hit = any(w in blob for w in words) or any(len(chunk) >= 2 and chunk in text for chunk in _chunks(item["key"]))
         if hit:
-            chosen.append(item)
-    return [*human, *chosen[:limit]]
+            relevant.append(item)
+    chosen = standing + relevant
+    return [*human, *chosen[:max(0, limit)]]
 
 
 def _chunks(text: str) -> list[str]:

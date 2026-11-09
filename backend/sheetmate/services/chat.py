@@ -105,7 +105,8 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
         customer = db.get(Customer, conv.customer_id) if conv.customer_id else None
         library = recipe_service.library_for(db, conv.customer_id)
         mode = conv.mode
-        customer_info = {"id": customer.id, "name": customer.name, "summary": customer.summary} if customer else None
+        customer_info = {"id": customer.id, "name": customer.name, "code": customer.code,
+                         "description": customer.description, "summary": customer.summary} if customer else None
         if customer is not None and not conv.recipe_id:
             primary = recipe_service.resolve_customer_recipe(db, customer.id)
             conv.recipe_id = primary.recipe_id if primary else None
@@ -120,7 +121,10 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
                 recipe_service.ensure_profile(db, selected_record)
             profile = db.get(RecipeProfile, recipe_id) if recipe_id else None
             if recipe_id:
-                customer_info["summary"] = profile.summary if profile and profile.customer_id == customer.id else ""
+                # 旧客户总结属于历史流程口径；选定流程后以其独立说明为准，避免混入旧规则。
+                customer_info["summary"] = ""
+                customer_info["recipe_name"] = selected_record.name if selected_record else ""
+                customer_info["recipe_summary"] = profile.summary if profile and profile.customer_id == customer.id else ""
         available = {record.id for record in file_service.list_files(
             db, customer_id=conv.customer_id, conversation_id=conv.id,
         )}
@@ -447,9 +451,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                         "deleted_recipe_ids": [item["recipe_id"] for item in host.deleted_recipes]})
         customer_service.schedule_summary_refresh(ctx.host.customer_id)  # 流程变了：后台更新客户的整体处理逻辑
     await job.emit({"type": "done"})
-    if intent.action == "chat":
-        return
-    # 记忆抽取放到独立的后台任务里，不占用这次请求的连接
+    # 普通聊天也可能提供客户背景；与处理任务一样提取用户明确提供的长期信息。
+    # 抽取放到独立的后台任务里，不占用这次请求的连接。
     task = asyncio.create_task(_learn_memories(llm, user_id, conversation_id, ctx.host.customer_id, message, answer,
                                                recipe_id=ctx.host.recipe_id))
     _background.add(task)
@@ -839,7 +842,13 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
         return
     with session_scope() as db:
         conversation = db.get(Conversation, conversation_id)
-        if conversation is None or (customer_id and db.get(Customer, customer_id) is None):
+        if conversation is None:
+            return
+        # 临时对话可能在抽取期间已保存到客户；补上绑定时尚未来得及迁移的记忆。
+        # 原本已绑定的任务仍归原客户和流程，避免改绑期间串入其他客户。
+        if customer_id is None and conversation.customer_id:
+            customer_id, recipe_id = conversation.customer_id, conversation.recipe_id
+        if customer_id and db.get(Customer, customer_id) is None:
             return
         for item in items:
             memory_service.set_memory(db, category=item["category"], key=item["key"], value=item["value"], user_id=user_id,

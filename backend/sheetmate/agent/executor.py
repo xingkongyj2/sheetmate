@@ -98,7 +98,9 @@ class AgentExecutor:
 
     async def converse(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """普通对话和意图询问，不提供任务执行工具。"""
-        messages = [{"role": "system", "content": CHAT_SYSTEM}, *model_history(history[-12:]),
+        system = (CHAT_SYSTEM + "\n\n## 当前客户资料\n" + build_customer_block(ctx)
+                  + "\n\n## 已保存的长期记忆与当前流程规则\n" + (ctx.host.memory_text(message) or "（当前可用范围尚未保存记忆条目）"))
+        messages = [{"role": "system", "content": system}, *model_history(history[-12:]),
                     {"role": "user", "content": user_content(message, ctx.image_parts)}]
         async for event in self.agent_stream(messages, [], ctx):
             yield event
@@ -721,6 +723,28 @@ def _coalesce_recipe_delete_calls(calls: list[dict[str, Any]]) -> list[dict[str,
 # ---------------------------------------------------------------------------
 
 
+def build_customer_block(ctx: AgentContext) -> str:
+    """客户身份独立于聊天历史和所选流程，每轮从宿主提供的最新资料构建。"""
+    if not ctx.customer:
+        return "未绑定客户：本会话的数据和会话记忆只属于这个会话。用户以后可以把会话保存到某个客户名下；不要根据文件名猜测客户身份。"
+    customer = ctx.customer
+    lines = [f"已绑定客户「{customer['name']}」：这是本轮的明确客户身份，不需要用户重复介绍。"]
+    if customer.get("code"):
+        lines.append(f"客户编号：{customer['code']}")
+    if customer.get("description"):
+        lines.append(f"客户说明：{customer['description']}")
+    summary = (customer.get("summary") or "").strip()
+    if summary:
+        lines.append("已保存的客户处理说明：\n" + summary[:4000])
+    if customer.get("recipe_id"):
+        lines.append(f"当前流程：{customer.get('recipe_name') or '已选择的流程'}（ID：{customer['recipe_id']}），使用这个流程的资料、字段映射和记忆。")
+    recipe_summary = (customer.get("recipe_summary") or "").strip()
+    if recipe_summary:
+        lines.append("当前流程的处理逻辑：\n" + recipe_summary[:4000])
+    lines.append("这些客户资料和下方已保存记忆由应用长期存储，每轮按当前客户绑定读取；同一客户的新旧对话都可以使用，与本轮是否执行表格任务无关。")
+    return "\n".join(lines)
+
+
 def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = False) -> str:
     tables = ctx.visible_tables()
     table_lines = []
@@ -744,16 +768,6 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
                   + ("，图片附件（非工作簿，无工作表）" if (f.get("media_type") or "").startswith("image/") else "")
                   + (f"，脚本 run_id={f['script_run_id']}（可查看脚本后继续调整）" if f.get("script_run_id") else "")
                   for f in files[:15]]
-    if ctx.customer:
-        summary = (ctx.customer.get("summary") or "").strip()
-        excerpt = summary[:800] + ("…" if len(summary) > 800 else "")
-        customer_block = f"已绑定客户「{ctx.customer['name']}」：按这个客户的记忆、流程和业务规则来处理。"
-        if ctx.customer.get("recipe_id"):
-            customer_block += f"\n当前流程 ID：{ctx.customer['recipe_id']}，使用这个流程的资料、字段映射和用户记忆。"
-        if excerpt:
-            customer_block += f"\n当前流程的处理逻辑：\n{excerpt}"
-    else:
-        customer_block = "未绑定客户：本会话的数据只属于这个会话。用户以后可以把会话保存到某个客户名下。"
     recipes = ctx.host.list_recipes()
     recipes_block = ""
     if recipes:
@@ -772,7 +786,7 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
             if ctx.delete_recipe_ids else
             "\n用户要求删除流程时，直接调用 delete_recipe 或 delete_recipes，由工具列出目标并请求一次确认。删除全部流程用 delete_recipes(all=true)。不需要开启额外授权，确认后系统直接执行。"
         ),
-        customer_block=customer_block,
+        customer_block=build_customer_block(ctx),
         tables_block="\n".join(table_lines) or ("（还没有表，可直接根据用户文字或资料新建工作簿）" if ctx.mode == "create"
                                                else "（还没有表；可回答问题，需要处理现有数据时再加载 Excel / CSV）"),
         files_block="\n".join(file_lines) or "（没有）",

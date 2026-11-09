@@ -177,7 +177,7 @@ export interface UiMessage {
   blocks?: AssistantBlock[]
   /** 开发者日志保留诊断事件；主聊天仍使用 timeline / artifacts 的用户视图。 */
   events?: AgentEvent[]
-  /** 思考模式：此刻在做什么（临时，空档里显示，任何新事件都会让它消失）。 */
+  /** 此刻在做什么；整轮执行中的通用回复提示由消息组件兜底。 */
   activity?: string
   /** 思考模式：AI 决定是否在输入框上方列任务清单，与步骤数无关。 */
   checklist?: boolean
@@ -438,8 +438,8 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
 function mergeEvent(msg: UiMessage, e: AgentEvent): void {
   // 文本增量、模型思考和临时的活动提示不属于执行诊断，避免日志里堆积流式碎片。
   if (e.type !== 'text_chunk' && e.type !== 'thinking' && e.type !== 'activity') (msg.events ??= []).push({ ...e })
-  // 活动提示只在「没有别的事情发生」的空档里显示：任何新事件到来它就消失（思考中的碎片不算事件）。
-  if (e.type !== 'activity' && e.type !== 'thinking' && msg.activity) msg.activity = ''
+  // 模型开始调用仍属于刚声明的活动；阶段结束或有新内容时才清空具体提示。
+  if (!['activity', 'thinking', 'model_call_start'].includes(e.type) && msg.activity) msg.activity = ''
   if (e.type === 'recipe_view') {
     // 查看事件不能落进下方 recipe_* 的执行进度分派，否则会产生一次虚假的失败尝试。
     if (typeof e.recipe_id !== 'string' || !e.recipe_id || !e.flow ||
@@ -637,6 +637,9 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
     // 计划审查和每一项的核对结果已经写在正文里（引用块），不再另起一行折叠记录。
     case 'activity':
       msg.activity = typeof e.text === 'string' ? e.text : ''
+      break
+    case 'completion_check_start':
+      msg.activity = '正在确认任务完成情况'
       break
     case 'audit_done':
       msg.audit = {

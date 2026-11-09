@@ -81,11 +81,8 @@ const { groups: displayGroups, pending: revealing } = useProgressiveReply(
 )
 const typing = computed(() => props.message.streaming || revealing.value)
 const activity = computed(() => {
-  if (!props.message.streaming || props.message.error) return ''
-  const current = props.message.activity?.trim()
-  if (current) return current
-  const hasVisibleContent = displayGroups.value.some((group) => group.kind === 'process' || !!group.text.trim())
-  return hasVisibleContent ? '' : '正在思考'
+  if (!props.message.streaming) return ''
+  return props.message.activity?.trim() || '正在回复'
 })
 const audit = computed(() => auditLine(props.message.audit))
 const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
@@ -177,7 +174,7 @@ onBeforeUnmount(() => {
         <MarkdownView v-else-if="group.text" :source="group.text" :streaming="!group.closed && typing" stable />
       </template>
 
-      <!-- 发送后立即显示等待状态；后端活动提示优先，实际正文或处理进度出现后替换通用提示。 -->
+      <!-- 整轮回复结束前持续显示状态；已有正文和历史操作不代表 AI 已经停止。 -->
       <div v-if="activity" class="assistant-activity flex items-start gap-1.5 py-0.5 text-[13px] leading-5 text-mute" role="status" aria-live="polite" data-testid="activity">
         <LoaderCircle class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
         <span class="process-title-running min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ activity }}…</span>

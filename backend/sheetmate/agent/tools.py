@@ -107,7 +107,7 @@ class AgentContext:
     host: ToolHost
     llm: Any
     conversation_id: str
-    customer: dict[str, Any] | None = None  # {id, name, summary}
+    customer: dict[str, Any] | None = None  # 客户资料及独立的当前流程说明，由服务层每轮刷新
     max_repair: int = 3
     verify_rounds: int = 2
     table_filter: set[str] | None = None  # 多表并行时，每个专员只看自己的表
