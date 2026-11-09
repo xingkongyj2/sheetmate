@@ -11,6 +11,7 @@ import StatusPill from '@/components/common/StatusPill.vue'
 import ScriptFile from '@/components/common/ScriptFile.vue'
 import StepDetail from '@/components/recipe/StepDetail.vue'
 import { duration, percent, type UiMessage } from '@/composables/chatModel'
+import { runDeliveryFiles } from '@/composables/deliveryFiles'
 import { readExecutionState } from '@/composables/executionStatus'
 import { scriptReferences } from '@/composables/scriptPresentation'
 import { useToast } from '@/composables/useToast'
@@ -72,12 +73,7 @@ const executionMessage = computed<UiMessage | null>(() => {
   return run.value && execution ? { key: run.value.run_id, role: 'assistant', content: '', meta: {},
     streaming: execution.status === 'running', timeline: [], artifacts: [], execution } : null
 })
-const outputFiles = computed(() => {
-  const files = (run.value?.validation?.files ?? []).flatMap((file) => file.file_id ? [{ id: file.file_id, name: file.filename || file.name || '运行结果' }] : [])
-  const primary = run.value?.output_file_id
-  if (primary && !files.some((file) => file.id === primary)) files.unshift({ id: primary, name: '运行结果' })
-  return files
-})
+const outputFiles = computed(() => runDeliveryFiles(run.value))
 
 async function rerun(step: StepReport, params: Record<string, unknown>) {
   if (rerunning.value) return

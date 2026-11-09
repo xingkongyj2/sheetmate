@@ -1,5 +1,6 @@
 import type { FileInfo, RecipeBrief, TableBrief } from '@/api/types'
 import type { RecipeProgress } from './chatModel'
+import { isDeliveredFile } from './deliveryFiles'
 
 function timestamp(value?: string | null): number {
   const time = value ? Date.parse(value) : NaN
@@ -14,7 +15,7 @@ export function executionFileGroups(files: FileInfo[]) {
   const ordered = chronological(files)
   return [
     { key: 'input', label: '输入文件', description: '上传的原始文件、人工样例与参考资料', files: ordered.filter((file) => file.kind !== 'output') },
-    { key: 'output', label: '输出文件', description: '处理完成后生成的交付文件', files: ordered.filter((file) => file.kind === 'output') },
+    { key: 'output', label: '输出文件', description: '处理完成后生成的交付文件', files: ordered.filter((file) => file.kind === 'output' && isDeliveredFile(file)) },
   ]
 }
 

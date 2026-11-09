@@ -76,7 +76,12 @@ class WorkflowRecorder:
             self.last_step = {"tool": step["tool"], "label": step["label"],
                               "status": "completed" if step["ok"] else "failed", "summary": step["summary"]}
         elif kind == "file" and event.get("file_id"):
-            self.files.append(event["file_id"])
+            if event.get("explicit") or event.get("delivery_status") != "candidate":
+                self.files.append(event["file_id"])
+        elif kind == "delivery_manifest":
+            candidates = set(event.get("candidate_file_ids", []))
+            finals = event.get("final_file_ids", []) if event.get("status") == "confirmed" else []
+            self.files = list(dict.fromkeys([*(file_id for file_id in self.files if file_id not in candidates), *finals]))
         elif kind == "recipe_saved":
             self.recipes.append({"recipe_id": event.get("recipe_id"), "version": event.get("version")})
         elif kind == "final_text":

@@ -1,5 +1,6 @@
 import type { FileInfo, TableBrief } from '@/api/types'
 import type { FileArtifact, TableArtifact, UiMessage } from './chatModel'
+import { isDeliveredFile, progressDeliveryFiles } from './deliveryFiles'
 
 export interface FilePresentationContext {
   tables?: TableBrief[]
@@ -18,8 +19,8 @@ export function fileKindLabel(kind: unknown): string {
 
 export function deliveredFiles(message: UiMessage): FileArtifact[] {
   return [...new Map(message.artifacts.flatMap((artifact) =>
-    artifact.kind === 'file' ? [artifact.file] : artifact.kind === 'recipe' && artifact.progress.file ? [artifact.progress.file] : [],
-  ).map((file) => [file.file_id, file])).values()]
+    artifact.kind === 'file' ? [artifact.file] : artifact.kind === 'recipe' ? progressDeliveryFiles(artifact.progress) : [],
+  ).filter(isDeliveredFile).map((file) => [file.file_id, file])).values()]
 }
 
 function exportedTables(params: Record<string, unknown>): string[] {
@@ -60,19 +61,26 @@ function fileFromTable(table: TableArtifact, context: FilePresentationContext): 
   const fileId = table.file_id || context.tables?.find((candidate) => candidate.name === table.name)?.file_id
   if (!fileId) return undefined
   const file = context.files?.find((candidate) => candidate.file_id === fileId)
-  if (file) return { file_id: file.file_id, filename: file.filename, kind: file.kind, kind_label: file.kind_label, download_url: file.download_url, sheets: file.sheets, run_id: file.run_id ?? undefined }
+  if (file) return { file_id: file.file_id, filename: file.filename, kind: file.kind, kind_label: file.kind_label, download_url: file.download_url, sheets: file.sheets, run_id: file.run_id ?? undefined,
+    delivery_status: file.delivery_status, intermediate: file.intermediate }
   if (!table.filename) return undefined
   return { file_id: fileId, filename: table.filename, download_url: `/api/files/${encodeURIComponent(fileId)}/download` }
 }
 
 /** Explicit deliveries take precedence; reading a source file can also offer that original directly. */
 export function standaloneFiles(message: UiMessage, context: FilePresentationContext = {}): FileArtifact[] {
-  const recipeIds = new Set(message.artifacts.flatMap((artifact) => artifact.kind === 'recipe' && artifact.progress.file ? [artifact.progress.file.file_id] : []))
+  const recipeIds = new Set(message.artifacts.flatMap((artifact) => artifact.kind === 'recipe' ? progressDeliveryFiles(artifact.progress).map((file) => file.file_id) : []))
   const explicit = deliveredFiles(message)
-  const files = explicit.length ? explicit : message.artifacts.flatMap((artifact) => {
+  const hasFileEvents = message.artifacts.some((artifact) => artifact.kind === 'file' || artifact.kind === 'recipe' &&
+    !!(artifact.progress.file || artifact.progress.files?.length))
+  const files = explicit.length || hasFileEvents ? explicit : message.artifacts.flatMap((artifact) => {
     if (artifact.kind !== 'table') return []
     const file = fileFromTable(artifact.table, context)
     return file ? [file] : []
   })
-  return [...new Map(files.filter((file) => !recipeIds.has(file.file_id)).map((file) => [file.file_id, file])).values()]
+  return [...new Map(files.filter((file) => {
+    if (recipeIds.has(file.file_id)) return false
+    const status = message.deliveryStatuses?.[file.file_id]
+    return isDeliveredFile({ ...file, delivery_status: status ?? file.delivery_status })
+  }).map((file) => [file.file_id, file])).values()]
 }

@@ -47,7 +47,7 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
                     "file_id": table.file_id, "filename": table.filename, "created_by": table.created_by}
                    for table in ctx.visible_tables()],
         "plan_steps": plan_steps or [],
-        "files": [{key: file.get(key) for key in ("file_id", "filename", "kind", "created_at", "scope_label", "tables", "media_type")}
+        "files": [{key: file.get(key) for key in ("file_id", "filename", "kind", "created_at", "scope_label", "tables", "media_type", "intermediate", "delivery_status")}
                   | {"sheets": [sheet.get("sheet") for sheet in file.get("sheets", [])]}
                   for file in files or []],
         "file_references": file_references or [],

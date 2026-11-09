@@ -47,6 +47,7 @@ class ConversationHost:
         self._last_recipe: Recipe | None = None
         self.analysis: AnalysisWorkspace | None = None
         self.files: FileCopies | None = None
+        self.defer_delivery = False
 
     # ------------------------------------------------------------------
     # 文件
@@ -152,7 +153,8 @@ class ConversationHost:
             path = run_service.output_path(run, name)
             written = file_service.export_tables(self.ws, sheets, path)
             record = file_service.register_output(db, path=path, filename=name, customer_id=self.customer_id,
-                                                  conversation_id=self.conversation_id, run_id=run.id, user_id=self.user_id)
+                                                  conversation_id=self.conversation_id, run_id=run.id, user_id=self.user_id,
+                                                  delivery_status="candidate" if self.defer_delivery else "final")
             run.status = "success"
             run.output_file_id = record.id
             run.finished_at = datetime.now()
@@ -246,7 +248,8 @@ class ConversationHost:
                 written = write_created_workbook(path, prepared)
                 written_output = True
                 record = file_service.register_output(db, path=path, filename=name, customer_id=self.customer_id,
-                                                      conversation_id=self.conversation_id, run_id=run.id, user_id=self.user_id)
+                                                      conversation_id=self.conversation_id, run_id=run.id, user_id=self.user_id,
+                                                      delivery_status="candidate" if self.defer_delivery else "final")
                 warnings: list[str] = []
                 try:
                     tables = file_service.load_into_workspace(self.ws, record)
@@ -494,7 +497,8 @@ class ConversationHost:
                 if handle.output_path.exists() and str(handle.output_path) not in paths:
                     suffix = ("_结果" if report.get("status") in {"success", "warning"} else "_结果_未通过校验") + handle.output_path.suffix
                     artifacts.append({"path": str(handle.output_path), "name": f"{recipe.name}{suffix}"})
-                delivered = run_service.register_delivery_files(db, run, artifacts, user_id=self.user_id)
+                delivered = run_service.register_delivery_files(db, run, artifacts, user_id=self.user_id,
+                    delivery_status="candidate" if self.defer_delivery else "final")
                 if delivered:
                     record = db.get(FileRecord, delivered[-1]["file_id"])
                 for artifact in artifacts:

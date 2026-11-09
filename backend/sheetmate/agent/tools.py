@@ -498,13 +498,14 @@ def _tool_show_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
             raise ValueError("部分文件不存在、不属于当前客户或会话，或不符合指定类型，请重新查看文件列表。")
         files = [available[file_id] for file_id in requested]
     else:
-        files = [item for item in available.values() if selected_kinds is None or item.get("kind") in selected_kinds]
+        files = [item for item in available.values() if (selected_kinds is None or item.get("kind") in selected_kinds)
+                 and not item.get("intermediate") and item.get("delivery_status") not in {"candidate", "intermediate"}]
     if not files:
         return ToolResult("没有找到符合范围的文件。", summary="没有可查看的文件")
 
-    public_fields = {"file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets", "media_type", "preview_url"}
+    public_fields = {"file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets", "media_type", "preview_url", "intermediate", "delivery_status"}
     events = [{"type": "file", **{key: value for key, value in item.items() if key in public_fields},
-               "download_url": f"/api/files/{item['file_id']}/download"} for item in files]
+               "download_url": f"/api/files/{item['file_id']}/download", "explicit": True} for item in files]
     summary = f"可查看和下载 {len(files)} 个文件。"
     return ToolResult(
         summary + "界面已提供原文件的查看和下载卡片；只需简短说明，不要读取或转写原表、重新导出副本或编造下载链接。"

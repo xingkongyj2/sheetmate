@@ -13,6 +13,7 @@ import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import type { RecipeProgress } from '@/composables/chatModel'
+import { progressDeliveryFiles } from '@/composables/deliveryFiles'
 import { recipeFailure } from '@/composables/messagePresentation'
 import { progressFlow } from '@/composables/recipeFlow'
 import { userFacingText } from '@/composables/timelinePresentation'
@@ -26,7 +27,7 @@ const props = defineProps<{ progress: RecipeProgress; customerId?: string | null
 const emit = defineEmits<{ previewFile: [file: FileInfo]; refresh: [] }>()
 const toast = useToast()
 const openingFile = ref<string | null>(null)
-const resultFiles = computed(() => props.progress.files?.length ? props.progress.files : props.progress.file ? [props.progress.file] : [])
+const resultFiles = computed(() => progressDeliveryFiles(props.progress))
 
 async function previewFile(fileId: string) {
   if (openingFile.value) return

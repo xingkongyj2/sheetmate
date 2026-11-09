@@ -37,6 +37,7 @@ export interface FileInfo {
   media_type?: string
   preview_url?: string | null
   intermediate?: boolean
+  delivery_status?: 'candidate' | 'final' | 'intermediate'
   step_id?: number | null
   step_name?: string | null
 }
@@ -62,6 +63,8 @@ export interface RecipeArtifact {
   file_id?: string
   filename?: string
   download_url?: string
+  delivery_status?: 'candidate' | 'final' | 'intermediate'
+  intermediate?: boolean
 }
 
 export interface FlowStep {
@@ -502,6 +505,14 @@ export interface AgentEvent {
   type: string
   details?: PublicOperationDetail[]
   [key: string]: any // eslint-disable-line @typescript-eslint/no-explicit-any
+}
+
+export interface DeliveryManifestEvent extends AgentEvent {
+  type: 'delivery_manifest'
+  candidate_file_ids: string[]
+  final_file_ids: string[]
+  status: 'confirmed' | 'unverified' | 'incomplete'
+  summary: string
 }
 
 export type LLMProviderId = 'deepseek' | 'qwen' | 'custom'

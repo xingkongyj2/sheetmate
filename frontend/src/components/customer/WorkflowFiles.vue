@@ -167,7 +167,7 @@ async function remove(file: FileInfo) {
         <FileSpreadsheet class="size-4 shrink-0" />
         <button type="button" class="min-w-0 flex-1 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :title="file.filename" :aria-label="`预览 ${file.filename}`" @click="emit('preview', file)">
           <span class="block truncate">{{ file.filename }}</span>
-          <span class="mt-0.5 block text-[10px] text-faint">{{ file.intermediate ? (file.step_name ? `环节 ${file.step_id} · ${file.step_name}` : '环节过程文件') : '最终结果' }}</span>
+          <span class="mt-0.5 block text-[10px] text-faint">{{ file.delivery_status === 'candidate' ? '待核验文件' : file.intermediate || file.delivery_status === 'intermediate' ? (file.step_name ? `环节 ${file.step_id} · ${file.step_name}` : '过程文件') : '最终结果' }}</span>
         </button>
         <span class="shrink-0 text-xs text-faint">{{ timeAgo(file.created_at) }}</span>
         <a :href="file.download_url" class="icon-btn shrink-0" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>

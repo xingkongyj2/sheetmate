@@ -94,7 +94,7 @@ export function recipeOutcomeSummary(message: UiMessage): string {
   const failures = attempts.filter((attempt) => recipeFailure(attempt.progress))
   const completed = attempts.filter((attempt) => attempt.progress.status === 'done' && !recipeFailure(attempt.progress))
   const unfinished = attempts.length - failures.length - completed.length
-  const hasFiles = message.artifacts.some((item) => item.kind === 'file' ? !!item.file.download_url : item.kind === 'recipe' && !!item.progress.file?.download_url)
+  const hasFiles = deliveredFiles(message).some((file) => !!file.download_url)
   const delivery = hasFiles ? '本轮已有可下载文件，请结合对应尝试的状态核对后使用。' : '本轮未提供可下载结果。'
   if (message.error) return `本轮处理已中断，不能确认全部修改完成。\n\n${delivery}可查看执行详情，确认已完成的部分后再继续。`
   if (unfinished) return `本轮进行了 ${attempts.length} 次尝试，仍有 ${unfinished} 次没有记录到完成结果，暂不能确认全部修改完成。\n\n${delivery}可查看执行详情后继续处理。`

@@ -157,13 +157,15 @@ def save_upload(
 
 
 def register_output(db: Session, *, path: Path, filename: str, customer_id: str | None, conversation_id: str | None,
-                    run_id: str | None, user_id: int | None) -> FileRecord:
+                    run_id: str | None, user_id: int | None, delivery_status: str = "final") -> FileRecord:
     """登记系统生成的结果文件。"""
     try:
         profile = profile_file(path)
     except ReadError:
         profile = {}
     profile["original_filename"] = filename
+    profile["delivery_status"] = delivery_status
+    profile["intermediate"] = delivery_status == "intermediate"
     name = unique_filename(db, filename, customer_id=customer_id, conversation_id=conversation_id, user_id=user_id)
     record = FileRecord(
         id=f"f_{uuid.uuid4().hex[:10]}", customer_id=customer_id, conversation_id=conversation_id, run_id=run_id,
@@ -231,9 +233,22 @@ def file_dict(record: FileRecord) -> dict[str, Any]:
             "image/png", "image/jpeg", "image/webp", "image/gif",
         } else None,
         "intermediate": bool((record.profile or {}).get("intermediate")),
+        "delivery_status": (record.profile or {}).get("delivery_status"),
         "step_id": (record.profile or {}).get("step_id"),
         "step_name": (record.profile or {}).get("step_name"),
     }
+
+
+def finalize_delivery(db: Session, *, conversation_id: str, candidate_file_ids: list[str],
+                      final_file_ids: list[str], summary: str) -> None:
+    """只改变本轮已生成文件的交付状态，文件和步骤记录保留用于核对。"""
+    finals = set(final_file_ids)
+    for file_id in dict.fromkeys(candidate_file_ids):
+        record = db.get(FileRecord, file_id)
+        if record is None or record.kind != "output" or record.conversation_id != conversation_id:
+            raise ServiceError("无法确认本轮生成文件的归属，尚未交付结果。")
+        record.profile = {**(record.profile or {}), "delivery_status": "final" if file_id in finals else "intermediate",
+                          "intermediate": file_id not in finals, "delivery_summary": summary[:1000]}
 
 
 def file_media_type(record: FileRecord) -> str:

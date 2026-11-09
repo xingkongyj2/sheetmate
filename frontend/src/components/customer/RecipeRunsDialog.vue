@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 一个流程的运行记录；查看详情或结果后返回列表。 */
 import { ChevronRight, Download, Eye, LoaderCircle } from '@lucide/vue'
-import { defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { fileApi, runApi } from '@/api'
 import { errorText } from '@/api/http'
@@ -9,6 +9,7 @@ import type { FileInfo, RunBrief } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import { duration, percent } from '@/composables/chatModel'
+import { primaryRunDeliveryId } from '@/composables/deliveryFiles'
 import { useToast } from '@/composables/useToast'
 
 import RunDetailDialog from './RunDetailDialog.vue'
@@ -19,6 +20,7 @@ const props = defineProps<{ recipeId: string; recipeName: string; customerId?: s
 const emit = defineEmits<{ close: []; changed: [] }>()
 const toast = useToast()
 const runs = ref<RunBrief[]>([])
+const visibleRuns = computed(() => runs.value.map((run) => ({ ...run, output_file_id: primaryRunDeliveryId(run) })))
 const loading = ref(true)
 const loadError = ref('')
 const selectedRun = ref<string | null>(null)
@@ -80,7 +82,7 @@ onBeforeUnmount(() => {
     </div>
     <p v-else-if="!runs.length" class="py-12 text-center text-sm text-faint">这个流程还没有运行记录</p>
     <div v-else class="space-y-3">
-      <article v-for="run in runs" :key="run.run_id" class="rounded-2xl border border-line p-3 sm:p-4">
+      <article v-for="run in visibleRuns" :key="run.run_id" class="rounded-2xl border border-line p-3 sm:p-4">
         <button
           type="button"
           class="block w-full rounded-xl p-2 text-left transition hover:bg-paper/60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:cursor-wait"

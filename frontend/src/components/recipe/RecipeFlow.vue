@@ -6,6 +6,7 @@ import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, r
 import type { FileInfo, RecipeFlowData } from '@/api/types'
 import type { StepState } from '@/composables/chatModel'
 import { progressFlow } from '@/composables/recipeFlow'
+import { progressDeliveryFiles } from '@/composables/deliveryFiles'
 import type { FlowFileNode, FlowSelection, RecipeFlowContext } from '@/composables/recipeFlowInteraction'
 import { useFlowReplay } from '@/composables/useFlowReplay'
 
@@ -52,7 +53,7 @@ const context = computed<RecipeFlowContext>(() => {
     version: progress.saved?.version ?? progress.recipeVersion ?? replay.executionRecipe.value?.version ?? props.context.version,
     recipe: replay.executionRecipe.value ?? progress.recipe ?? props.context.recipe,
     runId: progress.runId,
-    resultFiles: progress.files ?? (progress.file ? [progress.file] : []),
+    resultFiles: progressDeliveryFiles(progress),
     files: replay.executionFiles.value,
     running: running.value,
   }

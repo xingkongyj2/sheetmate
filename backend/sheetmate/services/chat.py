@@ -48,6 +48,7 @@ from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import recipe_deletion
 from sheetmate.services import runs as run_service
+from sheetmate.services.delivery import select_delivery
 from sheetmate.services.file_view import file_references, file_view_answer, select_files
 from sheetmate.services.analysis import AnalysisWorkspace, analysis_workspace
 from sheetmate.services.errors import Conflict, ServiceError
@@ -61,7 +62,7 @@ _MAX_HISTORY_IMAGES = 8
 _MAX_IMAGE_REQUEST_BYTES = 20 * 1024 * 1024
 _KEEP_EVENTS = {
     "model_call_start", "model_call_done", "completion_check_start", "completion_check", "execution_stop", "execution_status",
-    "note", "reply", "tool_call", "tool_result", "table", "file", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
+    "note", "reply", "tool_call", "tool_result", "table", "file", "delivery_manifest", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
     "reflect_start", "reflect_done", "think_start", "plan_review", "step_check", "audit_start", "audit_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
@@ -178,6 +179,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     candidate_parts: list[str] = []
     candidate_final = ""
     final_text = ""
+    delivery_candidates: dict[str, dict[str, Any]] = {}
+    delivery_finished = False
     analysis: AnalysisWorkspace | None = None
     run_id = None
     last_checkpoint = 0.0
@@ -213,6 +216,12 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     async def emit(event: dict[str, Any]) -> None:
         nonlocal final_text
         event = externalize_script_references(event)
+        if event.get("type") == "file" and event.get("delivery_status") == "candidate":
+            if event.get("file_id") in delivery_candidates:
+                # 工具重复展示本轮候选时仍须等待交付确认，并沿用原始生成证据。
+                event = {**event, "explicit": False}
+            if not event.get("explicit"):
+                delivery_candidates.setdefault(event["file_id"], dict(event))
         bind_script_references(event, user_id=user_id, conversation_id=conversation_id)
         recorder.observe(event)
         if event["type"] not in {"text_chunk", "final_text"}:
@@ -243,6 +252,40 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 analysis.publish(name)
         checkpoint(force=event["type"] != "text_chunk" and event["type"] not in {"thinking", "recipe_thinking"})
         await job.emit(event)
+
+    async def finalize_deliveries(answer: str) -> str:
+        """单步生成不代表最终交付；收尾后只发布明确选定的正式文件。"""
+        nonlocal delivery_finished
+        if not delivery_candidates or delivery_finished:
+            return ""
+        recorder.finish(answer)
+        confirmed = False
+        finals: list[str] = []
+        status = "incomplete"
+        summary = "本轮尚未完成最终结果确认，生成的文件留在执行记录中，未作为正式结果交付。"
+        if recorder.result.get("status") == "completed":
+            await job.emit({"type": "activity", "text": "正在确认最终交付文件"})
+            try:
+                selection = await select_delivery(llm, request=message, answer=answer,
+                                                   candidates=list(delivery_candidates.values()), events=stored)
+                confirmed, finals, summary = selection.confirmed, selection.file_ids, selection.summary
+            except Exception as exc:
+                summary = f"最终交付核对失败：{str(exc).strip()[:200] or type(exc).__name__}"
+            status = "confirmed" if confirmed else "unverified"
+        with session_scope() as db:
+            file_service.finalize_delivery(db, conversation_id=conversation_id,
+                candidate_file_ids=list(delivery_candidates), final_file_ids=finals if confirmed else [], summary=summary)
+        if status == "unverified":
+            recorder.record_stop({"status": "incomplete", "code": "delivery_unverified", "summary": summary,
+                                  "scope": "task", "verified": False})
+        await emit({"type": "delivery_manifest", "candidate_file_ids": list(delivery_candidates),
+                    "final_file_ids": finals if confirmed else [], "status": status, "summary": summary})
+        delivery_finished = True
+        if status == "unverified":
+            return "已生成文件，但最终交付版本尚未确认，本轮未交付正式结果。" + summary
+        if status == "incomplete":
+            return summary
+        return ""
 
     try:
         # 用户已看到具体目标并确认后直接执行，不再通过模型判断第二次授权。
@@ -295,6 +338,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         references = file_references(conversation_id, message_id, files)
         intent = await infer_request(llm, ctx, message, history, plan_steps, files=files, file_references=references)
         ctx.mode = intent.mode
+        host.defer_delivery = intent.action == "process"
         if intent.files is not None:
             selected_files = select_files(intent.files, files, references)
             with session_scope() as db:
@@ -308,7 +352,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             for file in selected_files:
                 await emit({"type": "file", **{key: file[key] for key in (
                     "file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets", "download_url", "media_type", "preview_url",
-                ) if key in file}})
+                ) if key in file}, "explicit": True})
             answer = await file_view_answer(llm, message, intent.files, selected_files)
             if answer:
                 await emit({"type": "text_chunk", "content": answer})
@@ -402,7 +446,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                     # 新建/修改的完成声明要先核对实际交付，再作为固定正文发布。
                     # 分析中的脚本失败也需要同样保护，避免事后替换已经显示的结论。
                     guarded_reply = intent.action == "process" and (ctx.mode in {"create", "modify"}
-                        or bool(_script_fallback(stored, mode=ctx.mode)))
+                        or bool(delivery_candidates) or bool(_script_fallback(stored, mode=ctx.mode)))
                     if guarded_reply and event["type"] == "text_chunk":
                         candidate_parts.append(event["content"])
                     elif guarded_reply and event["type"] == "final_text":
@@ -413,12 +457,17 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         cancel_execution()
         answer = await guard_creation_delivery(interrupted=True)
         if not answer:
-            await publish_candidate()
+            if delivery_candidates:
+                candidate_parts.clear()
+                candidate_final = ""
+            else:
+                await publish_candidate()
             summary = _recipe_fallback(stored, interrupted=True) or "（已停止）"
             separator = "\n\n" if text_parts else ""
             await emit({"type": "text_chunk", "content": separator + summary})
             answer = "".join(text_parts).strip()
             await emit({"type": "final_text", "content": answer})
+        await finalize_deliveries(answer)
         await finish_execution(answer)
         _save_assistant(conversation_id, answer, stored, recorder, run_id)
         if host.deleted_recipes:
@@ -429,6 +478,37 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
 
     answer = await guard_creation_delivery()
     if not answer:
+        answer = candidate_final or "".join(candidate_parts).strip() or final_text or "".join(text_parts).strip()
+    try:
+        delivery_problem = await finalize_deliveries(answer)
+    except asyncio.CancelledError:
+        cancel_execution()
+        await finalize_deliveries(answer)
+        candidate_parts.clear()
+        candidate_final = ""
+        answer = "（已停止）"
+        await emit({"type": "text_chunk", "content": answer})
+        await emit({"type": "final_text", "content": answer})
+        await finish_execution(answer)
+        _save_assistant(conversation_id, answer, stored, recorder, run_id)
+        raise
+    except Exception as exc:
+        delivery_problem = "最终交付文件未能确认，本轮未交付正式结果。"
+        reason = str(exc).strip()[:200]
+        if reason:
+            delivery_problem += f"核对失败原因：{reason}"
+        await emit({"type": "execution_stop", "status": "incomplete", "code": "delivery_unverified",
+                    "summary": delivery_problem, "scope": "task", "verified": False})
+        await emit({"type": "delivery_manifest", "candidate_file_ids": list(delivery_candidates),
+                    "final_file_ids": [], "status": "unverified", "summary": delivery_problem})
+        delivery_finished = True
+    if delivery_problem:
+        candidate_parts.clear()
+        candidate_final = ""
+        answer = delivery_problem
+        await emit({"type": "text_chunk", "content": answer})
+        await emit({"type": "final_text", "content": answer})
+    else:
         await publish_candidate()
         answer = final_text or "".join(text_parts).strip()
     if not answer or recorder.error:
@@ -496,8 +576,11 @@ def _script_fallback(events: list[dict[str, Any]], *, mode: str, interrupted: bo
         reason = details[0][:200] if details else ""
         if reason:
             message += f"\n\n工具返回：{reason}"
-    if any(event.get("type") == "file" and event.get("file_id") for event in events[:index]):
-        message += "\n\n较早生成的文件仍可查看；最近一次调整尚未得到新文件。"
+    previous_files = [event for event in events[:index] if event.get("type") == "file" and event.get("file_id")]
+    if previous_files:
+        pending = any(event.get("delivery_status") == "candidate" for event in previous_files)
+        message += ("\n\n较早生成的文件留在执行记录中；最近一次调整尚未得到新文件。" if pending
+                    else "\n\n较早生成的文件仍可查看；最近一次调整尚未得到新文件。")
     return message
 
 
@@ -540,7 +623,15 @@ def _recipe_fallback(events: list[dict[str, Any]], *, interrupted: bool = False)
     selected_run = next((event["selected_run"] for event in reversed(events)
                          if event.get("type") in {"recipe_completed", "recipe_saved"} and event.get("tool_call_id") == calls[-1].get("id")
                          and isinstance(event.get("selected_run"), dict)), {})
-    files = {event.get("file_id") for event in events if event.get("type") == "file" and event.get("file_id")}
+    statuses: dict[str, bool] = {}
+    for event in events:
+        if event.get("type") == "delivery_manifest":
+            finals = set(event.get("final_file_ids", [])) if event.get("status") == "confirmed" else set()
+            statuses.update({file_id: file_id in finals for file_id in event.get("candidate_file_ids", [])})
+    generated = {event["file_id"] for event in events if event.get("type") == "file" and event.get("file_id")}
+    files = {event["file_id"] for event in events if event.get("type") == "file" and event.get("file_id")
+             and (event.get("explicit") or statuses.get(event["file_id"],
+                  not event.get("intermediate") and event.get("delivery_status") not in {"candidate", "intermediate"}))}
     waiting = any(event.get("type") == "clarify" for event in events)
     if interrupted:
         outcome = "本次处理已中断，尚未完成最终结果确认。"
@@ -576,8 +667,9 @@ def _recipe_fallback(events: list[dict[str, Any]], *, interrupted: bool = False)
             reason = reason.splitlines()[0][:200]
         if reason:
             blocks.append(f"未完成的原因：{reason}")
-    blocks.append(f"本轮已生成 {len(files)} 个可下载文件，可先查看并核对已有结果。" if files
-                  else "本轮尚未生成可下载的结果文件。")
+    blocks.append(f"本轮已确认 {len(files)} 个可下载文件，可查看并核对正式结果。" if files else
+                  "生成的文件仅保留在执行记录中，尚未交付正式结果。" if generated else
+                  "本轮尚未生成可下载的结果文件。")
     if interrupted:
         blocks.append("可以继续本次任务，先核对已完成的步骤，再处理剩余部分。")
     elif waiting:

@@ -109,7 +109,8 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                             committed_paths.append(path)
                             shutil.copyfileobj(source, destination)
                         record = file_service.register_output(db, path=path, filename=name, customer_id=host.customer_id,
-                                                              conversation_id=host.conversation_id, run_id=run_id, user_id=host.user_id)
+                                                              conversation_id=host.conversation_id, run_id=run_id, user_id=host.user_id,
+                                                              delivery_status="candidate" if host.defer_delivery else "final")
                         report["files"].append({**file_service.file_dict(record), "script_run_id": run_id})
                         report["files"][-1]["ref"] = f"脚本_{run_id}/{output.name}"
                         try:

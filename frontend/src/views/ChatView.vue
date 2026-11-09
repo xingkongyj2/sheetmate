@@ -305,7 +305,7 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
       detail.value.title = event.title
       store.patchConversation(props.id, { title: event.title })
     }
-    if (event.type === 'table' || event.type === 'file' || event.type === 'recipes_changed' || event.type === 'recipe_deleted') refreshSide()
+    if (event.type === 'table' || event.type === 'file' || event.type === 'delivery_manifest' || event.type === 'recipes_changed' || event.type === 'recipe_deleted') refreshSide()
   })
   handle = currentHandle
   try {

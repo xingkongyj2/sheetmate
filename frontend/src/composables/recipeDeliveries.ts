@@ -1,4 +1,5 @@
 import type { Artifact, RecipeProgress, UiMessage } from './chatModel'
+import { progressDeliveryFiles } from './deliveryFiles'
 
 type RecipeDelivery = Extract<Artifact, { kind: 'recipe' }>
 type RecipeView = Extract<Artifact, { kind: 'recipe_view' }>
@@ -46,7 +47,7 @@ export function recipeDeliveries(message: Pick<UiMessage, 'artifacts'>): { deliv
     if (artifact.kind === 'recipe_view') {
       const previous = views.get(artifact.view.recipe_id)
       if (!previous || artifact.view.version >= previous.view.version) views.set(artifact.view.recipe_id, artifact)
-    } else if (artifact.kind === 'recipe' && (artifact.progress.file || artifact.progress.saved)) {
+    } else if (artifact.kind === 'recipe' && (progressDeliveryFiles(artifact.progress).length || artifact.progress.saved)) {
       const id = recipeId(artifact.progress)
       const key = id ? `recipe:${id}` : artifact.progress.file ? `file:${artifact.progress.file.file_id}` : artifact.key
       const previous = deliveries.get(key)

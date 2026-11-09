@@ -14,10 +14,10 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from sheetmate.config import settings
-from sheetmate.db.models import Run, new_id, now
+from sheetmate.db.models import FileRecord, Run, new_id, now
 from sheetmate.engine.workspace import WorkspaceManager
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.recipe.validator import output_metrics
@@ -50,7 +50,8 @@ def output_path(run: Run, filename: str) -> Path:
     return folder / f"{run.id}_{filename}"
 
 
-def register_delivery_files(db: Session, run: Run, artifacts: list[dict[str, Any]], *, user_id: int | None) -> list[dict[str, Any]]:
+def register_delivery_files(db: Session, run: Run, artifacts: list[dict[str, Any]], *, user_id: int | None,
+                            delivery_status: str = "final") -> list[dict[str, Any]]:
     """把正式交付复制到独立输出件，保留内部文件供后续步骤或断点重跑使用。"""
     from sheetmate.services import files as file_service
 
@@ -69,7 +70,9 @@ def register_delivery_files(db: Session, run: Run, artifacts: list[dict[str, Any
                 copied.append(path)
                 shutil.copyfileobj(source, destination)
             record = file_service.register_output(db, path=path, filename=name, customer_id=run.customer_id,
-                                                  conversation_id=run.conversation_id, run_id=run.id, user_id=user_id)
+                                                  conversation_id=run.conversation_id, run_id=run.id, user_id=user_id,
+                                                  delivery_status=delivery_status)
+            record.profile = {**(record.profile or {}), "source_path": str(source_path.resolve())}
             deliveries.append({**artifact, **file_service.file_dict(record)})
     except BaseException:
         for path in copied:
@@ -122,8 +125,8 @@ def _retain_step_files(db: Session, run: Run, steps: list[dict[str, Any]]) -> No
     from sheetmate.db.models import FileRecord
     from sheetmate.services import files as file_service
 
-    existing = {record.profile.get("source_path"): record for record in db.scalars(
-        select(FileRecord).where(FileRecord.run_id == run.id)) if (record.profile or {}).get("intermediate")}
+    existing = {record.profile["source_path"]: record for record in db.scalars(
+        select(FileRecord).where(FileRecord.run_id == run.id)) if (record.profile or {}).get("source_path")}
     for step in steps:
         retained = []
         for artifact in step.get("output_files", []):
@@ -136,7 +139,7 @@ def _retain_step_files(db: Session, run: Run, steps: list[dict[str, Any]]) -> No
             if source_path in existing:
                 retained.append({**artifact, **file_service.file_dict(existing[source_path])})
                 continue
-            delivered = register_delivery_files(db, run, [artifact], user_id=run.user_id)[0]
+            delivered = register_delivery_files(db, run, [artifact], user_id=run.user_id, delivery_status="intermediate")[0]
             record = db.get(FileRecord, delivered["file_id"])
             assert record is not None
             record.profile = {**(record.profile or {}), "intermediate": True,
@@ -202,6 +205,34 @@ def run_dict(run: Run, *, with_steps: bool = True) -> dict[str, Any]:
         data["steps"] = run.steps
         data["validation"] = run.validation
         data["verification_detail"] = run.verification
+    # 运行快照保留当时的生成证据；展示时使用当前的交付状态，避免旧候选重新变成结果。
+    db = object_session(run)
+    if db is not None:
+        snapshots = (run.validation or {}).get("files", [])
+        step_files = [artifact for step in run.steps or [] for artifact in step.get("output_files", [])]
+        ids = {artifact["file_id"] for artifact in [*snapshots, *step_files] if artifact.get("file_id")}
+        if run.output_file_id:
+            ids.add(run.output_file_id)
+        records = {record.id: record for record in db.scalars(select(FileRecord).where(FileRecord.id.in_(ids)))} if ids else {}
+
+        def current_file(artifact: dict[str, Any]) -> dict[str, Any]:
+            from sheetmate.services.files import file_dict
+
+            record = records.get(artifact.get("file_id"))
+            return {**artifact, **file_dict(record)} if record else dict(artifact)
+
+        def delivered(file_id: str | None) -> bool:
+            record = records.get(file_id)
+            profile = (record.profile or {}) if record else {}
+            return record is not None and not profile.get("intermediate") and profile.get("delivery_status") not in {"candidate", "intermediate"}
+
+        if not delivered(run.output_file_id):
+            data["output_file_id"] = next((item["file_id"] for item in reversed(snapshots)
+                                           if delivered(item.get("file_id"))), None)
+        if with_steps:
+            data["validation"] = {**(run.validation or {}), "files": [current_file(item) for item in snapshots]}
+            data["steps"] = [{**step, "output_files": [current_file(item) for item in step["output_files"]]}
+                             if "output_files" in step else step for step in run.steps or []]
     return data
 
 

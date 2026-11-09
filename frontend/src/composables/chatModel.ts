@@ -11,6 +11,7 @@ import type { AgentEvent, DiffCard, ExecutionState, PublicOperationDetail, Recip
 import { scriptReferences } from './scriptPresentation.ts'
 import { recipeProcessDetails, type RecipeProcessDetail } from './recipeProcessDetails'
 import { mergeExecutionStop, readExecutionState } from './executionStatus.ts'
+import type { FileDeliveryStatus } from './deliveryFiles'
 
 export type ToolStatus = 'running' | 'ok' | 'error'
 export type PlanStatus = 'pending' | 'running' | 'done' | 'warning' | 'waiting' | 'error' | 'stopped'
@@ -119,6 +120,9 @@ export interface FileArtifact {
   download_url: string
   sheets?: { sheet: string; rows: number }[]
   run_id?: string
+  delivery_status?: FileDeliveryStatus
+  intermediate?: boolean
+  explicit?: boolean
 }
 
 /** 查看流程时保存的只读快照，与执行/修订进度分开。 */
@@ -177,6 +181,8 @@ export interface UiMessage {
   blocks?: AssistantBlock[]
   /** 开发者日志保留诊断事件；主聊天仍使用 timeline / artifacts 的用户视图。 */
   events?: AgentEvent[]
+  /** Terminal selection survives later file events and stored-event replay. */
+  deliveryStatuses?: Record<string, FileDeliveryStatus>
   /** 此刻在做什么；整轮执行中的通用回复提示由消息组件兜底。 */
   activity?: string
   /** 思考模式：AI 决定是否在输入框上方列任务清单，与步骤数无关。 */
@@ -591,10 +597,28 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       break
     }
     case 'file': {
-      const file: FileArtifact = { file_id: e.file_id, toolCallId: e.tool_call_id, filename: e.filename, kind: e.kind, kind_label: e.kind_label, download_url: e.download_url, sheets: e.sheets, run_id: e.run_id }
+      const status = msg.deliveryStatuses?.[e.file_id] ?? e.delivery_status
+      const file: FileArtifact = { file_id: e.file_id, toolCallId: e.tool_call_id, filename: e.filename, kind: e.kind, kind_label: e.kind_label, download_url: e.download_url, sheets: e.sheets, run_id: e.run_id,
+        delivery_status: status, intermediate: status ? status === 'intermediate' : e.intermediate, explicit: e.explicit === true }
       const progress = e.tool_call_id ? findProgress(msg, e.tool_call_id) : undefined
       if (progress) addProgressFile(progress, file)
       else msg.artifacts.push({ kind: 'file', key: uid('a'), file })
+      break
+    }
+    case 'delivery_manifest': {
+      const candidates = new Set(textList(e.candidate_file_ids))
+      const finals = new Set(e.status === 'confirmed' ? textList(e.final_file_ids).filter((id) => candidates.has(id)) : [])
+      const statuses = msg.deliveryStatuses ??= {}
+      for (const id of candidates) statuses[id] = finals.has(id) ? 'final' : 'intermediate'
+      for (const artifact of msg.artifacts) {
+        const files = artifact.kind === 'file' ? [artifact.file] : artifact.kind === 'recipe'
+          ? [...(artifact.progress.files ?? []), ...(artifact.progress.file ? [artifact.progress.file] : [])] : []
+        for (const file of files) {
+          if (!candidates.has(file.file_id)) continue
+          file.delivery_status = statuses[file.file_id]
+          file.intermediate = file.delivery_status === 'intermediate'
+        }
+      }
       break
     }
     case 'clarify':

@@ -28,8 +28,15 @@ def file_references(conversation_id: str, message_id: int, files: list[dict[str,
             if is_llm_not_configured_message(message.role, message.content, message.events):
                 continue
             ids = [file_id for file_id in (message.meta or {}).get("attachments", []) if file_id in allowed]
+            statuses: dict[str, bool] = {}
+            for event in message.events or []:
+                if event.get("type") == "delivery_manifest":
+                    finals = set(event.get("final_file_ids", [])) if event.get("status") == "confirmed" else set()
+                    statuses.update({file_id: file_id in finals for file_id in event.get("candidate_file_ids", [])})
             ids += [event["file_id"] for event in message.events or []
-                    if event.get("type") == "file" and event.get("file_id") in allowed]
+                    if event.get("type") == "file" and event.get("file_id") in allowed
+                    and (event.get("explicit") or statuses.get(event["file_id"],
+                        not event.get("intermediate") and event.get("delivery_status") not in {"candidate", "intermediate"}))]
             references.append({"role": message.role, "content": (message.content or "")[-1500:],
                                "file_ids": list(dict.fromkeys(ids))})
     return references
@@ -41,6 +48,9 @@ def select_files(selection: FileSelection, files: list[dict[str, Any]],
     if any(file_id not in by_id for file_id in selection.file_ids):
         raise ServiceError("没有找到指定文件，或该文件不属于当前会话或客户。请确认文件名或查看范围。")
     candidates = [by_id[file_id] for file_id in selection.file_ids] if selection.file_ids else list(by_id.values())
+    if not selection.file_ids and selection.selection in {"all", "latest"}:
+        candidates = [file for file in candidates if not file.get("intermediate")
+                      and file.get("delivery_status") not in {"candidate", "intermediate"}]
     if selection.kinds:
         candidates = [file for file in candidates if file.get("kind") in selection.kinds]
     if selection.selection == "selected":

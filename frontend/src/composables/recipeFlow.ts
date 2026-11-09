@@ -1,5 +1,6 @@
 import type { RecipeFlowData } from '../api/types.ts'
 import type { RecipeProgress } from './chatModel.ts'
+import { isDeliveredFile, progressDeliveryFiles } from './deliveryFiles'
 
 /** File boundaries stay separate from the tables passed between processing steps. */
 export function flowInputFiles(flow: RecipeFlowData): NonNullable<RecipeFlowData['input_files']> {
@@ -31,8 +32,9 @@ export function progressFlow(progress: RecipeProgress): RecipeFlowData {
       file_pattern: '', source_file: input.filename, sheet: input.sheet,
     }))
     : snapshot?.inputs.length ? snapshot.inputs : progress.recipe?.inputs ?? []
-  const files = snapshot?.output_files
-  const delivered = progress.files?.length ? progress.files : progress.file ? [progress.file] : []
+  const hiddenIds = new Set((progress.files ?? (progress.file ? [progress.file] : [])).filter((file) => !isDeliveredFile(file)).map((file) => file.file_id))
+  const files = snapshot?.output_files?.filter((file) => !file.file_id || !hiddenIds.has(file.file_id))
+  const delivered = progressDeliveryFiles(progress)
   return {
     ...snapshot,
     inputs,

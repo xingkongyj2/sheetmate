@@ -92,6 +92,10 @@ class FakeLLM:
                    and item.get("tool") != "reconsider_approach"]
             return {"completed": True, "reason": "已核对本次测试的执行结果。", "remaining": [],
                     "can_continue": False, "evidence_ids": ids, "requires_execution": bool(evidence)}
+        if "最终交付核对助手" in blob:
+            candidates = json.loads(prompt).get("candidates", [])
+            return {"file_ids": [item["file_id"] for item in candidates],
+                    "reason": "保留本次测试要求的全部独立交付。", "excluded": []}
         if "重复流程保存授权判断助手" in blob:
             return {"save_recipe": self.save_recipe_requested}
         if "重复流程删除授权判断助手" in blob:
