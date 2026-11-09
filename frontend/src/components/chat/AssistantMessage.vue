@@ -203,8 +203,8 @@ onBeforeUnmount(() => {
           <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
             <div class="flex min-w-0 flex-1 basis-48 items-center gap-2">
               <FileSpreadsheet class="size-[18px] shrink-0 text-fun-green" aria-hidden="true" />
-              <div class="min-w-0 truncate text-[13px] font-semibold" :title="file.filename">{{ file.filename }}</div>
-              <span v-if="fileKindLabel(file.kind)" class="tag shrink-0 whitespace-nowrap">{{ fileKindLabel(file.kind) }}</span>
+              <div class="min-w-0 truncate text-[15px] font-semibold leading-6" :title="file.filename">{{ file.filename }}</div>
+              <span v-if="file.kind !== 'output' && fileKindLabel(file.kind)" class="tag shrink-0 whitespace-nowrap">{{ fileKindLabel(file.kind) }}</span>
             </div>
             <div class="ml-auto flex shrink-0 items-center gap-1.5">
               <button type="button" class="btn-line h-7 gap-1 rounded-lg px-2.5 py-0 text-xs focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink/40" :disabled="!!openingFile" :aria-label="`查看 ${file.filename}`" @click="previewFile(file.file_id)"><LoaderCircle v-if="openingFile === file.file_id" class="size-3.5 animate-spin" /><Eye v-else class="size-3.5" />查看</button>
