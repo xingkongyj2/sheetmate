@@ -507,15 +507,36 @@ def get_llm() -> LLMClient:
 
 
 async def test_connection(cfg: LLMSettings) -> dict[str, Any]:
-    """设置页「测试连接」：发一个最小请求。"""
+    """设置页「测试连接」：沿用输出预算，并限制整次测试的等待时间。"""
     client = LLMClient(cfg)
     extra: dict[str, Any] = {}
     if cfg.thinking_supported:
-        # 连接探测无需思考，避免极小的输出预算被思考内容耗尽。
+        # 已知协议的连接探测无需思考；中转或其他模型仍可能默认开启思考。
         extra["extra_body"] = ({"enable_thinking": False} if cfg.provider_id == "qwen"
                                else {"thinking": {"type": "disabled"}})
-    msg = await client.chat([{"role": "user", "content": "回复两个字：你好"}], max_tokens=10, **extra)
+    try:
+        # 思考内容可能计入输出额度，不能为两个字的回复强制缩成 10 Token。
+        msg = await asyncio.wait_for(
+            client.chat([{"role": "user", "content": "回复两个字：你好"}], **extra), cfg.timeout,
+        )
+    except (asyncio.TimeoutError, LLMTimeout) as exc:
+        raise LLMTimeout(
+            f"连接测试超时（等待上限为 {cfg.timeout:g} 秒）。模型可能响应较慢，"
+            "可在「高级配置」中增加「请求超时」后重试。"
+        ) from exc
+    finally:
+        await client.client.close()
     reply = (msg.content or "").strip()[:50]
     if not reply:
-        raise LLMError("模型返回了空回复，请检查模型设置后重试。")
+        if getattr(msg, "_sheetmate_finish_reason", None) == "length":
+            raise LLMError(
+                "模型输出达到 Token 上限，尚未生成回复。"
+                "请在「高级配置」中增加「输出 Token 上限」后重试。"
+            )
+        if getattr(msg, "reasoning_content", None):
+            raise LLMError(
+                "模型只返回了思考内容，没有返回最终回复。"
+                "请增加「输出 Token 上限」，或关闭模型思考后重试。"
+            )
+        raise LLMError("模型服务已响应，但返回的回复内容为空，请检查模型或接口兼容性后重试。")
     return {"ok": True, "model": cfg.model, "reply": reply}

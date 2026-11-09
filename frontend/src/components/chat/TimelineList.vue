@@ -50,20 +50,25 @@ function repeatsParentTitle(...titles: (string | undefined)[]): boolean {
             <p v-if="!repeatsParentTitle(item.label, tools.get(item.key)?.label)" class="font-medium text-ink">{{ tools.get(item.key)?.label }}</p>
             <p v-else-if="!tools.get(item.key)?.details.length && (!tools.get(item.key)?.summary || recipeTools.has(item.tool))" class="text-xs leading-5 text-mute">{{ item.status === 'running' ? '正在处理' : item.status === 'ok' ? '已完成' : '未完成' }}</p>
             <div v-if="tools.get(item.key)?.sections.length" class="space-y-3 pt-1 text-xs leading-5 text-mute">
-              <section v-for="section in tools.get(item.key)?.sections" :key="section.label" class="space-y-1.5">
-                <h4 class="text-[11px] font-medium text-faint">{{ section.label }}</h4>
-                <ol v-if="section.ordered" class="list-decimal space-y-2 pl-4 marker:text-faint">
-                  <li v-for="(text, index) in section.items" :key="index" class="pl-0.5">
-                    <MarkdownView :source="text" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
-                  </li>
-                </ol>
-                <ul v-else-if="section.items.length > 1" class="list-disc space-y-1.5 pl-4 marker:text-faint">
-                  <li v-for="(text, index) in section.items" :key="index" class="pl-0.5">
-                    <MarkdownView :source="text" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
-                  </li>
-                </ul>
-                <MarkdownView v-else :source="section.items[0] ?? ''" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
-              </section>
+              <details v-for="section in tools.get(item.key)?.sections" :key="section.label" class="group/tool-section">
+                <summary class="flex cursor-pointer list-none items-start gap-1.5 rounded py-0.5 text-[11px] font-medium text-faint transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
+                  <ChevronRight class="mt-1 size-3 shrink-0 transition group-open/tool-section:rotate-90" />
+                  <span>{{ section.label }}</span>
+                </summary>
+                <div class="mt-1.5 pl-4.5">
+                  <ol v-if="section.ordered" class="list-decimal space-y-2 pl-4 marker:text-faint">
+                    <li v-for="(text, index) in section.items" :key="index" class="pl-0.5">
+                      <MarkdownView :source="text" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
+                    </li>
+                  </ol>
+                  <ul v-else-if="section.items.length > 1" class="list-disc space-y-1.5 pl-4 marker:text-faint">
+                    <li v-for="(text, index) in section.items" :key="index" class="pl-0.5">
+                      <MarkdownView :source="text" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
+                    </li>
+                  </ul>
+                  <MarkdownView v-else :source="section.items[0] ?? ''" class="!text-xs !leading-5 !text-mute [&_p]:my-0" />
+                </div>
+              </details>
             </div>
             <p v-for="detail in tools.get(item.key)?.sections.length ? [] : tools.get(item.key)?.details" :key="detail" class="whitespace-pre-line text-xs leading-5 text-mute">{{ detail }}</p>
             <p v-if="tools.get(item.key)?.summary && (detailed || !recipeTools.has(item.tool))" class="text-xs leading-5" :class="item.status === 'error' ? 'text-error' : 'text-mute'">{{ tools.get(item.key)?.summary }}</p>

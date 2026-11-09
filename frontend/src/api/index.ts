@@ -53,7 +53,8 @@ export const settingsApi = {
     parseLLMConfig((await http.put<unknown>('/settings/llm', payload)).data),
   testLLM: async (payload: LLMConfigUpdate) =>
     (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/llm/test', payload,
-      { validateStatus: () => true })).data,
+      // 留出后端返回超时说明的时间，避免慢模型被前端固定的 120 秒超时提前中断。
+      { timeout: (payload.timeout ?? 120) * 1000 + 10_000, validateStatus: () => true })).data,
 }
 
 // ---------------------------------------------------------------- 客户
