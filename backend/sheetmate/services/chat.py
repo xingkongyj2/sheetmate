@@ -1179,7 +1179,16 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
             # creating new rules. Prioritize keys mentioned in this user turn.
             existing.sort(key=lambda item: not any(str(item.get("key") or "")[i:i + 2] in message
                                                    for i in range(max(0, len(str(item.get("key") or "")) - 1))))
-            items = await asyncio.wait_for(extract_memories(llm, message, answer, existing=existing[:12]), timeout=30)
+            target_scope = {
+                "scope": "customer" if customer_id else "conversation",
+                "user_id": None,
+                "customer_id": customer_id,
+                "conversation_id": None if customer_id else conversation_id,
+                "recipe_id": recipe_id,
+            }
+            items = await asyncio.wait_for(extract_memories(
+                llm, message, answer, existing=existing[:12], target_scope=target_scope,
+            ), timeout=30)
         except Exception as exc:
             record_event("memory.error", "sheetmate.services.chat._learn_memories", error_data(exc))
             return
@@ -1204,6 +1213,8 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
                 customer_id=customer_id, conversation_id=conversation_id, recipe_id=recipe_id,
                 source_message_id=source_message_id, source_turn_id=source_turn_id,
                 evidence_span=item.get("evidence_span", ""),
+                replaces_memory_id=item.get("replaces_memory_id"),
+                replaces_value=item.get("replaces_value"),
             )
             receipts.append(memory_service.memory_write_result(memory))
         record_event("memory.saved", "sheetmate.services.memory.set_memory",

@@ -11,7 +11,7 @@ from typing import Any
 
 from sqlalchemy import select
 
-from sheetmate.agent.memory import supported_memory_value
+from sheetmate.agent.memory import supported_memory_value, validate_memory_candidates
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeProfile, Run, User
 from sheetmate.engine.file_copies import FileCopies
@@ -614,10 +614,31 @@ class ConversationHost:
                 reason = "记忆内容必须与用户原话一致并保留完整条件；本次、临时或例外要求不能升级为长期规则。请引用完整原句或请用户明确长期适用范围。"
             if reason:
                 return MemoryRememberResult(status="needs_evidence", key=key, reason=reason)
-            item = memory_service.set_memory(db, category=category, key=key, value=supported_value, user_id=self.user_id,
+            candidates = validate_memory_candidates(message.content, [{
+                "category": category, "key": key, "value": supported_value, "evidence_span": supported_value,
+            }], existing=memory_service.memories_for(
+                db, user_id=self.user_id, customer_id=self.customer_id,
+                conversation_id=self.conversation_id, recipe_id=self.recipe_id,
+            ), target_scope={
+                "scope": "customer" if self.customer_id else "conversation",
+                "customer_id": self.customer_id,
+                "conversation_id": None if self.customer_id else self.conversation_id,
+                "user_id": None,
+                "recipe_id": self.recipe_id,
+            })
+            if not candidates:
+                return MemoryRememberResult(
+                    status="needs_evidence", key=key,
+                    reason="未找到可安全保存的完整新规则；修改已有规则时需明确长期修改的目标及完整新口径，不能另起名称绕过原规则。",
+                )
+            candidate = candidates[0]
+            item = memory_service.set_memory(db, category=candidate["category"], key=candidate["key"],
+                                             value=candidate["value"], user_id=self.user_id,
                                              customer_id=self.customer_id, conversation_id=self.conversation_id,
                                              recipe_id=self.recipe_id, source_message_id=source_message_id,
-                                             source_turn_id=source_turn_id, evidence_span=supported_value)
+                                             source_turn_id=source_turn_id, evidence_span=candidate["evidence_span"],
+                                             replaces_memory_id=candidate.get("replaces_memory_id"),
+                                             replaces_value=candidate.get("replaces_value"))
             receipt = memory_service.memory_write_result(item)
         receipt["scope_label"] = "客户记忆" if self.customer_id else "本会话记忆"
         return MemoryRememberResult(receipt)

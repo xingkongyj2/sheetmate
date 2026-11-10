@@ -115,7 +115,9 @@ async def compact_history(llm: Any, history: list[dict[str, Any]], *,
     if summary_tokens < 300:
         return None
     try:
-        msg = await llm.chat([{"role": "user", "content": COMPACT_PROMPT.format(history="\n\n".join(lines))}],
+        msg = await llm.chat([{"role": "user", "content": COMPACT_PROMPT.format(
+            history="\n\n".join(lines), summary_budget=summary_tokens,
+        )}],
                              max_tokens=COMPACTION_MODEL_MAX_TOKENS,
                              _stage="history_compaction", _auxiliary=True)
         result = (msg.content or "").strip()

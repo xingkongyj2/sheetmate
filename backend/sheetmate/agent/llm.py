@@ -27,7 +27,7 @@ from openai import AsyncOpenAI
 
 from sheetmate.agent.content import user_content
 from sheetmate.agent.context_builder import DEFAULT_PROJECTION_CHARS, prepare_context
-from sheetmate.agent.llm_budget import BudgetExceeded, RequestBudget
+from sheetmate.agent.llm_budget import BudgetExceeded, RequestBudget, context_profile, request_size
 from sheetmate.agent.structured import StructuredOutputError, complete_structured, validate_payload
 from sheetmate.config import LLMSettings, get_llm_settings, is_deepseek_url
 from sheetmate.conversation_log import record_event
@@ -298,6 +298,7 @@ class LLMClient:
         self.usage_calls: list[dict[str, Any]] = []
 
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
+        context_metrics = extra.pop("_context_metrics", None)
         auxiliary = extra.pop("_auxiliary", False)
         qwen = self.cfg.provider_id == "qwen"
         deepseek_thinking = not qwen and self.cfg.thinking_supported
@@ -343,7 +344,22 @@ class LLMClient:
         policy = self.cfg.runtime_policy
         projection_chars = (policy.max_input_chars if policy.budget_enabled and policy.max_input_chars
                             else DEFAULT_PROJECTION_CHARS)
-        return prepare_context(kwargs, projection_chars)
+        before_chars, before_tokens = request_size(kwargs) if context_metrics is not None else (0, 0)
+        prepared = prepare_context(kwargs, projection_chars)
+        if context_metrics is not None:
+            after_profile = context_profile(prepared)
+            after_chars, after_tokens = request_size(prepared)
+            context_metrics.update(after_profile)
+            context_metrics["projection"] = {
+                "applied": after_chars < before_chars,
+                "before_serialized_chars": before_chars,
+                "after_serialized_chars": after_chars,
+                "saved_serialized_chars": max(0, before_chars - after_chars),
+                "before_estimated_tokens": before_tokens,
+                "after_estimated_tokens": after_tokens,
+                "saved_estimated_tokens": max(0, before_tokens - after_tokens),
+            }
+        return prepared
 
     async def _within_deadline(self, request: Any) -> Any:
         try:
@@ -419,7 +435,9 @@ class LLMClient:
         response = None
         failure = None
         try:
-            kwargs = self._kwargs(messages, tools, **extra)
+            context_metrics: dict[str, Any] = {}
+            kwargs = self._kwargs(messages, tools, _context_metrics=context_metrics, **extra)
+            record_event("llm.context", function, context_metrics, call_id=call_id, stage=stage)
             record_event("llm.request", function, kwargs, call_id=call_id)
             resp = await self._create(kwargs, call_id, stage)
             response = resp
@@ -466,9 +484,12 @@ class LLMClient:
         content_parts: list[str] = []
         reasoning_parts: list[str] = []
         calls: dict[int, dict[str, str]] = {}
-        kwargs = self._kwargs(messages, tools, stream=True, tool_choice=tool_choice if tools else None)
+        context_metrics: dict[str, Any] = {}
+        kwargs = self._kwargs(messages, tools, stream=True, tool_choice=tool_choice if tools else None,
+                              _context_metrics=context_metrics)
         finish_reason: str | None = None
         try:
+            record_event("llm.context", function, context_metrics, call_id=call_id, stage=stage)
             record_event("llm.request", function, kwargs, call_id=call_id)
             stream = await self._create(kwargs, call_id, stage)
             failure: BaseException | None = None
