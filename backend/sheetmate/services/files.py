@@ -665,6 +665,10 @@ def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None 
             profile = {key: value for key, value in profile.items()
                        if key not in {"sheets", "file_only", FILE_MEMORY_KEY}}
             profile.update(refreshed)
+        else:
+            quality_by_sheet = {sheet.name: dict(sheet.quality or {}) for sheet in sheets}
+            profile["sheets"] = [{**saved, "quality": quality_by_sheet.get(saved.get("sheet"), saved.get("quality", {}))}
+                                 for saved in profile.get("sheets", [])]
         profile[FILE_VERSION_KEY] = version
         record.profile = profile
     for info in ws.list_tables():  # 同一个文件重复加载时先清掉旧表
@@ -685,6 +689,7 @@ def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None 
             name, sheet.df, label=f"{record.filename} · {sheet.name}", source="uploaded",
             role="expected" if record.kind == "expected" else "input", file_id=record.id, filename=record.filename,
             sheet=sheet.name, header=sheet.header.to_dict(), file_version=version["sha256"] if original_bytes else "",
+            read_quality=dict(sheet.quality or {}),
             description=("人工做好的期望结果" if record.kind == "expected" else
                          "系统生成的工作簿，可继续作为输入处理" if record.kind == "output" else "上传的原始数据")
                         + (f"，标题：{sheet.header.title}" if sheet.header.title else ""),

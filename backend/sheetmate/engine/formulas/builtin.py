@@ -377,7 +377,8 @@ def _build_lookup(p: dict[str, Any], ws: Workspace) -> FormulaPlan:
             warnings.append(f"「{c}」在原表已存在，带出的列命名为「{out}」")
         out_names[c] = out
 
-    # 重复键：多对多会把行数放大、金额重复，默认取第一条，也可以设为报错
+    # 默认只折叠带出值完全一致的重复；冲突记录必须明确选择 first 才允许择一。
+    dup_total = 0
     dup = ws.fetch(
         f"SELECT k, n FROM (SELECT {rk} AS k, count(*) AS n FROM {q(right)} AS r0 "
         f"WHERE {rk} IS NOT NULL GROUP BY 1 HAVING count(*) > 1) ORDER BY n DESC LIMIT 5"
@@ -389,7 +390,18 @@ def _build_lookup(p: dict[str, Any], ws: Workspace) -> FormulaPlan:
         examples = "、".join(f"{k}（{n} 次）" for k, n in dup)
         if p["duplicates"] == "error":
             raise FormulaError(f"匹配表「{right}」的键「{rkey}」有 {dup_total} 个重复值（{examples}），已拦截以免一对多重复计算")
-        warnings.append(f"匹配表「{right}」有 {dup_total} 个重复键（{examples}），已取第一条")
+        if p["duplicates"] == "consistent":
+            value_columns = ", ".join(f"r0.{q(c)}" for c in bring)
+            conflicts = ws.fetch(
+                f"SELECT __k, count(*) FROM (SELECT DISTINCT {rk} AS __k, {value_columns} "
+                f"FROM {q(right)} AS r0 WHERE {rk} IS NOT NULL) GROUP BY __k HAVING count(*) > 1 LIMIT 5"
+            )
+            if conflicts:
+                raise FormulaError(f"匹配表「{right}」的重复键对应不同的带出值：{[item[0] for item in conflicts]}；"
+                                   "请先明确去重或汇总规则，未自动取第一条")
+            warnings.append(f"匹配表「{right}」有 {dup_total} 个重复键，带出值完全一致，已合并一致记录")
+        else:
+            warnings.append(f"匹配表「{right}」有 {dup_total} 个重复键（{examples}），按明确的 first 策略取第一条")
 
     values = ", ".join(f"r0.{q(c)} AS {q(f'__v{i}')}" for i, c in enumerate(bring))
     r_cte = (
@@ -409,20 +421,38 @@ def _build_lookup(p: dict[str, Any], ws: Workspace) -> FormulaPlan:
         return f"CASE WHEN {matched} IS NULL THEN {lit(fill)} ELSE {src} END AS {q(out_names[c])}"
 
     threshold = p.get("fuzzy_threshold")
+    ambiguous_count = 0
+    ambiguous_examples: list[dict[str, Any]] = []
     if threshold:
         if not 0 < float(threshold) <= 1:
             raise FormulaError("fuzzy_threshold 取值 0~1，例如 0.9")
         score_col = p.get("score_column") or "匹配得分"
+        margin = float(p.get("fuzzy_min_margin", 0.05))
+        if not 0 <= margin <= 1:
+            raise FormulaError("fuzzy_min_margin 取值 0~1，例如 0.05")
         ctes = (
             f"WITH {r_cte}, "
             f"lk AS (SELECT DISTINCT {lk} AS __lk FROM {q(left)} AS l WHERE {lk} IS NOT NULL), "
-            "fz AS (SELECT __lk, __rk, __score FROM (SELECT lk.__lk, r.__k AS __rk, "
-            "jaro_winkler_similarity(lk.__lk, r.__k) AS __score, "
-            "ROW_NUMBER() OVER (PARTITION BY lk.__lk ORDER BY jaro_winkler_similarity(lk.__lk, r.__k) DESC, r.__k) AS __rn "
-            "FROM lk CROSS JOIN r WHERE lk.__lk NOT IN (SELECT __k FROM r)) WHERE __rn = 1), "
+            "fz_scores AS (SELECT lk.__lk, r.__k AS __rk, jaro_winkler_similarity(lk.__lk, r.__k) AS __score "
+            "FROM lk CROSS JOIN r WHERE lk.__lk NOT IN (SELECT __k FROM r)), "
+            "fz AS (SELECT * EXCLUDE (__rn) FROM (SELECT *, "
+            "ROW_NUMBER() OVER (PARTITION BY __lk ORDER BY __score DESC, __rk) AS __rn, "
+            "LEAD(__score) OVER (PARTITION BY __lk ORDER BY __score DESC, __rk) AS __second_score, "
+            "LEAD(__rk) OVER (PARTITION BY __lk ORDER BY __score DESC, __rk) AS __second_key "
+            "FROM fz_scores) WHERE __rn = 1), "
             "km AS (SELECT __lk, __lk AS __rk, 1.0 AS __score FROM lk WHERE __lk IN (SELECT __k FROM r) "
-            f"UNION ALL SELECT __lk, __rk, __score FROM fz WHERE __score >= {float(threshold)}) "
+            f"UNION ALL SELECT __lk, __rk, __score FROM fz WHERE __score >= {float(threshold)} "
+            f"AND (__second_score IS NULL OR __score - __second_score >= {margin})) "
         )
+        ambiguous_where = (f"__score >= {float(threshold)} AND __second_score IS NOT NULL "
+                           f"AND __score - __second_score < {margin}")
+        ambiguous_count = int(ws.fetch(f"{ctes}SELECT count(*) FROM fz WHERE {ambiguous_where}")[0][0])
+        ambiguous_examples = [
+            {"key": item[0], "best": item[1], "score": round(float(item[2]), 4),
+             "second": item[3], "second_score": round(float(item[4]), 4)}
+            for item in ws.fetch(f"{ctes}SELECT __lk, __rk, __score, __second_key, __second_score "
+                                 f"FROM fz WHERE {ambiguous_where} ORDER BY __lk LIMIT 5")
+        ]
         joins = f"FROM {q(left)} AS l LEFT JOIN km ON {lk} = km.__lk LEFT JOIN r ON km.__rk = r.__k"
         select = ", ".join(value_expr(i, c, "r.__k") for i, c in enumerate(bring))
         sql = f"{ctes}SELECT l.*, {select}, round(km.__score, 3) AS {q(score_col)} {joins} ORDER BY l.rowid"
@@ -446,8 +476,12 @@ def _build_lookup(p: dict[str, Any], ws: Workspace) -> FormulaPlan:
         "fuzzy_rows": int(fuzzy or 0),
         "match_rate": rate,
         "unmatched_examples": missing,
-        "duplicate_keys": len(dup),
+        "duplicate_keys": int(dup_total),
+        "fuzzy_ambiguous_keys": ambiguous_count,
+        "fuzzy_ambiguous_examples": ambiguous_examples,
     }
+    if ambiguous_count:
+        warnings.append(f"有 {ambiguous_count} 个键的模糊匹配候选分差不足，已保留为未匹配；示例：{ambiguous_examples}")
     if total - matched:
         filled = "，已按设置填充" if fills else ""
         warnings.append(f"有 {total - matched} 行没匹配上（匹配率 {rate:.1%}），示例：{missing}{filled}")
@@ -484,17 +518,63 @@ def _build_join(p: dict[str, Any], ws: Workspace) -> FormulaPlan:
             conds.append(f"l.{q(lc)} = r.{q(rc)}")
         else:
             conds.append(f"CAST(l.{q(lc)} AS VARCHAR) = CAST(r.{q(rc)} AS VARCHAR)")
+        conds.append(f"trim(CAST(l.{q(lc)} AS VARCHAR)) <> '' AND trim(CAST(r.{q(rc)} AS VARCHAR)) <> ''")
     sql = (
         f"SELECT {', '.join(select)} FROM {q(left)} AS l {how} JOIN {q(right)} AS r ON {' AND '.join(conds)} "
         "ORDER BY l.rowid NULLS LAST, r.rowid"
     )
-    plan = FormulaPlan(sql, [left, right])
+    condition = " AND ".join(conds)
+
+    def key_stats(table: str, columns: list[str]) -> tuple[int, int, int]:
+        blank = " OR ".join(f"{q(c)} IS NULL OR trim(CAST({q(c)} AS VARCHAR)) = ''" for c in columns)
+        total, null_keys = ws.fetch(f"SELECT count(*), count(*) FILTER (WHERE {blank}) FROM {q(table)}")[0]
+        duplicates = ws.fetch(
+            f"SELECT count(*) FROM (SELECT {_cols(columns)} FROM {q(table)} WHERE NOT ({blank}) "
+            f"GROUP BY {_cols(columns)} HAVING count(*) > 1)"
+        )[0][0]
+        return int(total), int(null_keys), int(duplicates)
+
+    left_rows, left_nulls, left_duplicates = key_stats(left, left_on)
+    right_rows, right_nulls, right_duplicates = key_stats(right, right_on)
+    left_matched = int(ws.fetch(
+        f"SELECT count(*) FROM {q(left)} AS l WHERE EXISTS (SELECT 1 FROM {q(right)} AS r WHERE {condition})"
+    )[0][0])
+    right_matched = int(ws.fetch(
+        f"SELECT count(*) FROM {q(right)} AS r WHERE EXISTS (SELECT 1 FROM {q(left)} AS l WHERE {condition})"
+    )[0][0])
+    cardinality = ("many" if left_duplicates else "one") + "_to_" + ("many" if right_duplicates else "one")
+    required_cardinality = p.get("relationship")
+    if required_cardinality and (
+        (required_cardinality in {"one_to_one", "one_to_many"} and left_duplicates)
+        or (required_cardinality in {"one_to_one", "many_to_one"} and right_duplicates)
+    ):
+        raise FormulaError(f"关联基数不符合 {required_cardinality}：实际 {cardinality}，"
+                           f"左表 {left_duplicates} 个重复键、右表 {right_duplicates} 个重复键")
+    metrics = {
+        "left_rows": left_rows, "right_rows": right_rows,
+        "left_null_key_rows": left_nulls, "right_null_key_rows": right_nulls,
+        "left_duplicate_keys": left_duplicates, "right_duplicate_keys": right_duplicates,
+        "left_matched_rows": left_matched, "right_matched_rows": right_matched,
+        "left_unmatched_rows": left_rows - left_matched, "right_unmatched_rows": right_rows - right_matched,
+        "total_rows": left_rows, "matched_rows": left_matched, "unmatched_rows": left_rows - left_matched,
+        "match_rate": left_matched / left_rows if left_rows else 1.0,
+        "cardinality": cardinality,
+    }
+    warnings = []
+    if left_nulls or right_nulls:
+        warnings.append(f"关联键为空：左表 {left_nulls} 行、右表 {right_nulls} 行")
+    if left_rows != left_matched or right_rows != right_matched:
+        warnings.append(f"关联未覆盖：左表 {left_rows - left_matched} 行、右表 {right_rows - right_matched} 行")
+    if right_duplicates and how in {"LEFT", "INNER", "FULL OUTER"}:
+        warnings.append(f"右表有 {right_duplicates} 个重复关联键，存在一对多风险；请核对归属和金额，不能只看总行数")
+    plan = FormulaPlan(sql, [left, right], warnings, {"metrics": metrics})
 
     def post(ws_: Workspace, output: str) -> dict[str, Any]:
         before, after = ws_.row_count(left), ws_.row_count(output)
         if how in {"LEFT", "INNER"} and after > before:
-            return {"warnings": [f"合并后行数从 {before} 变成 {after}：右表有重复键，出现了一对多，请确认金额不会被重复计算"]}
-        return {}
+            return {"warnings": [f"合并后行数从 {before} 变成 {after}：右表有重复键，出现了一对多，请确认金额不会被重复计算"],
+                    "metrics": {"output_rows": after}}
+        return {"metrics": {"output_rows": after}}
 
     plan.post = post
     return plan
@@ -960,10 +1040,11 @@ def _register() -> dict[str, BuiltinFormula]:
                    "lookup_key": {"type": "str", "desc": "匹配表里的键列；不填表示和 key 同名"},
                    "columns": {"type": "columns", "required": True, "of": "lookup_table", "desc": "要带出来的列"},
                    "missing_fill": {"type": "dict", "desc": "匹配不到时填的值，例如 {\"归属\": \"新食研\"}"},
-                   "duplicates": {"type": "enum", "values": ["first", "error"], "default": "first",
-                                  "desc": "匹配表键重复时：first 取第一条 / error 报错拦截"},
+                   "duplicates": {"type": "enum", "values": ["consistent", "first", "error"], "default": "consistent",
+                                  "desc": "重复键：consistent 仅合并带出值一致的记录（默认）/ first 明确取第一条 / error 全部拦截"},
                    "normalize_key": {"type": "bool", "default": True, "desc": "匹配前标准化键（去空格、统一大小写）"},
                    "fuzzy_threshold": {"type": "number", "desc": "可选：精确匹配不上的行按相似度模糊匹配，0~1，例如 0.92"},
+                   "fuzzy_min_margin": {"type": "number", "default": 0.05, "desc": "模糊匹配第一与第二候选的最小分差；分差不足保持未匹配"},
                    "score_column": {"type": "str", "default": "匹配得分", "desc": "模糊匹配时得分列名"}},
                   ["匹配", "vlookup", "查找", "关联", "带出"],
                   {"table": "订单", "lookup_table": "店铺归属", "key": "店铺", "columns": ["归属"], "missing_fill": {"归属": "新食研"}}),
@@ -976,6 +1057,8 @@ def _register() -> dict[str, BuiltinFormula]:
                    "left_on": {"type": "columns", "required": True, "of": "left", "desc": "左表的键"},
                    "right_on": {"type": "columns", "of": "right", "desc": "右表的键；不填表示和左表同名"},
                    "how": {"type": "enum", "values": ["inner", "left", "right", "full"], "default": "left", "desc": "合并方式"},
+                   "relationship": {"type": "enum", "values": ["one_to_one", "many_to_one", "one_to_many", "many_to_many"],
+                                    "desc": "可选的关联基数约束；例如 many_to_one 要求右表键唯一，不满足时拦截"},
                    "suffix": {"type": "str", "default": "_右", "desc": "重名列的后缀"}},
                   ["合并", "join", "关联"]),
             _build_join, _d("按 {left_on} 合并「{left}」和「{right}」（{how}）"),

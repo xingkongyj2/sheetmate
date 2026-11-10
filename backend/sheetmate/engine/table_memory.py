@@ -19,6 +19,21 @@ from sheetmate.engine.workspace import TableInfo, Workspace
 
 SCHEMA_VERSION = 1
 MAX_OBSERVATIONS = 32
+MAX_TABLE_CONTEXT_CHARS = 8_000
+MAX_TABLES_CONTEXT_CHARS = 24_000
+OBSERVATION_PREVIEW_ROWS = 10
+
+
+def _context_projection(text: str, max_chars: int, *, message: str = "") -> str:
+    """Bound only the model-facing projection; stored facts remain untouched."""
+    if len(text) <= max_chars:
+        return text
+    notice = "\n（探测记忆展示已达预算，部分详情省略；完整事实仍已保存，请按具体表/字段调用工具读取。" + message + "）"
+    room = max(0, max_chars - len(notice))
+    prefix = text[:room]
+    if "\n" in prefix:
+        prefix = prefix.rsplit("\n", 1)[0]
+    return prefix + notice
 
 
 def _memory(info: TableInfo) -> dict[str, Any]:
@@ -55,6 +70,7 @@ def seed_profile(ws: Workspace, name: str, sheet_profile: dict[str, Any]) -> boo
             return False
         preview = sheet_profile.get("sample") or sheet_profile.get("preview") or {}
         profile = {"columns": deepcopy(columns), "keys": deepcopy(sheet_profile.get("keys", {})),
+                   "quality": deepcopy(sheet_profile.get("quality", {})),
                    "sample": {"columns": info.column_names, "rows": deepcopy(preview.get("rows", []))}}
         return save_profile(ws, name, profile, expected_revision=info.revision)
 
@@ -113,6 +129,8 @@ def restore_memory(ws: Workspace, name: str, memory: dict[str, Any]) -> bool:
 
 def copy_table_memory(source_info: TableInfo, target_ws: Workspace, target_name: str) -> bool:
     """在完整复制数据之后复制探测事实；不得用于仅仅具有相同结构的不同表。"""
+    if source_info.read_quality:
+        target_ws.update_meta(target_name, read_quality=deepcopy(source_info.read_quality))
     memory = portable_memory(source_info)
     return bool(memory) and restore_memory(target_ws, target_name, memory)
 
@@ -141,24 +159,38 @@ def merge_table_memory(target_ws: Workspace, observed_ws: Workspace,
     return merged
 
 
-def table_memory_text(ws: Workspace, tables: list[TableInfo] | None = None) -> str:
-    """直接读取所有字段与已探测事实，不读取数据表，也不截断结构。"""
+def table_memory_text(ws: Workspace, tables: list[TableInfo] | None = None, *,
+                      max_chars: int = MAX_TABLES_CONTEXT_CHARS, query: str = "") -> str:
+    """Project versioned facts within a prompt budget; never modify stored facts."""
     blocks = []
     for supplied in tables if tables is not None else ws.list_tables():
         info = ws.info(supplied.name)
         if info is None:
             continue
-        blocks.append(format_table_memory(info))
-    return "\n\n".join(blocks)
+        blocks.append(format_table_memory(info, query=query))
+    return _context_projection("\n\n".join(blocks), max_chars)
 
 
-def format_table_memory(info: TableInfo, *, heading: str | None = None) -> str:
+def format_table_memory(info: TableInfo, *, heading: str | None = None,
+                        max_chars: int = MAX_TABLE_CONTEXT_CHARS, query: str = "") -> str:
     """格式化已验证的表元数据快照；文件记忆无需为展示而打开工作簿或工作区。"""
     lines = [heading or f"表「{info.name}」（{info.label}）：{info.rows} 行 × {len(info.columns)} 列，内容版本 {info.revision}"]
     if heading:
         lines.append(f"内容版本：{info.revision}")
     if info.filename or info.sheet:
         lines.append(f"来源文件：{info.filename or '未命名'}；工作表：{info.sheet or info.name}")
+    profile = cached_profile(info)
+    quality = info.read_quality or (profile or {}).get("quality") or {}
+    if quality:
+        lines.append("读取质量：" + json.dumps(quality, ensure_ascii=False, separators=(",", ":")))
+        if quality.get("truncated"):
+            lines.append("警告：仅载入部分物理行，当前画像和统计不能当作完整工作表结果；先读取剩余范围。")
+        if quality.get("missing_formula_cache"):
+            lines.append("警告：存在缺少计算缓存的公式，不能把这些空值当作正常空白或零；需重算或核对原始公式。")
+        if quality.get("formula_error_cells") or quality.get("error_cells"):
+            lines.append("警告：存在 Excel 错误单元格，错误不是正常业务值；先处理或说明错误后再计算。")
+        if quality.get("header_confidence") == "low":
+            lines.append("警告：表头识别置信度低，先核对原工作表区域，不能仅依据本画像确认业务字段。")
     if info.header:
         header = info.header
         row_index = header.get("row_index") or []
@@ -171,12 +203,14 @@ def format_table_memory(info: TableInfo, *, heading: str | None = None) -> str:
         if column_indexes:
             lines.append("原工作表列位置：" + "；".join(
                 f"{column}→第 {index + 1} 列" for column, index in zip(info.column_names, column_indexes)))
-    profile = cached_profile(info)
     if profile is None:
         lines.append("已登记字段（尚无详细画像）：" + "；".join(f"{c['name']}（{c['type']}）" for c in info.columns))
     else:
         lines.append("已探测字段画像（本版本直接复用）：")
-        for col in profile.get("columns", []):
+        columns = profile.get("columns", [])
+        if query:
+            columns = sorted(columns, key=lambda col: str(col.get("name", "")) not in query)
+        for col in columns:
             extra = (f"，范围 {col.get('min')}~{col.get('max')}，合计 {col.get('sum')}" if "sum" in col else "")
             lines.append(f"- {col['name']}：{col['dtype']}，空值 {col['null_rate']:.0%}，"
                          f"{col['unique']} 个不同值{extra}，样本 {col.get('samples', [])}")
@@ -186,12 +220,34 @@ def format_table_memory(info: TableInfo, *, heading: str | None = None) -> str:
         for duplicate in keys.get("duplicated", []):
             lines.append(f"重复键：{duplicate['column']}，{duplicate['duplicate_values']} 个值重复，"
                          f"最多 {duplicate['max_repeat']} 次，示例 {duplicate.get('examples', [])}")
-    for observation in _memory(info).get("observations", []):
+    observations = _memory(info).get("observations", [])
+    if query:
+        observations = sorted(observations, key=lambda item: not any(
+            column in query for column in info.column_names if column in json.dumps(item.get("params", {}), ensure_ascii=False)
+        ))
+    for observation in observations:
         kind = {"value_counts": "取值分布", "column_stats": "列统计"}.get(observation["kind"], observation["kind"])
-        frame = _frame_from_record(observation["result"])
-        lines.append(f"已完成{kind} {json.dumps(observation['params'], ensure_ascii=False)}：\n"
-                     + frame_to_text(frame, limit=len(frame)))
-    return "\n".join(lines)
+        record = observation["result"]
+        rows = record.get("rows", [])
+        shown = min(len(rows), OBSERVATION_PREVIEW_ROWS)
+        frame = _frame_from_record({**record, "rows": rows[:shown]})
+        coverage = ""
+        if observation["kind"] == "value_counts":
+            distribution = frame.attrs.get("distribution") or {}
+            if distribution and len(frame.columns) >= 2:
+                total_rows = int(distribution["total_rows"])
+                shown_count = int(pd.to_numeric(frame.iloc[:, 1], errors="coerce").sum())
+                shown_coverage = shown_count / total_rows if total_rows else 0.0
+                coverage = (f"；全表 {distribution['total_categories']} 个类别（空值如存在也计入），"
+                            f"缓存未包含 {distribution['omitted_categories']} 个类别；"
+                            f"当前展示覆盖 {shown_count}/{total_rows} 行（{shown_coverage:.4%}）")
+            else:
+                coverage = "；旧缓存未记录全表类别数及精确覆盖率，需要时重新查询"
+        lines.append(f"已完成{kind} {json.dumps(observation['params'], ensure_ascii=False)}："
+                     f"缓存结果 {len(rows)} 行，当前展示 {shown} 行，省略 {len(rows) - shown} 行{coverage}。"
+                     "缓存结果可能受查询 limit 限制，不代表全部类别。\n"
+                     + frame_to_text(frame, limit=shown))
+    return _context_projection("\n".join(lines), max_chars)
 
 
 def _pack_value(value: Any) -> Any:
@@ -227,11 +283,14 @@ def _unpack_value(value: Any) -> Any:
 
 def _frame_record(frame: pd.DataFrame) -> dict[str, Any]:
     return {"columns": list(frame.columns), "dtypes": [str(dtype) for dtype in frame.dtypes],
+            "attrs": {"distribution": deepcopy(frame.attrs["distribution"])} if "distribution" in frame.attrs else {},
             "rows": [[_pack_value(value) for value in row] for row in frame.itertuples(index=False, name=None)]}
 
 
 def _frame_from_record(record: dict[str, Any]) -> pd.DataFrame:
     frame = pd.DataFrame([[_unpack_value(value) for value in row] for row in record["rows"]], columns=record["columns"])
+    if isinstance((record.get("attrs") or {}).get("distribution"), dict):
+        frame.attrs["distribution"] = deepcopy(record["attrs"]["distribution"])
     for column, dtype in zip(frame.columns, record.get("dtypes", [])):
         try:
             frame[column] = frame[column].astype(dtype)

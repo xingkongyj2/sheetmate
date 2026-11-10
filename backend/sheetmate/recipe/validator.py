@@ -25,7 +25,7 @@ def validate_run(
     checks = _auto_checks(recipe, outputs)
     for rule in recipe.validation_rules:
         if rule.requires_history and not history:
-            checks.append(_check(rule, "info", message="需要历史运行数据，暂时跳过"))
+            checks.append(_check(rule, "not_evaluated", message="需要历史运行数据，暂时跳过"))
             continue
         try:
             checks.append(_run_rule(rule, inputs, outputs, history or []))
@@ -34,13 +34,17 @@ def validate_run(
     passed = sum(1 for c in checks if c["status"] == "pass")
     warnings = sum(1 for c in checks if c["status"] == "warn")
     failures = sum(1 for c in checks if c["status"] == "fail")
+    not_evaluated = sum(1 for c in checks if c["status"] == "not_evaluated")
     if failures:
         status, summary = "fail", f"{failures} 项校验未通过，{warnings} 项警告"
     elif warnings:
         status, summary = "warn", f"校验通过，有 {warnings} 项警告"
+    elif not_evaluated:
+        status, summary = "not_evaluated", f"有 {not_evaluated} 项校验未执行，结果不能视为完整通过"
     else:
         status, summary = "pass", f"全部 {passed} 项校验通过"
-    return {"status": status, "summary": summary, "passed": passed, "warnings": warnings, "failures": failures, "checks": checks}
+    return {"status": status, "summary": summary, "passed": passed, "warnings": warnings,
+            "failures": failures, "not_evaluated": not_evaluated, "checks": checks}
 
 
 def output_metrics(outputs: dict[str, pd.DataFrame]) -> dict[str, float]:
@@ -168,6 +172,8 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
     if p.get("sheet") and p["sheet"] not in outputs:
         return _check(rule, "warn", message=f"规则写错了：输出里没有 sheet「{p['sheet']}」（现有 {list(outputs)}），这条规则没有执行")
     sheets = _target_sheets(rule, outputs)
+    if not sheets:
+        return _check(rule, "not_evaluated", message="没有可校验的输出工作表，这条规则没有执行")
     if rule.type == "row_count_ratio":
         vs = p.get("vs") or p.get("input")
         in_rows = len(inputs[vs]) if vs in inputs else sum(len(df) for df in inputs.values())
@@ -211,13 +217,19 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
                       f"输入「{in_col}」合计 {in_sum:,.2f}，输出「{col}」合计 {out_sum:,.2f}，误差 {diff:.4%}",
                       "" if ok else f"合计对不上：输入 {in_sum:,.2f}，输出 {out_sum:,.2f}")
     if rule.type in {"no_nulls", "unique_check", "column_exists"} and not p.get("columns"):
-        return _check(rule, "warn", message="规则写错了：没有写要检查哪些列（columns），这条规则没有执行")
+        return _check(rule, "not_evaluated", message="规则写错了：没有写要检查哪些列（columns），这条规则没有执行")
     if rule.type == "no_nulls":
         cols = p.get("columns", [])
+        missing = [f"{s}.{c}" for s, df in sheets.items() for c in cols if c not in df.columns]
+        if missing:
+            return _check(rule, "fail", f"存在列 {cols}", f"缺少 {missing}", f"规则目标列不存在：{missing}")
         found = [f"{s}.{c}: {int(df[c].isna().sum())} 个空值" for s, df in sheets.items() for c in cols if c in df.columns and df[c].isna().any()]
         return _check(rule, "fail" if found else "pass", f"{cols} 不能有空值", "；".join(found) or "无空值", "；".join(found))
     if rule.type == "unique_check":
         cols = p.get("columns", [])
+        missing = [f"{s}.{c}" for s, df in sheets.items() for c in cols if c not in df.columns]
+        if missing:
+            return _check(rule, "fail", f"存在列 {cols}", f"缺少 {missing}", f"规则目标列不存在：{missing}")
         found = []
         for s, df in sheets.items():
             present = [c for c in cols if c in df.columns]
@@ -235,18 +247,24 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
                       f"缺少列：{missing}" if missing else "")
     if rule.type == "type_check":
         wanted = p.get("columns", {})
+        if not wanted:
+            return _check(rule, "not_evaluated", message="规则写错了：没有写要检查哪些列（columns），这条规则没有执行")
         bad = []
+        missing = []
         for s, df in sheets.items():
             for col, want in wanted.items():
                 if col not in df.columns:
+                    missing.append(f"{s}.{col}")
                     continue
                 actual = "numeric" if pd.api.types.is_numeric_dtype(df[col]) else "datetime" if pd.api.types.is_datetime64_any_dtype(df[col]) else "text"
                 if actual != want:
                     bad.append(f"{s}.{col}: 期望 {want}，实际 {actual}")
+        if missing:
+            return _check(rule, "fail", str(wanted), f"缺少 {missing}", f"规则目标列不存在：{missing}")
         return _check(rule, "fail" if bad else "pass", str(wanted), "；".join(bad) or "类型正确", "；".join(bad))
     if rule.type == "historical_range":
         return _historical(rule, sheets, history)
-    return _check(rule, "info", message=f"未知的校验类型：{rule.type}")
+    return _check(rule, "not_evaluated", message=f"未知的校验类型：{rule.type}")
 
 
 def _filtered_sum(frames: list[pd.DataFrame], column: str, condition: str) -> float:
@@ -277,15 +295,24 @@ def _historical(rule: ValidationRule, sheets: dict[str, pd.DataFrame], history: 
     col = p.get("column", "")
     std_devs = float(p.get("std_devs", 2))
     if len(history) < 3:
-        return _check(rule, "info", message="至少需要 3 次历史运行")
-    current = sum(float(pd.to_numeric(df[col], errors="coerce").sum()) for df in sheets.values() if col in df.columns)
-    key_suffix = f".{col}.sum"
-    values = [v for h in history for k, v in h.items() if k.endswith(key_suffix)]
+        return _check(rule, "not_evaluated", message="至少需要 3 次历史运行")
+    current_frames = [df for df in sheets.values() if col in df.columns]
+    if not current_frames:
+        return _check(rule, "fail", message=f"规则目标列不存在：{col}")
+    current = sum(float(pd.to_numeric(df[col], errors="coerce").sum()) for df in current_frames)
+    metric_keys = [f"{sheet}.{col}.sum" for sheet, frame in sheets.items() if col in frame.columns]
+    # 本次按目标工作表合计，历史也必须按每次运行的相同范围合计。
+    values = [sum(h[key] for key in metric_keys) for h in history if all(key in h for key in metric_keys)]
     if len(values) < 3:
-        return _check(rule, "info", message="历史数据里没有这一列")
+        return _check(rule, "not_evaluated", message="历史数据里没有这一列")
     mean, std = float(np.mean(values)), float(np.std(values))
     if std == 0:
-        return _check(rule, "pass", actual=current, message="历史数据没有波动")
+        tolerance = float(p.get("tolerance", 0.01))
+        diff = abs(current - mean)
+        allowed = max(0.005, abs(mean) * tolerance)
+        ok = diff <= allowed
+        return _check(rule, "pass" if ok else "fail", f"历史均值 {mean:,.2f} ± {allowed:,.2f}",
+                      f"本次 {current:,.2f}", "" if ok else f"本次合计偏离无波动历史均值 {diff:,.2f}")
     z = abs(current - mean) / std
     ok = z <= std_devs
     return _check(rule, "pass" if ok else "fail", f"历史均值 {mean:,.2f} ± {std_devs} 倍标准差", f"本次 {current:,.2f}",

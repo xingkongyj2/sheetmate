@@ -25,6 +25,8 @@ INTENT_SCHEMA = {
         "action": {"type": "string", "enum": ["process", "chat", "show_files"]},
         "files": _FILE_SELECTION,
         "replace_file_ids": {"type": "array", "items": _NONEMPTY_TEXT, "uniqueItems": True, "maxItems": 20},
+        "save_recipe": {"type": "boolean"},
+        "task_relation": {"type": "string", "enum": ["new", "continue"]},
     },
     "required": ["mode"],
     "allOf": [{
@@ -40,6 +42,8 @@ _PLAN_STEP = {
         "description": _NONEMPTY_TEXT,
         "narration": _TEXT,
         "check": _TEXT,
+        "depends_on": {"type": "array", "items": {"type": "integer", "minimum": 1},
+                       "uniqueItems": True, "maxItems": 7},
     },
     "required": ["description"],
 }

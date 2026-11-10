@@ -35,7 +35,9 @@ def should_activate(ctx: AgentContext, message: str) -> bool:
     uploaded = [t for t in ctx.ws.list_tables() if t.source == "uploaded"]
     if len(uploaded) < 2:
         return False
-    if not any(k in text for k in MULTI_AGENT_KEYWORDS):
+    if re.search(r"关联|匹配|对账|合并|拼接|勾稽|联表|跨表|\b(?:join|lookup|reconcil\w*|merge|union)\b", text):
+        return False
+    if not re.search(r"分别|各自|独立分析|逐表分析|\b(?:independently|separately|each table)\b", text):
         return False
     return not _same_structure(uploaded)
 
@@ -67,17 +69,30 @@ def _column_overlap(a: list[str], b: list[str]) -> float:
 
 async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str,
                         history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    executor.configure_tools(ctx, message)
     tables = [t for t in ctx.ws.list_tables() if t.source == "uploaded"]
     yield {"type": "agent_pool_start", "agents": [{"id": t.name, "table_name": t.label or t.name} for t in tables]}
     done_marker = object()
     queue: asyncio.Queue[Any] = asyncio.Queue()
     conclusions: dict[str, str] = {}
     budget = executor.new_budget()
+    # Reserve enough operations for the coordinator's cross-table checks and
+    # final delivery. Per-branch caps prevent a fast specialist from consuming
+    # the whole task budget while the others are still waiting for the model.
+    coordinator_reserve = min(8, max(1, executor.max_tool_calls // 4))
+    specialist_total = max(0, executor.max_tool_calls - coordinator_reserve)
+    per_branch, remainder = divmod(specialist_total, max(1, len(tables)))
+    budget.branch_limits = {table.name: per_branch + (index < remainder) for index, table in enumerate(tables)}
+    concurrency = asyncio.Semaphore(3)
 
     async def run_agent(table_name: str) -> None:
-        scoped = replace(ctx, table_filter={table_name})
+        scoped = replace(ctx, table_filter={table_name}, branch_id=table_name, tool_group="core")
+        acquired = False
         try:
-            await queue.put({"type": "agent_start", "agent_id": table_name, "table_name": table_name})
+            await concurrency.acquire()
+            acquired = True
+            await queue.put({"type": "agent_start", "agent_id": table_name, "table_name": table_name,
+                             "tool_calls_limit": budget.branch_limits[table_name]})
             messages = [{"role": "system", "content": build_system_prompt(scoped, message)}, *model_history(history, limit=6),
                         {"role": "user", "content": user_content(SPECIALIST_MESSAGE.format(table=table_name, message=message), scoped.image_parts)}]
             tools = executor.registry.for_context(scoped)
@@ -104,6 +119,8 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
                              "summary": conclusions[table_name], "verified": False})
             await queue.put({"type": "agent_done", "agent_id": table_name, "conclusion": conclusions[table_name], "error": True})
         finally:
+            if acquired:
+                concurrency.release()
             await queue.put(done_marker)
 
     tasks = [asyncio.create_task(run_agent(t.name)) for t in tables]

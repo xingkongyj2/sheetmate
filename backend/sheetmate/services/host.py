@@ -11,8 +11,9 @@ from typing import Any
 
 from sqlalchemy import select
 
+from sheetmate.agent.memory import supported_memory_value
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import Conversation, Customer, FileRecord, RecipeProfile, Run, User
+from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeProfile, Run, User
 from sheetmate.engine.file_copies import FileCopies
 from sheetmate.engine.reader import ReadError
 from sheetmate.engine.workbook_builder import write_created_workbook
@@ -28,6 +29,13 @@ from sheetmate.services import recipes as recipe_service
 from sheetmate.services import runs as run_service
 from sheetmate.services.analysis import AnalysisWorkspace
 from sheetmate.services.errors import NotFound, ServiceError
+
+
+class MemoryRememberResult(dict):
+    """Structured memory write receipt; string compatibility keeps old tools readable."""
+
+    def __str__(self) -> str:
+        return str(self.get("scope_label") or "记忆")
 
 
 class ConversationHost:
@@ -52,6 +60,21 @@ class ConversationHost:
     # ------------------------------------------------------------------
     # 文件
     # ------------------------------------------------------------------
+
+    def resolve_execution_evidence(self, evidence_id: str) -> dict[str, Any] | None:
+        """Fetch older exact evidence on demand, always within this conversation."""
+        if not isinstance(evidence_id, str) or not evidence_id.startswith("ev_") or len(evidence_id) > 100:
+            return None
+        with session_scope() as db:
+            messages = db.scalars(select(Message).where(
+                Message.conversation_id == self.conversation_id, Message.role == "assistant",
+            ).order_by(Message.id.desc()).execution_options(yield_per=20))
+            for message in messages:
+                for event in message.events or []:
+                    if (event.get("type") == "tool_result" and (event.get("evidence") or {}).get("id") == evidence_id
+                            and isinstance(event.get("evidence_record"), dict)):
+                        return event["evidence_record"]
+        return None
 
     def list_files(self) -> list[dict[str, Any]]:
         loaded: dict[str, list[str]] = {}
@@ -561,11 +584,43 @@ class ConversationHost:
             return memory_service.memory_text(db, user_id=self.user_id, customer_id=self.customer_id,
                                               conversation_id=self.conversation_id, recipe_id=self.recipe_id, query=query)
 
-    def remember(self, category: str, key: str, value: str) -> str:
+    def remember(self, category: str, key: str, value: str, *, source_message_id: int | None = None,
+                 source_turn_id: str | None = None, evidence_span: str = "") -> MemoryRememberResult:
+        source_message_id = source_message_id if source_message_id is not None else getattr(self, "request_message_id", None)
+        source_turn_id = source_turn_id or getattr(self, "request_turn_id", None)
         with session_scope() as db:
-            memory_service.set_memory(db, category=category, key=key, value=value, user_id=self.user_id,
-                                      customer_id=self.customer_id, conversation_id=self.conversation_id, recipe_id=self.recipe_id)
-        return "客户记忆" if self.customer_id else "本会话记忆"
+            message = db.get(Message, source_message_id) if source_message_id is not None else None
+            conversation = db.get(Conversation, self.conversation_id)
+            valid_source = (message is not None and message.role == "user"
+                            and message.conversation_id == self.conversation_id
+                            and conversation is not None and conversation.user_id == self.user_id)
+            quote = evidence_span.strip()
+            # Older tool callers may omit evidence only when the whole proposed
+            # value is itself an exact quote from this request's user message.
+            if valid_source and not quote and value.strip() in message.content:
+                quote = value.strip()
+            reason = ""
+            if category == "history_insights":
+                # This tool has no verifiable execution-event reference yet.
+                # Do not promote a model's interpretation of a tool result into
+                # a durable operational rule merely because some tool succeeded.
+                reason = "经验记忆需要关联已验证的执行结果和适用范围；当前工具不能验证这些证据，因此未保存。用户明确确认的规则可用 domain_knowledge 并引用用户原话。"
+            elif not valid_source or not quote or quote not in message.content:
+                reason = "未找到本会话用户消息中的确切原话。请提供支持该记忆的 evidence_span，或先请用户确认；不能把助手推断保存为长期规则。"
+            elif len(value.strip()) > 500 or len(quote) > 8_000:
+                reason = "记忆或证据过长，请拆成含义完整的单条规则并附对应用户原话；本次未截断保存。"
+            supported_value = supported_memory_value(message.content, value, quote) if valid_source else None
+            if not reason and supported_value is None:
+                reason = "记忆内容必须与用户原话一致并保留完整条件；本次、临时或例外要求不能升级为长期规则。请引用完整原句或请用户明确长期适用范围。"
+            if reason:
+                return MemoryRememberResult(status="needs_evidence", key=key, reason=reason)
+            item = memory_service.set_memory(db, category=category, key=key, value=supported_value, user_id=self.user_id,
+                                             customer_id=self.customer_id, conversation_id=self.conversation_id,
+                                             recipe_id=self.recipe_id, source_message_id=source_message_id,
+                                             source_turn_id=source_turn_id, evidence_span=supported_value)
+            receipt = memory_service.memory_write_result(item)
+        receipt["scope_label"] = "客户记忆" if self.customer_id else "本会话记忆"
+        return MemoryRememberResult(receipt)
 
     def save_field_mapping(self, standard: str, aliases: list[str]) -> str:
         if not self.customer_id:

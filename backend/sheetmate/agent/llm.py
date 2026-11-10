@@ -7,6 +7,7 @@ OpenAI 兼容接口，默认连接 DeepSeek（deepseek-v4-pro 或 deepseek-flash
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import logging
@@ -16,6 +17,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Callable
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,12 +26,26 @@ import httpx
 from openai import AsyncOpenAI
 
 from sheetmate.agent.content import user_content
+from sheetmate.agent.context_builder import prepare_context
+from sheetmate.agent.llm_budget import BudgetExceeded, RequestBudget
 from sheetmate.agent.structured import StructuredOutputError, complete_structured, validate_payload
 from sheetmate.config import LLMSettings, get_llm_settings, is_deepseek_url
 from sheetmate.conversation_log import record_event
 
 
 log = logging.getLogger(__name__)
+_LLM_STAGE: contextvars.ContextVar[str | None] = contextvars.ContextVar("sheetmate_llm_stage", default=None)
+_CHEAP_AUX_STAGES = frozenset({"request_intent", "recipe_persistence", "title", "memory_extraction", "history_compaction", "customer_summary"})
+
+
+@contextmanager
+def llm_stage(stage: str):
+    """Attribute nested and concurrent LLM calls without mutable client state."""
+    token = _LLM_STAGE.set(stage)
+    try:
+        yield
+    finally:
+        _LLM_STAGE.reset(token)
 
 
 class LLMError(RuntimeError):
@@ -274,11 +290,15 @@ class LLMClient:
             raise LLMNotConfigured()
         self.cfg = cfg
         self.model = cfg.model
-        self.client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout,
-                                  max_retries=cfg.runtime_policy.sdk_retries)
+        # Retry here so every network attempt consumes the same task budget.
+        self.client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout, max_retries=0)
+        self.budget = RequestBudget(cfg.runtime_policy)
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
+        self.usage_by_stage: dict[str, dict[str, int]] = {}
+        self.usage_calls: list[dict[str, Any]] = []
 
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
+        auxiliary = extra.pop("_auxiliary", False)
         qwen = self.cfg.provider_id == "qwen"
         deepseek_thinking = not qwen and self.cfg.thinking_supported
         legacy_chat = not qwen and self.model == "deepseek-chat" and is_deepseek_url(self.cfg.base_url)
@@ -305,6 +325,11 @@ class LLMClient:
         elif deepseek_thinking:
             extra_body["thinking"] = {"type": "enabled" if self.cfg.thinking_enabled else "disabled"}
         extra_body.update(extra.pop("extra_body", None) or {})
+        if auxiliary and not self.cfg.runtime_policy.auxiliary_thinking_enabled:
+            if qwen:
+                extra_body["enable_thinking"] = False
+            elif deepseek_thinking:
+                extra_body["thinking"] = {"type": "disabled"}
         if legacy_chat:
             # 兼容曾保存的额外参数和单次请求覆盖，Chat 不接收思考模式参数。
             for name in ("thinking", "reasoning_effort"):
@@ -315,7 +340,42 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
         kwargs.update({k: v for k, v in extra.items() if v is not None})
-        return kwargs
+        return prepare_context(kwargs, self.cfg.runtime_policy.max_input_chars)
+
+    async def _within_deadline(self, request: Any) -> Any:
+        try:
+            remaining = self.budget.remaining_seconds()
+        except BudgetExceeded as exc:
+            if hasattr(request, "close"):
+                request.close()
+            raise LLMTimeout(str(exc), code=exc.code) from exc
+        try:
+            return await asyncio.wait_for(request, remaining) if remaining is not None else await request
+        except asyncio.TimeoutError as exc:
+            raise LLMTimeout("本次任务已达到总时长上限，已停止模型调用。", code="task_timeout") from exc
+
+    async def _create(self, kwargs: dict[str, Any], call_id: str, stage: str) -> Any:
+        for attempt in range(self.cfg.runtime_policy.sdk_retries + 1):
+            try:
+                self.budget.reserve(call_id, kwargs)
+            except BudgetExceeded as exc:
+                cls = LLMTimeout if exc.code == "task_timeout" else LLMError
+                raise cls(str(exc), code=exc.code) from exc
+            started = time.monotonic()
+            try:
+                return await self._within_deadline(self.client.chat.completions.create(**kwargs))
+            except BaseException as exc:
+                self.budget.finish(call_id, None)
+                retryable = (isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError))
+                             or isinstance(exc, openai.APIStatusError) and
+                             (exc.status_code in {408, 409, 429} or exc.status_code >= 500))
+                will_retry = retryable and attempt < self.cfg.runtime_policy.sdk_retries
+                self._record_usage(stage, f"{call_id}:attempt{attempt + 1}", None,
+                                   "retry" if will_retry else "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
+                                   round((time.monotonic() - started) * 1000))
+                if not retryable or attempt >= self.cfg.runtime_policy.sdk_retries:
+                    raise
+                await self._within_deadline(asyncio.sleep(min(2.0, 0.25 * 2 ** attempt)))
 
     def _add_usage(self, usage: Any) -> None:
         if usage is None:
@@ -323,10 +383,34 @@ class LLMClient:
         self.usage["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
         self.usage["completion_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
 
+    def _record_usage(self, stage: str, call_id: str, usage: Any, status: str, duration_ms: int) -> None:
+        """Record reported usage, keeping unavailable usage distinct from zero."""
+        prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
+        completion = int(getattr(usage, "completion_tokens", 0) or 0)
+        cached = int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0)
+        reasoning = int(getattr(getattr(usage, "completion_tokens_details", None), "reasoning_tokens", 0) or 0)
+        totals = self.usage_by_stage.setdefault(stage, {"calls": 0, "usage_missing_calls": 0,
+            "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "reasoning_tokens": 0, "duration_ms": 0})
+        values = {"prompt_tokens": prompt, "completion_tokens": completion,
+                  "cached_tokens": cached, "reasoning_tokens": reasoning, "duration_ms": duration_ms}
+        totals["calls"] += 1
+        totals["usage_missing_calls"] += int(usage is None)
+        for key, value in values.items():
+            totals[key] += value
+        self.usage_calls.append({"call_id": call_id, "stage": stage, "status": status,
+                                 "usage_available": usage is not None, **values})
+
+    def usage_snapshot(self) -> dict[str, Any]:
+        """Read-only task cost snapshot; missing provider usage is explicit."""
+        return {**self.usage, "model_calls": self.budget.calls, "budget": self.budget.snapshot(),
+                "usage_missing_calls": sum(not call["usage_available"] for call in self.usage_calls),
+                "stages": {stage: dict(values) for stage, values in self.usage_by_stage.items()}}
+
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, **extra: Any) -> Any:
         """非流式，返回 message 对象（有 content / tool_calls）。"""
         function = "sheetmate.agent.llm.LLMClient.chat"
         call_id = uuid.uuid4().hex
+        stage = extra.pop("_stage", None) or _LLM_STAGE.get() or "chat"
         started = time.monotonic()
         status = "error"
         response = None
@@ -334,7 +418,7 @@ class LLMClient:
         try:
             kwargs = self._kwargs(messages, tools, **extra)
             record_event("llm.request", function, kwargs, call_id=call_id)
-            resp = await self.client.chat.completions.create(**kwargs)
+            resp = await self._create(kwargs, call_id, stage)
             response = resp
             self._add_usage(resp.usage)
             if not resp.choices:
@@ -354,7 +438,13 @@ class LLMClient:
             failure = {"type": type(exc).__name__, "code": error.code, "message": str(error)}
             raise error from exc
         finally:
+            usage = getattr(response, "usage", None)
+            admitted = call_id in self.budget.active
+            self.budget.finish(call_id, usage)
+            if admitted:
+                self._record_usage(stage, call_id, usage, status, round((time.monotonic() - started) * 1000))
             record_event("llm.response", function, response, call_id=call_id, status=status,
+                         stage=stage,
                          **({"error": failure} if failure else {}),
                          duration_ms=round((time.monotonic() - started) * 1000, 3))
 
@@ -363,6 +453,7 @@ class LLMClient:
         """流式，逐个产出原始 chunk。tool_choice="none" 时模型只能回答文字。"""
         function = "sheetmate.agent.llm.LLMClient.stream_chat"
         call_id = uuid.uuid4().hex
+        stage = _LLM_STAGE.get() or "execution"
         started = time.monotonic()
         status = "error"
         chunk_count = 0
@@ -376,16 +467,20 @@ class LLMClient:
         finish_reason: str | None = None
         try:
             record_event("llm.request", function, kwargs, call_id=call_id)
-            stream = await self.client.chat.completions.create(**kwargs)
+            stream = await self._create(kwargs, call_id, stage)
             failure: BaseException | None = None
             try:
                 saw_choice, has_content, has_reasoning = False, False, False
-                async for chunk in stream:
+                chunks = stream.__aiter__()
+                while True:
+                    try:
+                        chunk = await self._within_deadline(anext(chunks))
+                    except StopAsyncIteration:
+                        break
                     chunk_count += 1
                     response_model = getattr(chunk, "model", None) or response_model
                     if getattr(chunk, "usage", None) is not None:
                         usage = chunk.usage
-                    self._add_usage(getattr(chunk, "usage", None))
                     # 与执行器一致，只消费首个候选；usage-only chunk 不代表正文或结束。
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
                     if choice is not None:
@@ -435,7 +530,7 @@ class LLMClient:
                 raise
             finally:
                 try:
-                    await stream.close()
+                    await asyncio.wait_for(stream.close(), 5)
                 except BaseException:
                     if failure is None:
                         raise
@@ -451,12 +546,19 @@ class LLMClient:
             error_info = {"type": type(exc).__name__, "code": error.code, "message": str(error)}
             raise error from exc
         finally:
+            # Some compatible providers emit cumulative usage more than once;
+            # account for the final usage object once per streamed request.
+            self._add_usage(usage)
+            admitted = call_id in self.budget.active
+            self.budget.finish(call_id, usage)
+            if admitted:
+                self._record_usage(stage, call_id, usage, status, round((time.monotonic() - started) * 1000))
             record_event("llm.response", function, {
                 "model": response_model,
                 "content": "".join(content_parts), "reasoning_content": "".join(reasoning_parts),
                 "tool_calls": [{"index": index, **call} for index, call in calls.items()],
                 "finish_reason": finish_reason, "usage": usage,
-            }, call_id=call_id, status=status, chunk_count=chunk_count,
+            }, call_id=call_id, status=status, chunk_count=chunk_count, stage=stage,
                          **({"error": error_info} if error_info else {}),
                          duration_ms=round((time.monotonic() - started) * 1000, 3))
 
@@ -469,22 +571,26 @@ class LLMClient:
         Protocol negotiation and bounded response repair have separate budgets.
         A successful response takes one model call for every configuration.
         """
-        request = self._complete_json(prompt, system, retries, image_parts=image_parts, max_tokens=max_tokens,
-                                      schema=schema, schema_name=schema_name, validator=validator)
-        timeout = self.cfg.runtime_policy.structured_timeout
-        if not timeout:
-            return await request
-        try:
-            return await asyncio.wait_for(request, timeout)
-        except asyncio.TimeoutError as exc:
-            raise LLMTimeout(f"模型结构化返回超过 {timeout:g} 秒，已停止本次调用。") from exc
+        with llm_stage(schema_name if schema_name != "response" else (_LLM_STAGE.get() or "structured")):
+            request = self._complete_json(prompt, system, retries, image_parts=image_parts, max_tokens=max_tokens,
+                                          schema=schema, schema_name=schema_name, validator=validator)
+            timeout = self.cfg.runtime_policy.structured_timeout
+            if not timeout:
+                return await request
+            try:
+                return await asyncio.wait_for(request, timeout)
+            except asyncio.TimeoutError as exc:
+                raise LLMTimeout(f"模型结构化返回超过 {timeout:g} 秒，已停止本次调用。") from exc
 
     async def _complete_json(self, prompt: str, system: str | None, retries: int | None, *,
                              image_parts: list[dict[str, Any]] | None, max_tokens: int | None,
                              schema: dict[str, Any] | None, schema_name: str,
                              validator: Callable[[Any], None] | None) -> Any:
-        if max_tokens and self.cfg.thinking_supported and self.cfg.thinking_enabled:
-            max_tokens = None
+        # Auxiliary structured calls (planning, verification and completion
+        # checks) deliberately pass a small output budget.  Thinking-capable
+        # providers may include hidden reasoning in this limit; that must not erase
+        # the caller's output limit and silently fall back to the
+        # global 8192-token setting.
         if schema is not None:
             prompt += ("\n\n请只返回符合以下 JSON Schema 的 json，不要省略必填字段，不能把布尔值或数组写成字符串：\n"
                        + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
@@ -515,7 +621,8 @@ class LLMClient:
             elif output_format == "json_object":
                 response_format = {"type": "json_object"}
             try:
-                msg = await self.chat(messages, response_format=response_format, max_tokens=max_tokens)
+                msg = await self.chat(messages, response_format=response_format, max_tokens=max_tokens,
+                                      _auxiliary=schema_name in _CHEAP_AUX_STAGES)
             except LLMError as exc:
                 if len(formats) > 1 and _unsupported_format(exc):
                     record_event("llm.structured.fallback", "sheetmate.agent.llm.LLMClient._complete_json",

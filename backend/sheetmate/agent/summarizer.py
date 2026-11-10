@@ -7,12 +7,85 @@ from typing import Any
 
 from sheetmate.agent.prompts import COMPACT_PROMPT, CUSTOMER_SUMMARY_PROMPT, TITLE_PROMPT
 
-COMPACT_THRESHOLD = 24  # 历史消息超过这个数就先压缩
+COMPACT_THRESHOLD = 24  # 旧调用方兼容；服务层按估算 token 预算触发压缩
+HISTORY_TOKEN_BUDGET = 12_000
+RECENT_HISTORY_TOKENS = 4_000
+COMPACT_INPUT_TOKENS = 18_000
+SUMMARY_TOKEN_BUDGET = 3_000
+
+
+def estimate_tokens(text: str) -> int:
+    """Conservative local estimate for mixed Chinese/ASCII; no provider tokenizer required."""
+    value = str(text or "")
+    non_ascii = sum(ord(char) > 127 for char in value)
+    return non_ascii + (len(value) - non_ascii + 3) // 4
+
+
+def history_tokens(history: list[dict[str, Any]]) -> int:
+    return sum(estimate_tokens(str(item.get("content") or "")) + 8 for item in history)
+
+
+def fit_text(text: str, tokens: int) -> str:
+    """Bound a temporary projection, explicitly retaining both ends of long messages."""
+    value = str(text or "")
+    if estimate_tokens(value) <= tokens:
+        return value
+    marker = "\n（本条中间内容因上下文预算省略，原文仍保留；勿推断省略部分。）\n"
+    available = max(0, tokens - estimate_tokens(marker))
+    low, high = 0, len(value)
+    while low < high:
+        size = (low + high + 1) // 2
+        head = (size + 1) // 2
+        candidate = value[:head] + (value[-(size - head):] if size > head else "")
+        if estimate_tokens(candidate) <= available:
+            low = size
+        else:
+            high = size - 1
+    head = (low + 1) // 2
+    return value[:head] + marker + (value[-(low - head):] if low > head else "")
+
+
+def bounded_history(history: list[dict[str, Any]], budget: int = HISTORY_TOKEN_BUDGET) -> list[dict[str, Any]]:
+    """Temporary fallback: retain summary, original user goal and recent turns.
+
+    Never changes the persisted compaction cursor. Omitted messages remain
+    available for a later successful summary.
+    """
+    if history_tokens(history) <= budget:
+        return list(history)
+    notice = {"role": "assistant", "content": "（上下文预算提示：部分历史未纳入本次请求，原文仍保留；不要声称已完整阅读。以当前用户要求为准，缺少必要口径时补充确认。）",
+              "context_summary": True, "context_limited": True}
+    remaining = max(0, budget - history_tokens([notice]))
+    picked: dict[int, dict[str, Any]] = {}
+    anchors = [i for i, item in enumerate(history) if item.get("context_summary")]
+    first_user = next((i for i, item in enumerate(history) if item.get("role") == "user"), None)
+    if first_user is not None:
+        anchors.append(first_user)
+    for index in anchors:
+        allowance = min(2_000, max(0, remaining // 3))
+        if allowance < 100:
+            continue
+        item = {**history[index], "content": fit_text(str(history[index].get("content") or ""), allowance)}
+        picked[index] = item
+        remaining -= history_tokens([item])
+    for index in reversed(range(len(history))):
+        if index in picked:
+            continue
+        if remaining < 100:
+            break
+        item = history[index]
+        needed = history_tokens([item])
+        if needed > remaining:
+            item = {**item, "content": fit_text(str(item.get("content") or ""), max(0, remaining - 8))}
+        picked[index] = item
+        remaining -= history_tokens([item])
+    return [notice, *(picked[index] for index in sorted(picked))]
 
 
 async def make_title(llm: Any, message: str, answer: str) -> str:
     try:
-        msg = await llm.chat([{"role": "user", "content": TITLE_PROMPT.format(message=message[:500], answer=answer[:300])}], max_tokens=30)
+        msg = await llm.chat([{"role": "user", "content": TITLE_PROMPT.format(message=message[:500], answer=answer[:300])}],
+                             max_tokens=60, _stage="title", _auxiliary=True)
         title = re.sub(r"[\"'“”‘’《》。！!？?]", "", (msg.content or "").strip()).strip()
         return title[:24] or fallback_title(message)
     except Exception:
@@ -27,11 +100,16 @@ def fallback_title(message: str) -> str:
 async def compact_history(llm: Any, history: list[dict[str, Any]]) -> str | None:
     # 表结构和操作证据常在消息后半段；先截断再总结会永久丢失这些信息。
     lines = [f"[{m['role']}] {str(m.get('content') or '')}" for m in history if m.get("content")]
-    if not lines:
+    if not lines or history_tokens(history) > COMPACT_INPUT_TOKENS:
         return None
     try:
-        msg = await llm.chat([{"role": "user", "content": COMPACT_PROMPT.format(history="\n\n".join(lines))}])
-        return (msg.content or "").strip() or None
+        msg = await llm.chat([{"role": "user", "content": COMPACT_PROMPT.format(history="\n\n".join(lines))}],
+                             max_tokens=SUMMARY_TOKEN_BUDGET, _stage="history_compaction", _auxiliary=True)
+        result = (msg.content or "").strip()
+        # Never persist a truncated summary and advance past evidence it lost.
+        if getattr(msg, "_sheetmate_finish_reason", None) == "length" or estimate_tokens(result) > SUMMARY_TOKEN_BUDGET:
+            return None
+        return result or None
     except Exception:
         return None
 
@@ -45,7 +123,8 @@ async def customer_summary(llm: Any, customer: str, files: list[dict[str, Any]],
         memory="\n".join(f"- {line}" for line in _business_memory_lines(memory_text)) or "（无）",
         previous_summary=previous_summary[:3000] or "（无）",
     )
-    msg = await llm.chat([{"role": "user", "content": prompt}])
+    msg = await llm.chat([{"role": "user", "content": prompt}], max_tokens=2400,
+                         _stage="customer_summary", _auxiliary=True)
     return (msg.content or "").strip()
 
 

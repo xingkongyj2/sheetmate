@@ -113,6 +113,11 @@ function validationMessage(provider: LLMProviderConfig): string {
   if (!numberInRange(draft.max_tokens, 1, 131072, true)) return '输出 Token 上限需为 1–131072 的整数。'
   if (!numberInRange(draft.runtime_policy.structured_retries, 0, 3, true)) return '结构输出纠错次数需为 0–3 的整数。'
   if (!numberInRange(draft.runtime_policy.tool_protocol_retries, 0, 5, true)) return '工具调用纠错次数需为 0–5 的整数。'
+  if (!numberInRange(draft.runtime_policy.max_model_calls, 0, 1000, true)) return '每任务模型调用上限需为 0–1000 的整数。'
+  if (!numberInRange(draft.runtime_policy.max_prompt_tokens, 0, 10000000, true) ||
+      !numberInRange(draft.runtime_policy.max_total_tokens, 0, 10000000, true)) return '任务 Token 预算需为 0–10000000 的整数。'
+  if (!numberInRange(draft.runtime_policy.max_task_seconds, 0, 7200)) return '任务模型调用时限需为 0–7200 秒。'
+  if (!numberInRange(draft.runtime_policy.max_input_chars, 0, 2000000, true)) return '单次输入字符上限需为 0–2000000 的整数。'
   return ''
 }
 
@@ -351,6 +356,32 @@ async function test(provider: LLMProviderConfig) {
                     </label>
                   </div>
                   <p class="text-xs leading-5 text-faint">纠错次数为 0 时关闭对应重试。超时和输出上限也需符合模型服务的限制。</p>
+                  <div class="grid gap-4 sm:grid-cols-2">
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">每任务模型调用上限</span>
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_model_calls" type="number" min="0" max="1000" step="1" class="field" :disabled="anyBusy" />
+                    </label>
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">每任务累计输入 Token 预算</span>
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_prompt_tokens" type="number" min="0" max="10000000" step="1" class="field" :disabled="anyBusy" />
+                    </label>
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">每任务累计总 Token 预算</span>
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_total_tokens" type="number" min="0" max="10000000" step="1" class="field" :disabled="anyBusy" />
+                    </label>
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">每任务模型调用时限（秒）</span>
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_task_seconds" type="number" min="0" max="7200" class="field" :disabled="anyBusy" />
+                    </label>
+                    <label class="block">
+                      <span class="mb-1.5 block text-xs font-medium text-mute">单次输入字符上限（含工具定义）</span>
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_input_chars" type="number" min="0" max="2000000" step="1" class="field" :disabled="anyBusy" />
+                    </label>
+                    <label class="flex items-center gap-2 text-xs text-mute">
+                      <input v-model="drafts[provider.id]!.runtime_policy.auxiliary_thinking_enabled" type="checkbox" :disabled="anyBusy" />辅助判断也启用深度思考
+                    </label>
+                  </div>
+                  <p class="text-xs leading-5 text-faint">任务预算覆盖工具内部调用和核对，设为 0 可关闭对应限制。服务未报告用量时采用保守估算，估算与实际用量会分别记录。</p>
                   <p v-if="validationMessage(provider)" class="text-xs text-error" role="alert">{{ validationMessage(provider) }}</p>
                 </div>
               </details>

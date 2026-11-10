@@ -10,6 +10,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from sheetmate.engine.analysis import _require_complete_data
 from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.sqlutil import frame_rows
 from sheetmate.engine.workspace import TableInfo, Workspace
@@ -66,16 +67,22 @@ def apply_formula(
     """执行一个公式，结果写入 output 表（同名覆盖）。参数或 SQL 有问题时抛 ValueError，信息可直接给 AI 修复。"""
     started = time.perf_counter()
     resolved = library.resolve(formula_id)
-    normalized, plan = resolved.compile(params, ws)
-    rows_in = {t: ws.row_count(t) for t in dict.fromkeys(plan.inputs) if ws.exists(t)}
-    info: TableInfo = ws.create_table_as(
-        output,
-        plan.sql,
-        label=label or output,
-        source="computed",
-        created_by=created_by or formula_id,
-        description=description or resolved.describe(normalized),
-    )
+    with ws.locked():
+        normalized, plan = resolved.compile(params, ws)
+        # Every formula entry point must preserve the same completeness guard.
+        # In particular, a rename must not turn partial/error data into a new
+        # apparently clean table that can later be aggregated without warning.
+        for source in dict.fromkeys(plan.inputs):
+            _require_complete_data(ws.require(source))
+        rows_in = {t: ws.row_count(t) for t in dict.fromkeys(plan.inputs)}
+        info: TableInfo = ws.create_table_as(
+            output,
+            plan.sql,
+            label=label or output,
+            source="computed",
+            created_by=created_by or formula_id,
+            description=description or resolved.describe(normalized),
+        )
     warnings = list(plan.warnings)
     metrics = dict(plan.notes.get("metrics", {}))
     if plan.post is not None:

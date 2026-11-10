@@ -98,6 +98,7 @@ def profile_sheet(sheet: SheetData, preview_rows: int = 20) -> dict[str, Any]:
         "rows": int(len(df)),
         "cols": int(len(df.columns)),
         "header": sheet.header.to_dict(),
+        "quality": dict(sheet.quality or {}),
         "columns": columns,
         "keys": detect_keys(df, columns),
         "preview": {"columns": [str(c) for c in df.columns], "rows": frame_rows(df, preview_rows)},

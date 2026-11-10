@@ -22,6 +22,9 @@ function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
   const capabilities = value.capabilities === undefined ? {} : value.capabilities
   const policy = value.runtime_policy === undefined ? {} : value.runtime_policy
   if (!isRecord(capabilities) || !isRecord(policy)) throw new Error(VERSION_ERROR)
+  if (policy.auxiliary_thinking_enabled !== undefined && typeof policy.auxiliary_thinking_enabled !== 'boolean') {
+    throw new Error(VERSION_ERROR)
+  }
   const protocol = capabilities.structured_output === undefined ? 'auto' : capabilities.structured_output
   if (typeof protocol !== 'string' || !['auto', 'json_schema', 'json_object', 'prompt'].includes(protocol)) {
     throw new Error(VERSION_ERROR)
@@ -35,6 +38,12 @@ function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
       tool_protocol_retries: boundedNumber(policy.tool_protocol_retries, 2, 0, 5, true),
       sdk_retries: boundedNumber(policy.sdk_retries, 1, 0, 3, true),
       structured_timeout: boundedNumber(policy.structured_timeout, 0, 0, 900),
+      max_model_calls: boundedNumber(policy.max_model_calls, 120, 0, 1000, true),
+      max_prompt_tokens: boundedNumber(policy.max_prompt_tokens, 300000, 0, 10000000, true),
+      max_total_tokens: boundedNumber(policy.max_total_tokens, 500000, 0, 10000000, true),
+      max_task_seconds: boundedNumber(policy.max_task_seconds, 600, 0, 7200),
+      max_input_chars: boundedNumber(policy.max_input_chars, 240000, 0, 2000000, true),
+      auxiliary_thinking_enabled: policy.auxiliary_thinking_enabled === true,
     },
   }
 }

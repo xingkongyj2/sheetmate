@@ -3,9 +3,9 @@
 Recipe 连学习用的数据都复现不了，就不能拿去处理下个月的数据。检查项：
 1. sheet 是否齐全
 2. 列是否齐全（缺列直接不通过）
-3. 行数（默认允许 5% 差异）
-4. 数字列合计（默认允许 0.1% 差异）
-5. 单元格匹配率（≥98% 通过，90%~98% 警告；SheetAgent 原为 90% / 75%）
+3. 行数与主键集合完全一致，生成结果不能含重复主键
+4. 数值只允许半分以内的绝对误差，不随金额大小放宽
+5. 单元格匹配率、逐列匹配率及关键业务列分别检查
 
 相比 SheetAgent 的改进：有共同主键（如运单号）时按主键对齐行，而不是只按行位置；
 位置对齐匹配率低时再尝试忽略行顺序比较；输出不一致的单元格样例和每列匹配率，供 AI 精确修正。
@@ -14,33 +14,42 @@ Recipe 连学习用的数据都复现不了，就不能拿去处理下个月的�
 from __future__ import annotations
 
 import datetime as dt
+import re
+from collections import Counter
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
 
 from sheetmate.engine.sqlutil import to_jsonable
 
-ROW_TOLERANCE = 0.05
-SUM_TOLERANCE = 0.001
-# SheetAgent 用 90% 算通过；账单场景错一个归属都是错，这里收紧到 98%（比较本身已经容忍格式、大小写、0.1% 的数值误差）
+# 全表匹配率用于诊断；行数、主键和关键列仍有独立约束。
 PASS_THRESHOLD = 0.98
 WARN_THRESHOLD = 0.90
 
 
-def values_equal(expected: Any, actual: Any) -> bool:
-    """单元格比较：空对空相等；数字允许 0.1% 误差；日期按天；文本去空格忽略大小写。"""
+def values_equal(expected: Any, actual: Any, semantic: str | None = None) -> bool:
+    """比较单元格。
+
+    ``semantic`` 是可选的列语义，保持旧调用兼容。标识符必须精确相等，
+    数值默认只容忍半分的绝对误差，不随金额放大；数字形态文本保持精确。
+    """
     e_null, a_null = _is_null(expected), _is_null(actual)
     if e_null and a_null:
         return True
     if e_null or a_null:
-        # 空字符串和 0 视为「空」的常见写法差异，不算错
+        # 空字符串与缺失值可等价，数值 0 不能视为空。
         other = actual if e_null else expected
         return isinstance(other, str) and not other.strip()
-    e_num, a_num = _to_number(expected), _to_number(actual)
+    if semantic in {"identifier", "code", "key", "category"}:
+        # 不能把带前导零的编号或相邻编号当成金额近似值。
+        return str(expected).strip() == str(actual).strip()
+    if (semantic is None and isinstance(expected, str) and isinstance(actual, str)
+            and re.fullmatch(r"[+-]?\d+", expected.strip()) and re.fullmatch(r"[+-]?\d+", actual.strip())):
+        return expected.strip() == actual.strip()
+    e_num, a_num = _to_decimal(expected), _to_decimal(actual)
     if e_num is not None and a_num is not None:
-        if e_num == 0:
-            return abs(a_num) < 0.005
-        return abs(e_num - a_num) / abs(e_num) < 0.001 or abs(e_num - a_num) < 0.005
+        return abs(e_num - a_num) < Decimal("0.005")
     e_date, a_date = _to_date(expected), _to_date(actual)
     if e_date is not None and a_date is not None:
         return e_date == a_date
@@ -134,11 +143,11 @@ def _verify_sheet(name: str, exp: pd.DataFrame, gen: pd.DataFrame) -> dict[str, 
         "alignment": "position",
         "match_rate": 0.0,
     }
-    if len(exp):
-        row_diff = abs(len(gen) - len(exp)) / len(exp)
-        if row_diff > ROW_TOLERANCE:
-            sheet["messages"].append(f"行数：期望 {len(exp)}，实际 {len(gen)}（差 {row_diff:.1%}）")
-            sheet["status"] = "warn" if row_diff < 0.2 else "fail"
+    if len(exp) != len(gen):
+        row_diff = abs(len(gen) - len(exp)) / max(len(exp), 1)
+        sheet["messages"].append(f"行数：期望 {len(exp)}，实际 {len(gen)}（差 {row_diff:.1%}）")
+        # 额外/缺失记录不能被整体匹配率掩盖。
+        sheet["status"] = "fail"
     if sheet["missing_columns"]:
         sheet["messages"].append(f"缺少列：{sheet['missing_columns']}")
         sheet["status"] = "fail"
@@ -151,9 +160,28 @@ def _verify_sheet(name: str, exp: pd.DataFrame, gen: pd.DataFrame) -> dict[str, 
             sheet["messages"].append("没有可以比较的共同列")
         else:
             sheet["match_rate"] = 1.0 if len(gen) == 0 else 0.0
+            if len(exp) == 0 and len(gen) != 0:
+                sheet["status"] = "fail"
+                sheet["messages"].append("人工结果为空，但生成结果包含记录")
         return sheet
 
     key = _alignment_key(exp, gen, common)
+    if key:
+        expected_keys = _key_values(exp[key])
+        generated_key_list = [str(v).strip() for v in gen[key].tolist() if not _is_null(v) and str(v).strip()]
+        generated_keys = set(generated_key_list)
+        duplicate_keys = sorted(k for k, count in Counter(generated_key_list).items() if count > 1)
+        missing_keys = sorted(expected_keys - generated_keys)
+        extra_keys = sorted(generated_keys - expected_keys)
+        if duplicate_keys:
+            sheet["status"] = "fail"
+            sheet["messages"].append(f"生成结果主键重复：{duplicate_keys[:8]}")
+        if missing_keys:
+            sheet["status"] = "fail"
+            sheet["messages"].append(f"生成结果缺少主键：{missing_keys[:8]}")
+        if extra_keys:
+            sheet["status"] = "fail"
+            sheet["messages"].append(f"生成结果多出主键：{extra_keys[:8]}")
     if key:
         e_al, g_al = _align_by_key(exp, gen, key)
         sheet["alignment"] = f"key:{key}"
@@ -170,14 +198,22 @@ def _verify_sheet(name: str, exp: pd.DataFrame, gen: pd.DataFrame) -> dict[str, 
     sheet["match_rate"] = round(rate, 4)
     sheet["column_match"] = col_stats
     sheet["mismatches"] = mismatches
+    for column in col_stats:
+        semantic = _column_semantic(column["column"])
+        if semantic in {"identifier", "category", "money"} and column["match_rate"] < 1:
+            sheet["status"] = "fail"
+            sheet["messages"].append(f"关键列「{column['column']}」存在不匹配值，匹配率 {column['match_rate']:.1%}")
+        elif column["match_rate"] < WARN_THRESHOLD:
+            sheet["status"] = "fail"
+            sheet["messages"].append(f"列「{column['column']}」匹配率 {column['match_rate']:.1%}，不能被其他列平均掩盖")
 
     for col in common:
         if pd.api.types.is_numeric_dtype(exp[col]):
             e_sum = float(pd.to_numeric(exp[col], errors="coerce").sum())
             g_sum = float(pd.to_numeric(gen[col], errors="coerce").sum())
-            if e_sum and abs(g_sum - e_sum) / abs(e_sum) > SUM_TOLERANCE:
+            if abs(g_sum - e_sum) >= 0.005:
                 sheet["sum_diffs"][str(col)] = {"expected": round(e_sum, 4), "actual": round(g_sum, 4),
-                                                "diff_pct": round(abs(g_sum - e_sum) / abs(e_sum), 6)}
+                                                "diff_pct": round(abs(g_sum - e_sum) / abs(e_sum), 6) if e_sum else None}
     if sheet["sum_diffs"]:
         sheet["messages"].append(
             "合计不一致：" + "，".join(f"{c} 期望 {d['expected']} 实际 {d['actual']}" for c, d in sheet["sum_diffs"].items())
@@ -204,19 +240,51 @@ def _alignment_key(exp: pd.DataFrame, gen: pd.DataFrame, common: list[str]) -> s
         if pd.api.types.is_float_dtype(e):
             continue
         e_vals = {str(v).strip() for v in e.tolist()}
+        if len(e_vals) != len(exp):
+            continue
         g_vals = {str(v).strip() for v in g.dropna().tolist()}
         if len(e_vals & g_vals) >= 0.9 * len(e_vals):
             return col
     return None
 
 
+def _key_values(series: pd.Series) -> set[str]:
+    """键集合的保守规范化：保留前导零，空键不参与集合差异。"""
+    return {str(v).strip() for v in series.tolist() if not _is_null(v) and str(v).strip()}
+
+
+def _column_semantic(column: Any) -> str | None:
+    text = str(column).strip().lower()
+    if re.search(r"(?:^|[^a-z])(id|code|key)(?:$|[^a-z])", text) or any(
+        token in text for token in ("编号", "编码", "单号", "手机号", "证件")
+    ):
+        return "identifier"
+    if any(token in text for token in ("客户", "归属", "账户", "收款人", "customer", "owner", "account")):
+        return "category"
+    if any(token in text for token in ("金额", "合计", "收入", "成本", "费用", "单价", "price", "amount", "cost")):
+        return "money"
+    return None
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value).strip().replace(",", ""))
+        return number if number.is_finite() else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
 def _align_by_key(exp: pd.DataFrame, gen: pd.DataFrame, key: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     e = exp.copy()
-    g = gen.drop_duplicates(subset=[key]).copy()
     e["__k"] = e[key].astype(str).str.strip()
+    e["__n"] = e.groupby("__k", dropna=False).cumcount()
+    g = gen.copy()
     g["__k"] = g[key].astype(str).str.strip()
-    g = g.set_index("__k").reindex(e["__k"]).reset_index(drop=True)
-    return e.drop(columns="__k").reset_index(drop=True), g
+    g["__n"] = g.groupby("__k", dropna=False).cumcount()
+    g = g.set_index(["__k", "__n"]).reindex(pd.MultiIndex.from_frame(e[["__k", "__n"]])).reset_index(drop=True)
+    return e.drop(columns=["__k", "__n"]).reset_index(drop=True), g.drop(columns=["__k", "__n"], errors="ignore")
 
 
 def _sort_all(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
@@ -239,7 +307,7 @@ def _cell_match(
         e_vals, g_vals = exp[col].tolist(), gen[col].tolist()
         for i in range(rows):
             e, g = e_vals[i], g_vals[i] if i < len(g_vals) else None
-            if values_equal(e, g):
+            if values_equal(e, g, _column_semantic(col)):
                 col_ok += 1
             elif len(mismatches) < 30:
                 item = {"column": str(col), "expected": to_jsonable(e), "actual": to_jsonable(g)}
@@ -283,16 +351,16 @@ def _to_number(value: Any) -> float | None:
     return None
 
 
-def _to_date(value: Any) -> dt.date | None:
-    if isinstance(value, pd.Timestamp):
-        return None if pd.isna(value) else value.date()
-    if isinstance(value, dt.datetime):
-        return value.date()
-    if isinstance(value, dt.date):
-        return value
-    if isinstance(value, str) and len(value) >= 8:
+def _to_date(value: Any) -> pd.Timestamp | None:
+    """Preserve time, subsecond precision and timezone when comparing dates.
+
+    A plain date is equivalent to a naive midnight only. Aware timestamps
+    compare by instant; no timezone is invented for an unzoned value.
+    """
+    if isinstance(value, (pd.Timestamp, dt.datetime, dt.date)) or (isinstance(value, str) and len(value) >= 8):
         try:
-            return pd.Timestamp(value.strip()).date()
+            timestamp = pd.Timestamp(value.strip() if isinstance(value, str) else value)
+            return None if pd.isna(timestamp) else timestamp
         except (ValueError, TypeError):
             return None
     return None

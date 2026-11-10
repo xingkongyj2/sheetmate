@@ -25,6 +25,7 @@ from sheetmate.agent.llm import LLMError, aux_json
 from sheetmate.agent.prompts import CLARIFY_PROMPT, THINK_PLAN_SYSTEM, THINK_REVIEW_SYSTEM
 from sheetmate.agent.reporting import public_sentence, short_step_text, strip_step_label
 from sheetmate.agent.tools import AgentContext
+from sheetmate.agent.task_state import task_projection
 from sheetmate.engine.analysis import table_info
 from sheetmate.engine.sqlutil import frame_to_text
 
@@ -129,6 +130,7 @@ class Plan:
         if self.risks:
             lines.append("需要留意：\n" + "\n".join(f"- {item}" for item in self.risks))
         steps = [f"{step['id']}. {step['description']}" + (f"（验收：{step['check']}）" if step.get("check") else "")
+                 + (f"（依赖步骤：{step['depends_on']}）" if step.get("depends_on") else "")
                  for step in self.steps]
         lines.append("步骤：\n" + "\n".join(steps))
         return "\n".join(lines)
@@ -229,7 +231,7 @@ def _clean_steps(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
     steps = []
-    for item in value:
+    for position, item in enumerate(value, start=1):
         if isinstance(item, str):
             item = {"description": item}
         if not isinstance(item, dict):
@@ -238,14 +240,36 @@ def _clean_steps(value: Any) -> list[dict[str, Any]]:
         description = strip_step_label(clean_text(item.get("description"), 400))
         if description:
             step = {"description": description, "check": clean_text(item.get("check"), 300)}
+            step["_source_id"] = item.get("id", position)
+            if "depends_on" in item:
+                dependencies = item["depends_on"]
+                if not isinstance(dependencies, list) or any(type(dep) is not int for dep in dependencies):
+                    return []
+                step["depends_on"] = list(dict.fromkeys(dependencies))
             narration = strip_step_label(clean_text(item.get("narration"), 160))
             if narration:
                 step["narration"] = narration
             steps.append(step)
     if len(steps) > MAX_PLAN_STEPS:
-        # 最后一步通常是核对与交付，截断时保留它。
-        steps = [*steps[: MAX_PLAN_STEPS - 1], steps[-1]]
-    return [{"id": index, **step} for index, step in enumerate(steps, start=1)]
+        # Dropping intermediate steps can remove required work and silently
+        # rewire implicit dependencies. Let the caller choose its fallback.
+        return []
+    mapping: dict[int, int] = {}
+    normalized = []
+    for index, step in enumerate(steps, start=1):
+        source_id = step.pop("_source_id")
+        if type(source_id) is not int or source_id in mapping:
+            return []
+        dependencies = step.get("depends_on")
+        if dependencies is None:
+            step["depends_on"] = [index - 1] if index > 1 else []
+        elif any(dep not in mapping for dep in dependencies):
+            return []  # invalid/forward/missing prerequisites cannot silently disappear
+        else:
+            step["depends_on"] = [mapping[dep] for dep in dependencies]
+        mapping[source_id] = index
+        normalized.append({"id": index, **step})
+    return normalized
 
 
 def _parse_plan(result: Any) -> Plan | None:
@@ -311,7 +335,8 @@ async def review_plan(llm: Any, ctx: AgentContext, message: str, plan: Plan, bri
     限时；审查失败、超时或结果无法使用时保留原计划（并记下原因）。"""
     if not plan.worth_reviewing:
         return plan
-    payload = {"requirement": message, "data_profile": brief, "plan": plan.to_json()}
+    payload = {"requirement": message, "task_state": task_projection(ctx.task_state),
+               "data_profile": brief, "plan": plan.to_json()}
     outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=THINK_REVIEW_SYSTEM, timeout=REVIEW_TIMEOUT,
                              schema=PLAN_REVIEW_SCHEMA, schema_name="plan_review",
                              label="思考模式审查计划", **_image_kwargs(ctx, history or []))

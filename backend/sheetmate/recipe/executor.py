@@ -238,7 +238,7 @@ class RecipeRunner:
             if self.report["status"] == "running":
                 self.report["output_warnings"] = list(dict.fromkeys(
                     self.report["output_warnings"] + self.report["checkpoint_warnings"]))
-                failed = self.report["validation"] and self.report["validation"]["status"] == "fail"
+                failed = self.report["validation"] and self.report["validation"]["status"] in {"fail", "not_evaluated"}
                 if failed:
                     self.report["failed_stage"] = "validation"
                     self.report["escalation"] = validation_report_text(self.report)
@@ -319,6 +319,16 @@ class RecipeRunner:
             raise RecipeInputError(
                 f"「{src.filename or inp.alias}」缺少必需的列 {required_missing}；文件里的列是：{[str(c) for c in df.columns]}"
             )
+        if sheet is not None and sheet.quality.get("missing_formula_cache"):
+            missing_positions = set(sheet.quality.get("missing_formula_cache_columns", []))
+            affected = [renames.get(str(column), str(column)) for column, position in
+                        zip(sheet.df.columns, sheet.header.col_index or []) if position in missing_positions]
+            required_affected = [column for column in affected if column in inp.required_columns]
+            notice = (f"工作表「{sheet.name}」有 {sheet.quality['missing_formula_cache']} 个公式缺少计算结果"
+                      f"，涉及列 {affected}；请用表格软件重新计算并保存")
+            if required_affected:
+                raise RecipeInputError(notice + f"，本次必需列 {required_affected} 不可可靠读取")
+            warnings.append(notice)
         if inp.expected_row_range and len(inp.expected_row_range) == 2:
             lo, hi = inp.expected_row_range
             if not lo <= len(df) <= hi:
@@ -448,17 +458,44 @@ class RecipeRunner:
             colmap, _ = match_columns(inp.expected_columns, [str(c) for c in mapped.columns], mapping)
             return len(colmap) / len(expected)
 
+        # 自动表头失败时先尝试已记录的位置，再判断候选歧义。
+        if expected and inp.header:
+            for index, sheet in enumerate(sheets):
+                if score(sheet) >= 0.5:
+                    continue
+                try:
+                    retry = read_sheet(src.path, sheet.name, header_hint=inp.header)
+                    if score(retry) > score(sheet):
+                        sheets[index] = retry
+                except ReadError:
+                    pass
+
         wanted = src.sheet or inp.sheet
         chosen = next((s for s in sheets if s.name == wanted), None) if wanted else None
         if chosen is None:
-            chosen = max(sheets, key=score)
-        if expected and score(chosen) < 0.5 and inp.header:
-            try:
-                retry = read_sheet(src.path, chosen.name, header_hint=inp.header)
-                if score(retry) > score(chosen):
-                    chosen = retry
-            except ReadError:
-                pass
+            scored = sorted(((score(s), s) for s in sheets), key=lambda item: item[0], reverse=True)
+            best_score, chosen = scored[0]
+            if expected and best_score < 0.5:
+                raise RecipeInputError(
+                    f"无法可靠匹配输入「{inp.alias}」的工作表：最高字段匹配率 {best_score:.0%}；"
+                    f"现有工作表：{'、'.join(s.name for s in sheets)}"
+                )
+            if len(scored) > 1 and scored[1][0] == best_score:
+                candidates = [s.name for candidate_score, s in scored if candidate_score == best_score]
+                raise RecipeInputError(
+                    f"输入「{inp.alias}」的工作表匹配存在歧义：{'、'.join(candidates)} 字段匹配率相同，"
+                    "请明确指定本次工作表"
+                )
+        if expected and score(chosen) < 0.5:
+            raise RecipeInputError(
+                f"无法可靠匹配输入「{inp.alias}」的工作表「{chosen.name}」：字段匹配率 {score(chosen):.0%}"
+            )
+        quality = chosen.quality
+        if quality.get("truncated"):
+            raise RecipeInputError(
+                f"工作表「{chosen.name}」有 {quality.get('physical_rows')} 行，超过当前读取上限 "
+                f"{quality.get('read_rows')} 行，未执行不完整数据的处理"
+            )
         return chosen
 
     def _scoped_mapping(self, inp: RecipeInput) -> dict[str, list[str]]:
@@ -782,11 +819,13 @@ class RecipeRunner:
         passed = sum(item["status"] == "pass" for item in checks)
         warnings = sum(item["status"] == "warn" for item in checks)
         failures = sum(item["status"] == "fail" for item in checks)
-        status = "fail" if failures else "warn" if warnings else "pass"
+        not_evaluated = sum(item["status"] == "not_evaluated" for item in checks)
+        status = "fail" if failures else "warn" if warnings else "not_evaluated" if not_evaluated else "pass"
         summary = f"{failures} 项校验未通过，{warnings} 项警告" if failures else (
-            f"校验通过，有 {warnings} 项警告" if warnings else f"全部 {passed} 项校验通过")
+            f"校验通过，有 {warnings} 项警告" if warnings else (
+                f"有 {not_evaluated} 项校验未执行" if not_evaluated else f"全部 {passed} 项校验通过"))
         return {"status": status, "summary": summary, "passed": passed, "warnings": warnings,
-                "failures": failures, "checks": checks}
+                "failures": failures, "not_evaluated": not_evaluated, "checks": checks}
 
     def _record_checkpoint(self, checkpoint: dict[str, Any], validation: dict[str, Any]) -> bool:
         after_step = checkpoint["after_step"]
@@ -794,9 +833,10 @@ class RecipeRunner:
         self.report["checkpoint_warnings"].extend(
             f"第 {after_step} 步后原流程校验提示：{item.get('message') or item['description']}"
             for item in validation["checks"] if item["status"] == "warn")
-        if validation["status"] != "fail":
+        if validation["status"] not in {"fail", "not_evaluated"}:
             return True
-        failures = [item.get("message") or item["description"] for item in validation["checks"] if item["status"] == "fail"]
+        failures = [item.get("message") or item["description"] for item in validation["checks"]
+                    if item["status"] in {"fail", "not_evaluated"}]
         message = f"第 {after_step} 步后原流程校验未通过：" + "；".join(failures)
         self.report.update(status="failed", failed_stage="checkpoint", validation=validation,
                            files=[], error=message, escalation=message)
@@ -824,21 +864,35 @@ class RecipeRunner:
                 ok, msg = lo <= ratio <= hi, f"行数比 {ratio:.2f} 不在 {lo}~{hi} 之间"
             elif a.type == "match_rate_min":
                 rate = outcome.metrics.get("match_rate")
-                ok = rate is None or rate >= float(p.get("min", 0.9))
-                msg = f"匹配率 {rate:.1%} 低于 {float(p.get('min', 0.9)):.0%}" if rate is not None else ""
+                ok = rate is not None and rate >= float(p.get("min", 0.9))
+                msg = (f"匹配率 {rate:.1%} 低于 {float(p.get('min', 0.9)):.0%}"
+                       if rate is not None else "流程没有产生可用的匹配率，校验未执行")
             elif a.type == "no_duplicate_keys":
-                cols = [c for c in p.get("columns", []) if c in outcome.columns_out]
-                if cols:
+                requested = list(p.get("columns", []))
+                cols = [c for c in requested if c in outcome.columns_out]
+                missing = [c for c in requested if c not in outcome.columns_out]
+                if missing:
+                    ok, msg = False, f"缺少列 {missing}，重复键校验未执行"
+                elif cols:
                     key = ", ".join(quote_ident(c) for c in cols)
                     dups = self.ws.fetch(
                         f"SELECT count(*) FROM (SELECT {key} FROM {quote_ident(outcome.output)} GROUP BY {key} HAVING count(*) > 1)"
                     )[0][0]
                     ok, msg = dups == 0, f"{cols} 有 {dups} 个重复值"
+                else:
+                    ok, msg = False, "没有指定重复键列，校验未执行"
             elif a.type == "no_nulls":
-                cols = [c for c in p.get("columns", []) if c in outcome.columns_out]
-                nulls = {c: self.ws.fetch(f"SELECT count(*) FROM {quote_ident(outcome.output)} WHERE {quote_ident(c)} IS NULL")[0][0] for c in cols}
-                bad = {c: n for c, n in nulls.items() if n}
-                ok, msg = not bad, f"有空值：{bad}"
+                requested = list(p.get("columns", []))
+                cols = [c for c in requested if c in outcome.columns_out]
+                missing = [c for c in requested if c not in outcome.columns_out]
+                if missing:
+                    ok, msg = False, f"缺少列 {missing}，空值校验未执行"
+                elif cols:
+                    nulls = {c: self.ws.fetch(f"SELECT count(*) FROM {quote_ident(outcome.output)} WHERE {quote_ident(c)} IS NULL")[0][0] for c in cols}
+                    bad = {c: n for c, n in nulls.items() if n}
+                    ok, msg = not bad, f"有空值：{bad}"
+                else:
+                    ok, msg = False, "没有指定空值校验列，校验未执行"
             elif a.type == "columns_exist":
                 missing = [c for c in p.get("columns", []) if c not in outcome.columns_out]
                 ok, msg = not missing, f"缺少列 {missing}"
@@ -1043,7 +1097,7 @@ def has_reviewable_output(report: dict[str, Any]) -> bool:
 
 def validation_report_text(report: dict[str, Any]) -> str:
     """运行校验没通过时的人话报告：哪些检查没过 + 执行过程中可能的原因 + 建议。"""
-    checks = [c for c in (report.get("validation") or {}).get("checks", []) if c["status"] == "fail"]
+    checks = [c for c in (report.get("validation") or {}).get("checks", []) if c["status"] in {"fail", "not_evaluated"}]
     lines = ["结果没有通过校验，为了避免交付错误的数据，已标记为失败（文件仍可下载核对）。"]
     for c in checks:
         lines.append(f"· {c['description']}：{c.get('message') or c.get('actual')}")

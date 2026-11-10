@@ -529,6 +529,12 @@ export interface LLMRuntimePolicy {
   tool_protocol_retries: number
   sdk_retries: number
   structured_timeout: number
+  max_model_calls: number
+  max_prompt_tokens: number
+  max_total_tokens: number
+  max_task_seconds: number
+  max_input_chars: number
+  auxiliary_thinking_enabled: boolean
 }
 
 export interface LLMAdvancedConfig {

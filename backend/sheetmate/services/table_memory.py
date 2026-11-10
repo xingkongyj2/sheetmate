@@ -9,7 +9,10 @@ from typing import Any, Iterable
 
 from sheetmate.db.database import session_scope
 from sheetmate.db.models import FileRecord
-from sheetmate.engine.table_memory import MAX_OBSERVATIONS, SCHEMA_VERSION, format_table_memory, portable_memory, restore_memory, seed_profile
+from sheetmate.engine.table_memory import (
+    MAX_OBSERVATIONS, MAX_TABLES_CONTEXT_CHARS, SCHEMA_VERSION, _context_projection,
+    format_table_memory, portable_memory, restore_memory, seed_profile,
+)
 from sheetmate.engine.workspace import TableInfo, Workspace
 
 FILE_VERSION_KEY = "file_probe_version"
@@ -71,7 +74,8 @@ def file_memories_text(records: Iterable[FileRecord], loaded_file_ids: set[str] 
             memory = memories.get(name) or {}
             columns = [{"name": field["name"], "type": field.get("dtype", "text")} for field in fields]
             probe = {"schema_version": SCHEMA_VERSION, "revision": revision,
-                     "profile": {"columns": fields, "keys": sheet.get("keys", {})}, "observations": []}
+                     "profile": {"columns": fields, "keys": sheet.get("keys", {}),
+                                 "quality": sheet.get("quality", {})}, "observations": []}
             if (memory.get("schema_version") == SCHEMA_VERSION and memory.get("rows") == sheet["rows"]
                     and [column.get("name") for column in memory.get("columns", [])] == [field["name"] for field in fields]):
                 columns = memory["columns"]
@@ -79,15 +83,16 @@ def file_memories_text(records: Iterable[FileRecord], loaded_file_ids: set[str] 
                               if key not in {"schema_version", "revision", "rows", "columns"}})
             info = TableInfo(name=name, label=f"{record.filename} · {name}", source="uploaded",
                              rows=sheet["rows"], columns=columns, file_id=record.id, filename=record.filename,
-                             sheet=name, header=sheet.get("header"), revision=revision, probe_memory=probe)
+                             sheet=name, header=sheet.get("header"), revision=revision, probe_memory=probe,
+                             read_quality=dict(sheet.get("quality") or {}))
             descriptions.append(format_table_memory(info, heading=f"已验证工作表「{name}」：{info.rows} 行 × {len(columns)} 列"))
         if descriptions:
             blocks.append(heading + "\n" + "\n\n".join(descriptions))
     if not blocks:
         return ""
-    return ("以下是文件原件的结构化探测记忆，可直接复用已验证的结构与统计。文件尚未加载；"
+    return _context_projection(("以下是文件原件的结构化探测记忆，可复用与当前版本一致的事实，先核对读取质量警告。文件尚未加载；"
             "需要执行公式、SQL 或脚本时先调用 load_file(file_id)，使用返回的真实工作区表名。\n\n"
-            + "\n\n".join(blocks))
+            + "\n\n".join(blocks)), MAX_TABLES_CONTEXT_CHARS)
 
 
 def restore_workspace_memories(ws: Workspace, records: Iterable[FileRecord]) -> None:

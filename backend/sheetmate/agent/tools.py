@@ -30,6 +30,8 @@ import pandas as pd
 from jsonschema import Draft202012Validator
 
 from sheetmate.agent.structured import StructuredOutputError, validate_payload
+from sheetmate.agent.task_state import inspect_task
+from sheetmate.agent.sql_scope import checked_sql_tables
 from sheetmate.conversation_log import record_event
 from sheetmate.engine.analysis import column_stats, table_info, table_info_text, value_counts
 from sheetmate.engine.formulas import Formula, FormulaLibrary, ParamSpec
@@ -98,7 +100,7 @@ class ToolHost(Protocol):
     def pipeline_host(self) -> PipelineHost: ...
     def field_mapping(self) -> dict[str, list[str]]: ...
     def memory_text(self, query: str) -> str: ...
-    def remember(self, category: str, key: str, value: str) -> str: ...
+    def remember(self, category: str, key: str, value: str, *, evidence_span: str = "") -> dict[str, Any]: ...
     def save_field_mapping(self, standard: str, aliases: list[str]) -> str: ...
 
 
@@ -121,11 +123,17 @@ class AgentContext:
     image_parts: list[dict[str, Any]] = field(default_factory=list)  # 当前消息的图片，仅放入多模态请求，不写入提示词文本
     file_memory: str = ""  # 已授权但尚未加载的原件结构与探测事实，每轮按文件版本刷新
     replace_file_ids: tuple[str, ...] = ()  # 本轮成功交付后更新的旧结果，由处理意图判断提供
+    tool_group: str | None = None  # 可选：core 只暴露低成本分析工具，full 保持完整工具集
+    branch_id: str | None = None  # 并行子任务的证据归属；协调器为空
+    task_state_block: str = ""  # 服务层生成的结构化当前任务状态摘要
+    task_state: dict[str, Any] = field(default_factory=dict)
+    enabled_tool_groups: set[str] = field(default_factory=set)
+    evidence_store: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def visible_tables(self) -> list[TableInfo]:
         tables = self.ws.list_tables()
         if self.table_filter is not None:
-            return [t for t in tables if t.name in self.table_filter or t.source == "computed"]
+            return [t for t in tables if t.name in self.table_filter]
         return tables
 
 
@@ -258,6 +266,23 @@ def _clip(text: str) -> str:
     return text if len(text) <= MAX_TOOL_TEXT else text[:MAX_TOOL_TEXT] + "\n…（内容过长已截断）"
 
 
+def _assert_table_scope(ctx: AgentContext, names: list[str]) -> None:
+    """Enforce the per-agent table view at the tool boundary.
+
+    ``visible_tables`` only controls prompt construction. Read/query tools
+    must repeat the check because a model can still name an arbitrary table in
+    SQL or in a tool argument. A branch adds only its own derived tables to
+    this allowlist after successful execution.
+    """
+    if ctx.table_filter is None:
+        return
+    for raw_name in dict.fromkeys(str(name).strip() for name in names if str(name).strip()):
+        ctx.ws.require(raw_name)
+        if raw_name not in ctx.table_filter:
+            allowed = "、".join(sorted(ctx.table_filter)) or "当前分支表"
+            raise ValueError(f"当前并行分析分支只能读取「{allowed}」，不能访问「{raw_name}」。")
+
+
 def public_detail_text(value: Any, limit: int = 2400) -> str:
     """Allow business feedback, never raw code, diagnostic IDs or parameter dictionaries."""
     if not isinstance(value, (str, int, float, bool)) or value is None:
@@ -295,7 +320,9 @@ def _table_detail(info: TableInfo) -> str:
 
 
 def _tool_table_info(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
-    data = table_info(ctx.ws, str(args.get("table", "")))
+    table = str(args.get("table", ""))
+    _assert_table_scope(ctx, [table])
+    data = table_info(ctx.ws, table)
     columns = [f"「{col['name']}」：{col['dtype']}，空值 {col['null_rate']:.0%}，{col['unique']} 个不同值" for col in data["columns"]]
     keys = data.get("keys", {})
     checks = [f"「{name}」非空且没有重复值，可作为候选主键。" for name in keys.get("candidates", [])]
@@ -308,16 +335,26 @@ def _tool_table_info(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
 
 def _tool_value_counts(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     table, column = str(args.get("table", "")), str(args.get("column", ""))
+    _assert_table_scope(ctx, [table])
     df = value_counts(ctx.ws, table, column, int(args.get("limit") or 20))
-    return ToolResult(_clip(f"「{table}.{column}」取值分布：\n{frame_to_text(df, limit=30)}"),
-                      summary=f"「{column}」有 {len(df)} 种取值（前 {len(df)}）",
+    distribution = df.attrs.get("distribution") or {}
+    total = distribution.get("total_categories")
+    omitted = distribution.get("omitted_categories")
+    coverage = distribution.get("coverage")
+    detail = (f"共 {total} 种取值，返回前 {len(df)} 种，省略 {omitted} 种；覆盖 "
+              f"{distribution.get('covered_rows')}/{distribution.get('total_rows')} 行（{coverage:.2%}）"
+              if total is not None and coverage is not None else f"返回前 {len(df)} 种取值，未确认全部类别覆盖率")
+    return ToolResult(_clip(f"「{table}.{column}」取值分布：{detail}。\n{frame_to_text(df, limit=30)}"),
+                      summary=f"「{column}」{detail}",
                       tables=[ephemeral_payload(f"{column} 分布", df)],
                       public_details=[public_detail_section("统计对象", [f"「{table}」的「{column}」字段"]),
-                                      public_detail_section("统计结果", [f"{row.iloc[0]}：{row.iloc[1]} 条，占比 {row.iloc[2]}%" for _, row in df.iterrows()])])
+                                      public_detail_section("统计范围", [detail]),
+                                      public_detail_section("统计结果", [f"{row.iloc[0]}：{row.iloc[1]} 条，占比 {row.iloc[2]}%" for _, row in df.head(100).iterrows()])])
 
 
 def _tool_column_stats(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     table = str(args.get("table", ""))
+    _assert_table_scope(ctx, [table])
     df = column_stats(ctx.ws, table, args.get("columns") or None)
     statistics = [f"「{row['列']}」：" + "，".join(f"{key} {row[key]}" for key in ("最小", "最大", "均值", "约不同值", "空值比例") if key in row and not pd.isna(row[key])) for _, row in df.iterrows()]
     return ToolResult(_clip(f"「{table}」描述统计：\n{frame_to_text(df, limit=40, max_cell=24)}"),
@@ -329,6 +366,7 @@ def _tool_column_stats(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
 
 def _tool_preview(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     table = str(args.get("table", ""))
+    _assert_table_scope(ctx, [table])
     offset, limit = int(args.get("offset") or 0), min(int(args.get("limit") or 20), 100)
     page = ctx.ws.page(table, offset, limit)
     df = pd.DataFrame(page["rows"], columns=[c["name"] for c in page["columns"]])
@@ -341,7 +379,14 @@ def _tool_preview(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
 
 def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     sql = assert_single_select(str(args.get("sql", "")))
-    inputs = [ctx.ws.require(name) for name in sql_table_refs(sql)]
+    references = checked_sql_tables(ctx, sql)
+    _assert_table_scope(ctx, references)
+    inputs = [ctx.ws.require(name) for name in references]
+    for info in inputs:
+        if info.read_quality.get("truncated"):
+            raise ValueError(f"表「{info.name}」仅载入部分数据，不能作为完整查询结果；请先从原件分块读取完整数据。")
+        if any(info.read_quality.get(key) for key in ("missing_formula_cache", "error_cells", "formula_error_cells")):
+            raise ValueError(f"表「{info.name}」存在缺失公式缓存或错误单元格，不能把未确认的值当成完整数据计算；请用原件脚本核对公式或重算后再分析。")
     details = [public_detail_section("查询对象", [_table_detail(info) for info in inputs])]
     if args.get("description"):
         details.append(public_detail_section("执行内容", [args["description"]]))
@@ -352,6 +397,8 @@ def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
             out, sql, label=str(result_name), source="computed", role="derived", created_by="run_sql",
             description=str(args.get("description") or "SQL 查询结果"), step={"formula": "custom_sql", "params": {"sql": sql}},
         )
+        if ctx.table_filter is not None:
+            ctx.table_filter.add(out)
         df = ctx.ws.df(out, limit=10)
         info = ctx.ws.require(out)
         return ToolResult(_clip(f"已生成表「{out}」：{info.rows} 行 × {len(info.columns)} 列。前几行：\n{frame_to_text(df, limit=10)}"),
@@ -408,10 +455,20 @@ def formula_tool(spec: Formula, kind: str) -> Tool:
     def run(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         params = {k: v for k, v in args.items() if k != "result_name"}
         resolved = ctx.library.resolve(fid)
+        table_params = [
+            value
+            for name, spec_param in resolved.spec.params.items()
+            if spec_param.type in {"table", "tables"}
+            for value in (params.get(name) if isinstance(params.get(name), list) else [params.get(name)])
+            if isinstance(value, str) and value.strip()
+        ]
+        _assert_table_scope(ctx, table_params)
         first_table = next((params.get(n) for n, p in resolved.spec.params.items() if p.type == "table" and params.get(n)), "")
         out = _result_name(ctx, args.get("result_name"), f"{resolved.spec.name}_{first_table}" if first_table else resolved.spec.name)
         outcome = apply_formula(ctx.ws, ctx.library, fid, params, out, label=str(args.get("result_name") or out), created_by=fid)
         ctx.ws.update_meta(out, role="derived", step={"formula": fid, "params": outcome.params})
+        if ctx.table_filter is not None:
+            ctx.table_filter.add(out)
         preview = pd.DataFrame(outcome.preview["rows"][:5], columns=outcome.columns_out)
         text = f"{outcome.summary()}\n前 5 行：\n{frame_to_text(preview, limit=5)}"
         details = [public_detail_section("处理对象", [_table_detail(ctx.ws.require(name)) for name in outcome.inputs])]
@@ -543,6 +600,7 @@ def _tool_export_excel(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
             sheets.append((str(item), str(item)))
     if not sheets:
         raise ValueError("sheets 至少要有一张表，例如 [{\"table\": \"汇总\", \"sheet_name\": \"汇总\"}]")
+    _assert_table_scope(ctx, [table for table, _ in sheets])
     info = ctx.host.export_excel(sheets, str(args.get("filename") or "导出结果"))
     return ToolResult(f"已导出文件「{info['filename']}」，包含 {len(sheets)} 个 sheet，用户可以在右侧下载。",
                       summary=f"导出「{info['filename']}」", events=[{"type": "file", **info}],
@@ -999,9 +1057,27 @@ def _tool_remember(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     key, value = str(args.get("key") or "").strip(), str(args.get("value") or "").strip()
     if not key or not value:
         raise ValueError("key 和 value 都不能为空")
-    scope = ctx.host.remember(category, key, value)
-    return ToolResult(f"已记住（{scope}）：{key} = {value}", summary=f"记住：{key}",
-                      events=[{"type": "memory_saved", "items": [{"category": category, "key": key, "value": value}], "scope": scope}])
+    receipt = ctx.host.remember(category, key, value, evidence_span=str(args.get("evidence_span") or ""))
+    if not isinstance(receipt, dict):
+        return ToolResult("记忆保存未返回可验证的写入结果，本轮不能确认已保存。", ok=False,
+                          summary="记忆写入结果未确认")
+    status = receipt.get("status")
+    scope = str(receipt.get("scope_label") or "记忆")
+    actual_key, actual_value = str(receipt.get("key") or key), str(receipt.get("value") or "")
+    if status == "needs_evidence":
+        return ToolResult("记忆未保存：" + str(receipt.get("reason") or "需要可核实的用户原话证据。"),
+                          ok=False, summary=f"记忆证据不足：{actual_key}")
+    if status == "blocked":
+        return ToolResult(f"未更新（{scope}）：人工规则受到保护。当前保存的是 {actual_key} = {actual_value}。",
+                          summary=f"未覆盖人工记忆：{actual_key}")
+    if status == "unchanged":
+        return ToolResult(f"记忆未变更（{scope}）：{actual_key} = {actual_value}。", summary=f"记忆未变更：{actual_key}")
+    if status not in {"created", "updated"}:
+        return ToolResult("记忆保存未返回可验证的写入状态，本轮不能确认已保存。", ok=False,
+                          summary="记忆写入结果未确认")
+    label = "已记住" if status == "created" else "已更新记忆"
+    return ToolResult(f"{label}（{scope}）：{actual_key} = {actual_value}", summary=f"{label}：{actual_key}",
+                      events=[{"type": "memory_saved", "items": [receipt], "scope": scope, "status": status}])
 
 
 def _tool_save_field_mapping(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -1036,6 +1112,18 @@ def _static_tools() -> list[Tool]:
     both = frozenset({"analyze", "modify", "create"})
     analyze, modify = frozenset({"analyze"}), frozenset({"modify"})
     return [
+        Tool("inspect_execution_evidence", "按证据 ID 分页读取之前实际工具返回的完整原文与源表版本。上下文摘要不足时回查，不能把已压缩摘要当成完整数据。",
+             _obj({"evidence_id": _STR, "offset": {"type": "integer", "minimum": 0},
+                   "limit": {"type": "integer", "minimum": 100, "maximum": 8000}}, ["evidence_id"]), both,
+             run=_tool_inspect_evidence, label=lambda args: "回查执行证据"),
+        Tool("inspect_task_context", "按消息 ID 分页读取当前任务的用户原始要求，或按关键词查找。摘要未完整展示的要求必须按需回查。",
+             _obj({"message_id": {"type": "integer"}, "query": _STR, "offset": {"type": "integer", "minimum": 0},
+                   "limit": {"type": "integer", "minimum": 100, "maximum": 8000}}), both,
+             run=lambda args, ctx: ToolResult(json.dumps(inspect_task(ctx.task_state, **args), ensure_ascii=False), summary="已读取任务原始要求"),
+             label=lambda args: "查看任务要求"),
+        Tool("load_tool_group", "按需加载工具定义：formulas=清洗/匹配/汇总公式，workbook=建表与格式，python=脚本，workflow=已有流程/保存/删除，all=全部。只加载能力，不执行或授权操作。",
+             _obj({"group": {"type": "string", "enum": ["formulas", "workbook", "python", "workflow", "all"]}}, ["group"]), both,
+             run=_tool_load_group, label=lambda args: "加载处理工具"),
         *python_script_tools(),
         workbook_creation_tool(),
         workbook_inspection_tool(),
@@ -1043,7 +1131,7 @@ def _static_tools() -> list[Tool]:
              _obj({"table": {**_STR, "description": "表名"}}, ["table"]), both, run=_tool_table_info,
              label=lambda a: f"查看结构 · {a.get('table', '')}"),
         Tool("value_counts", "统计某一列的取值分布（出现次数和占比），按当前表版本和参数保存并复用探测结果。已有相同范围分布时直接使用。",
-             _obj({"table": _STR, "column": _STR, "limit": {"type": "integer", "description": "最多返回多少个取值，默认 20"}},
+             _obj({"table": _STR, "column": _STR, "limit": {"type": "integer", "minimum": 1, "maximum": 10000, "description": "最多返回多少个取值，默认 20，最多 10000"}},
                   ["table", "column"]), both, run=_tool_value_counts, label=lambda a: f"取值分布 · {a.get('column', '')}"),
         Tool("column_stats", "列的描述统计：最小、最大、均值、分位数、空值比例，按当前表版本和字段保存并复用。已有所需统计时直接使用。",
              _obj({"table": _STR, "columns": {**_STR_LIST, "description": "可选，只统计这些列"}}, ["table"]), both,
@@ -1112,9 +1200,11 @@ def _static_tools() -> list[Tool]:
              _obj({"all": {"type": "boolean", "description": "true表示当前客户或会话的全部已保存流程"},
                    "recipe_ids": {**_STR_LIST, "description": "指定要删除的流程 ID 列表；all=true时无需提供"}}),
              both, run=_tool_delete_recipes, label=lambda a: "删除全部流程" if a.get("all") is True else "批量删除流程"),
-        Tool("remember", "记住用户的偏好或业务规则（绑定客户时记到客户名下）。",
+        Tool("remember", "记住用户明确表达的偏好、业务规则或背景。必须引用本轮用户原话，不得把模型猜测或表格样本推断保存为规则；经验记忆需要已验证执行证据，当前工具不支持。",
              _obj({"category": {"type": "string", "enum": ["preferences", "domain_knowledge", "user_context", "history_insights"]},
-                   "key": _STR, "value": _STR}, ["category", "key", "value"]), both, run=_tool_remember,
+                   "key": _STR, "value": {**_STR, "description": "逐字摘自用户原话的完整规则，不得改写推断；保留否定、条件及范围，不得保存本次临时例外。"},
+                   "evidence_span": {**_STR, "description": "支持本条记忆的用户消息确切原文，不可引用助手文字或工具数据。"}},
+                  ["category", "key", "value"]), both, run=_tool_remember,
              label=lambda a: f"记住 · {a.get('key', '')}"),
         Tool("save_field_mapping", "为当前客户保存字段映射：标准字段名 ← 各种表里出现的别名（以后读入时自动统一）。只把确定是同一个意思的列配成别名。",
              _obj({"standard": _STR, "aliases": _STR_LIST}, ["standard", "aliases"]), both, run=_tool_save_field_mapping,
@@ -1130,13 +1220,63 @@ def reserved_tool_names() -> set[str]:
     return {t.name for t in _static_tools()} | {"reconsider_approach"}
 
 
+def _tool_load_group(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    ctx.enabled_tool_groups.add(str(args["group"]))
+    return ToolResult("相应工具已加载，下一轮可直接调用。加载工具不代表已经执行任何处理或获得保存/删除授权。", summary="已加载所需工具")
+
+
+def _tool_inspect_evidence(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    item = ctx.evidence_store.get(str(args["evidence_id"]))
+    if item is None:
+        resolver = getattr(ctx.host, "resolve_execution_evidence", None)
+        if callable(resolver):
+            item = resolver(str(args["evidence_id"]))
+            if item is not None:
+                ctx.evidence_store[str(args["evidence_id"])] = item
+    if item is None or (ctx.branch_id and item.get("facts", {}).get("branch_id") != ctx.branch_id):
+        raise ValueError("当前范围没有这条执行证据，请使用本任务实际返回的证据 ID。")
+    text = str(item.get("text") or "")
+    offset = max(0, int(args.get("offset") or 0))
+    limit = min(8000, max(100, int(args.get("limit") or 4000)))
+    payload = {"evidence_id": args["evidence_id"], "facts": item.get("facts"), "summary": item.get("summary"),
+               "text": text[offset:offset + limit], "total_chars": len(text), "offset": offset,
+               "next_offset": offset + limit if offset + limit < len(text) else None}
+    return ToolResult(json.dumps(payload, ensure_ascii=False), summary="已回查原始执行证据")
+
+
 class ToolRegistry:
+    # Read-only analysis keeps the common path small while preserving all
+    # formula tools (they are often the cheapest exact operation). Heavy
+    # workflow/code tools remain available through the full group.
+    _HEAVY_TOOL_NAMES = frozenset({
+        "run_python_script", "inspect_python_script", "create_workbook", "inspect_workbook_creation",
+        "build_recipe", "revise_recipe", "run_recipe", "save_as_recipe", "get_recipe",
+        "list_recipes", "delete_recipe", "delete_recipes",
+    })
+    _BRANCH_TOOL_NAMES = frozenset({"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "ask_user", "inspect_task_context", "inspect_execution_evidence"})
+    _GROUP_TOOLS = {
+        "workbook": frozenset({"create_workbook", "inspect_workbook_creation"}),
+        "python": frozenset({"run_python_script", "inspect_python_script"}),
+        "workflow": frozenset({"build_recipe", "revise_recipe", "run_recipe", "save_as_recipe", "get_recipe", "list_recipes", "delete_recipe", "delete_recipes"}),
+    }
+
     def __init__(self) -> None:
         self._static = {t.name: t for t in _static_tools()}
 
-    def for_context(self, ctx: AgentContext) -> list[Tool]:
+    def for_context(self, ctx: AgentContext, *, group: str | None = None) -> list[Tool]:
         tools = [t for t in self._static.values() if ctx.mode in t.modes and (not t.needs_customer or ctx.customer)]
-        if ctx.mode in {"analyze", "modify", "create"}:
+        selected_group = group or ctx.tool_group
+        if ctx.table_filter is not None:
+            # Specialists analyse one slice; file/recipe/memory side effects
+            # and cross-table work are owned by the coordinating agent.
+            return [tool for tool in tools if tool.name in self._BRANCH_TOOL_NAMES]
+        if selected_group == "core":
+            enabled = self._HEAVY_TOOL_NAMES if "all" in ctx.enabled_tool_groups else frozenset().union(
+                *(self._GROUP_TOOLS.get(group, frozenset()) for group in ctx.enabled_tool_groups))
+            tools = [tool for tool in tools if tool.name not in self._HEAVY_TOOL_NAMES or tool.name in enabled]
+        if ctx.mode in {"analyze", "modify", "create"} and (
+            selected_group != "core" or bool(ctx.enabled_tool_groups & {"formulas", "all"})
+        ):
             for spec in ctx.library.customer_specs():
                 tools.append(formula_tool(spec, "customer"))
             for spec in ctx.library.builtin_specs():
@@ -1145,6 +1285,22 @@ class ToolRegistry:
         # 与选择规则一致，脚本入口放在公式、SQL 和流程工具之后。
         tools.sort(key=lambda tool: tool.name == "run_python_script")
         return tools
+
+    def core_for_context(self, ctx: AgentContext) -> list[Tool]:
+        """Return the low-cost read/transform tool set for a common analysis turn."""
+        return self.for_context(ctx, group="core")
+
+    def load_named_tool(self, name: str, ctx: AgentContext) -> Tool | None:
+        """A remembered tool name may activate its group, never widen scope."""
+        if ctx.table_filter is not None:
+            return None
+        tool = next((item for item in self.for_context(ctx, group="full") if item.name == name), None)
+        if tool is not None:
+            group = next((key for key, names in self._GROUP_TOOLS.items() if name in names),
+                         "formulas" if name not in self._static else None)
+            if group:
+                ctx.enabled_tool_groups.add(group)
+        return tool
 
     def find(self, name: str, ctx: AgentContext) -> Tool | None:
         for tool in self.for_context(ctx):

@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sheetmate.agent.content import model_history, user_content
+from sheetmate.agent.evidence import evidence_projection
 from sheetmate.agent.contracts import ANSWER_AUDIT_SCHEMA, STEP_VERDICT_SCHEMA
 from sheetmate.agent.executor import AgentExecutor, build_system_prompt
 from sheetmate.agent.llm import aux_json
@@ -106,6 +107,7 @@ class _Run:
     transcript: list[dict[str, Any]] = field(default_factory=list)
     held: list[dict[str, Any]] = field(default_factory=list)  # 最终回答阶段扣住的文字事件
     results_ok: dict[str, bool] = field(default_factory=dict)  # 工具调用 ID → 是否成功
+    evidence: dict[str, dict[str, Any]] = field(default_factory=dict)
     protocol_results: set[str] = field(default_factory=set)  # 参数未通过校验、尚未执行的调用，不能作为业务证据
     unresolved: set[str] = field(default_factory=set)  # 最后一次调用仍然失败的工具
     waiting: bool = False
@@ -113,6 +115,7 @@ class _Run:
     failed: bool = False
     error: str = ""
     incomplete: bool = False
+    verified_complete: bool = False
 
     def observe(self, event: dict[str, Any], ledger: _Ledger) -> None:
         kind = event["type"]
@@ -121,11 +124,15 @@ class _Run:
             self.question = event.get("question") or "需要确认后才能继续"
         elif kind == "execution_stop" and event.get("status") == "incomplete":
             self.incomplete = True
+        elif kind == "execution_stop" and event.get("status") == "completed":
+            self.verified_complete = event.get("verified") is True
         elif kind == "tool_result":
             if event.get("error_kind") in {"protocol", "schema"}:
                 self.protocol_results.add(event["id"])
                 return
             self.results_ok[event["id"]] = bool(event["ok"])
+            if event.get("evidence"):
+                self.evidence[event["id"]] = evidence_projection(event["evidence"])
             if event["ok"]:
                 self.unresolved.discard(event["tool"])
             else:
@@ -157,7 +164,8 @@ async def _in_thread(ctx: AgentContext, function: Callable[..., Any], *args: Any
 
 
 def _tool_digest(transcript: list[dict[str, Any]], results_ok: dict[str, bool], step: int,
-                 protocol_results: set[str] | None = None) -> list[dict[str, Any]]:
+                 protocol_results: set[str] | None = None,
+                 evidence: dict[str, dict[str, Any]] | None = None) -> list[dict[str, Any]]:
     """把一次 ReAct 的消息整理成「调用了什么、返回了什么」，作为核对依据。"""
     calls: dict[str, tuple[str, str]] = {}
     digest = []
@@ -171,7 +179,8 @@ def _tool_digest(transcript: list[dict[str, Any]], results_ok: dict[str, bool], 
             if call_id in (protocol_results or ()):
                 continue
             name, arguments = calls.get(call_id, ("?", ""))
-            digest.append({"step": step, "tool": name, "ok": results_ok.get(call_id), "args": clip(arguments, 240),
+            digest.append({"call_id": call_id, "step": step, "tool": name, "ok": results_ok.get(call_id), "args": clip(arguments, 240),
+                           "execution": (evidence or {}).get(call_id, {}),
                            "result": clip(message.get("content") or "", _DIGEST_RESULT)})
     return digest
 
@@ -335,6 +344,9 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                            steps: list[dict[str, Any]] | None = None) -> AsyncIterator[dict[str, Any]]:
     """steps 不为空时使用调用方自带的步骤，跳过起草和审查，其余核对照常进行。"""
     llm = executor.llm
+    configure = getattr(executor, "configure_tools", None)
+    if callable(configure):
+        configure(ctx, message)
     yield {"type": "think_start"}
 
     # ---- 1~2. 勘察数据、起草并审查计划
@@ -372,9 +384,18 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     health = _CheckHealth()
     executed = 0
     carry = ""
+    step_states: dict[int, str] = {}
+    pending: list[str] = []
     for num, step in enumerate(plan.steps, start=1):
         executed = num
         description = step["description"]
+        dependencies = step.get("depends_on", [num - 1] if num > 1 else [])
+        if any(step_states.get(dep) != "done" for dep in dependencies):
+            step_states[num] = "blocked"
+            pending.append(description)
+            yield {"type": "step_done", "step_num": num, "status": "warning", "quiet": True,
+                   "summary": "依赖步骤尚未通过验收，本项未执行。", "blocked": True, "depends_on": dependencies}
+            continue
         doing = plan.doing(num)
         yield {"type": "step_start", "step_num": num, "total": total,
                "description": plan.display_description(num), "quiet": True}
@@ -403,14 +424,17 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                                        scope=f"本项目标：{description}\n验收：{step.get('check') or '依据实际结果完成本项'}"):
                 yield event
             conversation.extend(run.transcript)
-            digest = _tool_digest(run.transcript, run.results_ok, num, run.protocol_results)
+            digest = _tool_digest(run.transcript, run.results_ok, num, run.protocol_results, run.evidence)
             step_digest.extend(digest)
             ledger.digests.extend(digest)
             if run.failed or run.waiting:
                 break
             exhausted = executor.budget_exhausted(budget)
             if exhausted:
-                verdict = Verdict(skipped=True, reason="本次处理的操作次数已用完")
+                # Tool exhaustion prevents new work; it does not revoke the
+                # completion check that just verified this finished step.
+                verdict = (Verdict(passed=True, skipped=True) if run.verified_complete
+                           else Verdict(passed=False, skipped=True, reason="本次处理的操作次数已用完"))
             elif run.unresolved:
                 # 最后一次操作仍然报错：不用再问模型，直接带着事实补做（给用户看的话里不出现工具名）
                 verdict = Verdict(
@@ -462,7 +486,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         ledger.summaries[num] = report + (f"\n（核对仍有问题：{'；'.join(verdict.issues[:3])}）" if not verdict.passed and verdict.issues else "")
         ledger.checks.append((public_sentence(description, 60) or f"第 {num} 项",
                               _record_line(step_digest=step_digest, verdict=verdict, retried=retried, first_issues=first_issues)))
-        status = "warning" if (run.incomplete or run.unresolved or not verdict.passed or exhausted
+        status = "warning" if (run.incomplete or run.unresolved or not verdict.passed
+                               or (exhausted and not run.verified_complete)
                                or (verdict.skipped and verdict.reason)) else "done"
         summary = step_summary(status, report=report,
                                checked=verdict.checked if not verdict.skipped else "",
@@ -470,9 +495,24 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                                issues=verdict.issues)
         yield _note(summary, num)
         yield {"type": "step_done", "step_num": num, "status": status, "summary": summary, "quiet": True}
+        known_failure = bool(run.incomplete or run.unresolved or (exhausted and not run.verified_complete)
+                             or (not verdict.skipped and not verdict.passed))
+        step_states[num] = "failed" if known_failure else "done"
+        if known_failure:
+            pending.append(description)
         if exhausted or run.incomplete:
-            break
+            if exhausted:
+                pending.extend(item["description"] for item in plan.steps[num:])
+                break
         carry = verdict.carry_over
+
+    if pending:
+        answer = "本轮尚未完成，部分步骤未通过验收或依赖未就绪。\n\n仍需完成：" + "；".join(pending)
+        yield {"type": "execution_stop", "scope": "task", "status": "incomplete", "code": "plan_incomplete",
+               "summary": answer, "verified": False}
+        yield {"type": "text_chunk", "content": answer}
+        yield {"type": "final_text", "content": answer}
+        return
 
     # ---- 4. 整理结论；最终回答先扣住，核对后再发出
     yield {"type": "reflect_start", "quiet": True}
@@ -489,13 +529,15 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                                scope=f"原始任务：{message}\n根据实际执行证据整理最终回答，核对全部目标是否完成。"):
         yield event
     held = final.held
-    ledger.digests.extend(_tool_digest(final.transcript, final.results_ok, 0, final.protocol_results))
+    ledger.digests.extend(_tool_digest(final.transcript, final.results_ok, 0, final.protocol_results, final.evidence))
     answer = _answer_text(held)
     if answer and not final.failed and not final.waiting and ledger.digests:
         yield {"type": "audit_start"}
         yield _activity("正在核对回答里的数字和结论")
         audit = await audit_answer(llm, message, plan, answer, ledger, record)
         corrected = False
+        revalidated: Audit | None = None
+        fix_incomplete = False
         if not audit.skipped and not audit.ok:
             yield _activity("核对发现出入，正在核实更正")
             fix = _Run()
@@ -504,12 +546,40 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
             async for event in _stream(executor, fix_messages, tools, ctx, budget, fix, ledger, step=None, activity="正在核实更正",
                                        scope=f"原始任务：{message}\n核实更正回答并确认全部目标已完成。"):
                 yield event
-            if not fix.failed and (fix.waiting or _answer_text(fix.held)):
-                held = fix.held  # 澄清时 held 里只有空的 final_text，回答由澄清卡片代替；更正轮没给出回答就保留原回答
-                corrected = not fix.waiting
+            # A correction is only publishable after the same audit is run
+            # against the corrected answer. A successful ReAct stop or a
+            # piece of text alone is not evidence that the original issue was
+            # fixed. Include correction evidence in the revalidation ledger.
+            ledger.digests.extend(_tool_digest(fix.transcript, fix.results_ok, 0, fix.protocol_results, fix.evidence))
+            fix_answer = _answer_text(fix.held)
+            fix_incomplete = fix.failed or fix.waiting or fix.incomplete or not fix_answer
+            if not fix.failed and fix.waiting:
+                held = fix.held  # 澄清卡片代替旧答案，但不得声称已经更正。
+            if not fix_incomplete:
+                revalidation_record = record + "\n必须重新核对的原问题：\n" + "\n".join(audit.issues)
+                revalidated = await audit_answer(llm, message, plan, fix_answer, ledger, revalidation_record)
+                if not revalidated.skipped and revalidated.ok:
+                    held = fix.held
+                    corrected = True
         # 结果是结构化事件：界面在回答下面显示成一行小标识，不往回答文字里追加（追加的话会进入后续对话的历史）
-        yield {"type": "audit_done", "ok": None if audit.skipped else audit.ok, "issues": audit.issues, "skipped": audit.skipped,
-               "corrected": corrected, **({"reason": audit.reason} if audit.skipped and audit.reason else {})}
+        displayed_audit = revalidated if revalidated is not None else audit
+        if not audit.skipped and not audit.ok and not corrected and not (not fix.failed and fix.waiting):
+            # Do not publish an answer already known to conflict with the
+            # execution evidence when correction failed or could not be
+            # revalidated. The recorded tools remain visible for diagnosis.
+            unresolved = displayed_audit.issues or audit.issues
+            reason = displayed_audit.reason if displayed_audit.skipped else "；".join(unresolved)
+            failure_text = "本轮结果仍未通过核对，尚未确认完成。" + (reason or "关键结果需要继续核实。")
+            held = [{"type": "final_text", "content": failure_text}]
+            yield {"type": "execution_stop", "scope": "task", "status": "incomplete",
+                   "code": "answer_audit_failed", "summary": failure_text, "verified": False}
+        yield {"type": "audit_done", "ok": None if displayed_audit.skipped else displayed_audit.ok,
+               "issues": displayed_audit.issues if revalidated is not None else audit.issues,
+               "skipped": displayed_audit.skipped, "corrected": corrected,
+               "revalidated": revalidated is not None,
+               "revalidation_ok": (None if revalidated is None or revalidated.skipped else revalidated.ok),
+               "fix_incomplete": fix_incomplete,
+               **({"reason": displayed_audit.reason} if displayed_audit.skipped and displayed_audit.reason else {})}
     # 出错时已经给了错误提示，扣住的半截文字不能当作完整回答放出来（不依赖执行器怎样攒文字）
     if not final.failed:
         text = _answer_text(held)

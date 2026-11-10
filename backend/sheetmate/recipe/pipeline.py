@@ -136,8 +136,8 @@ class RecipePipeline:
                 yield {"type": "recipe_verify", "report": attempt.verification, "round": round_no}
                 rate = attempt.verification["overall_match_rate"]
                 if stage == "validation" and rate >= 0.999:
-                    _relax_rules(recipe, report)  # 和人工结果完全一致，说明是 AI 写的校验规则太严
-                    stage = ""
+                    if _relax_rules(recipe, report):
+                        stage = ""  # 仅推断性 warning 规则可随人工结果放宽
                 if attempt.verification["status"] == "pass" and not stage:
                     break
                 feedback = attempt.verification
@@ -232,18 +232,21 @@ class RecipePipeline:
 
 def _validation_feedback(validation: dict[str, Any]) -> dict[str, Any]:
     """没有人工结果时，用运行校验的失败项作为修正依据（格式和比对报告一致，方便复用修正提示词）。"""
-    bad = [f"{c['description']}：{c.get('message') or c.get('actual')}" for c in validation.get("checks", []) if c["status"] == "fail"]
+    bad = [f"{c['description']}：{c.get('message') or c.get('actual')}" for c in validation.get("checks", [])
+           if c["status"] in {"fail", "not_evaluated"}]
     return {"status": "fail", "summary": "运行校验未通过", "details": bad, "sheets": [], "overall_match_rate": 0.0}
 
 
-def _relax_rules(recipe: Recipe, report: dict[str, Any]) -> None:
-    """结果和人工结果一致但校验规则不通过：把这些规则降级为警告，并更新运行状态。"""
+def _relax_rules(recipe: Recipe, report: dict[str, Any]) -> bool:
+    """仅明确标记为模型推断的 warning 候选可放宽，不改写 error 约束。"""
     failed_ids = {c["rule_id"] for c in (report.get("validation") or {}).get("checks", []) if c["status"] == "fail"}
-    for rule in recipe.validation_rules:
-        if rule.id in failed_ids:
-            rule.severity = "warning"
+    eligible = {rule.id for rule in recipe.validation_rules
+                if rule.severity == "warning" and rule.params.get("source") == "model_inferred"}
+    if not failed_ids or not failed_ids <= eligible:
+        return False
     report["status"] = "warning"
     report["failed_stage"] = ""
+    return True
 
 
 def _keep_requested_columns(recipe: Recipe, runner: RecipeRunner, handle: RunHandle, instruction: str) -> list[str]:

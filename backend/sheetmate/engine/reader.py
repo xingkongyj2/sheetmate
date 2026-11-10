@@ -19,7 +19,8 @@ import csv
 import datetime as dt
 import math
 import re
-from dataclasses import asdict, dataclass
+from contextlib import closing
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,8 @@ class SheetData:
     df: pd.DataFrame
     header: HeaderInfo
     hidden: bool = False
+    # 读取质量只追加元数据，不改变 df/header 的既有 API。
+    quality: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -81,6 +84,7 @@ class _RawSheet:
     grid: list[list[Any]]
     merged_rows: set[int]  # 含横向合并单元格的行（0 起）
     hidden: bool = False
+    quality: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -174,32 +178,81 @@ def _load_raw_sheets(path: Path) -> list[_RawSheet]:
 
 
 def _load_xlsx(path: Path) -> list[_RawSheet]:
-    """openpyxl 读取（data_only=True 取公式的缓存结果），并展开合并单元格。"""
-    workbook = openpyxl.load_workbook(path, data_only=True)
-    raws: list[_RawSheet] = []
-    for ws in workbook.worksheets:
-        max_row = min(ws.max_row or 0, _MAX_ROWS)
-        max_col = ws.max_column or 0
-        grid = [list(row) for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)]
-        merged_rows: set[int] = set()
-        for rng in ws.merged_cells.ranges:
-            if rng.min_row > max_row:
-                continue
-            origin = grid[rng.min_row - 1][rng.min_col - 1]
-            if rng.max_col > rng.min_col:
-                merged_rows.update(range(rng.min_row - 1, min(rng.max_row, max_row)))
-            for r in range(rng.min_row - 1, min(rng.max_row, max_row)):
-                for c in range(rng.min_col - 1, min(rng.max_col, max_col)):
-                    grid[r][c] = origin
-        raws.append(_RawSheet(ws.title, grid, merged_rows, hidden=ws.sheet_state != "visible"))
-    workbook.close()
-    return raws
+    """读取缓存值并同时检查公式/错误/截断状态，不把质量问题静默成普通空值。"""
+    with closing(openpyxl.load_workbook(path, data_only=True)) as workbook, \
+            closing(openpyxl.load_workbook(path, data_only=False, read_only=True)) as formula_book:
+        raws: list[_RawSheet] = []
+        for ws in workbook.worksheets:
+            max_row = min(ws.max_row or 0, _MAX_ROWS)
+            max_col = ws.max_column or 0
+            grid = [list(row) for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)]
+            formula_ws = formula_book[ws.title]
+            formula_cells = 0
+            missing_formula_cache = 0
+            missing_formula_cache_columns: set[int] = set()
+            formula_error_cells: list[str] = []
+            formula_error_columns: set[int] = set()
+            error_cells: list[str] = []
+            error_columns: set[int] = set()
+            formula_examples: list[dict[str, Any]] = []
+            scan_rows = min(ws.max_row or 0, _MAX_ROWS)
+            for row_idx, row in enumerate(formula_ws.iter_rows(min_row=1, max_row=scan_rows, max_col=max_col), start=1):
+                for col_idx, formula_cell in enumerate(row, start=1):
+                    cached = ws.cell(row_idx, col_idx).value
+                    if formula_cell.data_type == "f" or (isinstance(formula_cell.value, str) and formula_cell.value.startswith("=")):
+                        formula_cells += 1
+                        if len(formula_examples) < 20:
+                            formula = str(getattr(formula_cell.value, "text", None) or formula_cell.value)
+                            formula_examples.append({"coordinate": ws.cell(row_idx, col_idx).coordinate,
+                                                     "formula": formula[:500], "truncated": len(formula) > 500})
+                        if cached is None:
+                            missing_formula_cache += 1
+                            missing_formula_cache_columns.add(col_idx - 1)
+                        elif isinstance(cached, str) and cached in _EXCEL_ERRORS:
+                            formula_error_columns.add(col_idx - 1)
+                            if len(formula_error_cells) < 20:
+                                formula_error_cells.append(ws.cell(row_idx, col_idx).coordinate)
+                    elif isinstance(cached, str) and cached in _EXCEL_ERRORS:
+                        error_columns.add(col_idx - 1)
+                        if len(error_cells) < 20:
+                            error_cells.append(ws.cell(row_idx, col_idx).coordinate)
+            merged_rows: set[int] = set()
+            for rng in ws.merged_cells.ranges:
+                if rng.min_row > max_row:
+                    continue
+                origin = grid[rng.min_row - 1][rng.min_col - 1]
+                if rng.max_col > rng.min_col:
+                    merged_rows.update(range(rng.min_row - 1, min(rng.max_row, max_row)))
+                for r in range(rng.min_row - 1, min(rng.max_row, max_row)):
+                    for c in range(rng.min_col - 1, min(rng.max_col, max_col)):
+                        grid[r][c] = origin
+            raws.append(_RawSheet(
+                ws.title,
+                grid,
+                merged_rows,
+                hidden=ws.sheet_state != "visible",
+                quality={
+                    "physical_rows": int(ws.max_row or 0),
+                    "read_rows": int(max_row),
+                    "truncated": bool((ws.max_row or 0) > _MAX_ROWS),
+                    "formula_cells": formula_cells,
+                    "missing_formula_cache": missing_formula_cache,
+                    "missing_formula_cache_columns": sorted(missing_formula_cache_columns),
+                    "formula_examples": formula_examples,
+                    "formula_error_cells": formula_error_cells,
+                    "formula_error_columns": sorted(formula_error_columns),
+                    "error_cells": error_cells,
+                    "error_columns": sorted(error_columns),
+                },
+            ))
+        return raws
 
 
 def _load_xls(path: Path) -> list[_RawSheet]:
     frames = pd.read_excel(path, sheet_name=None, header=None, engine="xlrd", dtype=object)
     return [
-        _RawSheet(str(name), [[None if _is_blank(v) else v for v in row] for row in frame.values.tolist()], set())
+        _RawSheet(str(name), [[None if _is_blank(v) else v for v in row] for row in frame.values.tolist()], set(),
+                   quality={"physical_rows": int(len(frame)), "read_rows": int(len(frame)), "truncated": False})
         for name, frame in frames.items()
     ]
 
@@ -212,7 +265,7 @@ def _load_csv(path: Path) -> list[_RawSheet]:
                 path, header=None, dtype=str, keep_default_na=False, sep=None, engine="python", encoding=encoding
             )
             grid = [[None if _is_blank(v) else v for v in row] for row in frame.values.tolist()]
-            return [_RawSheet(path.stem, grid, set())]
+            return [_RawSheet(path.stem, grid, set(), quality={"physical_rows": int(len(grid)), "read_rows": int(len(grid)), "truncated": False})]
         except (UnicodeDecodeError, UnicodeError, pd.errors.ParserError) as exc:
             last_error = exc
     raise ReadError(f"无法识别 CSV 文件编码：{last_error}")
@@ -252,7 +305,27 @@ def _raw_to_sheet(raw: _RawSheet, hint: HeaderInfo | None) -> SheetData | None:
 
     header = HeaderInfo(header_row=header_idx + 1, header_rows=header_rows, title=title, col_index=list(keep),
                         row_index=row_index)
-    return SheetData(name=raw.name, df=df, header=header, hidden=raw.hidden)
+    quality = dict(raw.quality)
+    for issue in ("missing_formula_cache", "formula_error", "error"):
+        if f"{issue}_columns" in quality:
+            affected = set(quality[f"{issue}_columns"])
+            quality[f"{issue}_fields"] = [column for column, position in zip(columns, keep) if position in affected]
+    quality["data_rows"] = int(len(df))
+    quality["header_confidence"] = _header_confidence(grid, header_idx, header_rows)
+    return SheetData(name=raw.name, df=df, header=header, hidden=raw.hidden, quality=quality)
+
+
+def _header_confidence(grid: list[list[Any]], header_idx: int, header_rows: int) -> str:
+    """粗粒度风险标记，供调用方决定是否需要定向复核原始区域。"""
+    if header_idx < 0 or header_idx >= len(grid):
+        return "low"
+    row = _non_empty(grid[header_idx])
+    if not row:
+        return "low"
+    texty = sum(1 for v in row if _is_texty(v)) / len(row)
+    if header_rows > 1 or texty >= 0.8:
+        return "high"
+    return "medium"
 
 
 def _detect_header(grid: list[list[Any]], merged_rows: set[int], hint: HeaderInfo | None) -> tuple[int, int]:
@@ -277,6 +350,12 @@ def _detect_header(grid: list[list[Any]], merged_rows: set[int], hint: HeaderInf
         texty = sum(1 for v in cells if _is_texty(v)) / len(cells)
         distinct = len({str(v).strip() for v in cells}) / len(cells)
         if texty >= 0.6 and distinct >= 0.6:
+            if i in merged_rows and distinct < 1 and i + 1 < len(grid):
+                following = _non_empty(grid[i + 1])
+                if (following and len(following) >= len(cells)
+                        and all(_is_texty(v) for v in following)
+                        and len({str(v).strip() for v in following}) / len(following) > distinct):
+                    continue  # 当前行是横向合并的分组表头，下一行才是字段名。
             header_idx = i
             break
     if header_idx is None:

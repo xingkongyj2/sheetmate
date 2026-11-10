@@ -89,6 +89,8 @@ class Conversation(Base):
     # 历史太长时压缩出的上下文摘要（TabClaw 的 auto-compact），以及它覆盖到的最后一条消息 id
     context_summary: Mapped[str] = mapped_column(Text, default="")
     summary_until: Mapped[int] = mapped_column(Integer, default=0)
+    # Durable source references for the current task; independent of lossy chat summaries.
+    task_state: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     # 对话里待用户确认的流程删除目标；确认只作用于本次列出的 ID。
     pending_recipe_deletion: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -269,8 +271,17 @@ class Memory(Base):
     key: Mapped[str] = mapped_column(String(128))
     value: Mapped[str] = mapped_column(Text)
     source: Mapped[str] = mapped_column(String(16), default="ai")  # ai / human
+    # 来源消息用于幂等和后台抽取乱序保护；旧记录为空时仍按原有行为兼容。
+    source_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    source_turn_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    evidence_span: Mapped[str] = mapped_column(Text, default="")
+    version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+    # Cover direct human edits and scope migrations as well as set_memory.
+    # A stale ORM UPDATE/DELETE must fail instead of replacing a newer rule.
+    __mapper_args__ = {"version_id_col": version}
 
 
 class FieldMapping(Base):

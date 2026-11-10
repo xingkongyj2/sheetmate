@@ -259,14 +259,23 @@ def test_explanation_before_clarification_is_only_shown_once(client, samples, fa
     assert stored["content"] == "" and not any(event["type"] == "reply" for event in stored["events"])
 
 
-def test_multi_table_compare(client, samples, fake_llm):
+def test_multi_table_independent_analysis(client, samples, fake_llm):
     conv = _new_conversation(client)
     _upload(client, conv, samples["fees_sep"])
     _upload(client, conv, samples["owners"])
     fake_llm(script=[{"text": "表一结论"}, {"text": "表二结论"}, {"text": "[一致] 两表可以关联\n## ✅ 最终结论\n- ok"}])
-    events = _chat(client, conv, "对比这两张表")
+    events = _chat(client, conv, "分别独立分析这两张表")
     types = [e["type"] for e in events]
     assert "agent_pool_start" in types and types.count("agent_done") == 2 and "aggregate_start" in types
+
+
+def test_multi_table_compare_keeps_cross_table_context(client, samples, fake_llm):
+    conv = _new_conversation(client)
+    _upload(client, conv, samples["fees_sep"])
+    _upload(client, conv, samples["owners"])
+    fake_llm(script=[{"text": "需要在同一范围内核对这两张表的关联。"}])
+    events = _chat(client, conv, "对比这两张表")
+    assert not any(event["type"] == "agent_pool_start" for event in events)
 
 
 def test_plan_execution(client, samples, fake_llm):

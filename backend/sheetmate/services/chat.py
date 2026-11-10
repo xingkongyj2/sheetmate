@@ -15,7 +15,7 @@ from contextlib import ExitStack, aclosing
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from sheetmate.agent.executor import AgentExecutor
@@ -32,9 +32,13 @@ from sheetmate.agent.multi_agent import execute_multi, should_activate
 from sheetmate.agent.planner import check_clarification
 from sheetmate.agent.persistence import infer_recipe_persistence
 from sheetmate.agent.recorder import WorkflowRecorder
-from sheetmate.agent.summarizer import COMPACT_THRESHOLD, compact_history, fallback_title, make_title
+from sheetmate.agent.summarizer import (
+    HISTORY_TOKEN_BUDGET, RECENT_HISTORY_TOKENS, bounded_history, compact_history,
+    fallback_title, history_tokens, make_title,
+)
 from sheetmate.agent.thinking import THINKING_TOOL_BUDGET, execute_thinking
 from sheetmate.agent.tools import AgentContext, ToolRegistry
+from sheetmate.agent.task_state import advance_task
 from sheetmate.config import settings
 from sheetmate.conversation_log import (
     bind_trace, current_trace, error_data, new_turn, record_event, trace_phase,
@@ -103,6 +107,34 @@ def _image_parts(records: list[FileRecord]) -> list[dict[str, Any]]:
     return parts
 
 
+def _hydrate_task(db: Session, conversation_id: str, state: dict[str, Any] | None) -> dict[str, Any]:
+    """Resolve source text within this conversation; never trust arbitrary message IDs."""
+    task = dict(state or {})
+    ids = [value for value in task.get("source_message_ids", []) if isinstance(value, int)]
+    if ids:
+        sources = db.scalars(select(Message).where(
+            Message.conversation_id == conversation_id, Message.role == "user", Message.id.in_(ids),
+        ).order_by(Message.id)).all()
+        task["requirements"] = [{"message_id": item.id, "content": item.content} for item in sources]
+    else:
+        task["requirements"] = []
+    return task
+
+
+def _advance_conversation_task(conversation_id: str, message_id: int, *, relation: str,
+                               save_recipe: bool) -> dict[str, Any]:
+    with session_scope() as db:
+        conv = db.get(Conversation, conversation_id)
+        request = db.get(Message, message_id)
+        if conv is None or request is None or request.conversation_id != conversation_id or request.role != "user":
+            raise ServiceError("当前任务的来源消息不可用")
+        state = advance_task(conv.task_state, message_id, relation=relation,
+                             file_ids=(request.meta or {}).get("attachments", []))
+        state["save_recipe_requested"] = save_recipe
+        conv.task_state = state
+        return _hydrate_task(db, conversation_id, state)
+
+
 def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentContext, ConversationHost]:
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
@@ -141,11 +173,24 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
                 ws.drop(table.name)
         restore_workspace_memories(ws, available_records)
         file_memory = file_memories_text(available_records, {t.file_id for t in ws.list_tables() if t.file_id})
+        task_state = _hydrate_task(db, conversation_id, conv.task_state)
+        evidence_store = {}
+        for previous in db.scalars(select(Message).where(
+            Message.conversation_id == conversation_id, Message.role == "assistant",
+        ).order_by(Message.id.desc()).limit(20)):
+            for event in previous.events or []:
+                evidence = event.get("evidence") or {}
+                evidence_id = evidence.get("id")
+                record = event.get("evidence_record")
+                if event.get("type") == "tool_result" and evidence_id and isinstance(record, dict):
+                    evidence_store.setdefault(evidence_id, record)
     host = ConversationHost(user_id=user_id, conversation_id=conversation_id,
                             customer_id=customer_info["id"] if customer_info else None, ws=ws, recipe_id=recipe_id)
     ctx = AgentContext(mode=mode, ws=ws, library=library, host=host, llm=llm, conversation_id=conversation_id,
                        customer=customer_info, max_repair=settings.repair_max_attempts,
                        verify_rounds=settings.verify_max_rounds, file_memory=file_memory)
+    ctx.task_state = task_state
+    ctx.evidence_store = evidence_store
     return ctx, host
 
 
@@ -216,6 +261,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     replace_file_ids: list[str] = []
     analysis: AnalysisWorkspace | None = None
     run_id = None
+    llm = None
     last_checkpoint = 0.0
 
     def checkpoint(*, force: bool = False) -> None:
@@ -226,6 +272,9 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
 
     async def finish_execution(content: str) -> None:
         recorder.finish(content)
+        snapshot = getattr(llm, "usage_snapshot", None)
+        if callable(snapshot):
+            recorder.llm_usage = snapshot()
         await emit({"type": "execution_status", **recorder.execution()})
 
     def cancel_execution() -> None:
@@ -371,6 +420,9 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             return
         llm = get_llm()
         ctx, host = build_context(user_id, conversation_id, llm)
+        host.request_message_id = message_id
+        trace = current_trace()
+        host.request_turn_id = trace.turn_id if trace is not None else None
         with session_scope() as db:
             conv = db.get(Conversation, conversation_id)
             request = db.get(Message, message_id)
@@ -410,8 +462,13 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             await job.emit({"type": "done"})
             return
         if intent.action == "process":
-            ctx.save_recipe_requested = await infer_recipe_persistence(llm, message, history)
+            ctx.save_recipe_requested = (intent.save_recipe if intent.save_recipe is not None
+                                         else await infer_recipe_persistence(llm, message, history))
             host.save_recipe_requested = ctx.save_recipe_requested
+            ctx.task_state = _advance_conversation_task(
+                conversation_id, message_id, relation=intent.task_relation,
+                save_recipe=ctx.save_recipe_requested,
+            )
     except asyncio.CancelledError:
         cancel_execution()
         await finish_execution("")
@@ -576,6 +633,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     await finish_execution(answer)
     _save_assistant(conversation_id, answer, stored, recorder, run_id)
     title = await _maybe_title(conversation_id, llm, message, answer)
+    _persist_llm_usage(conversation_id, recorder.message_id, llm)
     if title:
         await job.emit({"type": "title", "title": title})
     if host.saved_recipes or host.deleted_recipes:
@@ -585,8 +643,13 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     await job.emit({"type": "done"})
     # 普通聊天也可能提供客户背景；与处理任务一样提取用户明确提供的长期信息。
     # 抽取放到独立的后台任务里，不占用这次请求的连接。
-    task = asyncio.create_task(_learn_memories(llm, user_id, conversation_id, ctx.host.customer_id, message, answer,
-                                               recipe_id=ctx.host.recipe_id))
+    trace = current_trace()
+    task = asyncio.create_task(_learn_memories(
+        llm, user_id, conversation_id, ctx.host.customer_id, message, answer,
+        recipe_id=ctx.host.recipe_id, source_message_id=message_id,
+        source_turn_id=trace.turn_id if trace is not None else None,
+        assistant_message_id=recorder.message_id,
+    ))
     _background.add(task)
     task.add_done_callback(_background.discard)
 
@@ -763,6 +826,9 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
     if finalize:
         recorder.finish(content)
     record = recorder.to_dict(final=finalize)
+    usage = getattr(recorder, "llm_usage", None)
+    if usage:
+        record["execution"]["llm_usage"] = usage
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
         if conv is None:
@@ -780,6 +846,22 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
             assistant.content = content
             assistant.events = list(events)
             assistant.meta = meta
+        state = dict(conv.task_state or {})
+        if state and state.get("current_message_id") == recorder.request_message_id:
+            execution = record["execution"]
+            state["status"] = execution.get("status", "running")
+            state["last_assistant_message_id"] = assistant.id
+            state["evidence_ids"] = list(dict.fromkeys([
+                *(state.get("evidence_ids") or []),
+                *((event.get("evidence") or {}).get("id") or event.get("evidence_id") or event.get("id") for event in events
+                  if event.get("type") == "tool_result" and event.get("ok")
+                  and (event.get("evidence_id") or event.get("id"))),
+            ]))[-200:]
+            if execution.get("status") == "completed":
+                state["unresolved"] = []
+            elif execution.get("status") != "running":
+                state["unresolved"] = [execution.get("summary") or execution.get("code") or "上次任务未完成"]
+            conv.task_state = state
         if run_id and finalize:
             if record["steps"] or record["execution"].get("status") != "completed":
                 run_service.finish_analysis_run(db, run_id, record)
@@ -806,6 +888,24 @@ def _contains_unconfigured_llm_error(text: str) -> bool:
     return contains_llm_not_configured_text(text)
 
 
+def _persist_llm_usage(conversation_id: str, message_id: int | None, llm: Any) -> None:
+    """Include late title/memory calls in their originating turn's cost record."""
+    snapshot = getattr(llm, "usage_snapshot", None)
+    if message_id is None or not callable(snapshot):
+        return
+    usage = snapshot()
+    with session_scope() as db:
+        message = db.get(Message, message_id)
+        if message is None or message.conversation_id != conversation_id or message.role != "assistant":
+            return
+        meta = dict(message.meta or {})
+        execution = {**(meta.get("execution") or {}), "llm_usage": usage}
+        message.meta = {**meta, "execution": execution}
+        run = db.get(run_service.Run, meta["run_id"]) if meta.get("run_id") else None
+        if run is not None:
+            run.validation = {**(run.validation or {}), "execution": execution}
+
+
 def recover_interrupted_executions() -> None:
     """A persisted running checkpoint survived its process; the exact interruption cause is unknown."""
     reason = "服务已重启，上次执行未完成；停止的具体原因未知。"
@@ -821,6 +921,9 @@ def recover_interrupted_executions() -> None:
             status = {"type": "execution_status", **execution}
             assistant.meta = {**meta, "execution": execution}
             assistant.events = [*(assistant.events or []), status]
+            conv = db.get(Conversation, assistant.conversation_id)
+            if conv is not None and (conv.task_state or {}).get("current_message_id") == meta.get("request_message_id"):
+                conv.task_state = {**conv.task_state, "status": "interrupted", "unresolved": [reason]}
             if not assistant.content:
                 assistant.content = reason
             if meta.get("log_turn_id"):
@@ -855,6 +958,8 @@ def persist_unfinished_job(job: Job, *, status: str, code: str, summary: str) ->
         meta = dict(assistant.meta or {}) if assistant is not None else {"job_id": job.id, "request_message_id": job.message_id}
         execution = {**(meta.get("execution") or {}), "status": status, "code": code, "summary": summary,
                      "source": job.cancel_source or "system"}
+        if (conv.task_state or {}).get("current_message_id") == job.message_id:
+            conv.task_state = {**conv.task_state, "status": status, "unresolved": [summary]}
         event = {"type": "execution_status", **execution}
         if assistant is None:
             assistant = conv_service.add_message(db, conv, "assistant", summary, events=[event], meta={**meta, "execution": execution})
@@ -911,19 +1016,35 @@ async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message
             rows = rows[:-1]
     items = [{"id": m.id, "role": m.role, "content": _history_content(m)}
         for m in rows if not is_llm_not_configured_message(m.role, m.content, m.events)]
-    if len(items) > COMPACT_THRESHOLD:
-        older, recent = items[:-8], items[-8:]
+    summary_item = [{"role": "assistant", "content": summary, "context_summary": True}] if summary else []
+    if history_tokens([*summary_item, *items]) > HISTORY_TOKEN_BUDGET:
+        # Keep recent dialogue under its own token budget, rather than treating
+        # a very long spreadsheet discussion as equivalent to a short greeting.
+        cut = len(items)
+        recent_tokens = 0
+        while cut > 0:
+            next_tokens = history_tokens([items[cut - 1]])
+            if cut < len(items) and recent_tokens + next_tokens > RECENT_HISTORY_TOKENS:
+                break
+            recent_tokens += next_tokens
+            cut -= 1
+        older, recent = items[:cut], items[cut:]
         text = await compact_history(llm, ([{"role": "assistant", "content": summary}] if summary else []) + older)
-        if text:
+        if text and older:
             with session_scope() as db:
-                conv = db.get(Conversation, conversation_id)
-                conv.context_summary = text
-                conv.summary_until = older[-1]["id"]
+                # A slow summary from an older request must not move a newer
+                # request's persisted cursor backwards or replace its summary.
+                db.execute(update(Conversation).where(
+                    Conversation.id == conversation_id, Conversation.summary_until == summary_until,
+                ).values(context_summary=text, summary_until=older[-1]["id"]))
             summary = text
             items = recent
             await emit({"type": "compacted", "old_count": len(older), "summary": text[:120]})
     history = [{"role": "assistant", "content": summary, "context_summary": True}] if summary else []
     history += [{"role": m["role"], "content": m["content"], "message_id": m["id"]} for m in items if m["content"].strip()]
+    if history_tokens(history) > HISTORY_TOKEN_BUDGET:
+        history = bounded_history(history, HISTORY_TOKEN_BUDGET)
+        await emit({"type": "compacted", "fallback": True, "summary": "历史超出上下文预算，暂时保留原始目标和近期消息；完整原文仍已保存。"})
     # Reattach only recent, still-accessible images after text compaction. Never embed
     # base64 in summaries, persistence prompts, database messages, or diagnostic text.
     remaining = _MAX_HISTORY_IMAGES
@@ -999,13 +1120,23 @@ async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str
 
 
 async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer_id: str | None, message: str, answer: str,
-                          *, recipe_id: str | None = None) -> None:
+                          *, recipe_id: str | None = None, source_message_id: int | None = None,
+                          source_turn_id: str | None = None, assistant_message_id: int | None = None) -> None:
     with trace_phase("background_memory"):
         try:
-            items = await asyncio.wait_for(extract_memories(llm, message, answer), timeout=30)
+            with session_scope() as db:
+                existing = memory_service.memories_for(db, user_id=user_id, customer_id=customer_id,
+                                                       conversation_id=conversation_id, recipe_id=recipe_id)
+            # Candidate context is only a deduplication aid, never evidence for
+            # creating new rules. Prioritize keys mentioned in this user turn.
+            existing.sort(key=lambda item: not any(str(item.get("key") or "")[i:i + 2] in message
+                                                   for i in range(max(0, len(str(item.get("key") or "")) - 1))))
+            items = await asyncio.wait_for(extract_memories(llm, message, answer, existing=existing[:12]), timeout=30)
         except Exception as exc:
             record_event("memory.error", "sheetmate.services.chat._learn_memories", error_data(exc))
             return
+        finally:
+            _persist_llm_usage(conversation_id, assistant_message_id, llm)
     if not items:
         return
     with session_scope() as db:
@@ -1018,11 +1149,18 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
             customer_id, recipe_id = conversation.customer_id, conversation.recipe_id
         if customer_id and db.get(Customer, customer_id) is None:
             return
+        receipts = []
         for item in items:
-            memory_service.set_memory(db, category=item["category"], key=item["key"], value=item["value"], user_id=user_id,
-                                      customer_id=customer_id, conversation_id=conversation_id, recipe_id=recipe_id)
+            memory = memory_service.set_memory(
+                db, category=item["category"], key=item["key"], value=item["value"], user_id=user_id,
+                customer_id=customer_id, conversation_id=conversation_id, recipe_id=recipe_id,
+                source_message_id=source_message_id, source_turn_id=source_turn_id,
+                evidence_span=item.get("evidence_span", ""),
+            )
+            receipts.append(memory_service.memory_write_result(memory))
         record_event("memory.saved", "sheetmate.services.memory.set_memory",
-                     {"items": items, "customer_id": customer_id, "recipe_id": recipe_id})
+                     {"items": receipts, "customer_id": customer_id, "recipe_id": recipe_id,
+                      "source_message_id": source_message_id, "source_turn_id": source_turn_id})
 
 
 # ---------------------------------------------------------------------------

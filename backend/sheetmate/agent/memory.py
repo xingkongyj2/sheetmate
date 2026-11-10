@@ -10,11 +10,22 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from sheetmate.agent.prompts import MEMORY_PROMPT
 
 CATEGORIES = ["preferences", "domain_knowledge", "user_context", "history_insights"]
+MEMORY_MESSAGE_CHARS = 8_000
+MEMORY_ANSWER_CHARS = 2_000
+MEMORY_CONTEXT_CHARS = 12_000
+
+
+class MemoryContextLimit(ValueError):
+    """Required human rules cannot fit without losing constraints."""
+
+
 CATEGORY_LABELS = {
     "preferences": "偏好",
     "domain_knowledge": "业务规则",
@@ -23,42 +34,148 @@ CATEGORY_LABELS = {
 }
 
 
-async def extract_memories(llm: Any, message: str, answer: str) -> list[dict[str, str]]:
+def _bounded_text(value: str, limit: int) -> str:
+    """保留长文本的开头和结尾，避免长期要求写在末尾时被静默丢掉。"""
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    marker = "\n…（中间内容已截断）…\n"
+    available = max(0, limit - len(marker))
+    head = int(available * 0.65)
+    tail = available - head
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+_EPHEMERAL_RULE = re.compile(
+    r"本次|这次|此次|这回|本轮|这轮|当前任务|临时|暂时|仅限|只限|一次性|试一下|试试看|例外|"
+    r"\bthis\s+(?:time|run|task|request)\b|\bfor\s+now\b|\btemporar", re.IGNORECASE,
+)
+_NO_PERSIST = re.compile(
+    r"(?:不要|别|无需|不用|不必|暂不).{0,12}(?:记住|记忆|保存|长期)|"
+    r"(?:不作为|不是).{0,8}(?:长期|永久|默认)|\b(?:do not|don't)\s+(?:remember|save)\b", re.IGNORECASE,
+)
+_EXPLICIT_FUTURE = re.compile(r"以后|今后|往后|从此|永久|长期|\bfrom\s+now\s+on\b|\bpermanent", re.IGNORECASE)
+
+
+def supported_memory_value(message: str, value: str, evidence_span: str) -> str | None:
+    """Accept a quoted user fact, retaining its complete sentence and scope.
+
+    A substring citation alone does not substantiate a rewritten conclusion.
+    Persist the source sentence, including negation and conditions, instead of
+    a model paraphrase. Task-local exceptions are never permanent rules.
+    """
+    value, quote = value.strip(), evidence_span.strip()
+    if not value or not quote or value not in quote or quote not in message:
+        return None
+    start = message.find(quote)
+    end = start + len(quote)
+    boundaries = "。！？!?"
+    left = max((message.rfind(char, 0, start) for char in boundaries), default=-1) + 1
+    rights = [position for char in boundaries if (position := message.find(char, end)) >= 0]
+    right = end if message[end - 1] in boundaries else min(rights) + 1 if rights else len(message)
+    sentence = message[left:right].strip()
+    # A business condition often sits on the preceding line ("直营渠道：\n金额...").
+    # Keep the entire short paragraph when it spans lines, including conditions
+    # separated by punctuation; never turn its last line into a universal rule.
+    separators = list(re.finditer(r"\n[ \t\r]*\n", message))
+    paragraph_left = max((part.end() for part in separators if part.end() <= start), default=0)
+    paragraph_right = min((part.start() for part in separators if part.start() >= end), default=len(message))
+    paragraph = message[paragraph_left:paragraph_right].strip()
+    if "\n" in paragraph:
+        sentence = paragraph
+    if not sentence or len(sentence) > 500 or _EPHEMERAL_RULE.search(sentence) or _NO_PERSIST.search(sentence):
+        return None
+    # A scope qualifier can be in a preceding sentence ("本次例外。金额..."),
+    # so absence of that word in the selected quote does not establish permanence.
+    if (_EPHEMERAL_RULE.search(message) or _NO_PERSIST.search(message)) and not _EXPLICIT_FUTURE.search(sentence):
+        return None
+    return sentence
+
+
+async def extract_memories(llm: Any, message: str, answer: str, *,
+                           existing: list[dict[str, Any]] | None = None) -> list[dict[str, str]]:
     """对话结束后轻量抽取（最多 3 条）。失败不影响主流程。"""
+    known = [{"category": item["category"], "key": item["key"], "value": str(item.get("value") or "")[:200]}
+             for item in (existing or [])[:12]]
+    prompt = MEMORY_PROMPT.format(
+            message=_bounded_text(message, MEMORY_MESSAGE_CHARS),
+            answer=_bounded_text(answer, MEMORY_ANSWER_CHARS),
+        )
+    prompt += ("\n\n每条 items 还必须包含 evidence_span：逐字引用当前用户消息中支持该记忆的连续原文，"
+               "不得引用助手回答或仅引用旧记忆。没有用户原文证据就不提取。"
+               "value 必须逐字摘自 evidence_span，保留完整句子、否定词、条件和适用范围，不得自行改写结论。"
+               "本次、临时、例外口径以及用户要求不记住的内容绝不能抽取。"
+               "history_insights 需要程序验证的执行证据，本抽取器没有此证据，不提取该类别。"
+               "相同业务口径沿用下列已有记录的 category 和 key，并以 canonical_key 返回该 key；"
+               "旧记忆只用于去重，不代表用户本轮重新授权改变它。\n已有相关记忆："
+               + json.dumps(known, ensure_ascii=False, separators=(",", ":")))
     try:
-        result = await llm.complete_json(MEMORY_PROMPT.format(message=message[:1500], answer=answer[:1500]))
+        result = await llm.complete_json(prompt, max_tokens=900, schema_name="memory_extraction")
     except Exception:
         return []
     items = result.get("items", []) if isinstance(result, dict) else result if isinstance(result, list) else []
+    if not isinstance(items, list):
+        return []
     clean = []
     for item in items[:3]:
         if not isinstance(item, dict):
             continue
         category = str(item.get("category", ""))
         key, value = str(item.get("key", "")).strip(), str(item.get("value", "")).strip()
-        if category in CATEGORIES and key and value:
-            clean.append({"category": category, "key": key[:120], "value": value[:500]})
+        canonical = str(item.get("canonical_key") or "").strip()
+        if any(old["category"] == category and old["key"] == canonical for old in known):
+            key = canonical
+        evidence = str(item.get("evidence_span") or "").strip()
+        # Legacy providers may omit the new field. Accept those responses only
+        # when the complete proposed value is itself a verbatim user quote.
+        if not evidence and value and value in message:
+            evidence = value
+        supported_value = supported_memory_value(message, value, evidence)
+        if (category in CATEGORIES and category != "history_insights" and key and len(key) <= 120
+                and supported_value and len(evidence) <= MEMORY_MESSAGE_CHARS):
+            clean.append({"category": category, "key": key, "value": supported_value, "evidence_span": supported_value})
     return clean
 
 
-def select_relevant(items: list[dict[str, Any]], query: str, limit: int = 30) -> list[dict[str, Any]]:
-    """人工规则全部保留；当前作用域的背景和规则优先于相关经验，数量限制只作用于 AI。"""
+def select_relevant(items: list[dict[str, Any]], query: str, limit: int = 30,
+                    max_chars: int = MEMORY_CONTEXT_CHARS) -> list[dict[str, Any]]:
+    """按相关性和字符预算选记忆，避免常驻 AI 条目挤掉任务相关经验。"""
     text = (query or "").lower()
-    human = [item for item in items if item.get("source") == "human"]
-    standing, relevant = [], []
+    human_relevant, human_other, standing, relevant = [], [], [], []
     words = [w for w in text.split() if len(w) > 1]
     for item in items:
+        blob = f"{item.get('key', '')} {item.get('value', '')}".lower()
+        hit = any(w in blob for w in words) or any(len(chunk) >= 2 and chunk in text for chunk in _chunks(item.get("key", "")))
         if item.get("source") == "human":
-            continue
-        if item["category"] in {"preferences", "domain_knowledge", "user_context"}:
+            (human_relevant if hit else human_other).append(item)
+        elif item["category"] in {"preferences", "domain_knowledge", "user_context"}:
             standing.append(item)
-            continue
-        blob = f"{item['key']} {item['value']}".lower()
-        hit = any(w in blob for w in words) or any(len(chunk) >= 2 and chunk in text for chunk in _chunks(item["key"]))
-        if hit:
+        elif hit:
             relevant.append(item)
-    chosen = standing + relevant
-    return [*human, *chosen[:max(0, limit)]]
+
+    def cost(item: dict[str, Any]) -> int:
+        return len(str(item.get("key") or "")) + len(str(item.get("value") or "")) + 32
+
+    human = [*human_relevant, *human_other]
+    if sum(cost(item) for item in human) > max_chars:
+        raise MemoryContextLimit(
+            f"当前适用的 {len(human)} 条人工记忆超出上下文预算（{max_chars} 字符）。"
+            "请精简重复规则或缩小流程范围后继续；本轮未截断或忽略人工规则。"
+        )
+    # 相关经验有独立名额；standing 只能使用剩余的 AI 条目名额。
+    ai_limit = max(0, limit)
+    relevant = relevant[:min(len(relevant), max(0, ai_limit // 2 or (1 if ai_limit else 0)))]
+    standing = standing[:max(0, ai_limit - len(relevant))]
+    ordered = [*human, *relevant, *standing]
+    chosen: list[dict[str, Any]] = []
+    used = 0
+    for item in ordered:
+        item_cost = cost(item)
+        if used + item_cost > max_chars:
+            continue
+        chosen.append(item)
+        used += item_cost
+    return chosen
 
 
 def _chunks(text: str) -> list[str]:

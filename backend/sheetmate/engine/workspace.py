@@ -71,6 +71,7 @@ class TableInfo:
     # 表的内容版本与结构化探测记忆独立于对话历史。只有实际重建表才更换版本。
     revision: str = ""
     probe_memory: dict[str, Any] = field(default_factory=dict)
+    read_quality: dict[str, Any] = field(default_factory=dict)  # 原件读取风险，不能把缺公式缓存误当正常空值
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -94,6 +95,9 @@ class Workspace:
             path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self._con = self._connect()
+        self._query_cache: OrderedDict[tuple, tuple[pd.DataFrame, int]] = OrderedDict()
+        self._query_cache_bytes = 0
+        self.query_cache_hits = 0
 
     def _connect(self) -> duckdb.DuckDBPyConnection:
         """打开连接并进入沙箱：禁止访问外部文件/网络/扩展，锁定配置防止被 SQL 改回去。"""
@@ -242,7 +246,45 @@ class Workspace:
         if limit is not None:
             text = f"SELECT * FROM ({text}) AS __sm_q LIMIT {int(limit)}"
         with self._lock:
-            return self._run(text, as_df=True)
+            key = self._query_cache_key(text)
+            if key is not None and key in self._query_cache:
+                self._query_cache.move_to_end(key)
+                self.query_cache_hits += 1
+                return self._query_cache[key][0].copy(deep=True)
+            result = self._run(text, as_df=True)
+            # pandas deep copies still share list/dict/ndarray cell contents.
+            # Cache only scalar cells so callers cannot mutate cached evidence.
+            scalar_cells = key is not None and all(
+                pd.api.types.is_scalar(value)
+                for column in result.select_dtypes(include="object").items()
+                for value in column[1]
+            )
+            size = int(result.memory_usage(index=True, deep=True).sum()) if scalar_cells else 0
+            if scalar_cells and size <= 4 * 1024 * 1024:
+                self._query_cache[key] = (result.copy(deep=True), size)
+                self._query_cache_bytes += size
+                while len(self._query_cache) > 32 or self._query_cache_bytes > 16 * 1024 * 1024:
+                    _, (_, old_size) = self._query_cache.popitem(last=False)
+                    self._query_cache_bytes -= old_size
+            return result
+
+    def _query_cache_key(self, sql: str) -> tuple | None:
+        from sheetmate.engine.query_cache import cacheable_tables
+
+        try:
+            ast = json.loads(self._run("SELECT json_serialize_sql(?)", [sql])[0][0])
+            refs = cacheable_tables(ast)
+            if not refs:
+                return None
+            versions = []
+            for name in refs:
+                info = self.info(name)
+                if info is None:
+                    return None
+                versions.append((info.name, info.revision))
+            return (sql, tuple(sorted(versions)))
+        except (ValueError, TypeError, WorkspaceError):
+            return None
 
     def fetch(self, internal_sql: str, params: list[Any] | None = None) -> list[tuple]:
         """执行引擎内部的只读 SQL，返回元组列表。"""
