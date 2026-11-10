@@ -1,9 +1,10 @@
 /** 首页未发送的草稿独立于路由组件，保留原始 File，切换会话后仍可继续编辑。 */
-import { defineStore } from 'pinia'
+import { defineStore, storeToRefs } from 'pinia'
 import { computed, ref, watch } from 'vue'
 
 import type { Attachment } from '@/components/chat/ChatComposer.vue'
 import { browserHomeDraftStorage, type HomeDraftMetadata, type HomeDraftStorage } from '../composables/homeDraftPersistence.ts'
+import { useChatPreferencesStore } from './chatPreferences.ts'
 
 export interface DraftFile {
   key: string
@@ -13,7 +14,8 @@ export interface DraftFile {
 
 export const useHomeDraftStore = defineStore('homeDraft', () => {
   const text = ref('')
-  const thinking = ref(false)
+  const preferences = useChatPreferencesStore()
+  const { thinking } = storeToRefs(preferences)
   const customerId = ref<string | null>(null)
   const files = ref<DraftFile[]>([])
   const attachments = ref<Attachment[]>([])
@@ -94,7 +96,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
     busy.value = false
     savingFiles.value = false
     text.value = ''
-    thinking.value = false
+    preferences.hydrate(target)
     customerId.value = null
     files.value = []
     attachments.value = []
@@ -104,7 +106,6 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
         const saved = storage.readMetadata(target)
         if (saved) {
           text.value = saved.text
-          thinking.value = saved.thinking === true
           customerId.value = typeof saved.customerId === 'string' ? saved.customerId : null
           initialized.value = saved.initialized === true
           // A previous visit can still be saving its last attachment snapshot.
@@ -166,7 +167,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
   }
 
   function resetInitializationIfEmpty() {
-    if (!text.value && !files.value.length && !attachments.value.length && !thinking.value && customerId.value === null) initialized.value = false
+    if (!text.value && !files.value.length && !attachments.value.length && customerId.value === null) initialized.value = false
   }
 
   function clear() {
@@ -178,7 +179,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
     hydration = null
     initialized.value = false
     text.value = ''
-    thinking.value = false
+    preferences.reset()
     customerId.value = null
     files.value = []
     attachments.value = []

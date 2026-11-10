@@ -454,7 +454,9 @@ function restoreStreamSnapshot(msg: UiMessage, events: AgentEvent[]): void {
   restored.id = msg.id
   restored.createdAt = msg.createdAt
   restored.meta = { ...msg.meta }
-  restored.execution = { status: 'running', code: 'running', summary: '正在处理' }
+  const savedExecution = readExecutionState(msg.meta.execution)
+  restored.execution = { status: 'running', code: 'running', summary: '正在处理',
+    llm_usage: savedExecution?.llm_usage, llm_usage_pending: savedExecution?.llm_usage_pending }
   restored.meta.execution = { ...restored.execution }
   for (const event of events) {
     if (event && typeof event.type === 'string' && event.type !== 'stream_snapshot') applyEvent(restored, event)
@@ -524,6 +526,8 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
   }
   switch (e.type) {
     case 'execution_status': {
+      if (typeof e.request_message_id === 'number') msg.meta.request_message_id = e.request_message_id
+      if (typeof e.job_id === 'string') msg.meta.job_id = e.job_id
       const state = readExecutionState(e)
       if (state) {
         msg.execution = state
@@ -984,7 +988,8 @@ export function restoreConversationMessages(stored: StoredMessage[], job?: { id:
   }
   assistant.meta.request_message_id = job.message_id
   assistant.meta.job_id = job.id
-  assistant.execution = { status: 'running', code: 'reconnecting', summary: '正在恢复执行记录' }
+  assistant.execution = { status: 'running', code: 'reconnecting', summary: '正在恢复执行记录',
+    llm_usage: assistant.execution?.llm_usage, llm_usage_pending: assistant.execution?.llm_usage_pending }
   assistant.meta.execution = { ...assistant.execution }
   messages.push(assistant)
   return { messages, assistant }

@@ -93,7 +93,6 @@ async function send() {
     const submittedKeys = new Set(submittedFiles.map((file) => file.key))
     files.value = files.value.filter((file) => !submittedKeys.has(file.key))
     attachments.value = attachments.value.filter((attachment) => !submittedKeys.has(attachment.key))
-    if (thinking.value === submittedThinking) thinking.value = false
     if (customerId.value === submittedCustomer) customerId.value = null
     draft.resetInitializationIfEmpty()
   }

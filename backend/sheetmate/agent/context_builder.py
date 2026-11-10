@@ -2,7 +2,8 @@
 
 Only old tool results with a durable evidence reference can be projected here.
 User/system instructions, tool arguments and call/result pairing remain intact.
-If the remaining request is still too large the gateway refuses it explicitly.
+An enabled hard budget may refuse an oversized request; otherwise the target
+only controls projection and does not stop execution.
 """
 from __future__ import annotations
 
@@ -12,6 +13,10 @@ from typing import Any
 from sheetmate.agent.llm_budget import request_size
 
 _EVIDENCE = re.compile(r"^\[evidence_id=(ev_[a-zA-Z0-9_]+)\]\n")
+
+# A projection target saves repeated evidence text even when hard budgets are
+# disabled. It never discards source requirements or refuses a request.
+DEFAULT_PROJECTION_CHARS = 240_000
 
 
 def prepare_context(kwargs: dict[str, Any], max_chars: int) -> dict[str, Any]:

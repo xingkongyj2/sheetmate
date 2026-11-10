@@ -22,6 +22,9 @@ function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
   const capabilities = value.capabilities === undefined ? {} : value.capabilities
   const policy = value.runtime_policy === undefined ? {} : value.runtime_policy
   if (!isRecord(capabilities) || !isRecord(policy)) throw new Error(VERSION_ERROR)
+  if (policy.budget_enabled !== undefined && typeof policy.budget_enabled !== 'boolean') {
+    throw new Error(VERSION_ERROR)
+  }
   if (policy.auxiliary_thinking_enabled !== undefined && typeof policy.auxiliary_thinking_enabled !== 'boolean') {
     throw new Error(VERSION_ERROR)
   }
@@ -34,6 +37,7 @@ function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
     max_tokens: boundedNumber(value.max_tokens, 8192, 1, 131072, true),
     capabilities: { structured_output: protocol as LLMCapabilities['structured_output'] },
     runtime_policy: {
+      budget_enabled: policy.budget_enabled === true,
       structured_retries: boundedNumber(policy.structured_retries, 1, 0, 3, true),
       tool_protocol_retries: boundedNumber(policy.tool_protocol_retries, 2, 0, 5, true),
       sdk_retries: boundedNumber(policy.sdk_retries, 1, 0, 3, true),

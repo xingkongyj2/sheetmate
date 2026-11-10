@@ -525,6 +525,7 @@ export interface LLMCapabilities {
 }
 
 export interface LLMRuntimePolicy {
+  budget_enabled: boolean
   structured_retries: number
   tool_protocol_retries: number
   sdk_retries: number

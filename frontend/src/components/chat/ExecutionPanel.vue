@@ -13,13 +13,16 @@ import { executionFileGroups, executionRecipeSections, executionTableKey, execut
 import { progressFlow } from '@/composables/recipeFlow'
 import { useConfirm } from '@/composables/useConfirm'
 import ExecutionStatusNotice from './ExecutionStatusNotice.vue'
+import ExecutionUsage from './ExecutionUsage.vue'
 
-type Tab = 'recipes' | 'files' | 'data'
+type Tab = 'recipes' | 'files' | 'data' | 'usage'
 const props = withDefaults(defineProps<{
   detail: ConversationDetail | null
   message: UiMessage | null
+  messages?: UiMessage[]
+  refreshingUsage?: boolean
   activeTab?: Tab
-}>(), { activeTab: 'recipes' })
+}>(), { activeTab: 'recipes', messages: () => [], refreshingUsage: false })
 const emit = defineEmits<{
   close: []; openTable: [table: TableBrief]; openFile: [file: FileInfo]; refresh: []
   'update:activeTab': [tab: Tab]
@@ -28,7 +31,7 @@ const { confirmDelete } = useConfirm()
 const tab = computed({ get: () => props.activeTab, set: (value: Tab) => emit('update:activeTab', value) })
 const tabs = [
   { key: 'recipes', label: '流程' }, { key: 'files', label: '文件' },
-  { key: 'data', label: '数据' },
+  { key: 'data', label: '数据' }, { key: 'usage', label: '消耗' },
 ] as const
 const progresses = computed(() => (props.message?.artifacts ?? []).flatMap((artifact) => artifact.kind === 'recipe' ? [artifact.progress] : []))
 const recipeSections = computed(() => executionRecipeSections(props.detail?.recipes ?? [], progresses.value))
@@ -96,8 +99,9 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     </div>
 
     <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto p-4">
-      <ExecutionStatusNotice v-if="message" class="mb-4" :message="message" />
-      <template v-if="tab === 'recipes'">
+      <ExecutionStatusNotice v-if="message && tab !== 'usage'" class="mb-4" :message="message" />
+      <ExecutionUsage v-if="tab === 'usage'" :message="message" :messages="messages" :refreshing="refreshingUsage" @refresh="emit('refresh')" />
+      <template v-else-if="tab === 'recipes'">
         <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="mb-6 min-w-0 space-y-3">
           <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
             <div class="flex min-w-0 flex-1 items-center gap-2">

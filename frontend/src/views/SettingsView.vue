@@ -356,32 +356,41 @@ async function test(provider: LLMProviderConfig) {
                     </label>
                   </div>
                   <p class="text-xs leading-5 text-faint">纠错次数为 0 时关闭对应重试。超时和输出上限也需符合模型服务的限制。</p>
+                  <label class="flex items-start justify-between gap-4 rounded-xl border border-line px-3 py-3">
+                    <span>
+                      <span class="block text-sm font-medium">开启任务预算</span>
+                      <span class="mt-1 block text-xs leading-5 text-faint">默认关闭。关闭时不按任务 Token、模型调用次数、总时长和输入大小限制任务；用量仍记录。</span>
+                    </span>
+                    <input v-model="drafts[provider.id]!.runtime_policy.budget_enabled" type="checkbox"
+                      role="switch" class="toggle toggle-sm shrink-0" :disabled="anyBusy"
+                      @change="resetTestResult(provider.id)" />
+                  </label>
                   <div class="grid gap-4 sm:grid-cols-2">
                     <label class="block">
                       <span class="mb-1.5 block text-xs font-medium text-mute">每任务模型调用上限</span>
-                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_model_calls" type="number" min="0" max="1000" step="1" class="field" :disabled="anyBusy" />
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_model_calls" type="number" min="0" max="1000" step="1" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
                     </label>
                     <label class="block">
                       <span class="mb-1.5 block text-xs font-medium text-mute">每任务累计输入 Token 预算</span>
-                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_prompt_tokens" type="number" min="0" max="10000000" step="1" class="field" :disabled="anyBusy" />
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_prompt_tokens" type="number" min="0" max="10000000" step="1" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
                     </label>
                     <label class="block">
                       <span class="mb-1.5 block text-xs font-medium text-mute">每任务累计总 Token 预算</span>
-                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_total_tokens" type="number" min="0" max="10000000" step="1" class="field" :disabled="anyBusy" />
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_total_tokens" type="number" min="0" max="10000000" step="1" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
                     </label>
                     <label class="block">
                       <span class="mb-1.5 block text-xs font-medium text-mute">每任务模型调用时限（秒）</span>
-                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_task_seconds" type="number" min="0" max="7200" class="field" :disabled="anyBusy" />
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_task_seconds" type="number" min="0" max="7200" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
                     </label>
                     <label class="block">
                       <span class="mb-1.5 block text-xs font-medium text-mute">单次输入字符上限（含工具定义）</span>
-                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_input_chars" type="number" min="0" max="2000000" step="1" class="field" :disabled="anyBusy" />
+                      <input v-model.number="drafts[provider.id]!.runtime_policy.max_input_chars" type="number" min="0" max="2000000" step="1" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
                     </label>
                     <label class="flex items-center gap-2 text-xs text-mute">
                       <input v-model="drafts[provider.id]!.runtime_policy.auxiliary_thinking_enabled" type="checkbox" :disabled="anyBusy" />辅助判断也启用深度思考
                     </label>
                   </div>
-                  <p class="text-xs leading-5 text-faint">任务预算覆盖工具内部调用和核对，设为 0 可关闭对应限制。服务未报告用量时采用保守估算，估算与实际用量会分别记录。</p>
+                  <p class="text-xs leading-5 text-faint">开启后，任务预算覆盖工具内部调用和核对，设为 0 可关闭单项限制。关闭预算会保留上次填写的阈值。服务未报告用量时采用保守估算，估算与实际用量会分别记录。</p>
                   <p v-if="validationMessage(provider)" class="text-xs text-error" role="alert">{{ validationMessage(provider) }}</p>
                 </div>
               </details>

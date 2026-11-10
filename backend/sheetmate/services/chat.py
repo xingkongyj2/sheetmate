@@ -267,6 +267,9 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     def checkpoint(*, force: bool = False) -> None:
         nonlocal last_checkpoint
         if force or time.monotonic() - last_checkpoint >= 1:
+            snapshot = getattr(llm, "usage_snapshot", None)
+            if callable(snapshot):
+                recorder.llm_usage = snapshot()
             _save_assistant(conversation_id, "".join(text_parts).strip() or final_text, stored, recorder, run_id, finalize=False)
             last_checkpoint = time.monotonic()
 
@@ -297,6 +300,10 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
 
     async def emit(event: dict[str, Any]) -> None:
         nonlocal final_text
+        if event.get("type") in {"model_call_done", "completion_check"}:
+            snapshot = getattr(llm, "usage_snapshot", None)
+            if callable(snapshot):
+                event = {**event, "usage": snapshot()}
         event = externalize_script_references(event)
         if event.get("type") == "file" and event.get("delivery_status") == "candidate":
             if event.get("file_id") in delivery_candidates:
@@ -630,10 +637,17 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     if not answer and recorder.error:
         answer = f"⚠️ {recorder.error}"
     await finish_reply()
+    recorder.llm_usage_pending = True
     await finish_execution(answer)
     _save_assistant(conversation_id, answer, stored, recorder, run_id)
-    title = await _maybe_title(conversation_id, llm, message, answer)
-    _persist_llm_usage(conversation_id, recorder.message_id, llm)
+    try:
+        title = await _maybe_title(conversation_id, llm, message, answer)
+    except BaseException:
+        _persist_llm_usage(conversation_id, recorder.message_id, llm, pending=False)
+        raise
+    execution = _persist_llm_usage(conversation_id, recorder.message_id, llm)
+    if execution is not None:
+        await job.emit({"type": "execution_status", **execution})
     if title:
         await job.emit({"type": "title", "title": title})
     if host.saved_recipes or host.deleted_recipes:
@@ -826,9 +840,6 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
     if finalize:
         recorder.finish(content)
     record = recorder.to_dict(final=finalize)
-    usage = getattr(recorder, "llm_usage", None)
-    if usage:
-        record["execution"]["llm_usage"] = usage
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
         if conv is None:
@@ -888,7 +899,8 @@ def _contains_unconfigured_llm_error(text: str) -> bool:
     return contains_llm_not_configured_text(text)
 
 
-def _persist_llm_usage(conversation_id: str, message_id: int | None, llm: Any) -> None:
+def _persist_llm_usage(conversation_id: str, message_id: int | None, llm: Any,
+                       *, pending: bool | None = None) -> dict[str, Any] | None:
     """Include late title/memory calls in their originating turn's cost record."""
     snapshot = getattr(llm, "usage_snapshot", None)
     if message_id is None or not callable(snapshot):
@@ -900,16 +912,37 @@ def _persist_llm_usage(conversation_id: str, message_id: int | None, llm: Any) -
             return
         meta = dict(message.meta or {})
         execution = {**(meta.get("execution") or {}), "llm_usage": usage}
+        if pending is not None:
+            execution["llm_usage_pending"] = pending
         message.meta = {**meta, "execution": execution}
+        # History replays the status event as well as meta; both must expose the
+        # same snapshot after late title or background-memory calls settle.
+        events = list(message.events or [])
+        for index in range(len(events) - 1, -1, -1):
+            if events[index].get("type") == "execution_status":
+                events[index] = {"type": "execution_status", **execution}
+                message.events = events
+                break
         run = db.get(run_service.Run, meta["run_id"]) if meta.get("run_id") else None
         if run is not None:
             run.validation = {**(run.validation or {}), "execution": execution}
+        return execution
 
 
 def recover_interrupted_executions() -> None:
     """A persisted running checkpoint survived its process; the exact interruption cause is unknown."""
     reason = "服务已重启，上次执行未完成；停止的具体原因未知。"
     with session_scope() as db:
+        # A finished response may still have been waiting for background memory
+        # usage when the process stopped. There is no remaining work to poll.
+        for assistant in db.scalars(select(Message).where(
+            Message.role == "assistant", Message.meta["execution"]["llm_usage_pending"].as_boolean() == True,
+        )):
+            meta = dict(assistant.meta or {})
+            execution = {**(meta.get("execution") or {}), "llm_usage_pending": False}
+            assistant.meta = {**meta, "execution": execution}
+            assistant.events = [{**event, "llm_usage_pending": False} if event.get("type") == "execution_status"
+                                else event for event in assistant.events or []]
         for assistant in db.scalars(select(Message).where(
             Message.role == "assistant", Message.meta["execution"]["status"].as_string() == "running",
         )):
@@ -1136,7 +1169,7 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
             record_event("memory.error", "sheetmate.services.chat._learn_memories", error_data(exc))
             return
         finally:
-            _persist_llm_usage(conversation_id, assistant_message_id, llm)
+            _persist_llm_usage(conversation_id, assistant_message_id, llm, pending=False)
     if not items:
         return
     with session_scope() as db:

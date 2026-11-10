@@ -4,6 +4,7 @@
  * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和执行明细开关。
  */
 import { ListTree, LoaderCircle, PanelRight, Pencil, Save } from '@lucide/vue'
+import { storeToRefs } from 'pinia'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
@@ -28,7 +29,10 @@ import { useToast } from '@/composables/useToast'
 import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
 import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
 import { checklistItems } from '@/composables/thinkingPresentation'
+import { syncMessageUsage } from '@/composables/usageSync'
 import { useWorkspaceStore } from '@/stores/conversations'
+import { useAuthStore } from '@/stores/auth'
+import { useChatPreferencesStore } from '@/stores/chatPreferences'
 import { pendingStarts } from '@/stores/pending'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
@@ -44,14 +48,18 @@ const loading = ref(true)
 const streaming = ref(false)
 const reconnecting = ref(false)
 const text = ref('')
-const thinking = ref(false) // 思考模式：默认关闭，后端先规划、再逐步执行并核对，不需要确认计划
+const preferences = useChatPreferencesStore()
+const auth = useAuthStore()
+if (auth.user) preferences.hydrate(auth.user.id)
+const { thinking } = storeToRefs(preferences)
 const attachments = ref<Attachment[]>([])
 const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
 const recentlyUploaded = ref<FileInfo[]>([])
 const uploadedReferences = ref<TableReference[]>([])
 const checklistOpen = ref(true) // 任务目录默认显示，可用顶部图标隐藏
 const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角打开
-const panelTab = ref<'recipes' | 'files' | 'data'>('recipes')
+const panelTab = ref<'recipes' | 'files' | 'data' | 'usage'>('recipes')
+const refreshingUsage = ref(false)
 const selectedKey = ref<string | null>(null)
 const viewing = ref<TableBrief | null>(null)
 const viewingFile = ref<FileInfo | null>(null)
@@ -62,6 +70,8 @@ const scroller = ref<HTMLElement | null>(null)
 const content = ref<HTMLElement | null>(null)
 let handle: StreamHandle | null = null
 let pollTimer = 0
+let usageRefreshTimer = 0
+let usagePendingSince = 0
 let sideRefreshVersion = 0
 let loadVersion = 0
 let disposed = false
@@ -185,6 +195,7 @@ function schedulePoll(delay = 1000) {
 
 async function refreshSide() {
   const version = ++sideRefreshVersion
+  refreshingUsage.value = true
   try {
     const data = await conversationApi.get(props.id)
     if (!disposed && detail.value && version === sideRefreshVersion) {
@@ -193,12 +204,36 @@ async function refreshSide() {
       detail.value.recipes = data.recipes
       detail.value.title = data.title
       detail.value.customer = data.customer
+      detail.value.messages = data.messages
+      syncMessageUsage(messages.value, data.messages)
       acknowledgeUploads(data.files)
     }
   } catch {
     /* 忽略 */
+  } finally {
+    if (!disposed && version === sideRefreshVersion) {
+      refreshingUsage.value = false
+      scheduleUsageRefresh()
+    }
   }
 }
+
+function scheduleUsageRefresh() {
+  clearTimeout(usageRefreshTimer)
+  if (disposed || !panelOpen.value || panelTab.value !== 'usage') return
+  const pending = messages.value.some((message) => message.execution?.llm_usage_pending === true)
+  if (!pending) usagePendingSince = 0
+  else if (!usagePendingSince) usagePendingSince = Date.now()
+  if (streaming.value || pending && Date.now() - usagePendingSince < 60000) {
+    usageRefreshTimer = window.setTimeout(() => { void refreshSide() }, 2000)
+  }
+}
+
+watch([panelOpen, panelTab], ([open, tab]) => {
+  clearTimeout(usageRefreshTimer)
+  usagePendingSince = 0
+  if (open && tab === 'usage') void refreshSide()
+})
 
 let resizeObserver: ResizeObserver | null = null
 
@@ -213,7 +248,6 @@ onMounted(async () => {
   const pending = pendingStarts.get(props.id)
   if (pending) {
     pendingStarts.delete(props.id)
-    thinking.value = pending.thinking // 首页开着思考模式，后续追问沿用，开关上看得见
     await send(pending.message, { attachments: pending.attachments, thinking: pending.thinking })
   }
 })
@@ -222,6 +256,7 @@ onBeforeUnmount(() => {
   disposed = true
   resizeObserver?.disconnect()
   clearTimeout(pollTimer)
+  clearTimeout(usageRefreshTimer)
   cancelAnimationFrame(scrollFrame)
   handle?.abort() // 只是断开连接，后台任务会继续执行并保存结果
 })
@@ -281,8 +316,9 @@ async function onSend() {
 
 async function send(message: string, opts: { attachments?: string[]; thinking?: boolean } = {}) {
   if (disposed || streaming.value || reconnecting.value) return
+  const useThinking = opts.thinking ?? thinking.value
   message = serializeTableReferences(message, tableReferences.value, fileReferences.value)
-  messages.value.push(reactive(newUser(message, { attachments: opts.attachments ?? [], ...(opts.thinking ? { thinking: true } : {}) })) as UiMessage)
+  messages.value.push(reactive(newUser(message, { attachments: opts.attachments ?? [], ...(useThinking ? { thinking: true } : {}) })) as UiMessage)
   const assistant = reactive(newAssistant()) as UiMessage
   messages.value.push(assistant)
   selectedKey.value = assistant.key
@@ -291,12 +327,13 @@ async function send(message: string, opts: { attachments?: string[]; thinking?: 
   store.patchConversation(props.id, { running: true })
 
   await receiveStream(assistant, (onEvent) => conversationApi.chat(
-    props.id, { message, attachments: opts.attachments, ...(opts.thinking ? { thinking: true } : {}) }, onEvent,
+    props.id, { message, attachments: opts.attachments, ...(useThinking ? { thinking: true } : {}) }, onEvent,
   ))
 }
 
 async function receiveStream(assistant: UiMessage, open: (onEvent: (event: AgentEvent) => void) => StreamHandle, resuming = false) {
   streaming.value = true
+  scheduleUsageRefresh()
   let received = false
   let retry = false
   let retryDelay = 1000
@@ -337,6 +374,7 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
     else {
       finishMessage(assistant)
       store.patchConversation(props.id, { running: false, updated_at: new Date().toISOString() })
+      usagePendingSince = 0
       refreshSide()
     }
   }
@@ -555,6 +593,8 @@ function answer(option: string) {
       v-if="panelOpen"
       :detail="detail"
       :message="selectedMessage"
+      :messages="messages"
+      :refreshing-usage="refreshingUsage"
       v-model:active-tab="panelTab"
       @close="panelOpen = false"
       @open-table="openTable"

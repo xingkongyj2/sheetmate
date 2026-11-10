@@ -30,6 +30,8 @@ class WorkflowRecorder:
         self.message_id: int | None = None
         self.request_message_id: int | None = None
         self.job_id: str | None = None
+        self.llm_usage: dict[str, Any] | None = None
+        self.llm_usage_pending = False
 
     def record_stop(self, event: dict[str, Any]) -> None:
         stop = {key: value for key, value in event.items() if key != "type"}
@@ -133,6 +135,8 @@ class WorkflowRecorder:
     def execution(self, *, final: bool = True) -> dict[str, Any]:
         result = dict(self.result) if final else {"status": "running", "code": "executing", "summary": "正在处理"}
         return {**result, "last_step": deepcopy(self.last_step), "model_calls": deepcopy(self.model_calls),
+                **({"llm_usage": deepcopy(self.llm_usage), "llm_usage_pending": self.llm_usage_pending}
+                   if self.llm_usage is not None else {}),
                 "stops": deepcopy(self.stops), "active_call": deepcopy(self.active_call),
                 "active_calls": deepcopy(list(self._active_calls.values())),
                 "pending_steps": [{"tool": step["tool"], "label": step["label"]} for step in self._open.values()],

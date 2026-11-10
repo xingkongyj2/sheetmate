@@ -26,7 +26,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from sheetmate.agent.content import user_content
-from sheetmate.agent.context_builder import prepare_context
+from sheetmate.agent.context_builder import DEFAULT_PROJECTION_CHARS, prepare_context
 from sheetmate.agent.llm_budget import BudgetExceeded, RequestBudget
 from sheetmate.agent.structured import StructuredOutputError, complete_structured, validate_payload
 from sheetmate.config import LLMSettings, get_llm_settings, is_deepseek_url
@@ -340,7 +340,10 @@ class LLMClient:
         if tools:
             kwargs["tools"] = tools
         kwargs.update({k: v for k, v in extra.items() if v is not None})
-        return prepare_context(kwargs, self.cfg.runtime_policy.max_input_chars)
+        policy = self.cfg.runtime_policy
+        projection_chars = (policy.max_input_chars if policy.budget_enabled and policy.max_input_chars
+                            else DEFAULT_PROJECTION_CHARS)
+        return prepare_context(kwargs, projection_chars)
 
     async def _within_deadline(self, request: Any) -> Any:
         try:
