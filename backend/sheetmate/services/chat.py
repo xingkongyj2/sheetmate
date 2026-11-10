@@ -278,7 +278,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         snapshot = getattr(llm, "usage_snapshot", None)
         if callable(snapshot):
             recorder.llm_usage = snapshot()
-        await emit({"type": "execution_status", **recorder.execution()})
+        await emit({"type": "execution_status", **recorder.execution(),
+                    "request_message_id": recorder.request_message_id, "job_id": recorder.job_id})
 
     def cancel_execution() -> None:
         user_stop = job.cancel_source == "user"
@@ -647,7 +648,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         raise
     execution = _persist_llm_usage(conversation_id, recorder.message_id, llm)
     if execution is not None:
-        await job.emit({"type": "execution_status", **execution})
+        await job.emit({"type": "execution_status", **execution,
+                        "request_message_id": recorder.request_message_id, "job_id": recorder.job_id})
     if title:
         await job.emit({"type": "title", "title": title})
     if host.saved_recipes or host.deleted_recipes:
@@ -920,7 +922,8 @@ def _persist_llm_usage(conversation_id: str, message_id: int | None, llm: Any,
         events = list(message.events or [])
         for index in range(len(events) - 1, -1, -1):
             if events[index].get("type") == "execution_status":
-                events[index] = {"type": "execution_status", **execution}
+                events[index] = {"type": "execution_status", **execution,
+                                 "request_message_id": meta.get("request_message_id"), "job_id": meta.get("job_id")}
                 message.events = events
                 break
         run = db.get(run_service.Run, meta["run_id"]) if meta.get("run_id") else None
@@ -951,7 +954,8 @@ def recover_interrupted_executions() -> None:
             if execution.get("status") != "running":
                 continue
             execution.update(status="interrupted", code="process_restart", summary=reason, source="unknown")
-            status = {"type": "execution_status", **execution}
+            status = {"type": "execution_status", **execution,
+                      "request_message_id": meta.get("request_message_id"), "job_id": meta.get("job_id")}
             assistant.meta = {**meta, "execution": execution}
             assistant.events = [*(assistant.events or []), status]
             conv = db.get(Conversation, assistant.conversation_id)
@@ -993,7 +997,8 @@ def persist_unfinished_job(job: Job, *, status: str, code: str, summary: str) ->
                      "source": job.cancel_source or "system"}
         if (conv.task_state or {}).get("current_message_id") == job.message_id:
             conv.task_state = {**conv.task_state, "status": status, "unresolved": [summary]}
-        event = {"type": "execution_status", **execution}
+        event = {"type": "execution_status", **execution,
+                 "request_message_id": meta.get("request_message_id"), "job_id": meta.get("job_id")}
         if assistant is None:
             assistant = conv_service.add_message(db, conv, "assistant", summary, events=[event], meta={**meta, "execution": execution})
         else:
