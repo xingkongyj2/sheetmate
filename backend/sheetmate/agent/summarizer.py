@@ -12,6 +12,12 @@ HISTORY_TOKEN_BUDGET = 12_000
 RECENT_HISTORY_TOKENS = 4_000
 COMPACT_INPUT_TOKENS = 18_000
 SUMMARY_TOKEN_BUDGET = 3_000
+# Some providers count hidden reasoning against max_tokens even when the
+# visible summary is short. Keep the persisted text budget separate from the
+# provider output headroom so a complete summary is not cut off mid-response.
+COMPACTION_MODEL_MAX_TOKENS = 6_000
+RECENT_USER_ANCHORS = 2
+USER_ANCHOR_TOKEN_BUDGET = 600
 
 
 def estimate_tokens(text: str) -> int:
@@ -97,21 +103,53 @@ def fallback_title(message: str) -> str:
     return (text[:18] + "…") if len(text) > 18 else (text or "新对话")
 
 
-async def compact_history(llm: Any, history: list[dict[str, Any]]) -> str | None:
+async def compact_history(llm: Any, history: list[dict[str, Any]], *,
+                          user_anchors: list[dict[str, Any]] | None = None) -> str | None:
     # 表结构和操作证据常在消息后半段；先截断再总结会永久丢失这些信息。
     lines = [f"[{m['role']}] {str(m.get('content') or '')}" for m in history if m.get("content")]
     if not lines or history_tokens(history) > COMPACT_INPUT_TOKENS:
         return None
+    anchors = _recent_user_anchors(history, user_anchors)
+    anchor_tokens = estimate_tokens(anchors) if anchors else 0
+    summary_tokens = SUMMARY_TOKEN_BUDGET - anchor_tokens
+    if summary_tokens < 300:
+        return None
     try:
         msg = await llm.chat([{"role": "user", "content": COMPACT_PROMPT.format(history="\n\n".join(lines))}],
-                             max_tokens=SUMMARY_TOKEN_BUDGET, _stage="history_compaction", _auxiliary=True)
+                             max_tokens=COMPACTION_MODEL_MAX_TOKENS,
+                             _stage="history_compaction", _auxiliary=True)
         result = (msg.content or "").strip()
         # Never persist a truncated summary and advance past evidence it lost.
-        if getattr(msg, "_sheetmate_finish_reason", None) == "length" or estimate_tokens(result) > SUMMARY_TOKEN_BUDGET:
+        if (not result or getattr(msg, "_sheetmate_finish_reason", None) == "length"
+                or estimate_tokens(result) > summary_tokens):
             return None
-        return result or None
+        if anchors:
+            result = f"{result}\n\n{anchors}"
+        if estimate_tokens(result) > SUMMARY_TOKEN_BUDGET:
+            return None
+        return result
     except Exception:
         return None
+
+
+def _recent_user_anchors(history: list[dict[str, Any]],
+                         user_anchors: list[dict[str, Any]] | None = None) -> str:
+    """Keep the latest saved user wording beside the lossy model summary."""
+    users = user_anchors if user_anchors is not None else [
+        item for item in history if item.get("role") == "user"
+    ]
+    users = [item for item in users if str(item.get("content") or "").strip()]
+    if not users:
+        return ""
+    selected = users[-RECENT_USER_ANCHORS:]
+    lines = ["最近用户要求（系统从会话原始消息确定性附加；长消息可能只保留片段；不将本次例外视为长期规则）："]
+    for item in selected:
+        message_id = item.get("id", "unknown")
+        content = str(item.get("content") or "").strip()
+        bounded = fit_text(content, USER_ANCHOR_TOKEN_BUDGET)
+        suffix = "（原文片段，中间内容省略；完整消息仍保存在会话记录中）" if bounded != content else ""
+        lines.append(f"- [消息 ID {message_id}] {bounded}{suffix}")
+    return "\n".join(lines)
 
 
 async def customer_summary(llm: Any, customer: str, files: list[dict[str, Any]], recipes: list[Any],

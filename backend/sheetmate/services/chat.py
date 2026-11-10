@@ -33,7 +33,7 @@ from sheetmate.agent.planner import check_clarification
 from sheetmate.agent.persistence import infer_recipe_persistence
 from sheetmate.agent.recorder import WorkflowRecorder
 from sheetmate.agent.summarizer import (
-    HISTORY_TOKEN_BUDGET, RECENT_HISTORY_TOKENS, bounded_history, compact_history,
+    HISTORY_TOKEN_BUDGET, RECENT_HISTORY_TOKENS, RECENT_USER_ANCHORS, bounded_history, compact_history,
     fallback_title, history_tokens, make_title,
 )
 from sheetmate.agent.thinking import THINKING_TOOL_BUDGET, execute_thinking
@@ -1067,8 +1067,18 @@ async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message
             recent_tokens += next_tokens
             cut -= 1
         older, recent = items[:cut], items[cut:]
-        text = await compact_history(llm, ([{"role": "assistant", "content": summary}] if summary else []) + older)
-        if text and older:
+        text = None
+        if older:
+            with session_scope() as db:
+                # Read original messages across the old cursor so repeated
+                # compaction cannot rewrite or lose the previous user anchor.
+                anchor_rows = list(db.scalars(select(Message).where(
+                    Message.conversation_id == conversation_id, Message.role == "user",
+                    Message.id <= older[-1]["id"], Message.content != "",
+                ).order_by(Message.id.desc()).limit(RECENT_USER_ANCHORS)))
+                user_anchors = [{"id": m.id, "content": m.content} for m in reversed(anchor_rows)]
+            text = await compact_history(llm, [*summary_item, *older], user_anchors=user_anchors)
+        if text:
             with session_scope() as db:
                 # A slow summary from an older request must not move a newer
                 # request's persisted cursor backwards or replace its summary.

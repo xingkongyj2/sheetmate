@@ -140,33 +140,58 @@ async def extract_memories(llm: Any, message: str, answer: str, *,
 def select_relevant(items: list[dict[str, Any]], query: str, limit: int = 30,
                     max_chars: int = MEMORY_CONTEXT_CHARS) -> list[dict[str, Any]]:
     """按相关性和字符预算选记忆，避免常驻 AI 条目挤掉任务相关经验。"""
-    text = (query or "").lower()
-    human_relevant, human_other, standing, relevant = [], [], [], []
-    words = [w for w in text.split() if len(w) > 1]
-    for item in items:
-        blob = f"{item.get('key', '')} {item.get('value', '')}".lower()
-        hit = any(w in blob for w in words) or any(len(chunk) >= 2 and chunk in text for chunk in _chunks(item.get("key", "")))
+    terms = _query_terms(query)
+    human_relevant: list[tuple[int, int, dict[str, Any]]] = []
+    human_other: list[tuple[int, dict[str, Any]]] = []
+    relevant: list[tuple[int, int, dict[str, Any]]] = []
+    standing: dict[str, list[tuple[int, dict[str, Any]]]] = {
+        "preferences": [], "user_context": [], "domain_knowledge": []
+    }
+    for index, item in enumerate(items):
+        score = _memory_relevance(item, terms, query)
         if item.get("source") == "human":
-            (human_relevant if hit else human_other).append(item)
-        elif item["category"] in {"preferences", "domain_knowledge", "user_context"}:
-            standing.append(item)
-        elif hit:
-            relevant.append(item)
+            if score:
+                human_relevant.append((score, index, item))
+            else:
+                human_other.append((index, item))
+        elif score:
+            relevant.append((score, index, item))
+        elif item.get("category") in standing:
+            standing[item["category"]].append((index, item))
+
+    # Store order is newest first; preserve it for equally relevant memories.
+    human_relevant.sort(key=lambda row: (-row[0], row[1]))
+    relevant.sort(key=lambda row: (-row[0], row[1]))
 
     def cost(item: dict[str, Any]) -> int:
         return len(str(item.get("key") or "")) + len(str(item.get("value") or "")) + 32
 
-    human = [*human_relevant, *human_other]
+    human = [*(row[2] for row in human_relevant), *(row[1] for row in human_other)]
     if sum(cost(item) for item in human) > max_chars:
         raise MemoryContextLimit(
             f"当前适用的 {len(human)} 条人工记忆超出上下文预算（{max_chars} 字符）。"
             "请精简重复规则或缩小流程范围后继续；本轮未截断或忽略人工规则。"
         )
-    # 相关经验有独立名额；standing 只能使用剩余的 AI 条目名额。
+
+    # Match every category before adding generic standing context. A matched
+    # business rule must not be displaced by unrelated preferences or history.
     ai_limit = max(0, limit)
-    relevant = relevant[:min(len(relevant), max(0, ai_limit // 2 or (1 if ai_limit else 0)))]
-    standing = standing[:max(0, ai_limit - len(relevant))]
-    ordered = [*human, *relevant, *standing]
+    relevant_items = [row[2] for row in relevant[:ai_limit]]
+    remaining = max(0, ai_limit - len(relevant_items))
+    standing_items: list[dict[str, Any]] = []
+    taken = dict.fromkeys(standing, 0)
+    for offset in range(10):
+        for category, cap in (("preferences", 5), ("domain_knowledge", 10), ("user_context", 5)):
+            if remaining and offset < min(cap, len(standing[category])):
+                standing_items.append(standing[category][offset][1])
+                taken[category] += 1
+                remaining -= 1
+    # Quotas reserve room for each category; unused room remains available to
+    # other standing memories in their original (newest-first) order.
+    overflow = sorted(row for category, rows in standing.items() for row in rows[taken[category]:])
+    standing_items.extend(row[1] for row in overflow[:remaining])
+
+    ordered = [*human, *relevant_items, *standing_items]
     chosen: list[dict[str, Any]] = []
     used = 0
     for item in ordered:
@@ -181,6 +206,30 @@ def select_relevant(items: list[dict[str, Any]], query: str, limit: int = 30,
 def _chunks(text: str) -> list[str]:
     text = str(text)
     return [text[i : i + 2] for i in range(max(0, len(text) - 1))]
+
+
+def _query_terms(query: str) -> set[str]:
+    """Extract lightweight English words and Chinese bigrams/trigrams."""
+    text = str(query or "").lower()
+    terms = set(re.findall(r"[a-z0-9_]+", text))
+    for run in re.findall(r"[\u3400-\u9fff]+", text):
+        terms.update(_chunks(run))
+        terms.update(run[i:i + 3] for i in range(max(0, len(run) - 2)))
+    return terms
+
+
+def _memory_relevance(item: dict[str, Any], terms: set[str], query: str) -> int:
+    if not terms:
+        return 0
+    key_terms = _query_terms(str(item.get("key") or ""))
+    value_terms = _query_terms(str(item.get("value") or ""))
+    key_hits = terms & key_terms
+    value_hits = terms & value_terms
+    score = 4 * len(key_hits) + len(value_hits)
+    key = str(item.get("key") or "").lower()
+    if len(key) >= 2 and key in str(query or "").lower():
+        score += 20
+    return score
 
 
 def format_memories(items: list[dict[str, Any]], field_mapping: dict[str, list[str]] | None = None) -> str:
