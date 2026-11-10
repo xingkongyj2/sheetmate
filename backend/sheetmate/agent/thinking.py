@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sheetmate.agent.content import model_history, user_content
+from sheetmate.agent.context import stage_history
 from sheetmate.agent.evidence import evidence_projection
 from sheetmate.agent.contracts import ANSWER_AUDIT_SCHEMA, STEP_VERDICT_SCHEMA
 from sheetmate.agent.executor import AgentExecutor, build_system_prompt
@@ -376,7 +377,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     if plan.narrated:
         seen += "每一项开始时也会看到一句说明。"
     conversation: list[dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}, *model_history(history),
+        {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}, *model_history(stage_history(history, "execution")),
         {"role": "user", "content": user_content(THINK_TASK_MESSAGE.format(message=message, plan=plan.overview(), seen=seen), ctx.image_parts)},
     ]
     budget = executor.new_budget()

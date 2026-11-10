@@ -22,7 +22,12 @@ def history_window(history: list[dict[str, Any]], limit: int | None = None) -> l
 
 
 def model_history(history: list[dict[str, Any]], limit: int | None = None) -> list[dict[str, Any]]:
-    return [
-        {"role": item["role"], "content": user_content(item["content"], item.get("image_parts"))}
-        for item in history_window(history, limit)
-    ]
+    messages = []
+    for item in history_window(history, limit):
+        content = str(item.get("content") or "")
+        message_id = item.get("message_id", item.get("id"))
+        if message_id is not None:
+            source = "conversation_summary" if item.get("context_summary") else "conversation_message"
+            content = f"[history source={source} message_id={message_id}]\n{content}"
+        messages.append({"role": item["role"], "content": user_content(content, item.get("image_parts"))})
+    return messages

@@ -8,9 +8,11 @@ from sqlalchemy import func, insert, literal, or_, select, update
 from sqlalchemy.orm import Session
 
 from sheetmate.agent.memory import (
-    CATEGORIES, CATEGORY_LABELS, MEMORY_CONTEXT_CHARS, MemoryContextLimit, format_memories, select_relevant,
+    CATEGORIES, CATEGORY_LABELS, MEMORY_CONTEXT_CHARS, MemoryContextLimit, format_memories,
+    retrieve_memories, search_memory_candidates,
 )
-from sheetmate.db.models import FieldMapping, Memory, RecipeFieldMapping, now
+from sheetmate.agent.privacy import contains_sensitive_memory
+from sheetmate.db.models import FieldMapping, Memory, RecipeFieldMapping, advance_memory_id, now
 from sheetmate.services.errors import NotFound, ServiceError
 
 
@@ -33,6 +35,9 @@ def set_memory(db: Session, *, category: str, key: str, value: str, user_id: int
     key, value = key.strip(), value.replace("\r\n", "\n").replace("\r", "\n").strip(_MEMORY_EDGE_WHITESPACE)
     if not key or not value:
         raise ServiceError("记忆内容不能为空")
+    if source != "human" and any(contains_sensitive_memory(part)
+                                  for part in (key, value, evidence_span)):
+        raise ServiceError("这条内容包含敏感信息，未自动保存为长期记忆；原始消息仍保留。")
     scope = dict(user_id=user_id if not (customer_id or conversation_id) else None,
                  customer_id=customer_id or None,
                  conversation_id=(conversation_id or None) if not customer_id else None,
@@ -111,7 +116,7 @@ def set_memory(db: Session, *, category: str, key: str, value: str, user_id: int
                     confirmation_target_id = duplicate.id
                     continue
             created_at = now()
-            values = dict(category=category, key=key, value=value,
+            values = dict(id=advance_memory_id(db.connection()), category=category, key=key, value=value,
                           **scope, source=source, source_message_id=source_message_id,
                           source_turn_id=source_turn_id, evidence_span=evidence_span, version=1,
                           created_at=created_at, updated_at=created_at)
@@ -274,20 +279,89 @@ def move_conversation_memories(db: Session, conversation_id: str, customer_id: s
     return len(items)
 
 
-def memory_text(db: Session, *, user_id: int, customer_id: str | None, conversation_id: str | None,
-                query: str, recipe_id: str | None = None) -> str:
+def recall_memories(db: Session, *, user_id: int, customer_id: str | None, conversation_id: str | None,
+                    query: str, recipe_id: str | None = None, limit: int = 30,
+                    max_chars: int = MEMORY_CONTEXT_CHARS) -> dict[str, Any]:
+    """Filter access scope before lexical ranking and return an auditable subset."""
     items = memories_for(db, user_id=user_id, customer_id=customer_id, conversation_id=conversation_id,
                          recipe_id=recipe_id)
     try:
-        selected = select_relevant(items, query)
+        result = retrieve_memories(items, query, limit=limit, max_chars=max_chars)
     except MemoryContextLimit as exc:
         raise ServiceError(str(exc)) from exc
-    text = format_memories(selected, field_mapping_for(db, customer_id, recipe_id))
-    omitted = len(items) - len(selected)
-    if omitted:
-        text += f"\n（另有 {omitted} 条 AI 参考记忆未纳入本次上下文，不能据此假设这些记忆不存在。）"
-    if len(text) > MEMORY_CONTEXT_CHARS + 2_000:
+    result["metadata"]["scope_filter"] = "user_customer_conversation_recipe_before_ranking"
+    return result
+
+
+def inspect_memories(db: Session, *, user_id: int, customer_id: str | None, conversation_id: str | None,
+                     query: str = "", memory_id: int | None = None, recipe_id: str | None = None,
+                     offset: int = 0, limit: int | None = None) -> dict[str, Any]:
+    """Browse or page original memory values after the normal scope filter."""
+    items = memories_for(db, user_id=user_id, customer_id=customer_id,
+                         conversation_id=conversation_id, recipe_id=recipe_id)
+    offset = max(0, int(offset))
+    if memory_id is not None:
+        item = next((entry for entry in items if entry.get("id") == memory_id), None)
+        if item is None:
+            return {"found": False, "memory_id": memory_id}
+        page_chars = max(100, min(int(limit or 4000), 8000))
+        value = str(item.get("value") or "")
+        end = min(len(value), offset + page_chars)
+        return {"found": True, "memory_id": item["id"], "version": item.get("version"),
+                "category": item["category"], "key": item["key"], "scope": item.get("scope_label"),
+                "source": item.get("source"), "source_message_id": item.get("source_message_id"),
+                "source_turn_id": item.get("source_turn_id"),
+                "value": value[offset:end], "offset": offset, "offset_unit": "characters",
+                "total_characters": len(value), "next_offset": end if end < len(value) else None,
+                "complete": offset == 0 and end == len(value)}
+    if len(str(query or "")) > 200:
+        raise ServiceError("记忆检索关键词最多 200 字符，请缩小关键词后重试")
+    if offset > 100_000:
+        raise ServiceError("记忆检索翻页范围过大，请缩小检索范围")
+    candidates = search_memory_candidates(items, str(query or "").strip())
+    page_limit = max(1, min(int(limit or 8), 12))
+    page = candidates[offset:offset + page_limit]
+    matches = []
+    for item in page:
+        value = str(item.get("value") or "")
+        match_at = value.lower().find(str(query or "").strip().lower()) if query else -1
+        start = max(0, match_at - 80) if match_at >= 0 else 0
+        excerpt = value[start:start + 320]
+        matches.append({"memory_id": item.get("id"), "version": item.get("version"),
+                        "category": item.get("category"), "key": item.get("key"),
+                        "scope": item.get("scope_label"), "source": item.get("source"),
+                        "source_message_id": item.get("source_message_id"),
+                        "updated_at": item.get("updated_at"), "lexical_score": item.get("lexical_score"),
+                        "characters": len(value), "excerpt": excerpt,
+                        "excerpt_offset": start,
+                        "excerpt_truncated": start > 0 or len(value) > start + len(excerpt)})
+    next_offset = offset + len(page)
+    return {"source": "scoped_memory", "matches": matches, "query": str(query or "").strip(),
+            "offset": offset, "offset_unit": "memories", "total_matches": len(candidates),
+            "next_offset": next_offset if next_offset < len(candidates) else None,
+            "omitted_matches": max(0, len(candidates) - next_offset),
+            "scope_filter": "user_customer_conversation_recipe_before_search",
+            "instruction": "先按当前用户、客户、会话和流程范围过滤，再做词项检索。摘录仅供定位；需要完整原文时按 memory_id 分页读取。不同版本和作用域是独立记录。"}
+
+
+def memory_text(db: Session, *, user_id: int, customer_id: str | None, conversation_id: str | None,
+                query: str, recipe_id: str | None = None, max_chars: int = MEMORY_CONTEXT_CHARS) -> str:
+    # Field mappings are applicable rules too. Reserve their complete rendered
+    # cost before ranking AI context; never silently truncate a human mapping.
+    mapping = field_mapping_for(db, customer_id, recipe_id)
+    mapping_text = format_memories([], mapping)
+    reserved = len(mapping_text) + (1 if mapping_text else 0) + 180
+    if len(mapping_text) > max_chars:
         raise ServiceError("当前记忆与字段映射超出上下文预算，请精简重复映射或缩小流程范围；本轮未截断人工规则。")
+    result = recall_memories(db, user_id=user_id, customer_id=customer_id, conversation_id=conversation_id,
+                             recipe_id=recipe_id, query=query, max_chars=max(0, max_chars - reserved))
+    text = format_memories(result["items"], mapping)
+    metadata = result["metadata"]
+    if metadata["available_count"]:
+        text += (f"\n（记忆召回：词项相关性+MMR+近期偏好；已选 {metadata['selected_count']}/{metadata['available_count']} 条，"
+                 f"同域原文重复 {metadata['duplicate_count']} 条；省略不代表不存在，需要时调用 inspect_saved_memories 按 ID 或关键词检索原文。）")
+    if len(text) > max_chars:
+        raise ServiceError("当前记忆与字段映射超出上下文预算；本轮未截断人工规则，请缩小范围。")
     return text
 
 

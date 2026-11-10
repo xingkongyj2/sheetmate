@@ -61,11 +61,21 @@ class ConversationHost:
     # 文件
     # ------------------------------------------------------------------
 
+    def inspect_conversation_history(self, *, message_id: int | None = None, query: str = "",
+                                     role: str = "", offset: int = 0, limit: int | None = None) -> dict[str, Any]:
+        """Recover source messages across summary cursors and earlier tasks."""
+        from sheetmate.services.history import inspect_history
+
+        with session_scope() as db:
+            return inspect_history(db, user_id=self.user_id, conversation_id=self.conversation_id,
+                                   message_id=message_id, query=query, role=role, offset=offset, limit=limit)
+
     def resolve_execution_evidence(self, evidence_id: str) -> dict[str, Any] | None:
         """Fetch older exact evidence on demand, always within this conversation."""
         if not isinstance(evidence_id, str) or not evidence_id.startswith("ev_") or len(evidence_id) > 100:
             return None
         with session_scope() as db:
+            self._assert_current_memory_scope(db)
             messages = db.scalars(select(Message).where(
                 Message.conversation_id == self.conversation_id, Message.role == "assistant",
             ).order_by(Message.id.desc()).execution_options(yield_per=20))
@@ -573,22 +583,46 @@ class ConversationHost:
 
     def field_mapping(self) -> dict[str, list[str]]:
         with session_scope() as db:
+            self._assert_current_memory_scope(db)
             return memory_service.field_mapping_for(db, self.customer_id, recipe_id=self.recipe_id)
 
     def field_mapping_authoritative(self) -> bool:
         with session_scope() as db:
+            self._assert_current_memory_scope(db)
             return bool(self.customer_id and self.recipe_id and db.get(RecipeProfile, self.recipe_id) is not None)
 
     def memory_text(self, query: str) -> str:
         with session_scope() as db:
+            self._assert_current_memory_scope(db)
             return memory_service.memory_text(db, user_id=self.user_id, customer_id=self.customer_id,
                                               conversation_id=self.conversation_id, recipe_id=self.recipe_id, query=query)
+
+    def inspect_saved_memories(self, *, query: str = "", memory_id: int | None = None,
+                               offset: int = 0, limit: int | None = None) -> dict[str, Any]:
+        """Recover exact scoped memory text without broadening access."""
+        with session_scope() as db:
+            self._assert_current_memory_scope(db)
+            return memory_service.inspect_memories(db, user_id=self.user_id, customer_id=self.customer_id,
+                                                    conversation_id=self.conversation_id, recipe_id=self.recipe_id,
+                                                    query=query, memory_id=memory_id, offset=offset, limit=limit)
+
+    def _assert_current_memory_scope(self, db) -> None:
+        """Fail closed if this host's cached scope changed since construction."""
+        from sheetmate.services import conversations as conversation_service
+
+        user = db.get(User, self.user_id)
+        if user is None:
+            raise ServiceError("当前用户不存在，无法读取会话记忆")
+        conversation = conversation_service.get_conversation(db, user, self.conversation_id)
+        if (conversation.customer_id != self.customer_id or conversation.recipe_id != self.recipe_id):
+            raise ServiceError("会话的客户或流程范围已变化，请按当前范围重试记忆检索")
 
     def remember(self, category: str, key: str, value: str, *, source_message_id: int | None = None,
                  source_turn_id: str | None = None, evidence_span: str = "") -> MemoryRememberResult:
         source_message_id = source_message_id if source_message_id is not None else getattr(self, "request_message_id", None)
         source_turn_id = source_turn_id or getattr(self, "request_turn_id", None)
         with session_scope() as db:
+            self._assert_current_memory_scope(db)
             message = db.get(Message, source_message_id) if source_message_id is not None else None
             conversation = db.get(Conversation, self.conversation_id)
             valid_source = (message is not None and message.role == "user"
@@ -647,5 +681,6 @@ class ConversationHost:
         if not self.customer_id:
             raise ServiceError("字段映射是按客户保存的：请先把会话绑定到客户")
         with session_scope() as db:
+            self._assert_current_memory_scope(db)
             row = memory_service.upsert_field_mapping(db, self.customer_id, standard, aliases, source="ai", recipe_id=self.recipe_id)
             return f"已保存字段映射：{row.standard} ← {'、'.join(row.aliases)}"

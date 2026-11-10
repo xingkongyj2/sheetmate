@@ -100,6 +100,10 @@ class ToolHost(Protocol):
     def pipeline_host(self) -> PipelineHost: ...
     def field_mapping(self) -> dict[str, list[str]]: ...
     def memory_text(self, query: str) -> str: ...
+    def inspect_saved_memories(self, *, query: str = "", memory_id: int | None = None,
+                               offset: int = 0, limit: int | None = None) -> dict[str, Any]: ...
+    def inspect_conversation_history(self, *, message_id: int | None = None, query: str = "",
+                                     role: str = "", offset: int = 0, limit: int | None = None) -> dict[str, Any]: ...
     def remember(self, category: str, key: str, value: str, *, evidence_span: str = "") -> dict[str, Any]: ...
     def save_field_mapping(self, standard: str, aliases: list[str]) -> str: ...
 
@@ -1121,6 +1125,21 @@ def _static_tools() -> list[Tool]:
                    "limit": {"type": "integer", "minimum": 100, "maximum": 8000}}), both,
              run=lambda args, ctx: ToolResult(json.dumps(inspect_task(ctx.task_state, **args), ensure_ascii=False), summary="已读取任务原始要求"),
              label=lambda args: "查看任务要求"),
+        Tool("inspect_conversation_history", "按需检索本会话全部历史原消息，包括已压缩内容和已完成旧任务。省略 message_id 时按关键词/角色检索片段，offset/limit 为消息条数（默认8，最多12）；指定 message_id 后分页读取原文，offset/limit 为字符数（默认4000，最多8000）。不读取其他会话；旧助手声明不代表当前事实或完成证据。",
+             _obj({"message_id": {"type": "integer", "minimum": 1}, "query": {**_STR, "maxLength": 200},
+                   "role": {"type": "string", "enum": ["user", "assistant"]},
+                   "offset": {"type": "integer", "minimum": 0},
+                   "limit": {"type": "integer", "minimum": 1, "maximum": 8000}}), both,
+             run=lambda args, ctx: ToolResult(json.dumps(ctx.host.inspect_conversation_history(**args), ensure_ascii=False),
+                                              summary="已检索会话原始消息"),
+             label=lambda args: "回查历史原文"),
+        Tool("inspect_saved_memories", "只检索当前可用的个人/客户/会话/流程记忆。省略 memory_id 时按关键词找相关记忆或列出近期记忆，offset/limit 按条目分页（最多12条）；指定 memory_id 后按字符分页读取原文。结果带记忆版本、来源和范围；不扩大当前权限范围。",
+             _obj({"memory_id": {"type": "integer", "minimum": 1}, "query": {**_STR, "maxLength": 200},
+                   "offset": {"type": "integer", "minimum": 0},
+                   "limit": {"type": "integer", "minimum": 1, "maximum": 8000}}), both,
+             run=lambda args, ctx: ToolResult(json.dumps(ctx.host.inspect_saved_memories(**args), ensure_ascii=False),
+                                              summary="已检索当前作用域记忆"),
+             label=lambda args: "回查已保存记忆"),
         Tool("load_tool_group", "按需加载工具定义：formulas=清洗/匹配/汇总公式，workbook=建表与格式，python=脚本，workflow=已有流程/保存/删除，all=全部。只加载能力，不执行或授权操作。",
              _obj({"group": {"type": "string", "enum": ["formulas", "workbook", "python", "workflow", "all"]}}, ["group"]), both,
              run=_tool_load_group, label=lambda args: "加载处理工具"),

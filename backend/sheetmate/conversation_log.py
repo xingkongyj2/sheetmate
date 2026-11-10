@@ -2,13 +2,13 @@
 
 ContextVars follow async tasks and ``asyncio.to_thread``. Each event is flushed
 immediately; late background events are inserted into their original turn, so
-memory extraction cannot split the next user's request. No customer payloads
-are sampled or shortened. Only authentication fields are redacted.
+memory extraction cannot split the next user's request. Diagnostic projections
+redact recognizable contacts, credentials and inline image bytes; source records
+remain unchanged.
 """
 
 from __future__ import annotations
 
-import base64
 import contextvars
 import json
 import logging
@@ -26,6 +26,7 @@ from typing import Any
 from uuid import uuid4
 
 from sheetmate.config import settings
+from sheetmate.agent.privacy import redact_derived_text
 
 try:
     import fcntl
@@ -48,7 +49,9 @@ def _secret_field(key: Any) -> bool:
 
 def _normalise(value: Any, seen: set[int] | None = None) -> Any:
     """Preserve types/values for JSON, handling SDK models and scientific scalars."""
-    if value is None or isinstance(value, (str, bool, int)):
+    if isinstance(value, str):
+        return redact_derived_text(value)
+    if value is None or isinstance(value, (bool, int)):
         return value
     if isinstance(value, float):
         # Valid JSON even for pandas/numpy NaN and infinities.
@@ -56,16 +59,17 @@ def _normalise(value: Any, seen: set[int] | None = None) -> Any:
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, (Path, Enum)):
-        return str(value) if isinstance(value, Path) else _normalise(value.value, seen)
+        return redact_derived_text(str(value)) if isinstance(value, Path) else _normalise(value.value, seen)
     if isinstance(value, (bytes, bytearray, memoryview)):
-        return {"type": "bytes", "encoding": "base64", "value": base64.b64encode(value).decode("ascii")}
+        return {"type": "bytes", "length": len(value), "sha256": sha256(value).hexdigest(),
+                "value": "[BINARY_DATA_REDACTED]"}
     seen = set() if seen is None else seen
     if id(value) in seen:
         return {"type": type(value).__name__, "value": "<recursive reference>"}
     seen.add(id(value))
     try:
         if isinstance(value, Mapping):
-            return {str(key): "[REDACTED]" if _secret_field(key) else _normalise(item, seen)
+            return {redact_derived_text(str(key)): "[REDACTED]" if _secret_field(key) else _normalise(item, seen)
                     for key, item in value.items()}
         if isinstance(value, (list, tuple, set, frozenset)):
             return [_normalise(item, seen) for item in value]
@@ -86,7 +90,7 @@ def _normalise(value: Any, seen: set[int] | None = None) -> Any:
             return _normalise(value.item(), seen)
         if hasattr(value, "__dict__"):
             return _normalise(vars(value), seen)
-        return {"type": f"{type(value).__module__}.{type(value).__qualname__}", "value": str(value)}
+        return {"type": f"{type(value).__module__}.{type(value).__qualname__}", "value": redact_derived_text(str(value))}
     finally:
         seen.remove(id(value))
 
@@ -113,6 +117,9 @@ class ConversationTrace:
     turn_id: str
     path: Path
     _fresh: bool = field(default=False, repr=False)
+    _require_conversation: bool = field(default=False, repr=False)
+    _started: bool = field(default=False, init=False, repr=False)
+    _closed: bool = field(default=False, init=False, repr=False)
 
     @property
     def end_marker(self) -> bytes:
@@ -133,8 +140,26 @@ class ConversationTrace:
     def _write(self, entry: bytes) -> None:
         """Insert before our end marker, moving late successors in bounded chunks."""
         with _LOCK:
-            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            descriptor = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            if self._closed:
+                return
+            if not self._started:
+                # A newly allocated or recovered trace may reach its first
+                # write after the owning conversation was deleted. Checking
+                # under the same lock as after-commit deletion closes that
+                # check/create race without retaining permanent tombstones.
+                if self._require_conversation and not _conversation_exists(self.conversation_id):
+                    self._closed = True
+                    return
+                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            flags = os.O_RDWR | (os.O_CREAT if not self._started else 0)
+            try:
+                descriptor = os.open(self.path, flags, 0o600)
+            except FileNotFoundError:
+                # Late responses keep their trace object after deletion. They
+                # may append to an existing log, but cannot recreate a log.
+                self._closed = True
+                return
+            self._started = True
             with os.fdopen(descriptor, "r+b", buffering=0) as stream:
                 if fcntl is not None:
                     fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
@@ -187,7 +212,23 @@ def _find_marker(stream: Any, size: int, marker: bytes) -> int | None:
 
 def new_turn(conversation_id: str, *, turn_id: str | None = None) -> ConversationTrace:
     return ConversationTrace(conversation_id, turn_id or uuid4().hex,
-                             conversation_log_path(conversation_id), _fresh=turn_id is None)
+                             conversation_log_path(conversation_id), _fresh=turn_id is None,
+                             _require_conversation=True)
+
+
+def _conversation_exists(conversation_id: str) -> bool:
+    # Lazy imports avoid a dependency cycle during DB/model initialization.
+    from sheetmate.db.database import SessionLocal
+    from sheetmate.db.models import Conversation
+
+    with SessionLocal() as db:
+        return db.get(Conversation, conversation_id) is not None
+
+
+def delete_conversation_log(conversation_id: str) -> None:
+    """Commit-time cleanup, serialized with a trace's first check/create write."""
+    with _LOCK:
+        conversation_log_path(conversation_id).unlink(missing_ok=True)
 
 
 def current_trace() -> ConversationTrace | None:

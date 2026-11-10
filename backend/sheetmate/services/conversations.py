@@ -23,7 +23,7 @@ from sheetmate.services import files as file_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import runs as run_service
-from sheetmate.conversation_log import conversation_log_path
+from sheetmate.conversation_log import delete_conversation_log
 from sheetmate.engine.script_store import queue_unreferenced_scope_scripts
 from sheetmate.services.auth import require_customer
 from sheetmate.services.errors import Forbidden, NotFound, ServiceError
@@ -43,6 +43,11 @@ def get_conversation(db: Session, user: User, conversation_id: str) -> Conversat
         raise NotFound("对话不存在")
     if conv.user_id != user.id and user.role != "admin":
         raise Forbidden("你没有权限访问这个对话")
+    if conv.customer_id:
+        # A conversation's owner check alone is insufficient after customer
+        # access is revoked. Revalidate the live customer grant before loading
+        # its recipes, files, or long-term memories.
+        require_customer(db, user, conv.customer_id)
     return conv
 
 
@@ -367,7 +372,7 @@ def delete_conversation(db: Session, conv: Conversation) -> None:
             file_service.delete_if_unowned(db, current)
 
     # 日志和脚本文件没有数据库外键，跟随对应会话清理。
-    db.info.setdefault("deleted_aux_paths", set()).add(str(conversation_log_path(conversation_id)))
+    file_service.defer_after_commit(db, lambda: delete_conversation_log(conversation_id))
     queue_unreferenced_scope_scripts(db, conversation_ids={conversation_id})
     roots = [settings.outputs_dir / f"conv_{conversation_id}", settings.uploads_dir / f"conv_{conversation_id}"]
     _defer_owner_storage_cleanup(db, roots)

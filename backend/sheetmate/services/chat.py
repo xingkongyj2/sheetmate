@@ -34,7 +34,7 @@ from sheetmate.agent.persistence import infer_recipe_persistence
 from sheetmate.agent.recorder import WorkflowRecorder
 from sheetmate.agent.summarizer import (
     HISTORY_TOKEN_BUDGET, RECENT_HISTORY_TOKENS, RECENT_USER_ANCHORS, bounded_history, compact_history,
-    fallback_title, history_tokens, make_title,
+    compaction_batch, fallback_title, history_tokens, make_title, primer_block, summary_without_primer,
 )
 from sheetmate.agent.thinking import THINKING_TOOL_BUDGET, execute_thinking
 from sheetmate.agent.tools import AgentContext, ToolRegistry
@@ -137,8 +137,10 @@ def _advance_conversation_task(conversation_id: str, message_id: int, *, relatio
 
 def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentContext, ConversationHost]:
     with session_scope() as db:
-        conv = db.get(Conversation, conversation_id)
-        assert conv is not None
+        user = db.get(User, user_id)
+        if user is None:
+            raise ServiceError("当前用户不存在，无法读取对话上下文")
+        conv = conv_service.get_conversation(db, user, conversation_id)
         customer = db.get(Customer, conv.customer_id) if conv.customer_id else None
         library = recipe_service.library_for(db, conv.customer_id)
         mode = conv.mode
@@ -1032,30 +1034,69 @@ def _limit_history_images(history: list[dict[str, Any]], current: list[dict[str,
             item.pop("image_parts", None)
 
 
-async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message_id: int | None = None) -> list[dict[str, Any]]:
-    """组装历史：压缩摘要 + 之后的消息（不含刚保存的这条用户消息）。助手消息附上本轮执行摘要，方便追问。"""
+def _history_snapshot(conversation_id: str, current_message_id: int | None) -> tuple[
+    str, int, list[dict[str, Any]], dict[str, Any] | None,
+]:
+    """Read one consistent summary/cursor pair and the source messages after it."""
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
         assert conv is not None
-        summary = conv.context_summary
-        summary_until = conv.summary_until
-        if _contains_unconfigured_llm_error(summary):
+        if _contains_unconfigured_llm_error(conv.context_summary):
             # Old summaries may have absorbed a setup failure. Rebuild them from messages,
             # where the obsolete assistant error can be identified without dropping user text.
-            summary = ""
-            summary_until = 0
-            conv.context_summary = ""
-            conv.summary_until = 0
-        query = select(Message).where(Message.conversation_id == conversation_id, Message.id > summary_until)
-        if current_message_id is not None:
-            query = query.where(Message.id < current_message_id)
+            db.execute(update(Conversation).where(
+                Conversation.id == conversation_id, Conversation.summary_until == conv.summary_until,
+                Conversation.context_summary == conv.context_summary,
+            ).values(context_summary="", summary_until=0))
+            db.refresh(conv)
+        boundary = current_message_id
+        if boundary is None:
+            boundary = db.scalar(select(Message.id).where(
+                Message.conversation_id == conversation_id,
+            ).order_by(Message.id.desc()).limit(1))
+        query = select(Message).where(Message.conversation_id == conversation_id, Message.id > conv.summary_until)
+        primer_query = select(Message).where(
+            Message.conversation_id == conversation_id, Message.role == "user", Message.content != "",
+        )
+        if boundary is not None:
+            query = query.where(Message.id < boundary)
+            primer_query = primer_query.where(Message.id < boundary)
         rows = list(db.scalars(query.order_by(Message.id)))
-        if current_message_id is None:
-            rows = rows[:-1]
-    items = [{"id": m.id, "role": m.role, "content": _history_content(m)}
-        for m in rows if not is_llm_not_configured_message(m.role, m.content, m.events)]
-    summary_item = [{"role": "assistant", "content": summary, "context_summary": True}] if summary else []
-    if history_tokens([*summary_item, *items]) > HISTORY_TOKEN_BUDGET:
+        first_user = db.scalar(primer_query.order_by(Message.id).limit(1))
+        primer = {"id": first_user.id, "content": first_user.content} if first_user else None
+        items = [{"id": m.id, "role": m.role, "content": _history_content(m)}
+                 for m in rows if not is_llm_not_configured_message(m.role, m.content, m.events)]
+        return conv.context_summary, conv.summary_until, items, primer
+
+
+def _history_projection(summary: str, items: list[dict[str, Any]],
+                        primer: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Pinned opening goal, derived summary, then recent authoritative messages."""
+    history: list[dict[str, Any]] = []
+    if summary or history_tokens(items) > HISTORY_TOKEN_BUDGET:
+        opening = primer_block(primer)
+        if opening:
+            history.append({"role": "assistant", "content": opening, "context_primer": True,
+                            "message_id": primer["id"]})
+    body = summary_without_primer(summary)
+    if body:
+        history.append({"role": "assistant", "content": body, "context_summary": True})
+    history += [{"role": item["role"], "content": item["content"], "message_id": item["id"]}
+                for item in items if item["content"].strip()]
+    return history
+
+
+async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message_id: int | None = None) -> list[dict[str, Any]]:
+    """Build primer + summary + recent history, committing complete source batches only."""
+    summary, summary_until, items, primer = _history_snapshot(conversation_id, current_message_id)
+    conflicts = 0
+    record_event("history.selection", "sheetmate.services.chat._history", {
+        "summary_until": summary_until, "source_count": len(items),
+        "estimated_tokens": history_tokens(_history_projection(summary, items, primer)),
+        "history_token_budget": HISTORY_TOKEN_BUDGET,
+        "primer_message_id": primer["id"] if primer else None,
+    })
+    while history_tokens(_history_projection(summary, items, primer)) > HISTORY_TOKEN_BUDGET:
         # Keep recent dialogue under its own token budget, rather than treating
         # a very long spreadsheet discussion as equivalent to a short greeting.
         cut = len(items)
@@ -1066,33 +1107,62 @@ async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message
                 break
             recent_tokens += next_tokens
             cut -= 1
-        older, recent = items[:cut], items[cut:]
-        text = None
-        if older:
-            with session_scope() as db:
-                # Read original messages across the old cursor so repeated
-                # compaction cannot rewrite or lose the previous user anchor.
-                anchor_rows = list(db.scalars(select(Message).where(
-                    Message.conversation_id == conversation_id, Message.role == "user",
-                    Message.id <= older[-1]["id"], Message.content != "",
-                ).order_by(Message.id.desc()).limit(RECENT_USER_ANCHORS)))
-                user_anchors = [{"id": m.id, "content": m.content} for m in reversed(anchor_rows)]
-            text = await compact_history(llm, [*summary_item, *older], user_anchors=user_anchors)
-        if text:
-            with session_scope() as db:
-                # A slow summary from an older request must not move a newer
-                # request's persisted cursor backwards or replace its summary.
-                db.execute(update(Conversation).where(
-                    Conversation.id == conversation_id, Conversation.summary_until == summary_until,
-                ).values(context_summary=text, summary_until=older[-1]["id"]))
-            summary = text
-            items = recent
-            await emit({"type": "compacted", "old_count": len(older), "summary": text[:120]})
-    history = [{"role": "assistant", "content": summary, "context_summary": True}] if summary else []
-    history += [{"role": m["role"], "content": m["content"], "message_id": m["id"]} for m in items if m["content"].strip()]
+        batch = compaction_batch(items[:cut])
+        if not batch:
+            break
+        record_event("history.compaction.batch", "sheetmate.services.chat._history", {
+            "summary_until": summary_until, "source_first_id": batch[0]["id"],
+            "source_last_id": batch[-1]["id"], "source_count": len(batch),
+            "source_tokens": history_tokens(batch), "pending_count": len(items),
+        })
+        with session_scope() as db:
+            # Original user wording remains authoritative across every cursor.
+            anchor_rows = list(db.scalars(select(Message).where(
+                Message.conversation_id == conversation_id, Message.role == "user",
+                Message.id <= batch[-1]["id"], Message.content != "",
+            ).order_by(Message.id.desc()).limit(RECENT_USER_ANCHORS)))
+            user_anchors = [{"id": m.id, "content": m.content} for m in reversed(anchor_rows)]
+        summary_item = [{"role": "assistant", "content": summary, "context_summary": True}] if summary else []
+        text = await compact_history(llm, [*summary_item, *batch], user_anchors=user_anchors, primer=primer)
+        if not text:
+            record_event("history.compaction.failed", "sheetmate.services.chat._history", {
+                "summary_until": summary_until, "source_last_id": batch[-1]["id"],
+                "source_count": len(batch),
+            })
+            break
+        with session_scope() as db:
+            result = db.execute(update(Conversation).where(
+                Conversation.id == conversation_id, Conversation.summary_until == summary_until,
+                Conversation.context_summary == summary,
+            ).values(context_summary=text, summary_until=batch[-1]["id"]))
+            committed = result.rowcount == 1
+        if not committed:
+            # Reload the winning projection, including newly uncovered rows.
+            # Returning the losing text here would hide history despite the CAS.
+            summary, summary_until, items, primer = _history_snapshot(conversation_id, current_message_id)
+            conflicts += 1
+            record_event("history.compaction.conflict", "sheetmate.services.chat._history", {
+                "summary_until": summary_until, "source_count": len(items), "conflicts": conflicts,
+            })
+            if conflicts >= 2:
+                break
+            continue
+        summary, summary_until = text, batch[-1]["id"]
+        items = items[len(batch):]
+        record_event("history.compaction.committed", "sheetmate.services.chat._history", {
+            "summary_until": summary_until, "source_count": len(batch), "remaining_count": len(items),
+            "summary_tokens": history_tokens([{"content": summary}]),
+        })
+        await emit({"type": "compacted", "old_count": len(batch), "summary": text[:120]})
+    history = _history_projection(summary, items, primer)
     if history_tokens(history) > HISTORY_TOKEN_BUDGET:
         history = bounded_history(history, HISTORY_TOKEN_BUDGET)
         await emit({"type": "compacted", "fallback": True, "summary": "历史超出上下文预算，暂时保留原始目标和近期消息；完整原文仍已保存。"})
+    record_event("history.selected", "sheetmate.services.chat._history", {
+        "summary_until": summary_until, "selected_count": len(history),
+        "estimated_tokens": history_tokens(history),
+        "limited": any(item.get("context_limited") for item in history),
+    })
     # Reattach only recent, still-accessible images after text compaction. Never embed
     # base64 in summaries, persistence prompts, database messages, or diagnostic text.
     remaining = _MAX_HISTORY_IMAGES
@@ -1101,7 +1171,7 @@ async def _history(conversation_id: str, llm: Any, emit: Any, *, current_message
         conv = db.get(Conversation, conversation_id)
         assert conv is not None
         for item in reversed(history):
-            message_id = item.pop("message_id", None)
+            message_id = item.get("message_id")
             if item["role"] != "user" or message_id is None or remaining <= 0:
                 continue
             stored = db.get(Message, message_id)
@@ -1161,10 +1231,10 @@ async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str
     except (asyncio.TimeoutError, Exception):
         title = fallback_title(message)
     with session_scope() as db:
-        conv = db.get(Conversation, conversation_id)
-        if conv is not None:
-            conv.title = title
-    return title
+        result = db.execute(update(Conversation).where(
+            Conversation.id == conversation_id, Conversation.title.in_(["新对话", ""]),
+        ).values(title=title))
+        return title if result.rowcount == 1 else None
 
 
 async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer_id: str | None, message: str, answer: str,
@@ -1173,6 +1243,18 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
     with trace_phase("background_memory"):
         try:
             with session_scope() as db:
+                user = db.get(User, user_id)
+                if user is None:
+                    return
+                conversation = conv_service.get_conversation(db, user, conversation_id)
+                if (conversation.customer_id != customer_id or conversation.recipe_id != recipe_id):
+                    # A temporary chat may have just been saved to a customer.
+                    # A previously bound task must not keep learning into its
+                    # cached customer or workflow after a rebind or deletion.
+                    if customer_id is None and recipe_id is None and conversation.customer_id:
+                        customer_id, recipe_id = conversation.customer_id, conversation.recipe_id
+                    else:
+                        return
                 existing = memory_service.memories_for(db, user_id=user_id, customer_id=customer_id,
                                                        conversation_id=conversation_id, recipe_id=recipe_id)
             # Candidate context is only a deduplication aid, never evidence for
@@ -1197,14 +1279,25 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
     if not items:
         return
     with session_scope() as db:
-        conversation = db.get(Conversation, conversation_id)
-        if conversation is None:
+        user = db.get(User, user_id)
+        if user is None:
+            return
+        try:
+            conversation = conv_service.get_conversation(db, user, conversation_id)
+        except ServiceError:
+            # A late model response must not restore deleted/revoked context.
             return
         # 临时对话可能在抽取期间已保存到客户；补上绑定时尚未来得及迁移的记忆。
-        # 原本已绑定的任务仍归原客户和流程，避免改绑期间串入其他客户。
+        # 原本已绑定的任务在改绑或流程删除后停止学习，不写回过期范围。
         if customer_id is None and conversation.customer_id:
             customer_id, recipe_id = conversation.customer_id, conversation.recipe_id
+        elif conversation.customer_id != customer_id or conversation.recipe_id != recipe_id:
+            return
         if customer_id and db.get(Customer, customer_id) is None:
+            return
+        if recipe_id and db.scalar(select(RecipeRecord.id).where(
+            RecipeRecord.recipe_id == recipe_id, RecipeRecord.customer_id == customer_id,
+        ).limit(1)) is None:
             return
         receipts = []
         for item in items:

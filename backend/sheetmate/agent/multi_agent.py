@@ -16,6 +16,7 @@ from dataclasses import replace
 from typing import Any
 
 from sheetmate.agent.content import model_history, user_content
+from sheetmate.agent.context import stage_history
 from sheetmate.agent.executor import AgentExecutor, build_system_prompt
 from sheetmate.agent.prompts import AGGREGATOR_PROMPT, MULTI_AGENT_KEYWORDS, SPECIALIST_MESSAGE
 from sheetmate.agent.tools import AgentContext
@@ -93,7 +94,7 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
             acquired = True
             await queue.put({"type": "agent_start", "agent_id": table_name, "table_name": table_name,
                              "tool_calls_limit": budget.branch_limits[table_name]})
-            messages = [{"role": "system", "content": build_system_prompt(scoped, message)}, *model_history(history, limit=6),
+            messages = [{"role": "system", "content": build_system_prompt(scoped, message)}, *model_history(stage_history(history, "specialist")),
                         {"role": "user", "content": user_content(SPECIALIST_MESSAGE.format(table=table_name, message=message), scoped.image_parts)}]
             tools = executor.registry.for_context(scoped)
             conclusion = ""
@@ -142,7 +143,8 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
     labels = {t.name: t.label or t.name for t in tables}
     parts = [f"**「{name}」（{labels.get(name, name)}）专员的结论：**\n{text}" for name, text in conclusions.items() if text]
     prompt = AGGREGATOR_PROMPT.format(count=len(conclusions), message=message, conclusions="\n\n---\n\n".join(parts) or "（无）")
-    image_parts = [part for item in history[-6:] for part in item.get("image_parts", [])] + ctx.image_parts
+    aggregate_history = stage_history(history, "execution")
+    image_parts = [part for item in aggregate_history for part in item.get("image_parts", [])] + ctx.image_parts
     aggregate_messages = [{"role": "system", "content": build_system_prompt(ctx, message)},
                           {"role": "user", "content": user_content(prompt, image_parts)}]
     async for event in executor.agent_stream(aggregate_messages, executor.registry.for_context(ctx), ctx,

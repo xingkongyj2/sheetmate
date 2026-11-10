@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from sheetmate.agent.content import history_window
+from sheetmate.agent.context import stage_history
 from sheetmate.agent.contracts import INTENT_SCHEMA
 from sheetmate.agent.llm import LLMError
 from sheetmate.agent.prompts import INTENT_PROMPT
@@ -54,11 +54,12 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
                         plan_steps: list[dict[str, Any]] | None = None, *,
                         files: list[dict[str, Any]] | None = None,
                         file_references: list[dict[str, Any]] | None = None) -> RequestIntent:
+    selected_history = stage_history(history, "request_intent")
     context = {
         "customer": ctx.customer,
         "task_state": task_projection(getattr(ctx, "task_state", None)),
-        "history": [{"role": item["role"], "content": str(item.get("content", "")) if item.get("context_summary")
-                     else str(item.get("content", ""))[-4000:]} for item in history_window(history, 8)],
+        "history": [{"role": item["role"], "message_id": item.get("message_id", item.get("id")),
+                     "content": str(item.get("content", ""))} for item in selected_history],
         "tables": [{"name": table.name, "role": table.role, "columns": table.column_names,
                     "file_id": table.file_id, "filename": table.filename, "created_by": table.created_by}
                    for table in ctx.visible_tables()],
@@ -69,7 +70,7 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
         "file_references": file_references or [],
         "message": message,
     }
-    image_parts = [part for item in history[-8:] for part in item.get("image_parts", [])] + ctx.image_parts
+    image_parts = [part for item in selected_history for part in item.get("image_parts", [])] + ctx.image_parts
     image_kwargs = {"image_parts": image_parts} if image_parts else {}
     try:
         result = await complete_structured(llm, json.dumps(context, ensure_ascii=False),

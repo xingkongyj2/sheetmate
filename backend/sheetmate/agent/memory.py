@@ -1,8 +1,8 @@
 """记忆（沿用 TabClaw 的四类记忆）：抽取与筛选。存储由服务层（memories 表）负责。
 
-- preferences       偏好（总是注入，例如「金额保留两位小数」）
+- preferences       偏好（预算内优先保留，例如「金额保留两位小数」）
 - domain_knowledge  业务规则（例如「匹配不到归属的店铺记为新食研」）
-- user_context      背景（总是注入，例如「用户是财务，每月 5 号对账」）
+- user_context      背景（预算内优先保留，例如「用户是财务，每月 5 号对账」）
 - history_insights  经验（例如「这个客户的运单号偶尔带空格」）
 
 作用域：绑定客户的会话 → 记到客户；未绑定 → 记到会话（保存到客户时一起迁移）；用户级偏好对所有会话生效。
@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from sheetmate.agent.prompts import MEMORY_PROMPT
+from sheetmate.agent.privacy import contains_sensitive_memory
 
 CATEGORIES = ["preferences", "domain_knowledge", "user_context", "history_insights"]
 MEMORY_MESSAGE_CHARS = 8_000
@@ -301,7 +302,9 @@ def validate_memory_candidates(message: str, items: Any, *,
             evidence = value
         supported_value = supported_memory_value(message, value, evidence)
         if (category in CATEGORIES and category != "history_insights" and key and len(key) <= 120
-                and supported_value and len(evidence) <= MEMORY_MESSAGE_CHARS):
+                and supported_value and not contains_sensitive_memory(key)
+                and not contains_sensitive_memory(supported_value) and not contains_sensitive_memory(evidence)
+                and len(evidence) <= MEMORY_MESSAGE_CHARS):
             if (category, supported_value) in seen_values:
                 continue
             scoped = [old for old in existing if old.get("category") == category and _same_scope(old, target_scope)]
@@ -331,6 +334,11 @@ def validate_memory_candidates(message: str, items: Any, *,
                 continue
             if (category, key) in seen_keys:
                 continue
+            # Canonicalization/replacement can select a key from an older row;
+            # run the privacy boundary again on the exact final persisted data.
+            if contains_sensitive_memory(key) or contains_sensitive_memory(supported_value) \
+                    or contains_sensitive_memory(evidence):
+                continue
             result_item = {"category": category, "key": key, "value": supported_value, "evidence_span": supported_value}
             if replacement:
                 result_item.update(replaces_memory_id=replacement["id"], replaces_value=replacement["value"])
@@ -344,68 +352,103 @@ def validate_memory_candidates(message: str, items: Any, *,
 
 def select_relevant(items: list[dict[str, Any]], query: str, limit: int = 30,
                     max_chars: int = MEMORY_CONTEXT_CHARS) -> list[dict[str, Any]]:
-    """按相关性和字符预算选记忆，避免常驻 AI 条目挤掉任务相关经验。"""
+    """Compatibility wrapper; scope filtering is the caller's responsibility."""
+    return retrieve_memories(items, query, limit=limit, max_chars=max_chars)["items"]
+
+
+def _memory_identity(item: dict[str, Any]) -> tuple[Any, ...]:
+    # Exact wording only: different numbers, negations, conditions and scopes
+    # remain independent facts. Never merge merely similar business rules.
+    value = str(item.get("value") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    scope = tuple(item.get(key) for key in ("user_id", "customer_id", "conversation_id", "recipe_id"))
+    if not any(part is not None for part in scope):
+        scope += (item.get("scope"), item.get("scope_label"))
+    return (*scope, item.get("category"), value)
+
+
+def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
+                      max_chars: int = MEMORY_CONTEXT_CHARS) -> dict[str, Any]:
+    """Select scoped memories with lexical MMR, recency and explicit receipts.
+
+    No embedding model is involved. Service order is newest first. All human
+    rules survive selection or the request fails explicitly. Diversity only
+    changes AI ordering; only same-scope, exact-value duplicates are removed.
+    """
     terms = _query_terms(query)
-    human_relevant: list[tuple[int, int, dict[str, Any]]] = []
-    human_other: list[tuple[int, dict[str, Any]]] = []
-    relevant: list[tuple[int, int, dict[str, Any]]] = []
-    standing: dict[str, list[tuple[int, dict[str, Any]]]] = {
-        "preferences": [], "user_context": [], "domain_knowledge": []
-    }
-    for index, item in enumerate(items):
-        score = _memory_relevance(item, terms, query)
-        if item.get("source") == "human":
-            if score:
-                human_relevant.append((score, index, item))
-            else:
-                human_other.append((index, item))
-        elif score:
-            relevant.append((score, index, item))
-        elif item.get("category") in standing:
-            standing[item["category"]].append((index, item))
-
-    # Store order is newest first; preserve it for equally relevant memories.
-    human_relevant.sort(key=lambda row: (-row[0], row[1]))
-    relevant.sort(key=lambda row: (-row[0], row[1]))
-
-    def cost(item: dict[str, Any]) -> int:
-        return len(str(item.get("key") or "")) + len(str(item.get("value") or "")) + 32
-
-    human = [*(row[2] for row in human_relevant), *(row[1] for row in human_other)]
-    if sum(cost(item) for item in human) > max_chars:
+    scored = [(index, item, _memory_relevance(item, terms, query)) for index, item in enumerate(items)]
+    human = sorted((row for row in scored if row[1].get("source") == "human"),
+                   key=lambda row: (-row[2], row[0]))
+    chosen = [item for _, item, _ in human]
+    selection = [{"memory_id": item.get("id"), "reason": "human_required", "lexical_score": score}
+                 for _, item, score in human]
+    if len(format_memories(chosen)) > max_chars:
         raise MemoryContextLimit(
             f"当前适用的 {len(human)} 条人工记忆超出上下文预算（{max_chars} 字符）。"
             "请精简重复规则或缩小流程范围后继续；本轮未截断或忽略人工规则。"
         )
 
-    # Match every category before adding generic standing context. A matched
-    # business rule must not be displaced by unrelated preferences or history.
-    ai_limit = max(0, limit)
-    relevant_items = [row[2] for row in relevant[:ai_limit]]
-    remaining = max(0, ai_limit - len(relevant_items))
-    standing_items: list[dict[str, Any]] = []
-    taken = dict.fromkeys(standing, 0)
-    for offset in range(10):
-        for category, cap in (("preferences", 5), ("domain_knowledge", 10), ("user_context", 5)):
-            if remaining and offset < min(cap, len(standing[category])):
-                standing_items.append(standing[category][offset][1])
-                taken[category] += 1
-                remaining -= 1
-    # Quotas reserve room for each category; unused room remains available to
-    # other standing memories in their original (newest-first) order.
-    overflow = sorted(row for category, rows in standing.items() for row in rows[taken[category]:])
-    standing_items.extend(row[1] for row in overflow[:remaining])
+    seen = {_memory_identity(item) for _, item, _ in human}
+    candidates = []
+    duplicate_count = unrelated_count = 0
+    for index, item, score in scored:
+        if item.get("source") == "human":
+            continue
+        identity = _memory_identity(item)
+        if identity in seen:
+            duplicate_count += 1
+            continue
+        seen.add(identity)
+        if score or item.get("category") in {"preferences", "user_context"}:
+            candidates.append((index, item, score))
+        else:
+            unrelated_count += 1
 
-    ordered = [*human, *relevant_items, *standing_items]
-    chosen: list[dict[str, Any]] = []
-    used = 0
-    for item in ordered:
-        item_cost = cost(item)
-        if used + item_cost > max_chars:
+    ai_limit = max(0, limit)
+    relevant = sorted((row for row in candidates if row[2]), key=lambda row: (-row[2], row[0]))
+    # Generic business rules/experience are not standing context. Keep only a
+    # small recent baseline of preferences and background beside query matches.
+    standing = []
+    for category in ("preferences", "user_context"):
+        standing.extend(row for row in candidates if not row[2] and row[1].get("category") == category)
+    standing = sorted(standing, key=lambda row: row[0])
+    pool = relevant[:ai_limit * 3] + standing[:min(10, ai_limit)] if ai_limit else []
+    highest = max((row[2] for row in pool), default=1) or 1
+    selected_terms = [_query_terms(str(item.get("key") or "") + " " + str(item.get("value") or ""))
+                      for item in chosen]
+    lexical = {row[0]: _query_terms(str(row[1].get("key") or "") + " " + str(row[1].get("value") or ""))
+               for row in pool}
+
+    def rank(row: tuple[int, dict[str, Any], int]) -> tuple[bool, float, int]:
+        index, _, score = row
+        words = lexical[index]
+        similarity = max((len(words & old) / len(words | old) if words | old else 0
+                          for old in selected_terms), default=0)
+        mmr = 0.7 * score / highest - 0.3 * similarity + 0.05 / (index + 1)
+        return bool(score), mmr, -index
+
+    while pool and len(chosen) - len(human) < ai_limit:
+        row = max(pool, key=rank)
+        pool.remove(row)
+        index, item, score = row
+        if len(format_memories([*chosen, item])) > max_chars:
             continue
         chosen.append(item)
-        used += item_cost
-    return chosen
+        selection.append({"memory_id": item.get("id"), "reason": "lexical_match" if score else "recent_standing",
+                          "lexical_score": score})
+        selected_terms.append(lexical[index])
+
+    selected_ids = [item["id"] for item in chosen if item.get("id") is not None]
+    return {"items": chosen, "metadata": {
+        "method": "lexical_mmr_recent", "embedding": False, "mmr_lambda": 0.7,
+        "scope_filter": "caller_required_before_ranking",
+        "available_count": len(items), "candidate_count": len(candidates),
+        "selected_count": len(chosen), "required_human_count": len(human),
+        "duplicate_count": duplicate_count, "unrelated_count": unrelated_count,
+        "omitted_count": len(items) - len(chosen), "selected_memory_ids": selected_ids,
+        "selection": selection,
+        "max_chars": max_chars, "used_chars": len(format_memories(chosen)),
+        "instruction": "召回结果是范围内的参考子集；省略项仍保留，可按记忆 ID 或关键词按需检索原文。",
+    }}
 
 
 def _chunks(text: str) -> list[str]:
@@ -437,6 +480,17 @@ def _memory_relevance(item: dict[str, Any], terms: set[str], query: str) -> int:
     return score
 
 
+def search_memory_candidates(items: list[dict[str, Any]], query: str = "") -> list[dict[str, Any]]:
+    """Return all scoped lexical matches for an explicit memory inspection."""
+    terms = _query_terms(query)
+    ranked = [(index, item, _memory_relevance(item, terms, query))
+              for index, item in enumerate(items)]
+    if query.strip():
+        ranked = [row for row in ranked if row[2] > 0]
+    ranked.sort(key=lambda row: (-row[2], row[0]))
+    return [{**item, "lexical_score": score} for _, item, score in ranked]
+
+
 def format_memories(items: list[dict[str, Any]], field_mapping: dict[str, list[str]] | None = None) -> str:
     lines = []
     human = [i for i in items if i.get("source") == "human"]
@@ -445,11 +499,19 @@ def format_memories(items: list[dict[str, Any]], field_mapping: dict[str, list[s
         lines.append("用户维护的记忆（最高优先级）：处理本流程时必须遵守；与 AI 参考冲突时以这些内容为准，AI 不得改写。")
         for item in human:
             text = item['value'] if item['key'].startswith("note_") else f"{item['key']}：{item['value']}"
-            lines.append(f"- [{item.get('scope_label', '')}] {text}")
+            lines.append(f"- [{item.get('scope_label', '')}；{_memory_reference(item)}] {text}")
     if auxiliary:
         lines.append("AI 参考记忆（辅助参考，不得覆盖用户维护的记忆）：")
-        lines.extend(f"- [{CATEGORY_LABELS.get(i['category'], i['category'])}·{i.get('scope_label', '')}] {i['key']}：{i['value']}"
+        lines.extend(f"- [{CATEGORY_LABELS.get(i['category'], i['category'])}·{i.get('scope_label', '')}；{_memory_reference(i)}] {i['key']}：{i['value']}"
                      for i in auxiliary)
     if field_mapping:
         lines.append("- [字段映射] " + "；".join(f"{std} ← {'/'.join(aliases)}" for std, aliases in field_mapping.items()))
     return "\n".join(lines)
+
+
+def _memory_reference(item: dict[str, Any]) -> str:
+    reference = [f"memory_id={item.get('id', 'legacy')}", f"version={item.get('version') or 1}",
+                 f"source={item.get('source') or 'ai'}"]
+    if item.get("source_message_id") is not None:
+        reference.append(f"source_message_id={item['source_message_id']}")
+    return "；".join(reference)

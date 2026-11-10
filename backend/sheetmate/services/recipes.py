@@ -236,6 +236,8 @@ def versions(db: Session, recipe_id: str) -> list[dict[str, Any]]:
 
 def delete_recipe(db: Session, recipe_id: str, *, user: User) -> dict[str, Any]:
     """删除可复用流程全部版本；保留结果文件和可审计的历史运行。"""
+    from sheetmate.db.models import Memory, RecipeFieldMapping
+
     record = get_record(db, recipe_id)
     if record.customer_id:
         require_customer(db, user, record.customer_id)
@@ -248,6 +250,10 @@ def delete_recipe(db: Session, recipe_id: str, *, user: User) -> dict[str, Any]:
     for run in db.scalars(select(Run).where(Run.recipe_id == recipe_id)):
         run.validation = {**(run.validation or {}), "recipe_deleted": True}
     db.execute(delete(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id))
+    # Context belongs to this workflow identity. Moving it to the replacement
+    # primary workflow would silently apply obsolete rules to another task.
+    for model in (Memory, RecipeFieldMapping, RecipeProfile):
+        db.execute(delete(model).where(model.recipe_id == recipe_id))
     if record.customer_id:
         customer = db.get(Customer, record.customer_id)
         if customer is not None:

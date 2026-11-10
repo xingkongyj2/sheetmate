@@ -18,7 +18,7 @@ from typing import Any
 
 import pandas as pd
 
-from sheetmate.agent.content import history_window
+from sheetmate.agent.context import stage_history
 from sheetmate.agent.contracts import PLAN_REVIEW_SCHEMA, PLAN_SCHEMA
 from sheetmate.agent.executor import build_system_prompt
 from sheetmate.agent.llm import LLMError, aux_json
@@ -303,13 +303,15 @@ def fallback_plan(ctx: AgentContext, message: str, reason: str = "") -> Plan:
     )
 
 
-def _history_context(history: list[dict[str, Any]], count: int = 6, limit: int = 1500) -> list[dict[str, str]]:
-    return [{"role": item["role"], "content": str(item.get("content", "")) if item.get("context_summary")
-             else str(item.get("content", ""))[-limit:]} for item in history_window(history, count)]
+def _history_context(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    selected = stage_history(history, "planning")
+    return [{"role": item["role"], "message_id": item.get("message_id", item.get("id")),
+             "content": str(item.get("content", ""))} for item in selected]
 
 
 def _image_kwargs(ctx: AgentContext, history: list[dict[str, Any]]) -> dict[str, Any]:
-    parts = [part for item in history[-6:] for part in item.get("image_parts", [])] + ctx.image_parts
+    selected = stage_history(history, "planning")
+    parts = [part for item in selected for part in item.get("image_parts", [])] + ctx.image_parts
     return {"image_parts": parts} if parts else {}
 
 

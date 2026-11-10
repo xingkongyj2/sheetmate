@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, event, inspect
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from sheetmate.config import settings
@@ -70,7 +70,46 @@ def _add_missing_columns(conn) -> list[str]:
                 ddl += " DEFAULT '" + default.replace("'", "''") + "'"
             conn.exec_driver_sql(ddl)
             added.append(f"{table.name}.{column.name}")
+    _ensure_memory_id_sequence(conn)
     return added
+
+
+def _ensure_memory_id_sequence(conn) -> None:
+    """Seed a monotonic memory ID watermark without rebuilding legacy tables."""
+    from sheetmate.db.models import MemoryIdSequence
+
+    MemoryIdSequence.__table__.create(conn, checkfirst=True)
+    if not inspect(conn).has_table("memories"):
+        return
+    maximum = int(conn.execute(text("SELECT COALESCE(MAX(id), 0) FROM memories")).scalar_one())
+    if conn.dialect.name == "sqlite":
+        has_sequence = conn.execute(text(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'"
+        )).first()
+        if has_sequence:
+            sqlite_max = conn.execute(text(
+                "SELECT COALESCE(MAX(seq), 0) FROM sqlite_sequence WHERE name = 'memories'"
+            )).scalar_one()
+            maximum = max(maximum, int(sqlite_max or 0))
+    conn.execute(text(
+        "INSERT INTO memory_id_sequence (name, last_id) VALUES ('memories', :maximum) "
+        "ON CONFLICT(name) DO UPDATE SET last_id = MAX(memory_id_sequence.last_id, excluded.last_id)"
+    ), {"maximum": maximum})
+    if conn.dialect.name == "sqlite":
+        conn.exec_driver_sql(
+            "CREATE TRIGGER IF NOT EXISTS memories_advance_id_watermark "
+            "AFTER INSERT ON memories BEGIN "
+            "INSERT INTO memory_id_sequence (name, last_id) VALUES ('memories', NEW.id) "
+            "ON CONFLICT(name) DO UPDATE SET last_id = MAX(memory_id_sequence.last_id, excluded.last_id); "
+            "END"
+        )
+
+
+@event.listens_for(Base.metadata, "after_create")
+def _initialise_memory_id_sequence(_metadata, connection, **_kwargs) -> None:
+    # Also install the allocator in isolated databases created by metadata,
+    # including tests and future command-line import tools.
+    _ensure_memory_id_sequence(connection)
 
 
 @contextmanager

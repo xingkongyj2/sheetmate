@@ -103,7 +103,7 @@ async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: 
         return CompletionCheck(reason=f"任务完成情况尚未确认：{response.reason}", verified=False, duration_ms=duration)
     value = response.value
     successful = {identifier for call_id, item in results.items()
-                  if item.get("ok") and not item.get("invalid") and item.get("tool") not in {"reconsider_approach", "load_tool_group", "inspect_execution_evidence", "inspect_task_context"}
+                  if item.get("ok") and not item.get("invalid") and item.get("tool") not in {"reconsider_approach", "load_tool_group", "inspect_execution_evidence", "inspect_task_context", "inspect_conversation_history", "inspect_saved_memories"}
                   for identifier in (call_id, item.get("call_id")) if identifier}
     if any(call_id not in successful for call_id in value["evidence_ids"]):
         return CompletionCheck(reason="任务完成核对引用了不存在或未成功的执行结果，尚不能确认完成。",

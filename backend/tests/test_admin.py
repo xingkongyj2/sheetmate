@@ -20,6 +20,7 @@ from sheetmate.engine.reader import ReadError, read_pasted_table
 from sheetmate.recipe.schema import OutputSheet, Recipe, RecipeInput, RecipeStep, check_recipe
 from sheetmate.services import formulas as formula_service
 from sheetmate.services import recipes as recipe_service
+from sheetmate.services.errors import Forbidden
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -463,3 +464,25 @@ def test_customer_access_rules(client):
     for url in ("/api/admin/users", "/api/admin/customers"):
         r = client.get(url)
         assert r.status_code in {404, 405} or "application/json" not in r.headers.get("content-type", ""), url
+
+
+def test_revoked_customer_grant_blocks_existing_conversation_context(client):
+    member, member_id = _register_member()
+    customer_id = _new_customer(client)["id"]
+    with session_scope() as db:
+        db.add(UserCustomer(user_id=member_id, customer_id=customer_id))
+    response = member.post("/api/conversations", json={"customer_id": customer_id})
+    assert response.status_code == 200, response.text
+    conversation_id = response.json()["conversation"]["id"]
+    assert member.get(f"/api/conversations/{conversation_id}").status_code == 200
+
+    with session_scope() as db:
+        db.query(UserCustomer).filter_by(user_id=member_id, customer_id=customer_id).delete()
+
+    denied = member.get(f"/api/conversations/{conversation_id}")
+    assert denied.status_code == 403
+    # Agent context construction uses the same live authorization gate.
+    from sheetmate.services.chat import build_context
+
+    with pytest.raises(Forbidden, match="没有权限访问这个客户"):
+        build_context(member_id, conversation_id, llm=None)
