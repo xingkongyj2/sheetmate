@@ -68,7 +68,7 @@ def evidence_projection(value: dict[str, Any] | None) -> dict[str, Any]:
     """Bound audit/context size while retaining evidence identity and versions."""
     if not value:
         return {}
-    return {**{key: value.get(key) for key in ("id", "call_id", "status", "executed", "reused", "full_data", "query_hash")},
+    return {**{key: value.get(key) for key in ("id", "call_id", "status", "executed", "reused", "reused_from", "full_data", "query_hash")},
             "source_tables": (value.get("source_tables") or [])[:16],
             "omitted_sources": max(0, len(value.get("source_tables") or []) - 16),
             "row_counts": (value.get("row_counts") or [])[:16], "artifacts": (value.get("artifacts") or [])[:16]}

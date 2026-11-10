@@ -39,28 +39,30 @@ _PLAN_STEP = {
     "type": "object",
     "properties": {
         "id": {"type": "integer", "minimum": 1},
-        "description": _NONEMPTY_TEXT,
+        "description": {**_NONEMPTY_TEXT, "maxLength": 4000},
         "narration": _TEXT,
-        "check": _TEXT,
+        "check": {**_NONEMPTY_TEXT, "maxLength": 3000},
         "depends_on": {"type": "array", "items": {"type": "integer", "minimum": 1},
                        "uniqueItems": True, "maxItems": 7},
     },
-    "required": ["description"],
+    "required": ["description", "check"],
 }
 _PLAN_STEPS = {
     "type": "array", "minItems": 1, "maxItems": 8,
-    "items": {"anyOf": [_PLAN_STEP, _NONEMPTY_TEXT]},
+    "items": _PLAN_STEP,
 }
 _PLAN_PROPERTIES = {
     "title": _TEXT,
     "understanding": _TEXT,
     "assumptions": _TEXT_LIST,
     "risks": _TEXT_LIST,
+    "acceptance": {"type": "array", "minItems": 1, "maxItems": 8,
+                   "items": {**_NONEMPTY_TEXT, "maxLength": 1000}},
     "steps": _PLAN_STEPS,
     # show_plan 只控制展示；缺失或类型不合法时，沿用 planner 的隐藏/保留规则。
 }
 
-PLAN_SCHEMA = {"type": "object", "properties": _PLAN_PROPERTIES, "required": ["steps"]}
+PLAN_SCHEMA = {"type": "object", "properties": _PLAN_PROPERTIES, "required": ["steps", "acceptance"]}
 
 PLAN_REVIEW_SCHEMA = {
     "type": "object",
@@ -71,7 +73,8 @@ PLAN_REVIEW_SCHEMA = {
     },
     "required": ["verdict", "issues"],
     "allOf": [
-        {"if": {"properties": {"verdict": {"const": "revise"}}}, "then": {"required": ["steps"]}},
+        {"if": {"properties": {"verdict": {"const": "revise"}}},
+         "then": {"required": ["steps"], "properties": {"issues": {"minItems": 1}}}},
         {"if": {"properties": {"verdict": {"const": "ok"}}},
          "then": {"properties": {"issues": {"maxItems": 0}}}},
     ],

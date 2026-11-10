@@ -71,7 +71,7 @@ _MAX_IMAGE_REQUEST_BYTES = 20 * 1024 * 1024
 _KEEP_EVENTS = {
     "model_call_start", "model_call_done", "completion_check_start", "completion_check", "execution_stop", "execution_status",
     "note", "reply", "tool_call", "tool_result", "table", "file", "delivery_manifest", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
-    "reflect_start", "reflect_done", "think_start", "plan_review", "step_check", "audit_start", "audit_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
+    "reflect_start", "reflect_done", "think_start", "plan_review", "plan_repair", "step_check", "audit_start", "audit_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
     "recipe_learn_start", "recipe_evidence", "recipe_generated", "recipe_run_start", "recipe_input", "recipe_step_start",
     "recipe_step_done", "recipe_step_error", "recipe_repair", "recipe_output", "recipe_validation", "recipe_run_done",
     "recipe_verify", "recipe_refine", "recipe_diff", "recipe_completed", "recipe_saved", "recipe_deleted", "recipe_failed", "recipe_view",

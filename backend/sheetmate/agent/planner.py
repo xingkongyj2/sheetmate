@@ -30,6 +30,9 @@ from sheetmate.engine.analysis import table_info
 from sheetmate.engine.sqlutil import frame_to_text
 
 MAX_PLAN_STEPS = 8
+MAX_STEP_DESCRIPTION = 4000
+MAX_STEP_CHECK = 3000
+_DEFAULT_STEP_CHECK = "本项结果符合完整需求并有实际依据；涉及表格或文件时，核对实际产出及关键行数、金额或数量。"
 PLAN_TIMEOUT = 120.0  # 起草计划最多等多久；超时按兜底计划继续
 REVIEW_TIMEOUT = 90.0  # 审查计划最多等多久；超时保留原计划
 _ROLE_TAGS = {"expected": "，人工做好的期望结果", "derived": "，分析结果", "result": "，流程产出"}
@@ -115,10 +118,12 @@ class Plan:
     changes: list[str] = field(default_factory=list)  # 审查时发现并修订的问题
     fallback: bool = False  # 规划失败后的兜底计划
     reason: str = ""  # 规划失败（兜底计划）或审查没完成的原因，给用户看
+    acceptance: list[str] = field(default_factory=list)  # 最终交付的可观察验收条件
 
     def to_json(self) -> dict[str, Any]:
         return {"title": self.title, "understanding": self.understanding, "assumptions": self.assumptions,
-                "risks": self.risks, "steps": self.steps, "show_plan": self.show_plan}
+                "risks": self.risks, "steps": self.steps, "show_plan": self.show_plan,
+                "acceptance": self.acceptance}
 
     def overview(self) -> str:
         """给执行助手看的整份计划，让它知道每一步在全局里的位置。"""
@@ -129,6 +134,8 @@ class Plan:
             lines.append("默认口径：\n" + "\n".join(f"- {item}" for item in self.assumptions))
         if self.risks:
             lines.append("需要留意：\n" + "\n".join(f"- {item}" for item in self.risks))
+        if self.acceptance:
+            lines.append("最终交付验收：\n" + "\n".join(f"- {item}" for item in self.acceptance))
         steps = [f"{step['id']}. {step['description']}" + (f"（验收：{step['check']}）" if step.get("check") else "")
                  + (f"（依赖步骤：{step['depends_on']}）" if step.get("depends_on") else "")
                  for step in self.steps]
@@ -211,7 +218,10 @@ _CONNECTOR = re.compile(r"^(先|首先|然后|接着|接下来|再|之后|随后
 
 def plan_from_steps(steps: list[dict[str, Any]]) -> Plan:
     """调用方自带步骤时仍执行和核对；跳过模型规划，最终回答默认不逐项回顾。"""
-    return Plan(steps=_clean_steps(steps) or [{"id": 1, "description": "完成需求", "check": ""}])
+    cleaned = _clean_steps(steps)
+    if not cleaned:
+        raise ValueError("提供的计划无法执行：请保留完整步骤、有效依赖及非空业务描述，最多 8 项。")
+    return Plan(steps=cleaned)
 
 
 def clean_text(value: Any, limit: int) -> str:
@@ -227,56 +237,68 @@ def clean_list(value: Any, limit: int, item_limit: int = 200) -> list[str]:
     return [item for item in items if item][:limit]
 
 
-def _clean_steps(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
+def _clean_steps(value: Any, *, require_checks: bool = False) -> list[dict[str, Any]]:
+    """完整验证步骤，再稳定拓扑排序；拒绝整份非法计划，绝不静默删步或截断业务条件。"""
+    if not isinstance(value, list) or not 1 <= len(value) <= MAX_PLAN_STEPS:
         return []
-    steps = []
+    steps: list[dict[str, Any]] = []
+    source_ids: set[int] = set()
     for position, item in enumerate(value, start=1):
         if isinstance(item, str):
             item = {"description": item}
         if not isinstance(item, dict):
-            continue
-        # 模型偶尔会在描述里写「第 N 步：」，用户看到的清单和开场白里不要编号
-        description = strip_step_label(clean_text(item.get("description"), 400))
-        if description:
-            step = {"description": description, "check": clean_text(item.get("check"), 300)}
-            step["_source_id"] = item.get("id", position)
-            if "depends_on" in item:
-                dependencies = item["depends_on"]
-                if not isinstance(dependencies, list) or any(type(dep) is not int for dep in dependencies):
-                    return []
-                step["depends_on"] = list(dict.fromkeys(dependencies))
-            narration = strip_step_label(clean_text(item.get("narration"), 160))
-            if narration:
-                step["narration"] = narration
-            steps.append(step)
-    if len(steps) > MAX_PLAN_STEPS:
-        # Dropping intermediate steps can remove required work and silently
-        # rewire implicit dependencies. Let the caller choose its fallback.
-        return []
-    mapping: dict[int, int] = {}
-    normalized = []
-    for index, step in enumerate(steps, start=1):
-        source_id = step.pop("_source_id")
-        if type(source_id) is not int or source_id in mapping:
             return []
-        dependencies = step.get("depends_on")
-        if dependencies is None:
-            step["depends_on"] = [index - 1] if index > 1 else []
-        elif any(dep not in mapping for dep in dependencies):
-            return []  # invalid/forward/missing prerequisites cannot silently disappear
-        else:
-            step["depends_on"] = [mapping[dep] for dep in dependencies]
-        mapping[source_id] = index
-        normalized.append({"id": index, **step})
-    return normalized
+        # 模型偶尔会在描述里写「第 N 步：」，用户看到的清单和开场白里不要编号
+        raw_description = item.get("description")
+        if not isinstance(raw_description, str) or len(raw_description) > MAX_STEP_DESCRIPTION:
+            return []
+        description = strip_step_label(raw_description.strip())
+        raw_check = item.get("check", "")
+        if not isinstance(raw_check, str) or len(raw_check) > MAX_STEP_CHECK:
+            return []
+        check = raw_check.strip()
+        if not description or (require_checks and not check):
+            return []
+        source_id = item.get("id", position)
+        if type(source_id) is not int or source_id < 1 or source_id in source_ids:
+            return []
+        dependencies = item.get("depends_on", [steps[-1]["id"]] if steps else [])
+        if not isinstance(dependencies, list) or any(type(dep) is not int or dep < 1 for dep in dependencies):
+            return []
+        source_ids.add(source_id)
+        step = {"id": source_id, "description": description, "check": check or _DEFAULT_STEP_CHECK,
+                "depends_on": list(dict.fromkeys(dependencies))}
+        narration = strip_step_label(clean_text(item.get("narration"), 160))
+        if narration:
+            step["narration"] = narration
+        steps.append(step)
+    if any(dep not in source_ids or dep == step["id"] for step in steps for dep in step["depends_on"]):
+        return []
+    ordered = []
+    mapping: dict[int, int] = {}
+    pending = list(steps)
+    while pending:
+        # 只移动尚未就绪的项；独立步骤之间保持原顺序。
+        ready = next((step for step in pending if all(dep in mapping for dep in step["depends_on"])), None)
+        if ready is None:
+            return []  # 依赖成环，无可执行顺序
+        pending.remove(ready)
+        mapping[ready["id"]] = len(ordered) + 1
+        ordered.append(ready)
+    return [{**step, "id": mapping[step["id"]], "depends_on": [mapping[dep] for dep in step["depends_on"]]}
+            for step in ordered]
 
 
-def _parse_plan(result: Any) -> Plan | None:
+def _parse_plan(result: Any, *, require_acceptance: bool = False) -> Plan | None:
     if not isinstance(result, dict):
         return None
-    steps = _clean_steps(result.get("steps"))
+    steps = _clean_steps(result.get("steps"), require_checks=True)
     if not steps:
+        return None
+    acceptance = result.get("acceptance", [])
+    if (not isinstance(acceptance, list) or len(acceptance) > MAX_PLAN_STEPS
+            or any(not isinstance(item, str) or not item.strip() or len(item) > 1000 for item in acceptance)
+            or ((require_acceptance or "acceptance" in result) and not acceptance)):
         return None
     return Plan(
         title=clean_text(result.get("title"), 40) or "执行计划",
@@ -285,6 +307,7 @@ def _parse_plan(result: Any) -> Plan | None:
         risks=clean_list(result.get("risks"), 6),
         steps=steps,
         show_plan=result.get("show_plan") is True,
+        acceptance=[item.strip() for item in acceptance],
     )
 
 
@@ -294,12 +317,13 @@ def fallback_plan(ctx: AgentContext, message: str, reason: str = "") -> Plan:
         title="执行需求",
         steps=[
             {"id": 1, "description": "查看相关表的结构和数据" if has_tables and ctx.mode != "create" else "理解需求并确定表格结构",
-             "check": "确认用到的表和列真实存在"},
-            {"id": 2, "description": f"执行需求：{clip(message, 300)}", "check": "结果能和来源数据对上（行数、合计）"},
+             "check": "需求字段、表头和布局已明确，未提供的真实数据不虚构" if ctx.mode == "create" else "确认用到的表和列真实存在"},
+            {"id": 2, "description": "按原始需求完成处理及交付，保留全部业务条件", "check": "结果满足原始需求，能和来源数据对上（行数、合计）"},
             {"id": 3, "description": "整理并说明结果", "check": "回答中的数字与工具结果一致"},
         ],
         fallback=True,
         reason=reason,
+        acceptance=["原始需求中的全部交付完成，结果与实际来源核对一致"],
     )
 
 
@@ -328,7 +352,7 @@ async def make_plan(llm: Any, ctx: AgentContext, message: str, history: list[dic
             # 模型没能读懂图片时，不能悄悄按图片内容未知的情况给出计划
             raise outcome.error if isinstance(outcome.error, LLMError) else LLMError("规划时模型响应超时，请稍后再试。")
         return fallback_plan(ctx, message, outcome.reason)
-    return _parse_plan(outcome.value) or fallback_plan(ctx, message, "模型返回的计划无法使用")
+    return _parse_plan(outcome.value, require_acceptance=True) or fallback_plan(ctx, message, "模型返回的计划无法使用")
 
 
 async def review_plan(llm: Any, ctx: AgentContext, message: str, plan: Plan, brief: str,
@@ -337,9 +361,13 @@ async def review_plan(llm: Any, ctx: AgentContext, message: str, plan: Plan, bri
     限时；审查失败、超时或结果无法使用时保留原计划（并记下原因）。"""
     if not plan.worth_reviewing:
         return plan
-    payload = {"requirement": message, "task_state": task_projection(ctx.task_state),
+    plan.reviewed = False
+    plan.changes = []
+    payload = {"requirement": message, "history": _history_context(history or []),
+               "task_state": task_projection(ctx.task_state),
                "data_profile": brief, "plan": plan.to_json()}
-    outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=THINK_REVIEW_SYSTEM, timeout=REVIEW_TIMEOUT,
+    system = THINK_REVIEW_SYSTEM + "\n\n# 执行助手的工作环境（与起草计划相同）\n" + build_system_prompt(ctx, message, thinking=True)
+    outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=system, timeout=REVIEW_TIMEOUT,
                              schema=PLAN_REVIEW_SCHEMA, schema_name="plan_review",
                              label="思考模式审查计划", **_image_kwargs(ctx, history or []))
     if not outcome.ok:
@@ -355,6 +383,7 @@ async def review_plan(llm: Any, ctx: AgentContext, message: str, plan: Plan, bri
         if isinstance(result.get("show_plan"), bool):
             plan.show_plan = result["show_plan"]
         plan.reviewed = True
+        plan.reason = ""
         return plan
     revised = _parse_plan(result)
     if revised is None:
@@ -369,6 +398,8 @@ async def review_plan(llm: Any, ctx: AgentContext, message: str, plan: Plan, bri
         revised.risks = plan.risks
     if not isinstance(result.get("show_plan"), bool):
         revised.show_plan = plan.show_plan
+    if "acceptance" not in result:
+        revised.acceptance = list(plan.acceptance)
     revised.reviewed = True
     revised.changes = issues
     return revised

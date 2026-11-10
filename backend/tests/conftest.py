@@ -91,7 +91,8 @@ class FakeLLM:
             ids = [item["id"] for item in evidence if item.get("ok") and not item.get("invalid")
                    and item.get("tool") != "reconsider_approach"]
             return {"completed": True, "reason": "已核对本次测试的执行结果。", "remaining": [],
-                    "can_continue": False, "evidence_ids": ids, "requires_execution": bool(evidence)}
+                    "can_continue": False, "evidence_ids": ids, "requires_execution": bool(evidence),
+                    "requires_full_data": False}
         if "最终交付核对助手" in blob:
             candidates = json.loads(prompt).get("candidates", [])
             return {"file_ids": [item["file_id"] for item in candidates],

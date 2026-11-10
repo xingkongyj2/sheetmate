@@ -17,6 +17,7 @@ import re
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -60,12 +61,16 @@ _TOOL_MARKER = "<｜tool▁call▁begin｜>"
 _TOOL_RE = re.compile(r"<｜tool[\s\S]*?(?:<｜tool▁calls?▁end｜>|$)")
 _ROLE_TAGS = {"input": "", "expected": "，⭐期望结果（人工做好的样例）", "derived": "，分析结果", "result": "，流程产出"}
 _EXPLORE_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "list_files", "get_recipe"}
+_READ_OBSERVATION_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql"}
+_MAX_IDENTICAL_OBSERVATIONS = 3
 _RECIPE_TOOLS = {"build_recipe", "revise_recipe", "run_recipe"}
 _SCRIPT_TOOL = "run_python_script"
 _SCRIPT_EXTRA_ITERATIONS = 12
 _DIAGNOSTIC_TOOLS = (_EXPLORE_TOOLS - {"run_sql"}) | {
     "inspect_python_script", "inspect_workbook_creation", "list_recipes", "load_file", "show_files",
     "remember", "save_field_mapping", "save_as_recipe", "delete_recipe", "delete_recipes", "ask_user",
+    "load_tool_group", "inspect_execution_evidence", "inspect_task_context", "inspect_saved_memories",
+    "inspect_conversation_history",
 }
 _NUDGE_AFTER = 4  # 修改模式下查看数据超过这么多次还没生成流程，就提醒一次
 
@@ -74,6 +79,18 @@ _NUDGE_AFTER = 4  # 修改模式下查看数据超过这么多次还没生成流
 class _ScriptAttempt:
     result: ToolResult
     executions: int = 1
+    evidence_id: str | None = None
+
+
+@dataclass
+class _ReadProgress:
+    key: str | None = None
+    repetitions: int = 0
+
+    def observe(self, key: str | None) -> bool:
+        self.repetitions = self.repetitions + 1 if key and key == self.key else int(key is not None)
+        self.key = key
+        return self.repetitions >= _MAX_IDENTICAL_OBSERVATIONS
 
 
 @dataclass
@@ -83,6 +100,10 @@ class _ToolBudget:
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     branch_used: dict[str, int] = field(default_factory=dict)
     branch_limits: dict[str, int] = field(default_factory=dict)
+    script_attempts: dict[tuple[str | None, str], _ScriptAttempt] = field(default_factory=dict)
+    recoveries: dict[tuple[str | None, str], RecoveryState] = field(default_factory=dict)
+    read_progress: dict[tuple[str | None, str], _ReadProgress] = field(default_factory=dict)
+    scope_dependencies: dict[tuple[str | None, str], set[str]] = field(default_factory=dict)
 
     def exhausted(self, maximum: int, branch_id: str | None = None) -> bool:
         return (self.used >= maximum or bool(branch_id and branch_id in self.branch_limits
@@ -92,6 +113,23 @@ class _ToolBudget:
         """A specialist can only use its own evidence; the coordinator sees all."""
         return ({key: item for key, item in self.results.items() if item.get("branch_id") == branch_id}
                 if branch_id else self.results)
+
+    def allow_dependencies(self, branch_id: str | None, scope: str, dependency_scopes: set[str]) -> None:
+        allowed = set(dependency_scopes)
+        for dependency in dependency_scopes:
+            allowed.update(self.scope_dependencies.get((branch_id, dependency), set()))
+        self.scope_dependencies[(branch_id, scope)] = allowed
+
+    def eligible_evidence(self, branch_id: str | None, scope: str) -> set[str]:
+        """A step may cite its own work, declared prerequisites and explicit reuse."""
+        scopes = {scope} | self.scope_dependencies.get((branch_id, scope), set())
+        results = {key: item for key, item in self.results.items() if item.get("branch_id") == branch_id}
+        allowed = {key for key, item in results.items() if item.get("scope") in scopes}
+        for key in list(allowed):
+            original = (results[key].get("evidence") or {}).get("reused_from")
+            if original in results:
+                allowed.add(original)
+        return allowed
 
     def snapshot(self, maximum: int, branch_id: str | None = None) -> dict[str, Any]:
         return {"tool_calls_used": self.used, "tool_calls_limit": maximum,
@@ -158,6 +196,10 @@ class AgentExecutor:
     async def execute_plan(self, ctx: AgentContext, message: str, steps: list[dict[str, Any]],
                            history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """按用户确认的计划逐步执行，每步一次 ReAct，最后自检（TabClaw execute_plan）。"""
+        from sheetmate.agent.planner import plan_from_steps
+
+        plan = plan_from_steps(steps)
+        steps = plan.steps
         self.configure_tools(ctx, message)
         tools = self.registry.for_context(ctx)
         conversation = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(stage_history(history, "execution")),
@@ -166,6 +208,7 @@ class AgentExecutor:
         executed_steps = 0
         step_states: dict[int, str] = {}
         pending: list[str] = []
+        step_scopes: dict[int, str] = {}
         yield {"type": "plan_start", "steps": [{"id": index, "description": str(step.get("description") or f"第 {index} 步")}
                                                 for index, step in enumerate(steps, start=1)]}
         for i, step in enumerate(steps, start=1):
@@ -179,7 +222,10 @@ class AgentExecutor:
                        "summary": "依赖步骤尚未通过验收，本项未执行。", "blocked": True, "depends_on": dependencies}
                 continue
             yield {"type": "step_start", "step_num": i, "total": len(steps), "description": description}
-            step_message = PLAN_STEP_MESSAGE.format(num=i, total=len(steps), description=description)
+            step_message = (PLAN_STEP_MESSAGE.format(num=i, total=len(steps), description=description)
+                            + f"\n本项验收标准：{step['check']}")
+            step_scopes[i] = step_message
+            budget.allow_dependencies(ctx.branch_id, step_message, {step_scopes[dep] for dep in dependencies})
             # 每一步都刷新系统提示里的表清单：前面步骤生成的表要让模型看得到
             conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message)}
             conversation.append({"role": "user", "content": step_message})
@@ -221,7 +267,7 @@ class AgentExecutor:
                         unresolved_tools.add(event["tool"])
             conversation.extend(transcript)
             budget_exhausted = budget.used >= self.max_tool_calls
-            status = "waiting" if waiting else "warning" if (unresolved_tools or incomplete
+            status = "waiting" if waiting else "warning" if (not verified_complete or unresolved_tools or incomplete
                 or (budget_exhausted and not verified_complete)) else "done"
             step_states[i] = status
             if status != "done":
@@ -263,24 +309,26 @@ class AgentExecutor:
         start = len(msgs)
         if tools and ctx.tool_group is not None:
             tools = self.registry.for_context(ctx)
+        budget = budget or _ToolBudget()
+        scope = scope or next((text_content(item.get("content")) for item in reversed(messages)
+                               if item.get("role") == "user"), "当前任务")
+        scope_key = (ctx.branch_id, scope)
         tool_map = {t.name: t for t in tools}
-        recovery = RecoveryState()
+        recovery = budget.recoveries.setdefault(scope_key, RecoveryState())
+        read_progress = budget.read_progress.setdefault(scope_key, _ReadProgress())
         if tools:
             tool_map[RECONSIDER_TOOL] = recovery.tool()
         explored, built, nudged = 0, False, False
         iteration, iteration_limit = 0, max(1, self.max_iterations)
         script_budget_added, fallback_suggested = False, False
         failures: dict[tuple[str, str], int] = {}
-        script_attempts: dict[str, _ScriptAttempt] = {}
-        budget = budget or _ToolBudget()
         policy = getattr(getattr(self.llm, "cfg", None), "runtime_policy", None)
         protocol_retry_limit = getattr(policy, "tool_protocol_retries", 2)
         protocol_pending = False
         completion_retries = 0
-        scope = scope or next((text_content(item.get("content")) for item in reversed(messages)
-                               if item.get("role") == "user"), "当前任务")
         finish_reason: str | None = None
         stream_id = uuid4().hex
+        no_progress = False
 
         def stop(status: str, code: str, summary: str, *, verified: bool = False) -> dict[str, Any]:
             event = {"type": "execution_stop", "status": status, "code": code, "summary": summary,
@@ -308,15 +356,18 @@ class AgentExecutor:
                 return
             # 最后一轮只允许依据已有结果回答；服务商违规返回工具时会如实终止。
             final_round = not protocol_pending and (
-                budget_exhausted or (iteration == iteration_limit - 1 and definitions is not None)
+                no_progress or budget_exhausted or (iteration == iteration_limit - 1 and definitions is not None)
             )
             iteration += 1
-            limit_code = ("recovery_exhausted" if recovery.exhausted else
+            limit_code = ("no_progress" if no_progress else "recovery_exhausted" if recovery.exhausted else
                           "tool_budget_exhausted" if budget.exhausted(self.max_tool_calls, ctx.branch_id) else "max_iterations") if final_round else ""
-            limit_summary = {"recovery_exhausted": "本轮恢复次数已用尽，任务尚未确认全部完成。",
+            limit_summary = {"no_progress": "对相同版本输入的重复读取未带来新进展，任务尚未确认全部完成。",
+                             "recovery_exhausted": "本轮恢复次数已用尽，任务尚未确认全部完成。",
                              "tool_budget_exhausted": "本轮操作次数已用尽，任务尚未确认全部完成。",
                              "max_iterations": "本轮执行轮数已达到上限，任务尚未确认全部完成。"}.get(limit_code, "")
             if final_round:
+                if no_progress:
+                    msgs.append({"role": "user", "content": "对相同版本输入已连续读取三次并得到相同结果，本轮停止重复操作。请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。"})
                 if budget_exhausted:
                     msgs.append({"role": "user", "content": RECOVERY_BUDGET_MESSAGE})
                 msgs.append({"role": "user", "content": FINAL_ROUND_MESSAGE})
@@ -344,7 +395,6 @@ class AgentExecutor:
                     piece = getattr(delta, "reasoning_content", None)
                     if piece:
                         reasoning += piece
-                        yield {"type": "thinking", "content": piece}
                     if delta.content:
                         content += delta.content
                         suppress = suppress or _TOOL_MARKER in content
@@ -383,6 +433,8 @@ class AgentExecutor:
                 yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason,
                        "status": "error", "code": code, "summary": str(exc),
                        "duration_ms": int((time.perf_counter() - model_started) * 1000)}
+                if transcript is not None:
+                    transcript.extend(msgs[start:])
                 yield stop("failed", code, str(exc))
                 yield {"type": "error", "content": str(exc), "code": code, "finish_reason": finish_reason}
                 return
@@ -401,6 +453,7 @@ class AgentExecutor:
             ]
             if not tools:
                 calls = []  # 普通闲聊从未提供执行工具，保留正文并忽略服务商多余的调用。
+            id_errors = _unique_call_ids(calls, msgs)
             forbidden_calls = bool(calls) and (not definitions or final_round)
             if not calls:
                 if protocol_pending:
@@ -430,7 +483,10 @@ class AgentExecutor:
                     check_id = uuid4().hex
                     yield {"type": "completion_check_start", **model_call, "call_id": check_id,
                            "purpose": "completion_check"}
-                    check = await check_completion(self.llm, msgs, display, scope=scope, results=budget.evidence(ctx.branch_id))
+                    check = await check_completion(
+                        self.llm, msgs, display, scope=scope, results=budget.evidence(ctx.branch_id),
+                        eligible_evidence_ids=budget.eligible_evidence(ctx.branch_id, scope) if stop_scope == "step" else None,
+                    )
                     yield {**check.event(), "call_id": check_id}
                     if not check.completed:
                         if check.verified and check.can_continue and not final_round and completion_retries < MAX_COMPLETION_RETRIES:
@@ -474,7 +530,9 @@ class AgentExecutor:
                                 tool_map.update({item.name: item for item in self.registry.for_context(ctx)})
                 errors = ([tool_argument_error(call["function"]["name"], "protocol", [
                     {"path": "/", "message": "本轮不允许工具调用，此操作尚未执行，不能作为完成依据。"},
-                ]) for call in calls] if forbidden_calls else [_preflight_call(call, tool_map) for call in calls])
+                ]) for call in calls] if forbidden_calls else [
+                    id_error or _preflight_call(call, tool_map) for call, id_error in zip(calls, id_errors)
+                ])
             except ToolSchemaError as exc:
                 # 配置故障无法通过模型纠错解决；整批未执行，仍保留完整成对的对话。
                 assistant = {"role": "assistant", "content": display or None, "tool_calls": calls}
@@ -543,7 +601,7 @@ class AgentExecutor:
             end_turn = False
             guidance: list[str] = []
             for call_index, call in enumerate(calls):
-                if budget.exhausted(self.max_tool_calls, ctx.branch_id) or recovery.exhausted:
+                if no_progress or budget.exhausted(self.max_tool_calls, ctx.branch_id) or recovery.exhausted:
                     assistant["tool_calls"] = calls[:call_index]
                     break
                 budget.used += 1
@@ -591,15 +649,17 @@ class AgentExecutor:
                     )
                 else:
                     if name == _SCRIPT_TOOL:
-                        script_key = _script_key(args, ctx)
-                        attempt = script_attempts.get(script_key) if script_key else None
-                        if attempt is None and script_key and args.get("input_tables") is None:
-                            attempt = script_attempts.get("default:" + script_key)
+                        script_key = await asyncio.to_thread(_script_key, args, ctx)
+                        attempt = budget.script_attempts.get((ctx.branch_id, script_key)) if script_key else None
+                        if attempt is None and script_key and args.get("input_tables") is None and not args.get("input_files"):
+                            attempt = budget.script_attempts.get((ctx.branch_id, "default:" + script_key))
                     # 成功结果直接复用；失败允许一次原样重试以容纳暂时性故障。
                     repeated_script = attempt is not None and (attempt.result.ok or attempt.executions >= 2)
                     if repeated_script:
                         result = ToolResult(
-                            REPEATED_SCRIPT_MESSAGE + "\n上次实际执行的反馈：\n" + attempt.result.text,
+                            REPEATED_SCRIPT_MESSAGE
+                            + (f"\n原始执行依据 evidence_id={attempt.evidence_id}；请引用该依据核对完成情况。" if attempt.evidence_id else "")
+                            + "\n上次实际执行的反馈：\n" + attempt.result.text,
                             ok=attempt.result.ok, summary="相同代码与输入已执行，复用上次结果",
                             public_summary="已读取已有处理结果", public_text="正在根据已有结果核对处理方法。",
                             public_details=attempt.result.public_details,
@@ -625,13 +685,13 @@ class AgentExecutor:
                     else:
                         attempt.result = result
                         attempt.executions += 1
-                    script_attempts[script_key] = attempt
-                    if args.get("input_tables") is None:
+                    budget.script_attempts[(ctx.branch_id, script_key)] = attempt
+                    if args.get("input_tables") is None and not args.get("input_files"):
                         # 默认输入会自动包含刚产生的中间表；它们不能使原脚本绕过去重。
                         # 显式选择这些表、或之后由其他工具改变输入，仍会得到新的指纹。
-                        after_key = _script_key(args, ctx)
+                        after_key = await asyncio.to_thread(_script_key, args, ctx)
                         if after_key:
-                            script_attempts["default:" + after_key] = attempt
+                            budget.script_attempts[(ctx.branch_id, "default:" + after_key)] = attempt
                 for table in result.tables:
                     yield {"type": "table", "tool_call_id": call["id"], "table": table}
                 for extra in result.events:
@@ -642,6 +702,10 @@ class AgentExecutor:
                 )
                 evidence = tool_evidence(ctx, name, args, result, call_id=call["id"], sources=sources,
                                          executed=executed, reused=repeated_script)
+                if repeated_script and attempt is not None and attempt.evidence_id:
+                    evidence["reused_from"] = attempt.evidence_id
+                elif executed and script_key and attempt is not None:
+                    attempt.evidence_id = evidence["id"]
                 evidence_record = {"text": externalize_script_text(result.text, python=name == _SCRIPT_TOOL),
                                    "summary": result.summary, "args": externalize_script_references(args), "facts": evidence}
                 ctx.evidence_store[evidence["id"]] = evidence_record
@@ -655,17 +719,20 @@ class AgentExecutor:
                        "duration_ms": int((time.perf_counter() - started) * 1000)}
                 msgs.append({"role": "tool", "tool_call_id": call["id"],
                              "content": f"[evidence_id={evidence['id']}]\n{result.text}"})
-                budget.results[evidence["id"]] = {"tool": name, "ok": result.ok, "branch_id": ctx.branch_id,
+                budget.results[evidence["id"]] = {"tool": name, "ok": result.ok, "branch_id": ctx.branch_id, "scope": scope,
                                               "call_id": call["id"], "evidence": evidence,
                                               "result": externalize_script_text(result.text, python=name == _SCRIPT_TOOL)}
                 for invalid_id in recovery.invalid_results:
                     for evidence_id, item in budget.results.items():
-                        if invalid_id in {evidence_id, item.get("call_id")}:
+                        if item.get("branch_id") == ctx.branch_id and invalid_id in {evidence_id, item.get("call_id")}:
                             item["invalid"] = True
                 end_turn = end_turn or result.end_turn
                 if name != RECONSIDER_TOOL and not method_blocked:
                     recovery.observe(name, result, call_id=call["id"], diagnostic=name in _DIAGNOSTIC_TOOLS,
                                      reused=repeated_script)
+                if executed:
+                    observation = _read_observation_key(name, args, sources, result)
+                    no_progress = read_progress.observe(observation)
                 explored += name in _EXPLORE_TOOLS
                 built = built or name in _RECIPE_TOOLS
                 if name == _SCRIPT_TOOL and tool is not None:
@@ -711,6 +778,39 @@ class AgentExecutor:
         yield stop("incomplete", "max_iterations", "本轮执行轮数已达到上限，任务尚未完成。")
 
 
+def _unique_call_ids(calls: list[dict[str, Any]], messages: list[dict[str, Any]]) -> list[ToolResult | None]:
+    """Reject duplicate provider IDs before side effects and retain valid pairs.
+
+    A replacement ID belongs only to the rejected protocol receipt. It does
+    not turn the invalid request into an executable call.
+    """
+    seen = {call.get("id") for item in messages for call in item.get("tool_calls") or []}
+    errors = []
+    for call in calls:
+        identifier = call["id"]
+        if identifier in seen:
+            call["id"] = "call_" + uuid4().hex
+            errors.append(tool_argument_error(call["function"]["name"], "protocol", [
+                {"path": "/id", "message": "工具调用 ID 重复，本批调用尚未执行；请使用新的唯一 ID 重新发出。"},
+            ]))
+        else:
+            errors.append(None)
+        seen.add(identifier)
+        seen.add(call["id"])
+    return errors
+
+
+def _read_observation_key(name: str, args: dict[str, Any] | None, sources: list[dict[str, Any]],
+                          result: ToolResult) -> str | None:
+    """Convergence is limited to successful, versioned reads, never writes."""
+    if name not in _READ_OBSERVATION_TOOLS or not result.ok or not sources:
+        return None
+    if name == "run_sql" and (args or {}).get("result_name"):
+        return None  # A named query materializes a new table, so it is a write.
+    value = {"tool": name, "args": args, "sources": sources, "result": result.text}
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+
 def _script_key(args: dict[str, Any], ctx: AgentContext) -> str | None:
     """只比较代码和实际声明的输入版本，描述变化不构成新尝试。"""
     try:
@@ -720,11 +820,26 @@ def _script_key(args: dict[str, Any], ctx: AgentContext) -> str | None:
     visible = {table.name: table for table in ctx.visible_tables()}
     names = request.input_tables
     if names is None:
-        names = [table.name for table in visible.values() if table.role != "expected"]
+        names = [] if request.input_files else [table.name for table in visible.values() if table.role != "expected"]
+    files = []
+    for alias, file_id in request.input_files.items():
+        try:
+            resolve = getattr(ctx.host, "original_file_path", None)
+            path = resolve(file_id) if callable(resolve) else None
+            if path is None:
+                return None  # Unknown input versions cannot safely share a cached execution.
+            digest = hashlib.sha256()
+            with Path(path).open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            files.append((alias, file_id, digest.hexdigest()))
+        except Exception:
+            return None  # Let the tool report its actual access/read failure.
     payload = {
         "code": request.code,
-        "tables": [(name, visible[name].created_at if name in visible else None) for name in names],
-        "files": request.input_files,
+        "tables": [(name, visible[name].revision, visible[name].file_version) if name in visible else (name, None, None)
+                   for name in names],
+        "files": files,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 

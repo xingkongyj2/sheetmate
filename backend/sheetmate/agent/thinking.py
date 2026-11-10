@@ -5,7 +5,7 @@
   1. 勘察 + 起草计划   规划之前先看到真实的列类型、空值率、样本和候选主键；计划里写明理解、默认口径、风险和每一步的验收标准
   2. 审查计划          另起一次调用，对照需求和数据找遗漏、顺序错误、不存在的列、缺少勾稽的地方
   3. 逐步执行 + 核对   每一步仍是完整的 ReAct 工具循环；结束后另起一次调用，只依据工具的真实返回判断是否达标，
-                      不达标就带着具体问题补做一次（最多一次，仍有问题则如实标注）
+                      不达标先局部补做一次；初轮结束后最多再调整一次未完成部分，已完成步骤不重做
   4. 综合自检 + 回答核对  最终回答先扣住，对照各步骤的工具结果检查数字和结论，有出入就让智能体用工具核实、更正后再发出
 
 整个过程不打断用户（不需要确认计划）。需求里真正的业务歧义，仍然由执行时的 ask_user 向用户提问。
@@ -37,6 +37,7 @@ from sheetmate.agent.contracts import ANSWER_AUDIT_SCHEMA, STEP_VERDICT_SCHEMA
 from sheetmate.agent.executor import AgentExecutor, build_system_prompt
 from sheetmate.agent.llm import aux_json
 from sheetmate.agent.planner import Plan, clean_list, clean_text, clip, data_brief, make_plan, plan_from_steps, review_plan
+from sheetmate.agent.plan_progress import MAX_PLAN_REPAIRS, repair_unfinished_plan
 from sheetmate.agent.prompts import (
     THINK_AUDIT_FIX_MESSAGE,
     THINK_AUDIT_SYSTEM,
@@ -69,7 +70,7 @@ class Verdict:
     advice: str = ""
     carry_over: str = ""
     checked: str = ""  # 通过时：核对了什么、结果如何（一句话，数字都能在工具返回里找到）
-    skipped: bool = False  # 核对本身没能完成（超时、调用失败或返回无法解析），不据此阻塞执行，也不声称已核对
+    skipped: bool = False  # 核对未完成；不能借此清除已知失败，也不声称已核对
     reason: str = ""  # skipped 时的原因，给用户看；没有依据可核对的步骤不写原因，也就不提
     timed_out: bool = False
 
@@ -197,14 +198,16 @@ def _answer_text(held: list[dict[str, Any]]) -> str:
 
 
 async def verify_step(llm: Any, message: str, plan: Plan, step: dict[str, Any], num: int, run: _Run,
-                      digest: list[dict[str, Any]]) -> Verdict:
-    """只依据工具的真实返回判断一步是否做对做完。限时；超时、调用失败或返回无法解析时返回 skipped（带原因），不阻塞执行。"""
+                      digest: list[dict[str, Any]], prior_issues: list[str] | None = None) -> Verdict:
+    """只依据工具真实返回核对验收。核对不可用时返回 skipped，原来已发现的问题仍须通过重验。"""
     payload = {
         "requirement": message,
+        "final_acceptance": plan.acceptance,
         "assumptions": plan.assumptions,
         "step": {"num": num, "description": step["description"], "check": step.get("check", "")},
         "tool_results": digest[-12:],
         "step_summary": clip(run.text.strip(), 1500),
+        "issues_to_revalidate": prior_issues or [],
     }
     outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=THINK_VERIFY_SYSTEM,
                              timeout=CHECK_TIMEOUT, max_tokens=CHECK_MAX_TOKENS,
@@ -238,6 +241,7 @@ async def audit_answer(llm: Any, message: str, plan: Plan, answer: str, ledger: 
     """最终回答发出之前，对照本轮的工具结果核对数字和结论。限时；没能完成时返回 skipped（带原因）。"""
     payload = {
         "requirement": message,
+        "final_acceptance": plan.acceptance,
         "assumptions": plan.assumptions,
         "step_summaries": [{"step": num, "summary": clip(text, 800)} for num, text in sorted(ledger.summaries.items()) if text],
         "tool_results": [{**item, "result": clip(item["result"], 500)} for item in ledger.digests[-_AUDIT_RESULTS:]],
@@ -386,17 +390,39 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     executed = 0
     carry = ""
     step_states: dict[int, str] = {}
-    pending: list[str] = []
-    for num, step in enumerate(plan.steps, start=1):
-        executed = num
+    failed_checks: dict[int, list[str]] = {}
+    step_scopes = {step["id"]: f"计划步骤 {step['id']}：{step['description']}\n验收：{step['check']}" for step in plan.steps}
+    schedule = list(range(1, total + 1))
+    position, repair_round = 0, 0
+    repairs: dict[int, str] = {}
+    while True:
+        if position >= len(schedule):
+            unfinished = [step["id"] for step in plan.steps if step_states.get(step["id"]) != "done"]
+            if (not unfinished or repair_round >= MAX_PLAN_REPAIRS or health.degraded
+                    or executor.budget_exhausted(budget)):
+                break
+            yield _activity("正在调整未完成部分的处理方法")
+            repairs = await repair_unfinished_plan(llm, message, plan, step_states, ledger.summaries, ledger.digests,
+                                                   failure_issues=failed_checks)
+            if not repairs:
+                break
+            repair_round += 1
+            schedule, position = unfinished, 0
+            yield {"type": "plan_repair", "round": repair_round, "step_ids": unfinished,
+                   "repair_step_ids": sorted(repairs)}
+            yield _note("部分结果未达标，正在调整方法补做。")
+        num = schedule[position]
+        position += 1
+        step = plan.steps[num - 1]
+        executed = max(executed, num)
         description = step["description"]
         dependencies = step.get("depends_on", [num - 1] if num > 1 else [])
         if any(step_states.get(dep) != "done" for dep in dependencies):
             step_states[num] = "blocked"
-            pending.append(description)
             yield {"type": "step_done", "step_num": num, "status": "warning", "quiet": True,
                    "summary": "依赖步骤尚未通过验收，本项未执行。", "blocked": True, "depends_on": dependencies}
             continue
+        budget.allow_dependencies(getattr(ctx, "branch_id", None), step_scopes[num], {step_scopes[dep] for dep in dependencies})
         doing = plan.doing(num)
         yield {"type": "step_start", "step_num": num, "total": total,
                "description": plan.display_description(num), "quiet": True}
@@ -406,23 +432,29 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         yield _activity(doing)
         # 每一项都刷新系统提示里的表清单：前面生成的表要让模型看得到
         conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}
-        conversation.append({"role": "user", "content": THINK_STEP_MESSAGE.format(
+        step_instruction = THINK_STEP_MESSAGE.format(
             num=num, total=total, description=description,
             check=step.get("check") or "本项目标完成，结论和数字都有工具返回的数据支撑",
             carry=f"\n前面的提醒：{carry}" if carry else "",
             opener=THINK_OPENER_SAID if lead else THINK_OPENER_UNSAID,
-        )})
-        step_digest: list[dict[str, Any]] = []
+        )
+        if num in repairs:
+            step_instruction += ("\n根据真实反馈补做本项（原目标、验收和依赖仍有效）：\n" + repairs[num]
+                                 + "\n已完成的其他步骤无需重复执行。")
+        conversation.append({"role": "user", "content": step_instruction})
+        # 修复可以复用先前真实成果，但不能丢弃曾经明确失败的验收。
+        step_digest = [item for item in ledger.digests if item["step"] == num]
         verdict = Verdict()
         run = _Run()
         retried = False
-        first_issues: list[str] = []
+        first_issues = list(failed_checks.get(num, []))
         report = ""
         exhausted = False
-        for attempt in range(MAX_STEP_FIXES + 1):
+        max_fixes = MAX_STEP_FIXES if repair_round == 0 else 0
+        for attempt in range(max_fixes + 1):
             run = _Run()
             async for event in _stream(executor, conversation, tools, ctx, budget, run, ledger, step=num, activity=doing,
-                                       scope=f"本项目标：{description}\n验收：{step.get('check') or '依据实际结果完成本项'}"):
+                                       scope=step_scopes[num]):
                 yield event
             conversation.extend(run.transcript)
             digest = _tool_digest(run.transcript, run.results_ok, num, run.protocol_results, run.evidence)
@@ -449,10 +481,17 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                 verdict = Verdict(skipped=True, reason="前面的核对已超时，这一项没有再等待核对")
             else:
                 yield _activity("正在核对这一项的结果")
-                verdict = await verify_step(llm, message, plan, step, num, run, step_digest)
+                verdict = await verify_step(llm, message, plan, step, num, run, step_digest, failed_checks.get(num))
                 if verdict.timed_out:
                     health.degraded = True  # 模型服务卡住时，后面的核对不再各等一轮
-            retry = not verdict.skipped and not verdict.passed and attempt < MAX_STEP_FIXES and not exhausted
+            if not verdict.skipped:
+                if verdict.passed:
+                    failed_checks.pop(num, None)
+                else:
+                    failed_checks[num] = verdict.issues or ["结果与原验收标准不符"]
+            elif num in failed_checks:
+                verdict.issues = list(failed_checks[num])
+            retry = not verdict.skipped and not verdict.passed and attempt < max_fixes and not exhausted
             # 完整报告用于后续执行与核对，面板稍后只展示一行摘要。
             report = tidy_report(run.text)
             # 要补做时不展示有问题的数字；完整报告和核对证据仍留在执行对话里。
@@ -487,7 +526,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         ledger.summaries[num] = report + (f"\n（核对仍有问题：{'；'.join(verdict.issues[:3])}）" if not verdict.passed and verdict.issues else "")
         ledger.checks.append((public_sentence(description, 60) or f"第 {num} 项",
                               _record_line(step_digest=step_digest, verdict=verdict, retried=retried, first_issues=first_issues)))
-        status = "warning" if (run.incomplete or run.unresolved or not verdict.passed
+        accepted = (run.verified_complete or (not verdict.skipped and verdict.passed)) and num not in failed_checks
+        status = "warning" if (not accepted or run.incomplete or run.unresolved or not verdict.passed
                                or (exhausted and not run.verified_complete)
                                or (verdict.skipped and verdict.reason)) else "done"
         summary = step_summary(status, report=report,
@@ -496,17 +536,15 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                                issues=verdict.issues)
         yield _note(summary, num)
         yield {"type": "step_done", "step_num": num, "status": status, "summary": summary, "quiet": True}
-        known_failure = bool(run.incomplete or run.unresolved or (exhausted and not run.verified_complete)
+        known_failure = bool(not accepted or run.incomplete or run.unresolved or (exhausted and not run.verified_complete)
                              or (not verdict.skipped and not verdict.passed))
         step_states[num] = "failed" if known_failure else "done"
-        if known_failure:
-            pending.append(description)
         if exhausted or run.incomplete:
             if exhausted:
-                pending.extend(item["description"] for item in plan.steps[num:])
                 break
         carry = verdict.carry_over
 
+    pending = [step["description"] for step in plan.steps if step_states.get(step["id"]) != "done"]
     if pending:
         answer = "本轮尚未完成，部分步骤未通过验收或依赖未就绪。\n\n仍需完成：" + "；".join(pending)
         yield {"type": "execution_stop", "scope": "task", "status": "incomplete", "code": "plan_incomplete",
@@ -527,7 +565,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     reflect_messages = [*conversation, {"role": "user", "content": reflect}]
     final = _Run()
     async for event in _stream(executor, reflect_messages, tools, ctx, budget, final, ledger, step=None, activity="正在整理结论",
-                               scope=f"原始任务：{message}\n根据实际执行证据整理最终回答，核对全部目标是否完成。"):
+                               scope=f"原始任务：{message}\n整体验收：{'；'.join(plan.acceptance)}\n根据实际执行证据整理最终回答，核对全部目标是否完成。"):
         yield event
     held = final.held
     ledger.digests.extend(_tool_digest(final.transcript, final.results_ok, 0, final.protocol_results, final.evidence))
