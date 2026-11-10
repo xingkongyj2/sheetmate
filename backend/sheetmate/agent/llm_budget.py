@@ -152,6 +152,60 @@ class RequestBudget:
         self.prompt_tokens += prompt
         self.total_tokens += prompt + output
 
+    def export_state(self) -> dict[str, Any]:
+        """Serialize accounting only; prompt contents and policy never enter checkpoints."""
+        return {"version": 1, "calls": self.calls, "prompt_tokens": self.prompt_tokens,
+                "total_tokens": self.total_tokens, "estimated_calls": self.estimated_calls,
+                "active": {call_id: list(reservation) for call_id, reservation in self.active.items()},
+                "attempted": sorted(self.attempted),
+                "elapsed_seconds": max(0.0, time.monotonic() - self.started)}
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """Restore consumed limits, charging lost in-flight calls their reserved maximum.
+
+        Monotonic clocks cannot survive a process restart. Only active execution
+        time is restored here; checkpoint expiry belongs to the recovery owner.
+        Validate before mutation so a broken checkpoint cannot buy a fresh budget.
+        """
+        if not isinstance(state, dict) or type(state.get("version")) is not int or state["version"] != 1:
+            raise ValueError("不支持的模型预算检查点版本")
+
+        def count(value: Any) -> int:
+            if type(value) is not int or value < 0:
+                raise ValueError("模型预算检查点包含无效计数")
+            return value
+
+        calls = count(state.get("calls"))
+        prompt_tokens = count(state.get("prompt_tokens"))
+        total_tokens = count(state.get("total_tokens"))
+        estimated_calls = count(state.get("estimated_calls"))
+        elapsed = state.get("elapsed_seconds")
+        if type(elapsed) not in {int, float} or not math.isfinite(elapsed) or elapsed < 0:
+            raise ValueError("模型预算检查点包含无效耗时")
+        active, attempted = state.get("active"), state.get("attempted")
+        if (not isinstance(active, dict) or not isinstance(attempted, list)
+                or any(not isinstance(identifier, str) or not identifier for identifier in attempted)):
+            raise ValueError("模型预算检查点包含无效调用记录")
+        reservations: dict[str, tuple[int, int]] = {}
+        for identifier, reservation in active.items():
+            if (not isinstance(identifier, str) or not identifier
+                    or not isinstance(reservation, (list, tuple)) or len(reservation) != 2):
+                raise ValueError("模型预算检查点包含无效在途预留")
+            reservations[identifier] = (count(reservation[0]), count(reservation[1]))
+        attempted_ids = set(attempted)
+        if (total_tokens < prompt_tokens or calls < len(attempted_ids)
+                or estimated_calls + len(reservations) > calls
+                or not reservations.keys() <= attempted_ids):
+            raise ValueError("模型预算检查点计数不一致")
+
+        self.calls = calls
+        self.prompt_tokens = prompt_tokens + sum(item[0] for item in reservations.values())
+        self.total_tokens = total_tokens + sum(sum(item) for item in reservations.values())
+        self.estimated_calls = estimated_calls + len(reservations)
+        self.active = {}
+        self.attempted = attempted_ids
+        self.started = time.monotonic() - elapsed
+
     def snapshot(self) -> dict[str, Any]:
         enabled = self.policy.budget_enabled
         return {"budget_enabled": enabled,

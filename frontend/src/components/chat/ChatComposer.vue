@@ -34,12 +34,14 @@ const props = withDefaults(
     referencesError?: string
     busy?: boolean
     stoppable?: boolean
+    allowSteer?: boolean
+    steerPending?: boolean
     placeholder?: string
     autofocus?: boolean
     large?: boolean
     appearance?: 'outlined' | 'card'
   }>(),
-  { thinking: false, attachments: () => [], localFiles: () => [], tableReferences: () => [], fileReferences: () => [], referencesLoading: false, referencesError: '', busy: false, stoppable: true, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
+  { thinking: false, attachments: () => [], localFiles: () => [], tableReferences: () => [], fileReferences: () => [], referencesLoading: false, referencesError: '', busy: false, stoppable: true, allowSteer: false, steerPending: false, placeholder: '描述你要对表格做什么…', autofocus: false, large: false, appearance: 'outlined' },
 )
 
 const emit = defineEmits<{
@@ -59,8 +61,11 @@ const menuOpen = ref(false)
 const dragging = ref(false)
 const attachmentError = ref('')
 const localPreviews = ref(new Map<string, { file: File; url: string }>())
-const canSend = computed(() => !props.attachments.some((file) => file.status === 'uploading' || file.status === 'error') &&
-  (!!props.modelValue.trim() || props.attachments.some((file) => file.status === 'pending' || file.status === 'done')))
+const steering = computed(() => props.busy && props.allowSteer)
+const canSend = computed(() => props.busy
+  ? steering.value && !props.steerPending && !!props.modelValue.trim() && !props.attachments.length
+  : !props.attachments.some((file) => file.status === 'uploading' || file.status === 'error') &&
+    (!!props.modelValue.trim() || props.attachments.some((file) => file.status === 'pending' || file.status === 'done')))
 watch(() => props.localFiles.map(({ key, file }) => ({ key, file })), (files) => {
   const desired = new Map(files.filter(({ file }) => isImageFile(file.name, file.type)).map(({ key, file }) => [key, file]))
   const previews = new Map(localPreviews.value)
@@ -120,6 +125,7 @@ function preview(key: string) {
 }
 
 function pick(kind: 'input' | 'expected') {
+  if (props.busy) return
   pendingKind.value = kind
   menuOpen.value = false
   fileInput.value?.click()
@@ -138,12 +144,17 @@ function onDrop(e: DragEvent) {
 }
 
 function addFiles(files: File[], kind: 'input' | 'expected') {
+  if (props.busy) {
+    attachmentError.value = '处理中可追加文字要求，文件请在本次处理结束后上传。'
+    return
+  }
   const selected = filterAttachmentFiles(files, props.attachments.filter(image).length)
   attachmentError.value = selected.error
   if (selected.files.length) emit('attach', selected.files, kind)
 }
 
 function onPaste(event: ClipboardEvent) {
+  if (props.busy) return
   captureAttachmentPaste(event, (files) => {
     captureSelection()
     addFiles(files, 'input')
@@ -162,7 +173,7 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
         : ['rounded-[22px] border bg-white', dragging ? 'border-ink' : 'border-line shadow-[0_8px_30px_-18px_rgba(0,0,0,0.25)] focus-within:border-ink/30'],
       dragging && 'ring-4 ring-black/5',
     ]"
-    @dragover.prevent="dragging = true"
+    @dragover.prevent="dragging = !busy"
     @dragleave.prevent="dragging = false"
     @drop.prevent="onDrop"
     @paste.capture="onPaste"
@@ -218,7 +229,7 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
       :placeholder="placeholder"
       :large="large"
       :autofocus="autofocus"
-      :busy="busy"
+      :busy="busy && !steering || steerPending"
       :can-send="canSend"
       @update:model-value="emit('update:modelValue', $event)"
       @send="emit('send')"
@@ -226,8 +237,8 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
 
     <div class="flex items-center gap-1.5 px-3 pb-3 pt-1">
       <div class="relative">
-        <button class="icon-btn" title="上传表格或图片" @click="menuOpen = !menuOpen"><Plus class="size-[18px]" /></button>
-        <div v-if="menuOpen" class="absolute bottom-10 left-0 z-30 w-max max-w-[calc(100vw-3rem)] animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl" @mouseleave="menuOpen = false">
+        <button class="icon-btn disabled:opacity-40" title="上传表格或图片" :disabled="busy" @click="menuOpen = !menuOpen"><Plus class="size-[18px]" /></button>
+        <div v-if="menuOpen && !busy" class="absolute bottom-10 left-0 z-30 w-max max-w-[calc(100vw-3rem)] animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl" @mouseleave="menuOpen = false">
           <button class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper" @click="pick('input')">
             <FileSpreadsheet class="size-4 text-fun-green" />
             <span class="text-sm font-medium">要处理的文件</span>
@@ -247,30 +258,35 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
         class="flex items-center gap-1 rounded-full px-2.5 py-1 text-xs transition"
         :class="thinking ? 'bg-ink text-white' : 'text-mute hover:bg-paper hover:text-ink'"
         :aria-pressed="thinking"
+        :disabled="busy"
         title="思考模式：先了解数据、制定并审查计划，再分步执行、逐步核对，回答前再核对一遍数字。更严谨，也更慢一些"
         @click="emit('update:thinking', !thinking)"
       >
         <Brain class="size-3.5" />思考模式
       </button>
 
-      <div class="ml-auto">
+      <div class="ml-auto flex items-center gap-2">
         <button v-if="busy && stoppable" class="flex size-9 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/80" title="停止" @click="emit('stop')">
           <Square class="size-3.5 fill-current" />
         </button>
-        <button v-else-if="busy" type="button" class="flex size-9 items-center justify-center rounded-full bg-ink text-white opacity-60" aria-label="正在上传并创建对话" disabled>
+        <button v-else-if="busy && !steering" type="button" class="flex size-9 items-center justify-center rounded-full bg-ink text-white opacity-60" aria-label="正在上传并创建对话" disabled>
           <LoaderCircle class="size-4 animate-spin" />
         </button>
         <button
-          v-else
+          v-if="!busy || steering"
+          type="button"
           class="flex size-9 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/80 disabled:bg-line disabled:text-faint"
           :disabled="!canSend"
-          title="发送（Enter）"
+          :title="steering ? '追加要求（Enter）' : '发送（Enter）'"
+          :aria-label="steering ? '追加要求' : '发送'"
           @click="emit('send')"
         >
-          <ArrowUp class="size-4" />
+          <LoaderCircle v-if="steerPending" class="size-4 animate-spin" />
+          <ArrowUp v-else class="size-4" />
         </button>
       </div>
     </div>
+    <p v-if="steering" class="px-4 pb-3 text-xs leading-5 text-faint">可以继续补充要求，会在下一次处理前采纳。</p>
     <p v-if="attachmentError" role="alert" class="px-4 pb-3 text-xs text-error">{{ attachmentError }}</p>
     <div v-if="dragging" class="pointer-events-none absolute inset-0 flex items-center justify-center rounded-[22px] bg-white/80 text-sm font-medium">
       松开即可上传表格或图片

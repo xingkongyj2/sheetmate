@@ -10,6 +10,10 @@ import { parseTableReferences } from '@/composables/tableReferences'
 const props = defineProps<{ message: UiMessage; files: FileInfo[] }>()
 const emit = defineEmits<{ preview: [file: FileInfo] }>()
 const content = computed(() => parseTableReferences(props.message.content))
+const adopted = computed(() => {
+  const steering = props.message.meta.steering
+  return !!steering && typeof steering === 'object' && (steering as Record<string, unknown>).status === 'committed'
+})
 
 const attachments = computed(() => {
   const ids = props.message.meta.attachments
@@ -30,6 +34,7 @@ function fileDetails(file: FileInfo) {
   <div class="flex justify-end">
     <div class="flex max-w-[85%] min-w-0 flex-col items-end gap-2">
       <div class="max-w-full whitespace-pre-wrap break-words rounded-[20px] rounded-br-md bg-paper px-4 py-2.5 text-[15px] leading-relaxed [overflow-wrap:anywhere]"><template v-for="(segment, index) in content" :key="index"><span v-if="segment.type === 'table'" class="mx-0.5 rounded-md bg-[#e0ece5] px-1.5 py-0.5 text-[#3f6152]" :title="`${segment.reference.filename} / ${segment.reference.sheet}`">{{ segment.reference.sheet }}</span><span v-else-if="segment.type === 'file'" class="mx-0.5 rounded-md bg-[#e4eaf2] px-1.5 py-0.5 text-[#42566f]" :title="segment.reference.filename">{{ segment.reference.filename }}</span><template v-else>{{ segment.text }}</template></template></div>
+      <p v-if="adopted" class="text-[11px] text-success">追加要求 · 已采纳</p>
       <div v-if="attachments.length" class="flex w-[320px] max-w-full flex-col gap-2" aria-label="消息附件">
         <div v-for="attachment in attachments" :key="attachment.id" class="flex min-w-0 items-center gap-1 rounded-2xl border border-line bg-white p-1.5 shadow-[0_2px_8px_rgba(0,0,0,0.03)]">
           <template v-if="attachment.file">

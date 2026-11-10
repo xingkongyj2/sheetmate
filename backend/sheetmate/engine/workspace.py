@@ -148,6 +148,44 @@ class Workspace:
         except duckdb.Error:
             pass
 
+    def export_state(self) -> list[dict[str, Any]]:
+        """Internal snapshot for a killable data worker; no live connection escapes."""
+        with self._lock:
+            return [{"meta": info.to_dict(), "frame": self.df(info.name)} for info in self.list_tables()]
+
+    def import_state(self, state: list[dict[str, Any]], *, baseline: dict[str, str] | None = None) -> None:
+        """Publish a successful worker atomically, retaining original table revisions.
+
+        Existing inputs are checked before any write. Concurrent specialists
+        may publish unrelated new tables without invalidating each other.
+        """
+        with self._lock:
+            current = {info.name: info for info in self.list_tables()}
+            if baseline is not None:
+                if any(name not in current or current[name].revision != revision for name, revision in baseline.items()):
+                    raise WorkspaceError("工具运行期间输入表版本已变化，本次计算未发布，请依据新版本重新计算。")
+                if any(item["meta"]["name"] in current and item["meta"]["name"] not in baseline for item in state):
+                    raise WorkspaceError("工具运行期间结果表名称已被占用，本次计算未发布，请重新计算。")
+            self._run("BEGIN TRANSACTION")
+            try:
+                for item in state:
+                    info = TableInfo.from_dict(item["meta"])
+                    existing = current.get(info.name)
+                    if existing is None or existing.revision != info.revision:
+                        meta = info.to_dict()
+                        for key in ("name", "rows", "columns", "revision"):
+                            meta.pop(key, None)
+                        self.put_dataframe(info.name, item["frame"], **meta)
+                        self._save_info(info)
+                    elif existing.probe_memory != info.probe_memory:
+                        self._save_info(info)
+                self._run("COMMIT")
+                self._query_cache.clear()
+                self._query_cache_bytes = 0
+            except BaseException:
+                self._run("ROLLBACK")
+                raise
+
     @contextmanager
     def locked(self):
         """对读取版本、分析与保存记忆等复合操作持有同一把可重入锁。"""

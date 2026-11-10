@@ -116,6 +116,61 @@ class Message(Base):
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
 
+class AgentExecution(Base):
+    """A durable turn, indexed independently from the conversation transcript.
+
+    ``version`` protects concurrent checkpoint writers. A checkpoint is a
+    restart boundary, while tool receipts below record what actually happened.
+    """
+
+    __tablename__ = "agent_executions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("exec"))
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    request_message_id: Mapped[int] = mapped_column(
+        ForeignKey("messages.id", ondelete="CASCADE"), unique=True
+    )
+    assistant_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(24), default="running", index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    request: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    checkpoint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    input_fingerprint: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    recovery_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+
+
+class AgentToolReceipt(Base):
+    """Durable intent/result pair keyed by one stable tool call identity."""
+
+    __tablename__ = "agent_tool_receipts"
+    __table_args__ = (UniqueConstraint("execution_id", "call_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    execution_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_executions.id", ondelete="CASCADE"), index=True
+    )
+    call_id: Mapped[str] = mapped_column(String(200))
+    tool_name: Mapped[str] = mapped_column(String(128))
+    # Arguments are hashed rather than duplicated: the checkpoint owns the
+    # replay input and the receipt owns the actual outcome.
+    arguments_digest: Mapped[str] = mapped_column(String(64))
+    input_digest: Mapped[str] = mapped_column(String(64))
+    side_effect: Mapped[bool] = mapped_column(Boolean, default=True)
+    status: Mapped[str] = mapped_column(String(16), default="started")
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class FileRecord(Base):
     __tablename__ = "files"
 

@@ -382,11 +382,27 @@ export interface StoredMessage {
 
 export interface ConversationDetail extends ConversationBrief {
   running_job: { id: string; message_id: number } | null
+  execution?: {
+    can_resume: boolean
+    execution_id?: string
+    assistant_message_id?: number | null
+    status: ExecutionStatus
+    resume_reason?: string
+  }
+  pending_steers?: RunSteer[]
   messages: StoredMessage[]
   tables: TableBrief[]
   files: FileInfo[]
   recipes: RecipeBrief[]
   runs: { run_id: string; kind: string; status: string; created_at: string }[]
+}
+
+export interface RunSteer {
+  message_id: number
+  content: string
+  status: 'queued' | 'committed' | 'withdrawn'
+  job_id: string
+  execution_id?: string
 }
 
 export interface ValidationCheck {

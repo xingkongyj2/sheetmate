@@ -525,7 +525,14 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
     return
   }
   switch (e.type) {
+    case 'start': {
+      if (typeof e.assistant_message_id === 'number') msg.id = e.assistant_message_id
+      if (typeof e.request_message_id === 'number') msg.meta.request_message_id = e.request_message_id
+      if (typeof e.job_id === 'string') msg.meta.job_id = e.job_id
+      break
+    }
     case 'execution_status': {
+      if (typeof e.assistant_message_id === 'number') msg.id = e.assistant_message_id
       if (typeof e.request_message_id === 'number') msg.meta.request_message_id = e.request_message_id
       if (typeof e.job_id === 'string') msg.meta.job_id = e.job_id
       const state = readExecutionState(e)

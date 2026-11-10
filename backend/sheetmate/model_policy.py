@@ -32,3 +32,9 @@ class LLMRuntimePolicy(BaseModel):
     # 在兼容服务没有 tokenizer 时使用的每次请求保守输入边界（含工具 schema）。
     max_input_chars: int = Field(default=240000, ge=0, le=2000000)
     auxiliary_thinking_enabled: bool = False
+    # Waiting owners have separate clocks; tool activity never resets model idle.
+    llm_soft_idle_seconds: float = Field(default=90, ge=0, le=900, allow_inf_nan=False)
+    llm_hard_idle_seconds: float = Field(default=540, gt=0, le=7200, allow_inf_nan=False)
+    stream_idle_seconds: float = Field(default=90, gt=0, le=900, allow_inf_nan=False)
+    tool_timeout_seconds: float = Field(default=120, gt=0, le=7200, allow_inf_nan=False)
+    cancellation_grace_seconds: float = Field(default=5, gt=0, le=30, allow_inf_nan=False)

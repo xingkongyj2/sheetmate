@@ -16,7 +16,7 @@ import json
 import re
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -45,7 +45,8 @@ from sheetmate.agent.prompts import (
     THINKING_RULES,
     TOOL_FALLBACK_MESSAGE,
 )
-from sheetmate.agent.recovery import MAX_METHODS, METHOD_FAILURE_LIMIT, RECONSIDER_TOOL, RecoveryState
+from sheetmate.agent.recovery import MAX_METHODS, METHOD_FAILURE_LIMIT, RECONSIDER_TOOL, RecoveryState, _Method, _ObservedResult
+from sheetmate.agent.runtime import durable_value, restore_messages, runtime_images
 from sheetmate.agent.scripting import ScriptRequest
 from sheetmate.agent.summarizer import estimate_tokens
 from sheetmate.agent.table_probe import table_probe_context
@@ -105,6 +106,47 @@ class _ToolBudget:
     read_progress: dict[tuple[str | None, str], _ReadProgress] = field(default_factory=dict)
     scope_dependencies: dict[tuple[str | None, str], set[str]] = field(default_factory=dict)
 
+    def to_state(self) -> dict[str, Any]:
+        def rows(items, encode):
+            return [{"branch": key[0], "scope": key[1], "state": encode(value)} for key, value in items.items()]
+
+        def recovery(value):
+            return {"methods": [asdict(method) for method in value.methods], "pending": sorted(value.pending),
+                    "results": {key: asdict(item) for key, item in value.results.items()},
+                    "invalid_results": sorted(value.invalid_results)}
+
+        return durable_value({
+            "used": self.used, "protocol_retries": self.protocol_retries, "results": self.results,
+            "branch_used": self.branch_used, "branch_limits": self.branch_limits,
+            "script_attempts": rows(self.script_attempts, asdict), "recoveries": rows(self.recoveries, recovery),
+            "read_progress": rows(self.read_progress, asdict),
+            "scope_dependencies": rows(self.scope_dependencies, sorted),
+        })
+
+    @classmethod
+    def from_state(cls, state: dict[str, Any]) -> _ToolBudget:
+        budget = cls(used=int(state.get("used", 0)), protocol_retries=int(state.get("protocol_retries", 0)),
+                     results=state.get("results", {}), branch_used=state.get("branch_used", {}),
+                     branch_limits=state.get("branch_limits", {}))
+        for row in state.get("script_attempts", []):
+            value = row["state"]
+            budget.script_attempts[(row["branch"], row["scope"])] = _ScriptAttempt(
+                ToolResult(**value["result"]), int(value["executions"]), value.get("evidence_id"))
+        for row in state.get("recoveries", []):
+            value = row["state"]
+            budget.recoveries[(row["branch"], row["scope"])] = RecoveryState(
+                methods=[_Method(**method) for method in value["methods"]], pending=set(value["pending"]),
+                results={key: _ObservedResult(**item) for key, item in value["results"].items()},
+                invalid_results=set(value["invalid_results"]))
+        for row in state.get("read_progress", []):
+            budget.read_progress[(row["branch"], row["scope"])] = _ReadProgress(**row["state"])
+        for row in state.get("scope_dependencies", []):
+            budget.scope_dependencies[(row["branch"], row["scope"])] = set(row["state"])
+        return budget
+
+    def restore(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(self.from_state(state).__dict__)
+
     def exhausted(self, maximum: int, branch_id: str | None = None) -> bool:
         return (self.used >= maximum or bool(branch_id and branch_id in self.branch_limits
                 and self.branch_used.get(branch_id, 0) >= self.branch_limits[branch_id]))
@@ -150,12 +192,53 @@ class AgentExecutor:
         """一次任务共用的工具调用预算：计划的各个步骤、补做和自检共享同一份。"""
         return _ToolBudget()
 
+    async def continue_runtime(self, ctx: AgentContext, message: str,
+                               history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+        """Continue a late accepted requirement using all prior work and budget."""
+        runtime = getattr(ctx, "runtime", None)
+        if runtime is None:
+            async for event in self.execute(ctx, message, history):
+                yield event
+            return
+        self.configure_tools(ctx, runtime.effective_message(message))
+        budget = _ToolBudget.from_state(runtime.state.get("budget", {}))
+        messages = restore_messages(runtime.state.get("conversation", []), runtime_images(ctx))
+        if not messages:
+            messages = [{"role": "system", "content": build_system_prompt(ctx, message)},
+                        *model_history(stage_history(history, "execution"))]
+        else:
+            messages[0] = {"role": "system", "content": build_system_prompt(ctx, runtime.effective_message(message))}
+        runtime.state.pop("loop", None)
+        runtime.state["whole_task_continuation"] = True
+        messages.append({"role": "user", "content": runtime.effective_message(message)})
+        tools = [] if getattr(ctx, "execution_action", "process") == "chat" else self.registry.for_context(ctx)
+        async for event in self.agent_stream(messages, tools, ctx, budget=budget,
+                                             scope=message):
+            yield event
+
+    async def resume_runtime(self, ctx: AgentContext, message: str,
+                             history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+        """Resume a whole-task continuation without replacing its pending calls."""
+        runtime = getattr(ctx, "runtime", None)
+        saved = runtime.state.get("loop") if runtime else None
+        if not saved:
+            async for event in self.continue_runtime(ctx, message, history):
+                yield event
+            return
+        budget = _ToolBudget.from_state(runtime.state.get("budget", {}))
+        messages = restore_messages(saved["messages"], runtime_images(ctx))
+        tools = [] if getattr(ctx, "execution_action", "process") == "chat" else self.registry.for_context(ctx)
+        async for event in self.agent_stream(messages, tools, ctx, budget=budget,
+                                             scope=saved.get("original_scope", saved["scope"]),
+                                             stop_scope=saved.get("stop_scope", "task")):
+            yield event
+
     def budget_exhausted(self, budget: _ToolBudget) -> bool:
         return budget.used >= self.max_tool_calls
 
     def configure_tools(self, ctx: AgentContext, message: str) -> None:
         """Keep a stable compact menu, expanding only explicit capabilities."""
-        if ctx.table_filter is not None or ctx.tool_group is not None:
+        if ctx.table_filter is not None or ctx.tool_group not in {None, "core"}:
             return
         ctx.tool_group = "core"
         if ctx.mode == "create" or re.search(r"新建|创建|排版|格式|建表", message):
@@ -173,6 +256,11 @@ class AgentExecutor:
 
     async def converse(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """普通对话和意图询问，不提供任务执行工具。"""
+        ctx.execution_action = "chat"
+        if getattr(ctx, "runtime", None) and ctx.runtime.state.get("whole_task_continuation"):
+            async for event in self.resume_runtime(ctx, message, history):
+                yield event
+            return
         system = assemble_context([
             ContextBlock("system_policy", CHAT_SYSTEM, required=True),
             ContextBlock("customer", "## 当前客户资料\n" + build_customer_block(ctx), required=True),
@@ -187,6 +275,10 @@ class AgentExecutor:
 
     async def execute(self, ctx: AgentContext, message: str, history: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
         """直接执行（不带计划）。"""
+        if getattr(ctx, "runtime", None) and ctx.runtime.state.get("whole_task_continuation"):
+            async for event in self.resume_runtime(ctx, message, history):
+                yield event
+            return
         self.configure_tools(ctx, message)
         messages = [{"role": "system", "content": build_system_prompt(ctx, message)}, *model_history(stage_history(history, "execution")),
                     {"role": "user", "content": user_content(message, ctx.image_parts)}]
@@ -198,6 +290,28 @@ class AgentExecutor:
         """按用户确认的计划逐步执行，每步一次 ReAct，最后自检（TabClaw execute_plan）。"""
         from sheetmate.agent.planner import plan_from_steps
 
+        runtime = getattr(ctx, "runtime", None)
+        if runtime and runtime.state.get("whole_task_continuation"):
+            async for event in self.resume_runtime(ctx, message, history):
+                yield event
+            return
+        if runtime and runtime.state.get("plan"):
+            saved_loop = runtime.state.get("loop") or {}
+            if saved_loop:
+                budget = _ToolBudget.from_state(runtime.state.get("budget", {}))
+                messages = restore_messages(saved_loop["messages"], runtime_images(ctx))
+                async for event in self.agent_stream(
+                    messages, self.registry.for_context(ctx), ctx, budget=budget,
+                    scope=saved_loop.get("original_scope", saved_loop["scope"]),
+                    stop_scope=saved_loop.get("stop_scope", "step"),
+                ):
+                    if event["type"] not in {"text_chunk", "final_text", "execution_stop"}:
+                        yield event
+                    if event["type"] in {"error", "clarify"}:
+                        return
+            async for event in self.continue_runtime(ctx, message, history):
+                yield event
+            return
         plan = plan_from_steps(steps)
         steps = plan.steps
         self.configure_tools(ctx, message)
@@ -209,9 +323,23 @@ class AgentExecutor:
         step_states: dict[int, str] = {}
         pending: list[str] = []
         step_scopes: dict[int, str] = {}
+
+        async def checkpoint_plan() -> None:
+            if runtime:
+                runtime.state["plan"] = durable_value({"steps": steps, "step_states": {str(key): value for key, value in step_states.items()},
+                                                        "conversation": conversation, "pending": pending})
+                runtime.state["budget"] = budget.to_state()
+                await runtime.checkpoint()
+
+        await checkpoint_plan()
         yield {"type": "plan_start", "steps": [{"id": index, "description": str(step.get("description") or f"第 {index} 步")}
                                                 for index, step in enumerate(steps, start=1)]}
         for i, step in enumerate(steps, start=1):
+            if runtime and await runtime.consume(ctx):
+                await checkpoint_plan()
+                async for event in self.continue_runtime(ctx, message, history):
+                    yield event
+                return
             executed_steps = i
             description = str(step.get("description") or f"第 {i} 步")
             dependencies = step.get("depends_on", [i - 1] if i > 1 else [])
@@ -239,6 +367,10 @@ class AgentExecutor:
             verified_complete = False
             async for event in self.agent_stream(conversation, tools, ctx, transcript=transcript, budget=budget,
                                                  scope=step_message, stop_scope="step"):
+                if event["type"] == "execution_steered":
+                    async for continued in self.continue_runtime(ctx, message, history):
+                        yield continued
+                    return
                 if event["type"] == "text_chunk":
                     step_text += event["content"]  # 每一步的文字小结是过程，不是给用户的最终回答
                     continue
@@ -272,6 +404,7 @@ class AgentExecutor:
             step_states[i] = status
             if status != "done":
                 pending.append(description)
+            await checkpoint_plan()
             yield {"type": "step_done", "step_num": i, "status": status, "summary": question if waiting else step_text.strip()}
             if waiting:
                 return
@@ -312,7 +445,9 @@ class AgentExecutor:
         budget = budget or _ToolBudget()
         scope = scope or next((text_content(item.get("content")) for item in reversed(messages)
                                if item.get("role") == "user"), "当前任务")
-        scope_key = (ctx.branch_id, scope)
+        runtime = getattr(ctx, "runtime", None)
+        original_scope = scope
+        scope_key = (ctx.branch_id, original_scope)
         tool_map = {t.name: t for t in tools}
         recovery = budget.recoveries.setdefault(scope_key, RecoveryState())
         read_progress = budget.read_progress.setdefault(scope_key, _ReadProgress())
@@ -329,6 +464,90 @@ class AgentExecutor:
         finish_reason: str | None = None
         stream_id = uuid4().hex
         no_progress = False
+        pending_response: dict[str, Any] | None = None
+        saved = runtime.state.get("loop", {}) if runtime else {}
+        restored = saved.get("original_scope", saved.get("scope")) == original_scope and saved.get("stop_scope") == stop_scope
+        applied_revision = int(saved.get("revision", 0)) if restored else 0
+        if runtime:
+            # An earlier phase may already have marked messages committed.
+            # Their presence in runtime is not proof this loop has seen them.
+            await runtime.consume(ctx)
+            scope = runtime.effective_message(original_scope)
+            self.configure_tools(ctx, scope)
+            if tools and ctx.tool_group is not None:
+                tool_map.update({item.name: item for item in self.registry.for_context(ctx)})
+        if restored:
+            msgs = restore_messages(saved["messages"], runtime_images(ctx))
+            start = int(saved.get("start", start))
+            budget.restore(saved.get("budget", {}))
+            recovery = budget.recoveries.setdefault(scope_key, RecoveryState())
+            read_progress = budget.read_progress.setdefault(scope_key, _ReadProgress())
+            if tools:
+                tool_map[RECONSIDER_TOOL] = recovery.tool()
+            pending_response = saved.get("pending_response")
+            iteration = int(saved.get("iteration", 0)) - int(bool(pending_response))
+            iteration_limit = int(saved.get("iteration_limit", iteration_limit))
+            explored, built, nudged = saved.get("explored", 0), saved.get("built", False), saved.get("nudged", False)
+            script_budget_added = saved.get("script_budget_added", False)
+            fallback_suggested, protocol_pending = saved.get("fallback_suggested", False), saved.get("protocol_pending", False)
+            completion_retries, no_progress = saved.get("completion_retries", 0), saved.get("no_progress", False)
+            failures = {(row[0], row[1]): row[2] for row in saved.get("failures", [])}
+            if saved.get("terminal_events") and applied_revision == runtime.revision:
+                if transcript is not None:
+                    transcript.extend(msgs[start:])
+                for event in saved["terminal_events"]:
+                    yield event
+                return
+
+        def snapshot_loop(*, response: dict[str, Any] | None = None,
+                          snapshot_messages: list[dict[str, Any]] | None = None,
+                          terminal_events: list[dict[str, Any]] | None = None) -> None:
+            if runtime is None:
+                return
+            values = durable_value(msgs if snapshot_messages is None else snapshot_messages)
+            budget_state = budget.to_state()
+            runtime.state["budget"] = budget_state
+            runtime.state["conversation"] = values
+            runtime.state["loop"] = {
+                "scope": scope, "original_scope": original_scope, "revision": applied_revision,
+                "stop_scope": stop_scope, "messages": values, "start": start,
+                "budget": budget_state, "iteration": iteration, "iteration_limit": iteration_limit,
+                "explored": explored, "built": built, "nudged": nudged, "script_budget_added": script_budget_added,
+                "fallback_suggested": fallback_suggested, "protocol_pending": protocol_pending,
+                "completion_retries": completion_retries, "no_progress": no_progress,
+                "failures": [[*key, count] for key, count in failures.items()],
+                "pending_response": durable_value(response), "terminal_events": terminal_events or [],
+            }
+
+        async def consume(abandon: dict[str, Any] | None = None, completed: int = 0) -> bool:
+            nonlocal scope, pending_response, applied_revision, no_progress, iteration_limit, protocol_pending
+            if runtime is None:
+                return False
+            await runtime.consume(ctx)
+            if applied_revision == runtime.revision:
+                return False
+            fresh = runtime.state.get("steers", [])[applied_revision:]
+            if abandon is not None:
+                abandon["tool_calls"] = abandon["tool_calls"][:completed]
+            pending_response = None
+            scope = runtime.effective_message(original_scope)
+            # Whole-task continuation already carries one composed request.
+            # Other entries need the still-unseen inbound messages themselves.
+            if not any(item.get("role") == "user" and text_content(item.get("content")) == scope for item in msgs):
+                msgs.extend({"role": "user", "content": item["content"]} for item in fresh)
+            applied_revision = runtime.revision
+            no_progress = False
+            read_progress.key, read_progress.repetitions = None, 0
+            protocol_pending = False
+            # New inbound work has its own bounded decision window. The
+            # shared tool/model/token/time budgets remain spent across it.
+            iteration_limit = max(iteration_limit, iteration + max(1, self.max_iterations))
+            self.configure_tools(ctx, scope)
+            if tools and ctx.tool_group is not None:
+                tool_map.update({item.name: item for item in self.registry.for_context(ctx)})
+            snapshot_loop()
+            await runtime.checkpoint()
+            return True
 
         def stop(status: str, code: str, summary: str, *, verified: bool = False) -> dict[str, Any]:
             event = {"type": "execution_stop", "status": status, "code": code, "summary": summary,
@@ -341,7 +560,17 @@ class AgentExecutor:
             record_event("agent.stop", "sheetmate.agent.executor.AgentExecutor.agent_stream", event, stream_id=stream_id)
             return event
 
+        if await consume() and stop_scope in {"step", "agent"}:
+            if transcript is not None:
+                transcript.extend(msgs[start:])
+            yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
+            return
         while iteration < iteration_limit:
+            if await consume() and stop_scope in {"step", "agent"}:
+                if transcript is not None:
+                    transcript.extend(msgs[start:])
+                yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
+                return
             budget_exhausted = recovery.exhausted or budget.exhausted(self.max_tool_calls, ctx.branch_id)
             available = [tool for name, tool in tool_map.items()
                          if (name != RECONSIDER_TOOL or recovery.pending or recovery.results)
@@ -382,10 +611,30 @@ class AgentExecutor:
             model_started = time.perf_counter()
             model_call = {"call_id": uuid4().hex, "iteration": iteration,
                           "model": getattr(self.llm, "model", None) or getattr(getattr(self.llm, "cfg", None), "model", ""),
+                          "budget_calls_before": getattr(getattr(self.llm, "budget", None), "calls", None),
                           "iteration_limit": iteration_limit, **budget.snapshot(self.max_tool_calls, ctx.branch_id)}
-            yield {"type": "model_call_start", **model_call}
+            resumed_response, pending_response = pending_response, None
+            if runtime is not None and not resumed_response:
+                runtime.state["inflight_model"] = model_call
+                runtime.state["model_calls_started"] = int(runtime.state.get("model_calls_started", 0)) + 1
+                snapshot_loop()
+                await runtime.checkpoint()
+            if not resumed_response:
+                yield {"type": "model_call_start", **model_call}
             try:
-                async for chunk in self.llm.stream_chat(msgs, tools=definitions, tool_choice="none" if final_round else None):
+                async def response_stream():
+                    if resumed_response:
+                        return
+                    async for item in self.llm.stream_chat(msgs, tools=definitions, tool_choice="none" if final_round else None):
+                        yield item
+
+                if resumed_response:
+                    content = resumed_response.get("display", "")
+                    calls_acc = {index: {"id": call["id"], "name": call["function"]["name"],
+                                        "arguments": call["function"]["arguments"]}
+                                 for index, call in enumerate(resumed_response["calls"])}
+                    finish_reason, saw_choice = "tool_calls", True
+                async for chunk in response_stream():
                     choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
                     if choice is None:
                         continue
@@ -438,9 +687,22 @@ class AgentExecutor:
                 yield stop("failed", code, str(exc))
                 yield {"type": "error", "content": str(exc), "code": code, "finish_reason": finish_reason}
                 return
-            yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason, "status": "ok",
-                   "code": "model_response", "summary": "模型已返回响应。",
-                   "duration_ms": int((time.perf_counter() - model_started) * 1000)}
+            if runtime is not None:
+                runtime.state.pop("inflight_model", None)
+            if not resumed_response:
+                yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason, "status": "ok",
+                       "code": "model_response", "summary": "模型已返回响应。",
+                       "duration_ms": int((time.perf_counter() - model_started) * 1000)}
+
+            # A request accepted during remote inference supersedes its old
+            # decision before even the first selected tool can have an effect.
+            if await consume():
+                if stop_scope in {"step", "agent"}:
+                    if transcript is not None:
+                        transcript.extend(msgs[start:])
+                    yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
+                    return
+                continue
 
             display = _TOOL_RE.sub("", content).strip()
             reply: dict[str, Any] = {"role": "assistant", "content": display}
@@ -453,6 +715,9 @@ class AgentExecutor:
             ]
             if not tools:
                 calls = []  # 普通闲聊从未提供执行工具，保留正文并忽略服务商多余的调用。
+            if runtime is not None:
+                snapshot_loop(response={"display": display, "calls": calls} if calls else None)
+                await runtime.checkpoint()
             id_errors = _unique_call_ids(calls, msgs)
             forbidden_calls = bool(calls) and (not definitions or final_round)
             if not calls:
@@ -485,7 +750,7 @@ class AgentExecutor:
                            "purpose": "completion_check"}
                     check = await check_completion(
                         self.llm, msgs, display, scope=scope, results=budget.evidence(ctx.branch_id),
-                        eligible_evidence_ids=budget.eligible_evidence(ctx.branch_id, scope) if stop_scope == "step" else None,
+                        eligible_evidence_ids=budget.eligible_evidence(ctx.branch_id, original_scope) if stop_scope == "step" else None,
                     )
                     yield {**check.event(), "call_id": check_id}
                     if not check.completed:
@@ -510,14 +775,19 @@ class AgentExecutor:
                         yield {"type": "text_chunk", "content": answer}
                         yield {"type": "final_text", "content": answer}
                         return
+                terminal = stop("completed", limit_code or "model_stop", "任务完成情况已核对。" if tools else "本轮回答已结束。",
+                                verified=bool(tools))
+                if runtime is not None:
+                    snapshot_loop(snapshot_messages=msgs + ([reply] if display else []), terminal_events=[
+                        terminal, {"type": "final_text", "content": display}])
+                    await runtime.checkpoint()
                 if display and not live:
                     yield {"type": "text_chunk", "content": display}
                 if transcript is not None:
                     transcript.extend(m for m in msgs[start:] if m.get("content") != FINAL_ROUND_MESSAGE)
                     if display:
                         transcript.append(reply)
-                yield stop("completed", limit_code or "model_stop", "任务完成情况已核对。" if tools else "本轮回答已结束。",
-                           verified=bool(tools))
+                yield terminal
                 yield {"type": "final_text", "content": display}
                 return
             try:
@@ -597,10 +867,18 @@ class AgentExecutor:
             if reasoning:
                 assistant["reasoning_content"] = reasoning
             msgs.append(assistant)
+            assistant_position = len(msgs) - 1
 
             end_turn = False
             guidance: list[str] = []
             for call_index, call in enumerate(calls):
+                if call_index and await consume(assistant, call_index):
+                    if stop_scope in {"step", "agent"}:
+                        if transcript is not None:
+                            transcript.extend(msgs[start:])
+                        yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
+                        return
+                    break
                 if no_progress or budget.exhausted(self.max_tool_calls, ctx.branch_id) or recovery.exhausted:
                     assistant["tool_calls"] = calls[:call_index]
                     break
@@ -613,6 +891,8 @@ class AgentExecutor:
                 args = _parse_args(call["function"]["arguments"])
                 tool = tool_map.get(name)
                 sources = snapshot_inputs(ctx, name, args)
+                cached_result = await runtime.started(call["id"], name, args or {}) if runtime else None
+                visible_events: list[dict[str, Any]] = []
                 debug_params: Any = args if args is not None else call["function"]["arguments"]
                 script_ref: dict[str, Any] = {}
                 if name == _SCRIPT_TOOL and args is not None:
@@ -637,7 +917,10 @@ class AgentExecutor:
                 attempt = None
                 repeated_script = False
                 method_blocked = False
-                if tool is None:
+                if cached_result is not None:
+                    result = ToolResult(**cached_result)
+                    executed = True
+                elif tool is None:
                     result = ToolResult(f"没有工具 `{name}`。可用工具：{', '.join(tool_map)}", ok=False)
                 elif args is None:
                     result = ToolResult("工具参数不是合法的 JSON 对象，请重新调用。", ok=False)
@@ -670,7 +953,10 @@ class AgentExecutor:
                             if isinstance(item, ToolResult):
                                 result = item
                             else:
-                                yield {**item, "tool_call_id": call["id"]}
+                                if runtime:
+                                    visible_events.append({**item, "tool_call_id": call["id"]})
+                                else:
+                                    yield {**item, "tool_call_id": call["id"]}
                 assert result is not None
                 if name == "load_tool_group" and result.ok:
                     tool_map.update({item.name: item for item in self.registry.for_context(ctx)})
@@ -693,9 +979,9 @@ class AgentExecutor:
                         if after_key:
                             budget.script_attempts[(ctx.branch_id, "default:" + after_key)] = attempt
                 for table in result.tables:
-                    yield {"type": "table", "tool_call_id": call["id"], "table": table}
+                    visible_events.append({"type": "table", "tool_call_id": call["id"], "table": table})
                 for extra in result.events:
-                    yield {**extra, "tool_call_id": call["id"]}
+                    visible_events.append({**extra, "tool_call_id": call["id"]})
                 public_text = externalize_script_text(
                     result.public_text if result.public_text is not None else result.text,
                     python=name in {_SCRIPT_TOOL, "inspect_python_script"},
@@ -709,17 +995,17 @@ class AgentExecutor:
                 evidence_record = {"text": externalize_script_text(result.text, python=name == _SCRIPT_TOOL),
                                    "summary": result.summary, "args": externalize_script_references(args), "facts": evidence}
                 ctx.evidence_store[evidence["id"]] = evidence_record
-                yield {"type": "tool_result", "id": call["id"], "tool": name, "ok": result.ok,
+                visible_events.append({"type": "tool_result", "id": call["id"], "tool": name, "ok": result.ok,
                        "evidence": evidence,
                        "evidence_record": evidence_record,
                        "summary": result.public_summary if result.public_summary is not None else result.summary or result.text[:200],
                        "text": public_text[:3000],
                        **({"details": result.public_details} if result.public_details else {}),
                        "debug_result": externalize_script_text(result.text, python=name in {_SCRIPT_TOOL, "inspect_python_script"}),
-                       "duration_ms": int((time.perf_counter() - started) * 1000)}
+                       "duration_ms": int((time.perf_counter() - started) * 1000)})
                 msgs.append({"role": "tool", "tool_call_id": call["id"],
                              "content": f"[evidence_id={evidence['id']}]\n{result.text}"})
-                budget.results[evidence["id"]] = {"tool": name, "ok": result.ok, "branch_id": ctx.branch_id, "scope": scope,
+                budget.results[evidence["id"]] = {"tool": name, "ok": result.ok, "branch_id": ctx.branch_id, "scope": original_scope,
                                               "call_id": call["id"], "evidence": evidence,
                                               "result": externalize_script_text(result.text, python=name == _SCRIPT_TOOL)}
                 for invalid_id in recovery.invalid_results:
@@ -755,6 +1041,16 @@ class AgentExecutor:
                         fallback_suggested = True
                 if recovery.must_switch and not recovery.exhausted:
                     guidance.append(_approach_switch_message(recovery))
+                if runtime is not None:
+                    saved_messages = durable_value(msgs)
+                    saved_messages[assistant_position]["tool_calls"] = calls[:call_index + 1]
+                    remaining = [] if result.end_turn else calls[call_index + 1:]
+                    snapshot_loop(response={"display": "", "calls": remaining} if remaining else None,
+                                  snapshot_messages=saved_messages)
+                    runtime.state["last_tool_events"] = durable_value(visible_events)
+                    await runtime.finished(call["id"], asdict(result))
+                for event in visible_events:
+                    yield event
                 if result.end_turn:
                     # 等待用户回答时立即停止，后续调用不能覆盖确认或产生额外副作用。
                     # 只保留实际执行过的调用，保证计划模式接续时工具消息成对。
@@ -772,6 +1068,9 @@ class AgentExecutor:
                 # 收束没有产出修改文件的探索；由模型选择 Recipe 或 Python 完成交付。
                 msgs.append({"role": "user", "content": MODIFY_NUDGE.format(count=explored)})
                 nudged = True
+            if runtime is not None:
+                snapshot_loop()
+                await runtime.checkpoint()
 
         if transcript is not None:
             transcript.extend(msgs[start:])

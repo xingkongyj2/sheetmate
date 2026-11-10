@@ -15,7 +15,7 @@ from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.config import settings
-from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeRecord, Run, User
+from sheetmate.db.models import AgentExecution, Conversation, Customer, FileRecord, Message, RecipeRecord, Run, User
 from sheetmate.engine.workspace import Workspace, WorkspaceManager
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
 from sheetmate.services import customers as customer_service
@@ -340,6 +340,7 @@ def _run_file_ids(run: Run) -> set[str]:
 def delete_conversation(db: Session, conv: Conversation) -> None:
     """Delete a conversation and every resource whose only scope is that conversation."""
     conversation_id = conv.id
+    execution_ids = list(db.scalars(select(AgentExecution.id).where(AgentExecution.conversation_id == conversation_id)))
     records = file_service.list_files(db, conversation_id=conversation_id, available_only=False)
     run_rows = list(db.scalars(select(Run).where(Run.conversation_id == conversation_id)))
     run_ids = [run.id for run in run_rows]
@@ -375,6 +376,7 @@ def delete_conversation(db: Session, conv: Conversation) -> None:
     file_service.defer_after_commit(db, lambda: delete_conversation_log(conversation_id))
     queue_unreferenced_scope_scripts(db, conversation_ids={conversation_id})
     roots = [settings.outputs_dir / f"conv_{conversation_id}", settings.uploads_dir / f"conv_{conversation_id}"]
+    roots.extend(settings.workspaces_dir / "executions" / execution_id for execution_id in execution_ids)
     _defer_owner_storage_cleanup(db, roots)
 
 

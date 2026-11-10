@@ -22,6 +22,7 @@ from sheetmate.services import files as file_service
 from sheetmate.services.auth import COOKIE_NAME, require_customer
 from sheetmate.services.errors import Conflict, ServiceError
 from sheetmate.services.jobs import jobs
+from sheetmate.services import execution_control
 
 class ConversationLogRoute(APIRoute):
     def get_route_handler(self):
@@ -115,8 +116,13 @@ async def get_conversation(conversation_id: str, db: Session = Depends(get_db), 
         require_customer(db, user, conv.customer_id)
     job = jobs.get(conv.id)
     running_job = {"id": job.id, "message_id": job.message_id} if job else None
+    latest = execution_control.latest_execution(db, conv.id)
+    pending_execution_id = job.execution_id if job else latest.id if latest and latest.status in {"running", "interrupted", "paused"} else None
     return {"ok": True, "conversation": {**conv_service.detail(db, conv), "running": job is not None,
-                                         "running_job": running_job}}
+                                         "running_job": running_job,
+                                         "execution": execution_control.execution_view(db, conv),
+                                         "pending_steers": execution_control.pending_steers(db, conv.id, pending_execution_id)
+                                         if pending_execution_id else []}}
 
 
 @router.get("/{conversation_id}/events")
@@ -232,3 +238,20 @@ async def stop(conversation_id: str, request: Request, db: Session = Depends(get
     conv_service.get_conversation(db, user, conversation_id)
     result = {"ok": True, "stopped": jobs.stop(conversation_id)}
     return result
+
+
+@router.post("/{conversation_id}/steer")
+async def steer(conversation_id: str, body: MessageBody, user: User = Depends(current_user)):
+    if body.attachments:
+        raise ServiceError("运行中只能追加文字要求。")
+    return {"ok": True, **await execution_control.queue_steer(user, conversation_id, body.message)}
+
+
+@router.delete("/{conversation_id}/steer/{message_id}")
+async def withdraw_steer(conversation_id: str, message_id: int, user: User = Depends(current_user)):
+    return {"ok": True, **await execution_control.withdraw_steer(user, conversation_id, message_id)}
+
+
+@router.post("/{conversation_id}/resume")
+async def resume(conversation_id: str, user: User = Depends(current_user)):
+    return sse_response(chat_service.resume_chat(user, conversation_id))

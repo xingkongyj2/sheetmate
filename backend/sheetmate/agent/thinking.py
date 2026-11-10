@@ -27,7 +27,7 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from sheetmate.agent.content import model_history, user_content
@@ -51,6 +51,7 @@ from sheetmate.agent.prompts import (
     THINK_VERIFY_SYSTEM,
 )
 from sheetmate.agent.reporting import grounded, public_sentence, short_step_text, step_summary, tidy_report
+from sheetmate.agent.runtime import durable_value, restore_messages, runtime_images
 from sheetmate.agent.tools import AgentContext
 
 log = logging.getLogger(__name__)
@@ -118,6 +119,7 @@ class _Run:
     error: str = ""
     incomplete: bool = False
     verified_complete: bool = False
+    steered: bool = False
 
     def observe(self, event: dict[str, Any], ledger: _Ledger) -> None:
         kind = event["type"]
@@ -128,6 +130,8 @@ class _Run:
             self.incomplete = True
         elif kind == "execution_stop" and event.get("status") == "completed":
             self.verified_complete = event.get("verified") is True
+        elif kind == "execution_steered":
+            self.steered = True
         elif kind == "tool_result":
             if event.get("error_kind") in {"protocol", "schema"}:
                 self.protocol_results.add(event["id"])
@@ -349,6 +353,34 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                            steps: list[dict[str, Any]] | None = None) -> AsyncIterator[dict[str, Any]]:
     """steps 不为空时使用调用方自带的步骤，跳过起草和审查，其余核对照常进行。"""
     llm = executor.llm
+    runtime = getattr(ctx, "runtime", None)
+    if runtime and runtime.state.get("whole_task_continuation"):
+        async for event in executor.resume_runtime(ctx, message, history):
+            yield event
+        return
+    if runtime and runtime.state.get("planning_state"):
+        # Resume the last serial ReAct boundary first. The Python planner stack
+        # is intentionally not replayed: its completed steps and actual tool
+        # transcript are retained, and a whole-task continuation reconciles the
+        # remaining goals against those results.
+        saved_loop = runtime.state.get("loop") or {}
+        budget = executor.new_budget()
+        budget.restore(runtime.state.get("budget", {}))
+        if saved_loop:
+            messages = restore_messages(saved_loop["messages"], runtime_images(ctx))
+            if messages:
+                async for event in executor.agent_stream(
+                    messages, executor.registry.for_context(ctx), ctx, budget=budget,
+                    scope=saved_loop.get("original_scope", saved_loop["scope"]),
+                    stop_scope=saved_loop.get("stop_scope", "task"),
+                ):
+                    if event["type"] not in {"text_chunk", "final_text", "execution_stop"}:
+                        yield event
+                    if event["type"] in {"error", "clarify"}:
+                        return
+        async for event in executor.continue_runtime(ctx, message, history):
+            yield event
+        return
     configure = getattr(executor, "configure_tools", None)
     if callable(configure):
         configure(ctx, message)
@@ -395,7 +427,25 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     schedule = list(range(1, total + 1))
     position, repair_round = 0, 0
     repairs: dict[int, str] = {}
+
+    async def checkpoint_plan() -> None:
+        if runtime:
+            runtime.state["planning_state"] = durable_value({
+                "plan": asdict(plan), "step_states": {str(key): value for key, value in step_states.items()},
+                "ledger": asdict(ledger), "conversation": conversation, "executed": executed,
+                "failed_checks": {str(key): value for key, value in failed_checks.items()},
+                "schedule": schedule, "position": position, "repair_round": repair_round,
+            })
+            runtime.state["budget"] = budget.to_state()
+            await runtime.checkpoint()
+
+    await checkpoint_plan()
     while True:
+        if runtime and await runtime.consume(ctx):
+            await checkpoint_plan()
+            async for event in executor.continue_runtime(ctx, message, history):
+                yield event
+            return
         if position >= len(schedule):
             unfinished = [step["id"] for step in plan.steps if step_states.get(step["id"]) != "done"]
             if (not unfinished or repair_round >= MAX_PLAN_REPAIRS or health.degraded
@@ -452,10 +502,15 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         exhausted = False
         max_fixes = MAX_STEP_FIXES if repair_round == 0 else 0
         for attempt in range(max_fixes + 1):
+            await checkpoint_plan()
             run = _Run()
             async for event in _stream(executor, conversation, tools, ctx, budget, run, ledger, step=num, activity=doing,
                                        scope=step_scopes[num]):
                 yield event
+            if run.steered:
+                async for event in executor.continue_runtime(ctx, message, history):
+                    yield event
+                return
             conversation.extend(run.transcript)
             digest = _tool_digest(run.transcript, run.results_ok, num, run.protocol_results, run.evidence)
             step_digest.extend(digest)
@@ -534,15 +589,16 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                                checked=verdict.checked if not verdict.skipped else "",
                                reason=verdict.reason,
                                issues=verdict.issues)
-        yield _note(summary, num)
-        yield {"type": "step_done", "step_num": num, "status": status, "summary": summary, "quiet": True}
         known_failure = bool(not accepted or run.incomplete or run.unresolved or (exhausted and not run.verified_complete)
                              or (not verdict.skipped and not verdict.passed))
         step_states[num] = "failed" if known_failure else "done"
+        carry = verdict.carry_over
+        await checkpoint_plan()
+        yield _note(summary, num)
+        yield {"type": "step_done", "step_num": num, "status": status, "summary": summary, "quiet": True}
         if exhausted or run.incomplete:
             if exhausted:
                 break
-        carry = verdict.carry_over
 
     pending = [step["description"] for step in plan.steps if step_states.get(step["id"]) != "done"]
     if pending:
@@ -578,6 +634,9 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         revalidated: Audit | None = None
         fix_incomplete = False
         if not audit.skipped and not audit.ok:
+            if runtime:
+                runtime.state["validation_issues"] = list(audit.issues)
+                await runtime.checkpoint()
             yield _activity("核对发现出入，正在核实更正")
             fix = _Run()
             fix_messages = [*reflect_messages, *final.transcript, {"role": "user", "content": THINK_AUDIT_FIX_MESSAGE.format(
@@ -600,6 +659,9 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                 if not revalidated.skipped and revalidated.ok:
                     held = fix.held
                     corrected = True
+                    if runtime:
+                        runtime.state.pop("validation_issues", None)
+                        await runtime.checkpoint()
         # 结果是结构化事件：界面在回答下面显示成一行小标识，不往回答文字里追加（追加的话会进入后续对话的历史）
         displayed_audit = revalidated if revalidated is not None else audit
         if not audit.skipped and not audit.ok and not corrected and not (not fix.failed and fix.waiting):

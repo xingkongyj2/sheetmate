@@ -398,7 +398,14 @@ def test_analysis_cleans_temporary_workspace_on_error_or_stop(client, samples, f
     fake_llm()
     events = _chat(client, conversation, "统计总额")
     assert any(event["type"] == "error" for event in events)
-    assert roots and all(not root.exists() for root in roots)
+    assert roots
+    if stopped:
+        # A system interruption retains the exact scratch workspace for resume.
+        assert all(root.exists() for root in roots)
+        detail = client.get(f"/api/conversations/{conversation}").json()["conversation"]
+        assert detail["execution"]["can_resume"]
+    else:
+        assert all(not root.exists() for root in roots)
     messages = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"]
     assert messages[-1]["role"] == "assistant"
 
@@ -437,7 +444,9 @@ def test_analysis_stop_waits_for_sync_tool_before_removing_temporary_files():
                 release.set()
                 with pytest.raises(asyncio.CancelledError):
                     await task
-                assert completed.is_set()
+                # Revoked invocations cannot publish a late workspace write.
+                assert not completed.is_set()
+                assert not analysis.ws.exists("临时表")
             finally:
                 release.set()
                 await asyncio.gather(task, return_exceptions=True)

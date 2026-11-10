@@ -29,6 +29,7 @@ from sheetmate.agent.content import user_content
 from sheetmate.agent.context_builder import DEFAULT_PROJECTION_CHARS, prepare_context
 from sheetmate.agent.llm_budget import BudgetExceeded, RequestBudget, context_profile, request_size
 from sheetmate.agent.structured import StructuredOutputError, complete_structured, validate_payload
+from sheetmate.agent.watchdog import Phase, WatchdogTimeout, phase, wait_owned
 from sheetmate.config import LLMSettings, get_llm_settings, is_deepseek_url
 from sheetmate.conversation_log import record_event
 
@@ -361,17 +362,28 @@ class LLMClient:
             }
         return prepared
 
-    async def _within_deadline(self, request: Any) -> Any:
+    async def _within_deadline(self, request: Any, *, streaming: bool = False, retrying: bool = False,
+                               wait_phase: Phase | None = None) -> Any:
         try:
             remaining = self.budget.remaining_seconds()
         except BudgetExceeded as exc:
             if hasattr(request, "close"):
                 request.close()
             raise LLMTimeout(str(exc), code=exc.code) from exc
+        policy = self.cfg.runtime_policy
+        owner_limit = policy.stream_idle_seconds if streaming else policy.llm_hard_idle_seconds
+        hard = min(owner_limit, remaining) if remaining is not None else owner_limit
+        code = ("task_timeout" if remaining is not None and remaining <= owner_limit else
+                "stream_idle_timeout" if streaming else "llm_idle_timeout")
+        name = "retrying_llm" if retrying else "streaming_llm" if streaming else "awaiting_llm"
         try:
-            return await asyncio.wait_for(request, remaining) if remaining is not None else await request
-        except asyncio.TimeoutError as exc:
-            raise LLMTimeout("本次任务已达到总时长上限，已停止模型调用。", code="task_timeout") from exc
+            with phase(name, _LLM_STAGE.get() or "execution", state=wait_phase) as item:
+                return await wait_owned(request, item=item, hard_seconds=hard,
+                                        soft_seconds=0 if retrying else policy.llm_soft_idle_seconds,
+                                        code=code, grace=policy.cancellation_grace_seconds)
+        except WatchdogTimeout as exc:
+            message = ("本次任务已达到总时长上限，已停止模型调用。" if code == "task_timeout" else str(exc))
+            raise LLMTimeout(message, code=exc.code) from exc
 
     async def _create(self, kwargs: dict[str, Any], call_id: str, stage: str) -> Any:
         for attempt in range(self.cfg.runtime_policy.sdk_retries + 1):
@@ -394,7 +406,7 @@ class LLMClient:
                                    round((time.monotonic() - started) * 1000))
                 if not retryable or attempt >= self.cfg.runtime_policy.sdk_retries:
                     raise
-                await self._within_deadline(asyncio.sleep(min(2.0, 0.25 * 2 ** attempt)))
+                await self._within_deadline(asyncio.sleep(min(2.0, 0.25 * 2 ** attempt)), retrying=True)
 
     def _add_usage(self, usage: Any) -> None:
         if usage is None:
@@ -496,9 +508,10 @@ class LLMClient:
             try:
                 saw_choice, has_content, has_reasoning = False, False, False
                 chunks = stream.__aiter__()
+                stream_wait = Phase("streaming_llm", stage)
                 while True:
                     try:
-                        chunk = await self._within_deadline(anext(chunks))
+                        chunk = await self._within_deadline(anext(chunks), streaming=True, wait_phase=stream_wait)
                     except StopAsyncIteration:
                         break
                     chunk_count += 1

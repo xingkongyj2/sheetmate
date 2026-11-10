@@ -11,15 +11,17 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import ExitStack, aclosing
+from contextlib import aclosing
+from copy import deepcopy
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from sheetmate.agent.executor import AgentExecutor
-from sheetmate.agent.intent import infer_request
+from sheetmate.agent.intent import RequestIntent, infer_request
 from sheetmate.agent.llm import (
     LLMError,
     LLMNotConfigured,
@@ -44,7 +46,7 @@ from sheetmate.conversation_log import (
     bind_trace, current_trace, error_data, new_turn, record_event, trace_phase,
 )
 from sheetmate.db.database import session_scope
-from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeProfile, RecipeRecord, User
+from sheetmate.db.models import AgentExecution, Conversation, Customer, FileRecord, Message, RecipeProfile, RecipeRecord, User
 from sheetmate.engine.images import model_image_data_url
 from sheetmate.engine.reader import ReadError
 from sheetmate.engine.script_references import bind_script_references, externalize_script_references
@@ -62,6 +64,8 @@ from sheetmate.services.errors import Conflict, ServiceError
 from sheetmate.services.host import ConversationHost
 from sheetmate.services.table_memory import file_memories_text, restore_workspace_memories
 from sheetmate.services.jobs import Job, jobs
+from sheetmate.services import execution_state
+from sheetmate.services.execution_control import ExecutionControl, execution_resources, execution_root, input_snapshot, latest_execution
 
 _registry = ToolRegistry()
 _background: set[asyncio.Task] = set()  # 持有后台任务的引用，防止被垃圾回收
@@ -239,30 +243,97 @@ def _start_chat(user: User, conversation_id: str, message: str, *,
         if thinking:
             meta["thinking"] = True
         message_id = conv_service.add_message(db, conv, "user", text, meta=meta).id
+        execution = execution_state.create_execution(db, conversation_id, user.id, message_id,
+            request={"message": text, "plan_steps": plan_steps, "use_planning": thinking},
+            input_fingerprint=input_snapshot(db, conv))
+        execution_id = execution.id
     user_id = user.id
 
     async def work(job: Job) -> None:
-        await _run_chat(job, user_id, conversation_id, text, plan_steps, message_id, thinking)
+        try:
+            await _run_chat(job, user_id, conversation_id, text, plan_steps, message_id, thinking)
+        finally:
+            _cleanup_execution_workspace(execution_id)
 
-    return jobs.start(conversation_id, work, message_id=message_id)
+    return jobs.start(conversation_id, work, message_id=message_id, execution_id=execution_id)
+
+
+def _cleanup_execution_workspace(execution_id: str) -> None:
+    import shutil
+    with session_scope() as db:
+        execution = db.get(AgentExecution, execution_id)
+        terminal = execution is None or execution.status in execution_state.TERMINAL_STATUSES
+    if terminal:
+        shutil.rmtree(execution_root(execution_id), ignore_errors=True)
+
+
+def resume_chat(user: User, conversation_id: str) -> Job:
+    """Claim once before starting work; a click can never create two writers."""
+    if jobs.running(conversation_id):
+        raise Conflict("当前任务仍在执行或清理，请稍候。")
+    with session_scope() as db:
+        conv = conv_service.get_conversation(db, user, conversation_id)
+        execution = latest_execution(db, conv.id)
+        if execution is None:
+            raise Conflict("没有可以继续的任务。")
+        execution = execution_state.claim_recovery(db, execution.id, user_id=user.id,
+            expected_version=execution.version, current_inputs=input_snapshot(db, conv, execution.input_fingerprint))
+        request = db.get(Message, execution.request_message_id)
+        assert request is not None
+        text, message_id = request.content, request.id
+        options = deepcopy(execution.request)
+        execution_id = execution.id
+    async def work(job: Job) -> None:
+        try:
+            await _run_chat(job, user.id, conversation_id, text, options.get("plan_steps"), message_id,
+                            bool(options.get("use_planning")), resumed=True)
+        finally:
+            _cleanup_execution_workspace(execution_id)
+    with bind_trace(new_turn(conversation_id)):
+        return jobs.start(conversation_id, work, message_id=message_id, execution_id=execution_id)
 
 
 async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
-                    message_id: int, thinking: bool = False) -> None:
+                    message_id: int, thinking: bool = False, *, resumed: bool = False) -> None:
+    control = ExecutionControl(job, user_id) if job.execution_id else None
+    saved = (control.checkpoint.get("ui") or {}) if control else {}
     recorder = WorkflowRecorder(message)
     recorder.request_message_id = message_id
     recorder.job_id = job.id
-    stored: list[dict[str, Any]] = []
-    text_parts: list[str] = []
+    stored: list[dict[str, Any]] = deepcopy(saved.get("stored", []))
+    committed_delivery = control.checkpoint.get("delivery_manifest") if control else None
+    if control and resumed:
+        for pending_event in (control.checkpoint.get("runtime") or {}).get("last_tool_events", []):
+            if pending_event not in stored and pending_event.get("type") in _KEEP_EVENTS:
+                stored.append(_slim(pending_event))
+        if committed_delivery and committed_delivery not in stored:
+            stored.append(_slim(committed_delivery))
+    # Interruption notices do not become the continued answer or its verdict.
+    if resumed:
+        stored = [event for event in stored if event.get("type") not in {"execution_status", "execution_stop", "error"}]
+        for event in stored:
+            recorder.observe(event)
+        recorder.result, recorder.error = {}, ""
+        recorder._active_calls.clear()
+        recorder.active_call = None
+    recorder.message_id = saved.get("assistant_message_id")
+    recorder.execution_id = job.execution_id
+    text_parts: list[str] = list(saved.get("text_parts", []))
     reply_parts: list[str] = []
-    candidate_parts: list[str] = []
-    candidate_final = ""
-    final_text = ""
-    delivery_candidates: dict[str, dict[str, Any]] = {}
-    delivery_finished = False
-    replace_file_ids: list[str] = []
+    candidate_parts: list[str] = list(saved.get("candidate_parts", []))
+    candidate_final = saved.get("candidate_final", "")
+    final_text = saved.get("final_text", "")
+    delivery_candidates: dict[str, dict[str, Any]] = deepcopy(saved.get("delivery_candidates", {}))
+    delivery_finished = bool(saved.get("delivery_finished", False))
+    replace_file_ids: list[str] = list(saved.get("replace_file_ids", []))
+    if resumed:
+        text_parts, candidate_parts = [], []
+        candidate_final = final_text = ""
+        delivery_finished = bool(committed_delivery)
+        if delivery_finished:
+            job.accepting = False
     analysis: AnalysisWorkspace | None = None
-    run_id = None
+    run_id = saved.get("run_id")
     llm = None
     last_checkpoint = 0.0
 
@@ -273,15 +344,31 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             if callable(snapshot):
                 recorder.llm_usage = snapshot()
             _save_assistant(conversation_id, "".join(text_parts).strip() or final_text, stored, recorder, run_id, finalize=False)
+            if control:
+                control.assistant_message_id = recorder.message_id
             last_checkpoint = time.monotonic()
 
+    if control:
+        control.ui_snapshot = lambda: {"stored": deepcopy(stored), "assistant_message_id": recorder.message_id,
+            "text_parts": list(text_parts), "candidate_parts": list(candidate_parts), "candidate_final": candidate_final,
+            "final_text": final_text, "delivery_candidates": deepcopy(delivery_candidates),
+            "delivery_finished": delivery_finished, "replace_file_ids": list(replace_file_ids), "run_id": run_id}
+
     async def finish_execution(content: str) -> None:
+        await job.wait_workers()
+        job.accepting = False
         recorder.finish(content)
         snapshot = getattr(llm, "usage_snapshot", None)
         if callable(snapshot):
             recorder.llm_usage = snapshot()
         await emit({"type": "execution_status", **recorder.execution(),
-                    "request_message_id": recorder.request_message_id, "job_id": recorder.job_id})
+                    "request_message_id": recorder.request_message_id, "job_id": recorder.job_id,
+                    "assistant_message_id": recorder.message_id})
+        if control:
+            result = recorder.execution().get("status")
+            status = {"completed": "completed", "failed": "failed", "cancelled": "cancelled",
+                      "interrupted": "interrupted"}.get(result, "paused")
+            control.persist(control.runtime.state if control.runtime else None, status=status)
 
     def cancel_execution() -> None:
         user_stop = job.cancel_source == "user"
@@ -358,7 +445,8 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         if recorder.result.get("status") == "completed":
             await job.emit({"type": "activity", "text": "正在确认最终交付文件"})
             try:
-                selection = await select_delivery(llm, request=message, answer=answer,
+                effective_request = control.runtime.effective_message(message) if control and control.runtime else message
+                selection = await select_delivery(llm, request=effective_request, answer=answer,
                                                    candidates=list(delivery_candidates.values()), events=stored)
                 confirmed, finals, summary = selection.confirmed, selection.file_ids, selection.summary
             except Exception as exc:
@@ -369,13 +457,25 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 candidate_file_ids=list(delivery_candidates), final_file_ids=finals if confirmed else [], summary=summary,
                 replace_file_ids=replace_file_ids if confirmed else [])
             final_files = [file_service.file_dict(file_service.get_file(db, file_id)) for file_id in finals] if confirmed else []
+            manifest = {"type": "delivery_manifest", "candidate_file_ids": list(delivery_candidates),
+                        "final_file_ids": finals if confirmed else [], "status": status, "summary": summary,
+                        "replaced_file_ids": replaced, "files": final_files}
+            if control and confirmed:
+                # File replacement and its recovery receipt share one commit.
+                # Recovery must never repeat selection after a successful swap.
+                durable_delivery = control.snapshot(control.runtime.state if control.runtime else None)
+                durable_delivery["delivery_manifest"] = deepcopy(manifest)
+                durable_delivery.setdefault("ui", {})["delivery_finished"] = True
+                persisted = execution_state.save_checkpoint(db, job.execution_id, durable_delivery,
+                    user_id=user_id, expected_version=control.version, assistant_message_id=recorder.message_id)
+                delivery_version = persisted.version
+        if control and confirmed:
+            control.checkpoint, control.version = durable_delivery, delivery_version
         if status == "unverified":
             recorder.record_stop({"status": "incomplete", "code": "delivery_unverified", "summary": summary,
                                   "scope": "task", "verified": False})
-        await emit({"type": "delivery_manifest", "candidate_file_ids": list(delivery_candidates),
-                    "final_file_ids": finals if confirmed else [], "status": status, "summary": summary,
-                    "replaced_file_ids": replaced, "files": final_files})
         delivery_finished = True
+        await emit(manifest)
         if status == "unverified":
             return "已生成文件，但最终交付版本尚未确认，本轮未交付正式结果。" + summary
         if status == "incomplete":
@@ -384,42 +484,136 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
 
     try:
         # 用户已看到具体目标并确认后直接执行，不再通过模型判断第二次授权。
-        with session_scope() as db:
-            user = db.get(User, user_id)
-            assert user is not None
-            confirmed_ids = recipe_deletion.resolve_confirmation(db, user, conversation_id, message)
-            if confirmed_ids is not None:
-                conv = db.get(Conversation, conversation_id)
-                assert conv is not None
-                conv.mode = "analyze"
+        confirmation = deepcopy(control.checkpoint.get("confirmed_recipe_deletion")) if control else None
+        confirmed_ids = None
+        durable_confirmation = None
+        async with job.control_lock:
+            with session_scope() as db:
+                user = db.get(User, user_id)
+                assert user is not None
+                confirmed_ids = (set(confirmation["recipe_ids"]) if confirmation else None) if resumed else (
+                    recipe_deletion.resolve_confirmation(db, user, conversation_id, message))
+                # A queued correction may revoke the original confirmation.
+                # Let the normal request path adopt every accepted message.
+                has_corrections = control and any(
+                    ((item.meta or {}).get("steering") or {}).get("execution_id") == job.execution_id
+                    and ((item.meta or {}).get("steering") or {}).get("status") in {"queued", "committed"}
+                    for item in db.scalars(select(Message).where(
+                        Message.conversation_id == conversation_id, Message.role == "user")))
+                if has_corrections:
+                    confirmed_ids = None
+                if confirmed_ids is not None:
+                    conv = db.get(Conversation, conversation_id)
+                    assert conv is not None
+                    conv.mode = "analyze"
+                    job.accepting = False
+                    if control:
+                        # Consuming the one-time confirmation and remembering
+                        # its exact action must share the same commit.
+                        durable_confirmation = control.snapshot()
+                        if confirmation is None:
+                            source_inputs = execution_state.get_execution(
+                                db, job.execution_id, user_id=user_id).input_fingerprint
+                            if any(source_inputs.get(key) != getattr(conv, key) for key in ("customer_id", "recipe_id")):
+                                raise Conflict("客户或流程绑定已经变化，请重新发送需求。")
+                            expected_recipe_id = conv.recipe_id
+                            if conv.customer_id and conv.recipe_id in confirmed_ids:
+                                customer = db.get(Customer, conv.customer_id)
+                                remaining = list(db.scalars(select(RecipeRecord.recipe_id).where(
+                                    RecipeRecord.customer_id == conv.customer_id,
+                                    RecipeRecord.recipe_id.not_in(confirmed_ids)).group_by(RecipeRecord.recipe_id)
+                                    .order_by(func.min(RecipeRecord.created_at), func.min(RecipeRecord.id))))
+                                expected_recipe_id = (customer.primary_recipe_id if customer.primary_recipe_id in remaining
+                                                      else remaining[0] if remaining else None)
+                            confirmation = {
+                                "action": "delete_recipes", "recipe_ids": sorted(confirmed_ids), "status": "confirmed",
+                                "input_fingerprint": deepcopy(source_inputs), "expected_recipe_id": expected_recipe_id,
+                            }
+                        durable_confirmation["confirmed_recipe_deletion"] = confirmation
+                        execution = execution_state.save_checkpoint(db, job.execution_id, durable_confirmation,
+                            user_id=user_id, expected_version=control.version,
+                            assistant_message_id=recorder.message_id)
+                        confirmation_version = execution.version
+            if durable_confirmation is not None:
+                control.checkpoint, control.version = durable_confirmation, confirmation_version
         if confirmed_ids is not None:
             ctx, host = build_context(user_id, conversation_id, None)
-            await job.emit({"type": "start", "mode": "analyze", "customer": ctx.customer["name"] if ctx.customer else None})
+            await job.emit({"type": "start", "mode": "analyze", "customer": ctx.customer["name"] if ctx.customer else None,
+                            "resumed": resumed, "request_message_id": message_id,
+                            "assistant_message_id": recorder.message_id, "job_id": job.id})
             deleted: list[dict[str, Any]] = []
             if confirmed_ids:
                 host.delete_recipe_ids = set(confirmed_ids)
                 call_id = "confirmed_recipe_deletion"
-                await emit({"type": "tool_call", "id": call_id, "tool": "delete_recipes",
-                            "label": "删除已确认的流程", "params": {"recipe_ids": sorted(confirmed_ids)}})
-                record_event("tool.input", "sheetmate.services.host.ConversationHost.delete_recipes_confirmed",
-                             {"recipe_ids": sorted(confirmed_ids)}, call_id=call_id, tool="delete_recipes")
-                try:
-                    deleted = host.delete_recipes_confirmed(sorted(confirmed_ids))
-                except BaseException as exc:
-                    record_event("tool.error", "sheetmate.services.host.ConversationHost.delete_recipes_confirmed",
-                                 error_data(exc), call_id=call_id, tool="delete_recipes", status="error")
-                    raise
-                record_event("tool.result", "sheetmate.services.host.ConversationHost.delete_recipes_confirmed",
-                             {"deleted": deleted}, call_id=call_id, tool="delete_recipes", status="ok")
-                for item in deleted:
-                    await emit({"type": "recipe_deleted", **item, "tool_call_id": call_id})
-                answer = f"已删除 {len(deleted)} 个流程。"
-                await emit({"type": "tool_result", "id": call_id, "tool": "delete_recipes", "ok": True,
-                            "summary": answer, "text": answer})
+                arguments = {"recipe_ids": sorted(confirmed_ids)}
+                result = None
+                if control:
+                    with session_scope() as db:
+                        start = execution_state.start_tool(db, job.execution_id, user_id=user_id,
+                            call_id=call_id, tool_name="delete_recipes", arguments=arguments,
+                            input_fingerprint=control.checkpoint["confirmed_recipe_deletion"].get("input_fingerprint"))
+                        if not start.should_execute:
+                            result = deepcopy(start.receipt.result)
+                call_event = {"type": "tool_call", "id": call_id, "tool": "delete_recipes",
+                              "label": "删除已确认的流程", "params": arguments}
+                if _slim(call_event) not in stored:
+                    await emit(call_event)
+                if result is None:
+                    record_event("tool.input", "sheetmate.services.host.ConversationHost.delete_recipes_confirmed",
+                                 arguments, call_id=call_id, tool="delete_recipes")
+                    try:
+                        deleted = host.delete_recipes_confirmed(sorted(confirmed_ids))
+                    except BaseException as exc:
+                        record_event("tool.error", "sheetmate.services.host.ConversationHost.delete_recipes_confirmed",
+                                     error_data(exc), call_id=call_id, tool="delete_recipes", status="error")
+                        raise
+                    record_event("tool.result", "sheetmate.services.host.ConversationHost.delete_recipes_confirmed",
+                                 {"deleted": deleted}, call_id=call_id, tool="delete_recipes", status="ok")
+                    answer = f"已删除 {len(deleted)} 个流程。"
+                    result = {"ok": True, "deleted": deleted, "text": answer}
+                    if control:
+                        durable_result = control.snapshot()
+                        durable_result["confirmed_recipe_deletion"] = {
+                            **control.checkpoint["confirmed_recipe_deletion"], "status": "completed",
+                        }
+                        with session_scope() as db:
+                            execution_state.finish_tool(db, job.execution_id, user_id=user_id, call_id=call_id,
+                                                        result=result)
+                            execution = execution_state.get_execution(db, job.execution_id, user_id=user_id)
+                            # Deleting a customer's active recipe can select
+                            # its next primary recipe. That is this action's
+                            # own authorized scope change, not new input.
+                            conv = db.get(Conversation, conversation_id)
+                            if (execution.input_fingerprint.get("recipe_id") in confirmed_ids
+                                    and conv.customer_id == execution.input_fingerprint.get("customer_id")
+                                    and conv.recipe_id == durable_result["confirmed_recipe_deletion"].get("expected_recipe_id")):
+                                durable_result = execution_state.acknowledge_recipe_binding(db, job.execution_id,
+                                    durable_result, user_id=user_id, call_id=call_id,
+                                    previous_recipe_id=execution.input_fingerprint["recipe_id"], recipe_id=conv.recipe_id)
+                            execution = execution_state.save_checkpoint(db, job.execution_id, durable_result,
+                                user_id=user_id, expected_version=control.version,
+                                assistant_message_id=recorder.message_id)
+                            result_version = execution.version
+                        control.checkpoint, control.version = durable_result, result_version
+                deleted, answer = result["deleted"], result["text"]
+                result_events = [{"type": "recipe_deleted", **item, "tool_call_id": call_id} for item in deleted]
+                result_events.append({"type": "tool_result", "id": call_id, "tool": "delete_recipes", "ok": True,
+                                      "summary": answer, "text": answer})
+                for event in result_events:
+                    if _slim(event) in stored:
+                        await job.emit({**event, "replayed": True})
+                    else:
+                        await emit(event)
             else:
                 answer = "本次没有删除流程。"
-            await emit({"type": "text_chunk", "content": answer})
-            await emit({"type": "final_text", "content": answer})
+            if resumed and any(event.get("type") == "reply" and event.get("content") == answer for event in stored):
+                text_parts.append(answer)
+                final_text = answer
+                await job.emit({"type": "reply", "content": answer, "replayed": True})
+                checkpoint(force=True)
+            else:
+                await emit({"type": "text_chunk", "content": answer})
+                await emit({"type": "final_text", "content": answer})
             await finish_execution(answer)
             _save_assistant(conversation_id, answer, stored, recorder, None)
             if deleted:
@@ -430,6 +624,12 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             return
         llm = get_llm()
         ctx, host = build_context(user_id, conversation_id, llm)
+        if control:
+            from sheetmate.agent.runtime import AgentRuntime
+            control.restore_context(ctx, llm)
+            control.runtime = AgentRuntime(control.checkpoint.get("runtime"), save=control.save, poll=control.poll,
+                                          start_tool=control.start_tool, finish_tool=control.finish_tool)
+            ctx.runtime = control.runtime
         host.request_message_id = message_id
         trace = current_trace()
         host.request_turn_id = trace.turn_id if trace is not None else None
@@ -441,11 +641,26 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             ctx.image_parts = _image_parts(records)
         history = await _history(conversation_id, llm, emit, current_message_id=message_id)
         _limit_history_images(history, ctx.image_parts)
+        ctx.runtime_image_parts = [part for item in history for part in item.get("image_parts", [])] + ctx.image_parts
         files = host.list_files()
         references = file_references(conversation_id, message_id, files)
-        intent = await infer_request(llm, ctx, message, history, plan_steps, files=files, file_references=references)
+        saved_intent = control.checkpoint.get("intent") if control else None
+        if control and await control.runtime.consume(ctx):
+            saved_intent = None
+        while True:
+            effective_request = control.runtime.effective_message(message) if control else message
+            intent = RequestIntent(**saved_intent) if saved_intent else await infer_request(
+                llm, ctx, effective_request, history, plan_steps, files=files, file_references=references)
+            if control and await control.runtime.consume(ctx):
+                saved_intent = None
+                continue
+            if control and intent.files is not None and not await control.seal_if_idle():
+                saved_intent = None
+                continue
+            break
         record_event("chat.intent.result", "sheetmate.agent.intent.infer_request", intent)
         ctx.mode = intent.mode
+        ctx.execution_action = intent.action
         host.defer_delivery = intent.action == "process"
         replace_file_ids = list(intent.replace_file_ids)
         ctx.replace_file_ids = intent.replace_file_ids
@@ -463,7 +678,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                 await emit({"type": "file", **{key: file[key] for key in (
                     "file_id", "filename", "kind", "kind_label", "size", "customer_id", "conversation_id", "run_id", "created_at", "sheets", "download_url", "media_type", "preview_url",
                 ) if key in file}, "explicit": True})
-            answer = await file_view_answer(llm, message, intent.files, selected_files)
+            answer = await file_view_answer(llm, effective_request, intent.files, selected_files)
             if answer:
                 await emit({"type": "text_chunk", "content": answer})
             await emit({"type": "final_text", "content": answer})
@@ -472,13 +687,21 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             await job.emit({"type": "done"})
             return
         if intent.action == "process":
-            ctx.save_recipe_requested = (intent.save_recipe if intent.save_recipe is not None
-                                         else await infer_recipe_persistence(llm, message, history))
+            ctx.save_recipe_requested = (ctx.save_recipe_requested if saved_intent else intent.save_recipe if intent.save_recipe is not None
+                                         else await infer_recipe_persistence(llm, effective_request, history))
             host.save_recipe_requested = ctx.save_recipe_requested
-            ctx.task_state = _advance_conversation_task(
-                conversation_id, message_id, relation=intent.task_relation,
-                save_recipe=ctx.save_recipe_requested,
-            )
+            if not saved_intent:
+                ctx.task_state = _advance_conversation_task(
+                    conversation_id, message_id, relation=intent.task_relation,
+                    save_recipe=ctx.save_recipe_requested,
+                )
+                if control:
+                    for adopted in control.runtime.state.get("steers", []):
+                        ctx.task_state = _advance_conversation_task(conversation_id, adopted["message_id"],
+                            relation="continue", save_recipe=ctx.save_recipe_requested)
+            if control:
+                control.checkpoint["intent"] = asdict(intent)
+                control.persist(control.runtime.state)
     except asyncio.CancelledError:
         cancel_execution()
         await finish_execution("")
@@ -535,19 +758,32 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             await emit({"type": "final_text", "content": content})
 
     try:
-        with ExitStack() as resources:
+        async with execution_resources(job) as resources:
             if intent.action == "process":
-                analysis = resources.enter_context(analysis_workspace(ctx.ws))
+                ready = bool(control and control.checkpoint.get("analysis_ready"))
+                analysis = resources.enter_context(analysis_workspace(ctx.ws,
+                    root=execution_root(job.execution_id) if control else None, resume=ready))
                 ctx.ws = host.ws = analysis.ws
                 host.analysis = analysis
                 for table in ctx.ws.list_tables():
                     if table.file_id:
                         host.file_path(table.file_id)
-                if ctx.mode == "analyze":
+                if resumed:
+                    for event in stored:
+                        if event.get("type") == "table":
+                            name = (event.get("table") or {}).get("name")
+                            if name and analysis.ws.exists(name):
+                                analysis.publish(name)
+                if ctx.mode == "analyze" and run_id is None:
                     with session_scope() as db:
                         run_id = run_service.create_run(db, kind="analysis", user_id=user_id, customer_id=ctx.host.customer_id,
                                                         conversation_id=conversation_id, request_text=message).id
-            await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None})
+                if control:
+                    control.checkpoint["analysis_ready"] = True
+                    control.persist(control.runtime.state)
+            await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None,
+                            "resumed": resumed, "request_message_id": message_id,
+                            "assistant_message_id": recorder.message_id, "job_id": job.id})
             if intent.action == "chat":
                 stream = executor.converse(ctx, message, history)
             elif thinking:
@@ -570,6 +806,24 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                         candidate_final = event.get("content", "")
                     else:
                         await emit(event)
+            # Close intake atomically with the last queue check. Requests that
+            # arrived during a final audit still get their own full-goal pass.
+            if control:
+                while True:
+                    if await control.seal_if_idle():
+                        break
+                    await control.runtime.consume(ctx)
+                    candidate_parts.clear()
+                    candidate_final = ""
+                    stream = executor.continue_runtime(ctx, message, history)
+                    async with aclosing(stream):
+                        async for event in stream:
+                            if event["type"] == "text_chunk":
+                                candidate_parts.append(event["content"])
+                            elif event["type"] == "final_text":
+                                candidate_final = event.get("content", "")
+                            else:
+                                await emit(event)
     except asyncio.CancelledError:
         cancel_execution()
         answer = await guard_creation_delivery(interrupted=True)
@@ -850,6 +1104,15 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
             return
         meta = {"mode": conv.mode, "digest": recorder.digest(), "tool_sequence": record["tool_sequence"], "run_id": run_id,
                 "execution": record["execution"], "request_message_id": recorder.request_message_id, "job_id": recorder.job_id}
+        if getattr(recorder, "execution_id", None):
+            meta["execution_id"] = recorder.execution_id
+        replies = [recorder.request_message_id] if recorder.request_message_id else []
+        if getattr(recorder, "execution_id", None):
+            replies.extend(item.id for item in db.scalars(select(Message).where(
+                Message.conversation_id == conversation_id, Message.role == "user").order_by(Message.id))
+                if ((item.meta or {}).get("steering") or {}).get("execution_id") == recorder.execution_id
+                and ((item.meta or {}).get("steering") or {}).get("status") == "committed")
+        meta["reply_to_message_ids"] = replies
         trace = current_trace()
         if trace is not None:
             meta["log_turn_id"] = trace.turn_id
@@ -862,7 +1125,7 @@ def _save_assistant(conversation_id: str, content: str, events: list[dict[str, A
             assistant.events = list(events)
             assistant.meta = meta
         state = dict(conv.task_state or {})
-        if state and state.get("current_message_id") == recorder.request_message_id:
+        if state and state.get("current_message_id") in replies:
             execution = record["execution"]
             state["status"] = execution.get("status", "running")
             state["last_assistant_message_id"] = assistant.id
@@ -938,6 +1201,10 @@ def recover_interrupted_executions() -> None:
     """A persisted running checkpoint survived its process; the exact interruption cause is unknown."""
     reason = "服务已重启，上次执行未完成；停止的具体原因未知。"
     with session_scope() as db:
+        for execution in execution_state.discover_recoverable(db, limit=1000):
+            if execution.status == "running":
+                execution_state.save_checkpoint(db, execution.id, execution.checkpoint,
+                    user_id=execution.user_id, expected_version=execution.version, status="interrupted")
         # A finished response may still have been waiting for background memory
         # usage when the process stopped. There is no remaining work to poll.
         for assistant in db.scalars(select(Message).where(
@@ -983,9 +1250,45 @@ def recover_interrupted_executions() -> None:
             run.finished_at = run_service.now()
 
 
+async def resume_startup_executions() -> None:
+    """Continue only the latest request's safe interrupted checkpoint at startup."""
+    from sheetmate.config import get_llm_settings
+    if not get_llm_settings().configured:
+        return
+    with session_scope() as db:
+        candidates = [(execution.id, execution.conversation_id, execution.user_id)
+                      for execution in execution_state.discover_recoverable(db, limit=1000)
+                      if execution.status == "interrupted" and execution.checkpoint.get("runtime")]
+    for execution_id, conversation_id, user_id in candidates:
+        try:
+            with session_scope() as db:
+                user = db.get(User, user_id)
+                if user is None:
+                    continue
+                conv = conv_service.get_conversation(db, user, conversation_id)
+                current = latest_execution(db, conversation_id)
+                if (current is None or current.id != execution_id or current.status != "interrupted"
+                        or not current.checkpoint.get("runtime")):
+                    continue
+                from sheetmate.services.execution_control import execution_view
+                view = execution_view(db, conv)
+                if not view or not view.get("can_resume"):
+                    continue
+            resume_chat(user, conversation_id)
+        except ServiceError as exc:
+            record_event("execution.recovery_skipped", "sheetmate.services.chat.resume_startup_executions",
+                         {"conversation_id": conversation_id, "reason": str(exc)})
+        await asyncio.sleep(0)
+
+
 def persist_unfinished_job(job: Job, *, status: str, code: str, summary: str) -> dict[str, Any] | None:
     """Last-resort persistence when orchestration fails outside its normal finalization path."""
     with session_scope() as db:
+        if job.execution_id:
+            durable = db.get(AgentExecution, job.execution_id)
+            if durable is not None and durable.status in execution_state.RECOVERABLE_STATUSES:
+                execution_state.save_checkpoint(db, durable.id, durable.checkpoint, user_id=durable.user_id,
+                    expected_version=durable.version, status=status)
         conv = db.get(Conversation, job.key)
         if conv is None:
             return
@@ -1065,7 +1368,8 @@ def _history_snapshot(conversation_id: str, current_message_id: int | None) -> t
         first_user = db.scalar(primer_query.order_by(Message.id).limit(1))
         primer = {"id": first_user.id, "content": first_user.content} if first_user else None
         items = [{"id": m.id, "role": m.role, "content": _history_content(m)}
-                 for m in rows if not is_llm_not_configured_message(m.role, m.content, m.events)]
+                 for m in rows if not is_llm_not_configured_message(m.role, m.content, m.events)
+                 and ((m.meta or {}).get("steering") or {}).get("status") not in {"queued", "withdrawn"}]
         return conv.context_summary, conv.summary_until, items, primer
 
 

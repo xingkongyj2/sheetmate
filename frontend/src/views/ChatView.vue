@@ -3,7 +3,7 @@
  * 对话页：中间是消息流和输入框，右侧是工作区面板。
  * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和工作区面板开关。
  */
-import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Save } from '@lucide/vue'
+import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Play, Save } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -11,13 +11,14 @@ import { useRouter } from 'vue-router'
 import { conversationApi, runApi } from '@/api'
 import { ApiError, errorText } from '@/api/http'
 import type { StreamHandle } from '@/api/sse'
-import type { AgentEvent, ConversationDetail, FileInfo, TableBrief } from '@/api/types'
+import type { AgentEvent, ConversationDetail, FileInfo, RunSteer, TableBrief } from '@/api/types'
 import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
 import ChatComposer, { type Attachment } from '@/components/chat/ChatComposer.vue'
 import ExecutionPanel from '@/components/chat/ExecutionPanel.vue'
 import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
+import RunSteeringQueue from '@/components/chat/RunSteeringQueue.vue'
 import TaskChecklist from '@/components/chat/TaskChecklist.vue'
 import UserMessage from '@/components/chat/UserMessage.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
@@ -30,6 +31,7 @@ import { serializeTableReferences, type FileReference, type TableReference } fro
 import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
 import { checklistItems } from '@/composables/thinkingPresentation'
 import { syncMessageUsage } from '@/composables/usageSync'
+import { applyRunSteerEvent, committedRunMessages, mergeRunSteer, reconcileRunSteers, restoreRunSteers } from '@/composables/runControls'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { useAuthStore } from '@/stores/auth'
 import { useChatPreferencesStore } from '@/stores/chatPreferences'
@@ -47,6 +49,10 @@ const messages = ref<UiMessage[]>([])
 const loading = ref(true)
 const streaming = ref(false)
 const reconnecting = ref(false)
+const steers = ref<RunSteer[]>([])
+const sendingSteer = ref(false)
+const startingResume = ref(false)
+const withdrawingSteer = ref<number | null>(null)
 const text = ref('')
 const preferences = useChatPreferencesStore()
 const auth = useAuthStore()
@@ -74,6 +80,7 @@ let pollTimer = 0
 let usageRefreshTimer = 0
 let usagePendingSince = 0
 let sideRefreshVersion = 0
+let steerRevision = 0
 let loadVersion = 0
 let disposed = false
 let scrollFrame = 0
@@ -86,9 +93,13 @@ const selectedMessage = computed(() => {
   return assistants.find((m) => m.key === selectedKey.value) ?? assistants[assistants.length - 1] ?? null
 })
 const customer = computed(() => detail.value?.customer ?? null)
+const canResume = computed(() => detail.value?.execution?.can_resume === true && !streaming.value && !reconnecting.value && !startingResume.value)
+const visibleSteers = computed(() => steers.value.filter((item) => item.status !== 'committed' ||
+  !messages.value.some((message) => message.role === 'user' && message.id === item.message_id)))
+const currentAssistant = computed(() => [...messages.value].reverse().find((message) => message.role === 'assistant'))
 // 思考模式的进度跟随本轮助手消息，刷新后也可恢复步骤总结。
 const checklist = computed(() => {
-  const last = messages.value.at(-1)
+  const last = currentAssistant.value
   const items = checklistItems(last)
   return last && items.length ? { key: last.key, items, running: last.streaming } : null
 })
@@ -163,14 +174,15 @@ async function load(silent = false) {
     detail.value = data
     acknowledgeUploads(data.files)
     if (!streaming.value) {
-      const restored = restoreConversationMessages(data.messages, data.running_job)
+      steers.value = restoreRunSteers(data.messages, data.pending_steers, data.execution?.execution_id)
+      const restored = restoreConversationMessages(committedRunMessages(data.messages), data.running_job)
       messages.value = restored.messages.map((m) => reactive(m) as UiMessage)
       scrollToBottom(true) // 打开会话（包括后台任务跑完刷新）都停在最新一条
       reconnecting.value = false
       store.patchConversation(props.id, { running: data.running, title: data.title })
       const job = data.running_job
       if (job) {
-        const assistant = messages.value.at(-1)!
+        const assistant = restored.assistant!
         selectedKey.value = assistant.key
         void receiveStream(assistant, (onEvent) => conversationApi.events(props.id, job.id, onEvent), true)
       }
@@ -196,6 +208,7 @@ function schedulePoll(delay = 1000) {
 
 async function refreshSide() {
   const version = ++sideRefreshVersion
+  const queueRevision = steerRevision
   refreshingUsage.value = true
   try {
     const data = await conversationApi.get(props.id)
@@ -206,7 +219,15 @@ async function refreshSide() {
       detail.value.title = data.title
       detail.value.customer = data.customer
       detail.value.messages = data.messages
+      detail.value.execution = data.execution
+      detail.value.pending_steers = data.pending_steers
+      steers.value = reconcileRunSteers(steers.value,
+        restoreRunSteers(data.messages, data.pending_steers, data.execution?.execution_id),
+        data.execution?.execution_id, queueRevision !== steerRevision)
       syncMessageUsage(messages.value, data.messages)
+      if (!streaming.value && steers.value.some((item) => item.status === 'committed')) {
+        messages.value = restoreConversationMessages(committedRunMessages(data.messages)).messages.map((message) => reactive(message) as UiMessage)
+      }
       acknowledgeUploads(data.files)
     }
   } catch {
@@ -299,7 +320,11 @@ watch(
 )
 
 async function onSend() {
-  if (streaming.value || reconnecting.value) return
+  if (reconnecting.value || sendingSteer.value) return
+  if (streaming.value) {
+    await steer()
+    return
+  }
   if (attachments.value.some((a) => a.status === 'uploading')) {
     toast.info('文件还在上传，请稍等')
     return
@@ -318,6 +343,9 @@ async function onSend() {
 async function send(message: string, opts: { attachments?: string[]; thinking?: boolean } = {}) {
   if (disposed || streaming.value || reconnecting.value) return
   const useThinking = opts.thinking ?? thinking.value
+  sideRefreshVersion++
+  steerRevision++
+  steers.value = []
   message = serializeTableReferences(message, tableReferences.value, fileReferences.value)
   messages.value.push(reactive(newUser(message, { attachments: opts.attachments ?? [], ...(useThinking ? { thinking: true } : {}) })) as UiMessage)
   const assistant = reactive(newAssistant()) as UiMessage
@@ -346,6 +374,8 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
     const title = events.filter((item) => item.type === 'title').at(-1)
     const deletionTargets = event.type === 'stream_snapshot' ? messages.value.filter((message) => message !== assistant) : messages.value
     for (const item of events) {
+      if (['steer_queued', 'steer_committed', 'steer_withdrawn'].includes(item.type)) steerRevision++
+      steers.value = applyRunSteerEvent(steers.value, item)
       if (item.type === 'recipe_deleted') markRecipeDeleted(deletionTargets, item.recipe_id)
       if (item.type === 'delivery_manifest') applyDeliveryManifest(messages.value, item)
     }
@@ -385,9 +415,76 @@ async function stop() {
   await conversationApi.stop(props.id).catch(() => undefined)
 }
 
+async function steer() {
+  const message = text.value.trim()
+  if (!message || sendingSteer.value) return
+  if (attachments.value.length) {
+    toast.info('处理中可追加文字要求，文件请在本次处理结束后上传')
+    return
+  }
+  const assistantKey = currentAssistant.value?.key
+  sendingSteer.value = true
+  try {
+    const receipt = await conversationApi.steer(props.id, message)
+    if (disposed || currentAssistant.value?.key !== assistantKey) return
+    steerRevision++
+    if (streaming.value || !detail.value?.execution || ['running', 'interrupted', 'paused'].includes(detail.value.execution.status)) {
+      steers.value = mergeRunSteer(steers.value, { ...receipt, content: message })
+    }
+    if (text.value.trim() === message) text.value = ''
+    scrollToBottom(true)
+  } catch (err) {
+    if (!disposed) toast.error(errorText(err))
+  } finally {
+    sendingSteer.value = false
+  }
+}
+
+async function withdrawSteer(messageId: number) {
+  if (withdrawingSteer.value !== null) return
+  withdrawingSteer.value = messageId
+  try {
+    await conversationApi.withdrawSteer(props.id, messageId)
+    steerRevision++
+    steers.value = applyRunSteerEvent(steers.value, { type: 'steer_withdrawn', message_id: messageId })
+  } catch (err) {
+    toast.error(errorText(err))
+    void refreshSide()
+  } finally {
+    withdrawingSteer.value = null
+  }
+}
+
+async function resume() {
+  if (!canResume.value) return
+  const execution = detail.value!.execution!
+  startingResume.value = true
+  sideRefreshVersion++
+  try {
+    let assistant = messages.value.find((message) => message.role === 'assistant' &&
+      (typeof execution.assistant_message_id === 'number' ? message.id === execution.assistant_message_id :
+        execution.assistant_message_id === undefined && execution.execution_id && message.meta.execution_id === execution.execution_id))
+    if (!assistant) {
+      assistant = reactive(newAssistant()) as UiMessage
+      if (typeof execution.assistant_message_id === 'number') assistant.id = execution.assistant_message_id
+      assistant.meta.execution_id = execution.execution_id
+      messages.value.push(assistant)
+    }
+    assistant.streaming = true
+    assistant.error = undefined
+    selectedKey.value = assistant.key
+    scrollToBottom(true)
+    store.patchConversation(props.id, { running: true })
+    await receiveStream(assistant, (onEvent) => conversationApi.resume(props.id, onEvent), true)
+  } finally {
+    startingResume.value = false
+  }
+}
+
 // ------------------------------------------------------------------ 附件 / 标题
 
 async function attach(files: File[], kind: 'input' | 'expected') {
+  if (streaming.value || reconnecting.value) return
   // Register the entire batch before uploading so Send cannot omit later files.
   const batch = files.map((file) => ({ file, local: reactive<Attachment>({ key: uid('f'), name: file.name, kind, status: 'uploading', mediaType: file.type }) }))
   attachments.value.push(...batch.map(({ local }) => local))
@@ -554,7 +651,7 @@ function answer(option: string) {
                 :files="messageFiles"
                 :tables="messageTables"
                 :answers-disabled="streaming || reconnecting"
-                :answers-closed="messages.at(-1)?.key !== m.key"
+                :answers-closed="currentAssistant?.key !== m.key"
                 :customer-id="customer?.id"
                 :conversation-id="props.id"
                 :mascot="customer?.mascot"
@@ -575,6 +672,11 @@ function answer(option: string) {
       <div class="chat-input mx-auto w-full max-w-[680px] shrink-0 px-6 pb-3">
         <div class="w-full">
           <div class="relative z-10">
+          <RunSteeringQueue :items="visibleSteers" :withdrawing="withdrawingSteer" @withdraw="withdrawSteer" />
+          <div v-if="canResume" class="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-paper/50 px-3.5 py-3 text-xs" role="status">
+            <p class="min-w-0 flex-1 text-mute">{{ detail?.execution?.resume_reason || '上次处理已中断，可以从已保存的进度继续。' }}</p>
+            <button type="button" class="btn-line h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="resume"><Play class="size-3.5" />继续处理</button>
+          </div>
           <ChatComposer
             ref="composer"
             v-model="text"
@@ -585,9 +687,11 @@ function answer(option: string) {
             :references-loading="referencesLoading"
             :references-error="referencesError"
             :busy="streaming || reconnecting"
+            :allow-steer="streaming && !reconnecting"
+            :steer-pending="sendingSteer"
             large
             appearance="card"
-            placeholder="继续追问..."
+            :placeholder="streaming ? '补充或调整本次处理要求…' : '继续追问...'"
             @attach="attach"
             @remove="removeAttachment"
             @preview="previewAttachment"

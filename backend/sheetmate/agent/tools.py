@@ -16,12 +16,16 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import sys
+import threading
+from concurrent.futures import Future
 import json
 import re
 import time
 from collections.abc import AsyncIterator, Callable
-from copy import deepcopy
-from dataclasses import dataclass, field
+from copy import copy, deepcopy
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
@@ -31,6 +35,7 @@ from jsonschema import Draft202012Validator
 
 from sheetmate.agent.structured import StructuredOutputError, validate_payload
 from sheetmate.agent.task_state import inspect_task
+from sheetmate.agent.watchdog import phase, register_tool_worker, report_cleanup, report_wait, wait_tool
 from sheetmate.agent.sql_scope import checked_sql_tables
 from sheetmate.conversation_log import record_event
 from sheetmate.engine.analysis import column_stats, table_info, table_info_text, value_counts
@@ -185,6 +190,7 @@ class Tool:
     label: Callable[[dict[str, Any]], str] | None = None
     needs_customer: bool = False
     public_params: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    process_safe: bool = False  # Trusted pure data operation, published only after a killable worker succeeds.
     _checked_schema: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
 
     def parameters_schema(self) -> dict[str, Any]:
@@ -501,7 +507,8 @@ def formula_tool(spec: Formula, kind: str) -> Tool:
         table = args.get("table") or args.get("left") or ", ".join(args.get("tables") or [])
         return f"{spec.name} · {table}" if table else spec.name
 
-    return Tool(fid, description, _obj(properties, required), frozenset({"analyze", "modify", "create"}), run=run, label=label)
+    return Tool(fid, description, _obj(properties, required), frozenset({"analyze", "modify", "create"}),
+                run=run, label=label, process_safe=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1281,6 +1288,8 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._static = {t.name: t for t in _static_tools()}
+        for name in ("run_sql", "column_stats", "value_counts", "table_info"):
+            self._static[name].process_safe = True
 
     def for_context(self, ctx: AgentContext, *, group: str | None = None) -> list[Tool]:
         tools = [t for t in self._static.values() if ctx.mode in t.modes and (not t.needs_customer or ctx.customer)]
@@ -1328,6 +1337,224 @@ class ToolRegistry:
         return None
 
 
+class _ToolCancelled(BaseException):
+    """Bypass business error recovery when a revoked invocation unwinds."""
+
+
+class ToolCleanupPending(RuntimeError):
+    code = "tool_cleanup_pending"
+
+
+class _CallCapability:
+    """Revocation fences a late worker's next workspace/host operation.
+
+    An already-entered host operation remains owned by its job until its
+    real worker future completes; this proxy never claims it killed native IO.
+    """
+
+    def __init__(self, target: Any, cancelled: threading.Event):
+        object.__setattr__(self, "_target", target)
+        object.__setattr__(self, "_cancelled", cancelled)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if self._cancelled.is_set():
+            raise _ToolCancelled()
+        setattr(self._target, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        if self._cancelled.is_set():
+            raise _ToolCancelled()
+        delattr(self._target, name)
+
+    def __getattr__(self, name: str) -> Any:
+        if self._cancelled.is_set():
+            raise _ToolCancelled()
+        value = getattr(self._target, name)
+        if not callable(value):
+            return value
+
+        def invoke(*args, **kwargs):
+            if self._cancelled.is_set():
+                raise _ToolCancelled()
+            return value(*args, **kwargs)
+        return invoke
+
+
+async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    """Bound the waiter while retaining ownership of every real live worker."""
+    from sheetmate.agent.tool_worker import DataWorkerCancelled, run_data_tool
+    from sheetmate.model_policy import LLMRuntimePolicy
+
+    policy = getattr(getattr(ctx.llm, "cfg", None), "runtime_policy", None) or LLMRuntimePolicy()
+    timeout = getattr(policy, "tool_timeout_seconds", 120)
+    grace = getattr(policy, "cancellation_grace_seconds", 5)
+    cancelled = threading.Event()
+    publication = threading.Lock()
+    future: Future[ToolResult] = Future()
+    ws = _CallCapability(ctx.ws, cancelled)
+    host = copy(ctx.host) if ctx.host is not None else None
+    host_baseline = dict(vars(host)) if host is not None and hasattr(host, "__dict__") else {}
+    # Mutable bookkeeping also stays private until this invocation settles;
+    # late native callbacks must not append to the live host after revocation.
+    for name, value in host_baseline.items():
+        if type(value) in {list, dict, set}:
+            setattr(host, name, copy(value))
+    if host is not None and hasattr(host, "ws"):
+        host.ws = ws
+    worker_ctx = replace(ctx, ws=ws, host=_CallCapability(host, cancelled) if host is not None else None)
+    invocation_context = contextvars.copy_context()
+
+    def publish_host() -> None:
+        if host is None or not hasattr(host, "__dict__"):
+            return
+        with publication:
+            if cancelled.is_set():
+                return
+            changes = {}
+            missing = object()
+            for name, value in vars(host).items():
+                if name == "ws":
+                    continue
+                previous = host_baseline.get(name, missing)
+                if value is previous:
+                    continue
+                if type(value) in {list, dict, set} and type(value) is type(previous):
+                    try:
+                        if value == previous:
+                            continue
+                    except (TypeError, ValueError):
+                        pass
+                changes[name] = value
+            vars(ctx.host).update(changes)
+            for name in host_baseline.keys() - vars(host).keys() - {"ws"}:
+                vars(ctx.host).pop(name, None)
+
+    def trace(frame, event, arg):
+        if (cancelled.is_set() and event == "line"
+                and frame.f_globals.get("__name__") not in {__name__, "sheetmate.agent.tool_worker"}):
+            raise _ToolCancelled()
+        return trace
+
+    def run():
+        future.set_running_or_notify_cancel()
+        try:
+            # The cooperative tracer handles Python work; native pure data
+            # computations run in a separate, killable process instead.
+            if not tool.process_safe:
+                # Restrict cancellation checks to the tool and domain code.
+                # Raising inside SQLAlchemy/SQLite/threading cleanup would
+                # interrupt the very rollback/release paths we must preserve.
+                implementation_module = getattr(tool.run, "__module__", "")
+
+                def domain_trace(frame, event, arg):
+                    module = frame.f_globals.get("__name__", "")
+                    if (module.startswith("sheetmate.db.")
+                            or module in {"sheetmate.engine.workspace", "sheetmate.engine.file_copies",
+                                          "sheetmate.services.analysis"}
+                            or frame.f_code.co_name in {"close", "aclose", "__exit__", "__aexit__", "cleanup"}):
+                        return None
+                    if module == implementation_module or module.startswith("sheetmate."):
+                        return trace(frame, event, arg)
+                    return None
+
+                sys.settrace(domain_trace)
+            result = (run_data_tool(tool.name, args, worker_ctx, cancelled) if tool.process_safe
+                      else tool.run(args, worker_ctx))
+            if cancelled.is_set():
+                raise _ToolCancelled()
+        except (_ToolCancelled, DataWorkerCancelled):
+            sys.settrace(None)
+            future.set_exception(_ToolCancelled())
+        except BaseException as exc:
+            sys.settrace(None)
+            publish_host()
+            future.set_exception(exc)
+        else:
+            sys.settrace(None)
+            publish_host()
+            future.set_result(result)
+        finally:
+            sys.settrace(None)
+
+    with phase("executing_tool", tool.name) as item:
+        register_tool_worker(future)
+        thread = threading.Thread(target=lambda: invocation_context.run(run), daemon=True,
+                                  name=f"sheetmate-tool-{tool.name}")
+        thread.start()
+        wrapped = asyncio.wrap_future(future)
+
+        async def revoke() -> bool:
+            with publication:
+                cancelled.set()
+            ctx.ws.interrupt()
+            done, _ = await asyncio.wait({wrapped}, timeout=grace)
+            if done:
+                if not wrapped.cancelled():
+                    wrapped.exception()
+                return True
+            wrapped.add_done_callback(lambda value: value.exception() if not value.cancelled() else None)
+            await report_cleanup(item)
+            return False
+
+        try:
+            done, _ = await asyncio.wait({wrapped}, timeout=timeout)
+            if done:
+                return wrapped.result()
+            await report_wait(item, elapsed=timeout, hard=True, code="tool_timeout")
+            if not await revoke():
+                # No retry may overlap an unfinished side-effect-capable call.
+                raise ToolCleanupPending("工具已超时，正在清理资源；清理完成前不能开始下一次处理。")
+            return ToolResult(f"工具「{tool.name}」超过 {timeout:g} 秒执行时限，已停止本次尝试。",
+                              ok=False, summary="本次工具执行超时", error_kind="timeout")
+        except asyncio.CancelledError:
+            await revoke()
+            raise
+
+
+async def _stream_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> AsyncIterator[Any]:
+    """Own streaming-tool silence separately from a nested model's idle clock."""
+    from sheetmate.model_policy import LLMRuntimePolicy
+
+    policy = getattr(getattr(ctx.llm, "cfg", None), "runtime_policy", None) or LLMRuntimePolicy()
+    timeout = getattr(policy, "tool_timeout_seconds", 120)
+    grace = getattr(policy, "cancellation_grace_seconds", 5)
+    stream = tool.stream(args, ctx)
+    with phase("executing_tool", tool.name) as item:
+        while True:
+            task = asyncio.create_task(anext(stream))
+            marker: Future[None] = Future()
+            register_tool_worker(marker)
+            task.add_done_callback(lambda done, marker=marker: marker.set_result(None))
+
+            async def revoke() -> bool:
+                task.cancel()
+                done, _ = await asyncio.wait({task}, timeout=grace)
+                if done:
+                    if not task.cancelled():
+                        task.exception()
+                    return True
+                task.add_done_callback(lambda value: value.exception() if not value.cancelled() else None)
+                await report_cleanup(item)
+                return False
+
+            try:
+                if not await wait_tool(task, item, timeout):
+                    await report_wait(item, elapsed=timeout, hard=True, code="tool_timeout")
+                    if not await revoke():
+                        raise ToolCleanupPending("流式工具已超时，正在等待执行器完成清理。")
+                    yield ToolResult(f"工具「{tool.name}」连续 {timeout:g} 秒未返回进展，已停止本次尝试。",
+                                     ok=False, summary="本次工具执行超时", error_kind="timeout")
+                    return
+                try:
+                    value = task.result()
+                except StopAsyncIteration:
+                    return
+                yield value
+            except asyncio.CancelledError:
+                await revoke()
+                raise
+
+
 async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext, *,
                        call_id: str | None = None) -> AsyncIterator[Any]:
     """统一执行：同步工具放线程里跑；流式工具逐个转发事件。最后一定产出一个 ToolResult。"""
@@ -1355,7 +1582,7 @@ async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext, *,
         validated = True
         if tool.stream is not None:
             got_result = False
-            async for item in tool.stream(args, ctx):
+            async for item in _stream_tool(tool, args, ctx):
                 if isinstance(item, ToolResult):
                     got_result = True
                     outcome = item
@@ -1369,22 +1596,17 @@ async def execute_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext, *,
                 yield outcome
         else:
             assert tool.run is not None
-            worker = asyncio.create_task(asyncio.to_thread(tool.run, args, ctx))
-            try:
-                outcome = await asyncio.shield(worker)
-            except asyncio.CancelledError:
-                ctx.ws.interrupt()
-                try:
-                    await worker
-                except Exception:
-                    pass
-                raise
+            outcome = await _sync_tool(tool, args, ctx)
             status = "ok" if outcome.ok else "failed"
             yield outcome
     except (asyncio.CancelledError, GeneratorExit) as exc:
         if outcome is None:
             status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "interrupted"
             failure = {"reason": type(exc).__name__}
+        raise
+    except ToolCleanupPending as exc:
+        status = "cleanup_pending"
+        failure = {"error_type": type(exc).__name__, "error": str(exc), "code": exc.code}
         raise
     except Exception as exc:  # 工具出错时把错误当结果交给 LLM，让它自己纠正
         message = str(exc) or type(exc).__name__

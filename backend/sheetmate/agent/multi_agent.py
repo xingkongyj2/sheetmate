@@ -19,6 +19,7 @@ from sheetmate.agent.content import model_history, user_content
 from sheetmate.agent.context import stage_history
 from sheetmate.agent.executor import AgentExecutor, build_system_prompt
 from sheetmate.agent.prompts import AGGREGATOR_PROMPT, MULTI_AGENT_KEYWORDS, SPECIALIST_MESSAGE
+from sheetmate.agent.runtime import durable_value
 from sheetmate.agent.tools import AgentContext
 from sheetmate.engine.field_mapping import normalize_name
 from sheetmate.recipe.schema import file_pattern_from_name
@@ -73,6 +74,10 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
     executor.configure_tools(ctx, message)
     tables = [t for t in ctx.ws.list_tables() if t.source == "uploaded"]
     yield {"type": "agent_pool_start", "agents": [{"id": t.name, "table_name": t.label or t.name} for t in tables]}
+    if getattr(ctx, "runtime", None) is not None:
+        async for event in _execute_durable_multi(executor, ctx, message, history, tables):
+            yield event
+        return
     done_marker = object()
     queue: asyncio.Queue[Any] = asyncio.Queue()
     conclusions: dict[str, str] = {}
@@ -148,5 +153,99 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
     aggregate_messages = [{"role": "system", "content": build_system_prompt(ctx, message)},
                           {"role": "user", "content": user_content(prompt, image_parts)}]
     async for event in executor.agent_stream(aggregate_messages, executor.registry.for_context(ctx), ctx,
+                                             budget=budget, scope=f"原始任务：{message}\n汇总并完成所有目标。"):
+        yield event
+
+
+async def _execute_durable_multi(executor: AgentExecutor, ctx: AgentContext, message: str,
+                                 history: list[dict[str, Any]], tables: list[Any]) -> AsyncIterator[dict[str, Any]]:
+    """Serial specialists retain isolation and one durable checkpoint writer."""
+    runtime = ctx.runtime
+    if runtime.state.get("whole_task_continuation"):
+        async for event in executor.resume_runtime(ctx, message, history):
+            yield event
+        return
+    state = runtime.state.setdefault("multi_state", {"conclusions": {}, "completed": {}, "current": None,
+                                                      "revision": runtime.revision})
+    conclusions, completed = state["conclusions"], state["completed"]
+    budget = executor.new_budget()
+    if runtime.state.get("budget"):
+        budget.restore(runtime.state["budget"])
+    else:
+        reserve = min(8, max(1, executor.max_tool_calls // 4))
+        per_branch, remainder = divmod(max(0, executor.max_tool_calls - reserve), max(1, len(tables)))
+        budget.branch_limits = {table.name: per_branch + (index < remainder) for index, table in enumerate(tables)}
+
+    async def save() -> None:
+        runtime.state["budget"] = budget.to_state()
+        runtime.state["multi_state"] = durable_value(state)
+        await runtime.checkpoint()
+
+    async def steered() -> bool:
+        await runtime.consume(ctx)
+        return runtime.revision != state["revision"]
+
+    for table in tables:
+        name = table.name
+        if name in completed:
+            yield {"type": "agent_done", "agent_id": name, "conclusion": conclusions.get(name, ""),
+                   "status": completed[name], "error": completed[name] == "failed", "restored": True}
+            continue
+        if await steered():
+            async for event in executor.continue_runtime(ctx, message, history):
+                yield event
+            return
+        if state["current"] != name:
+            runtime.state.pop("loop", None)
+        state["current"] = name
+        await save()
+        scoped = replace(ctx, table_filter={name}, branch_id=name, tool_group="core")
+        scoped.runtime = runtime
+        yield {"type": "agent_start", "agent_id": name, "table_name": name,
+               "tool_calls_limit": budget.branch_limits.get(name, executor.max_tool_calls)}
+        messages = [{"role": "system", "content": build_system_prompt(scoped, message)},
+                    *model_history(stage_history(history, "specialist")),
+                    {"role": "user", "content": user_content(SPECIALIST_MESSAGE.format(table=name, message=message),
+                                                               scoped.image_parts)}]
+        conclusion, status, reason = "", "incomplete", ""
+        async for event in executor.agent_stream(messages, executor.registry.for_context(scoped), scoped,
+                                                 budget=budget, stop_scope="agent"):
+            kind = event["type"]
+            if kind == "execution_steered":
+                async for continued in executor.continue_runtime(ctx, message, history):
+                    yield continued
+                return
+            if kind == "final_text":
+                conclusion = event["content"]
+                continue
+            if kind == "text_chunk":
+                continue
+            if kind == "execution_stop":
+                status, reason = event.get("status", "incomplete"), event.get("summary", "")
+            yield {**event, "agent_id": name}
+            if kind in {"error", "clarify"}:
+                return
+        conclusions[name] = conclusion or reason or "本项尚未完成。"
+        completed[name] = status
+        await save()
+        yield {"type": "agent_done", "agent_id": name, "conclusion": conclusions[name],
+               "status": status, "error": status == "failed"}
+
+    if await steered():
+        async for event in executor.continue_runtime(ctx, message, history):
+            yield event
+        return
+    if state["current"] != "aggregate":
+        runtime.state.pop("loop", None)
+    state["current"] = "aggregate"
+    await save()
+    yield {"type": "aggregate_start"}
+    labels = {table.name: table.label or table.name for table in tables}
+    parts = [f"**「{name}」（{labels.get(name, name)}）专员的结论：**\n{text}" for name, text in conclusions.items() if text]
+    prompt = AGGREGATOR_PROMPT.format(count=len(conclusions), message=message,
+                                     conclusions="\n\n---\n\n".join(parts) or "（无）")
+    messages = [{"role": "system", "content": build_system_prompt(ctx, message)},
+                {"role": "user", "content": user_content(prompt, ctx.image_parts)}]
+    async for event in executor.agent_stream(messages, executor.registry.for_context(ctx), ctx,
                                              budget=budget, scope=f"原始任务：{message}\n汇总并完成所有目标。"):
         yield event

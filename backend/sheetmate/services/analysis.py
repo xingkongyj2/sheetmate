@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -45,22 +46,34 @@ class AnalysisWorkspace:
 
 
 @contextmanager
-def analysis_workspace(source: Workspace) -> Iterator[AnalysisWorkspace]:
-    with TemporaryDirectory(prefix="sheetmate_analysis_") as directory:
-        root = Path(directory)
-        scratch = Workspace(root / "working.duckdb")
-        expected_revisions: dict[str, tuple[str, str]] = {}
-        try:
+def analysis_workspace(source: Workspace, *, root: Path | None = None, resume: bool = False) -> Iterator[AnalysisWorkspace]:
+    """Keep execution scratch data on disk when a durable root is supplied."""
+    if root is None:
+        with TemporaryDirectory(prefix="sheetmate_analysis_") as directory:
+            with analysis_workspace(source, root=Path(directory)) as analysis:
+                yield analysis
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    manifest = root / "inputs.json"
+    if resume and (not manifest.exists() or not (root / "working.duckdb").exists()):
+        raise ValueError("执行工作区已丢失，无法继续旧任务。")
+    scratch = Workspace(root / "working.duckdb")
+    expected_revisions: dict[str, tuple[str, str]] = {}
+    try:
+        if resume:
+            expected_revisions = {name: tuple(value) for name, value in json.loads(manifest.read_text()).items()}
+        else:
             for table in source.list_tables():
                 _copy_table(source, scratch, table.name)
                 expected_revisions[table.name] = (table.revision, scratch.require(table.name).revision)
-            yield AnalysisWorkspace(source, scratch, root)
+            manifest.write_text(json.dumps(expected_revisions), encoding="utf-8")
+        yield AnalysisWorkspace(source, scratch, root)
+    finally:
+        try:
+            merge_table_memory(source, scratch, expected_revisions)
+            persist_workspace_memories(source)
+        except Exception:
+            # 记忆维护失败不能遮蔽本次处理或用户取消的实际结果。
+            logger.warning("无法保存本轮表格探测记忆", exc_info=True)
         finally:
-            try:
-                merge_table_memory(source, scratch, expected_revisions)
-                persist_workspace_memories(source)
-            except Exception:
-                # 记忆维护失败不能遮蔽本次处理或用户取消的实际结果。
-                logger.warning("无法保存本轮表格探测记忆", exc_info=True)
-            finally:
-                scratch.close()
+            scratch.close()

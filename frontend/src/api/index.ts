@@ -136,6 +136,10 @@ export const conversationApi = {
   setTableRole: async (id: string, name: string, role: 'input' | 'expected', sourceConversationId?: string) =>
     (await http.put<{ table: TableBrief }>(`/conversations/${id}/tables/${encodeURIComponent(name)}/role`, { role }, { params: { source_conversation_id: sourceConversationId } })).data.table,
   stop: async (id: string) => http.post(`/conversations/${id}/stop`),
+  steer: async (id: string, message: string) =>
+    (await http.post<{ message_id: number; status: 'queued'; job_id: string; execution_id?: string }>(`/conversations/${id}/steer`, { message })).data,
+  withdrawSteer: async (id: string, messageId: number) => http.delete(`/conversations/${id}/steer/${messageId}`),
+  resume: (id: string, onEvent: (e: AgentEvent) => void) => postStream(`/conversations/${id}/resume`, {}, onEvent),
   /** thinking=true 是思考模式：后端先规划、再逐步执行并核对，中途不需要用户确认计划 */
   chat: (id: string, body: { message: string; attachments?: string[]; thinking?: boolean }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/conversations/${id}/chat`, body, onEvent),
