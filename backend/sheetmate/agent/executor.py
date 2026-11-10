@@ -27,6 +27,7 @@ from sheetmate.agent.context import ContextBlock, assemble_context, stage_histor
 from sheetmate.agent.evidence import snapshot_inputs, tool_evidence
 from sheetmate.agent.task_state import task_projection
 from sheetmate.agent.llm import LLMError, parse_json, translate_error
+from sheetmate.agent.parallel_tools import ParallelOutcome, independent_batch, run_parallel_tools
 from sheetmate.agent.prompts import (
     AGENT_SYSTEM,
     AGENT_TABLE_LINE,
@@ -51,12 +52,14 @@ from sheetmate.agent.scripting import ScriptRequest
 from sheetmate.agent.summarizer import estimate_tokens
 from sheetmate.agent.table_probe import table_probe_context
 from sheetmate.agent.structured import StructuredOutputError
+from sheetmate.agent.tool_results import ProjectionBudget, project_tool_result, result_reference
 from sheetmate.agent.tools import (
     AgentContext, Tool, ToolRegistry, ToolResult, ToolSchemaError, execute_tool, tool_argument_error, validate_tool_args,
 )
 from sheetmate.conversation_log import record_event
 from sheetmate.engine.script_references import externalize_script_references, externalize_script_text
 from sheetmate.engine.script_store import script_params
+from sheetmate.services.tool_results import sanitize_tool_payload
 
 _TOOL_MARKER = "<｜tool▁call▁begin｜>"
 _TOOL_RE = re.compile(r"<｜tool[\s\S]*?(?:<｜tool▁calls?▁end｜>|$)")
@@ -72,8 +75,37 @@ _DIAGNOSTIC_TOOLS = (_EXPLORE_TOOLS - {"run_sql"}) | {
     "remember", "save_field_mapping", "save_as_recipe", "delete_recipe", "delete_recipes", "ask_user",
     "load_tool_group", "inspect_execution_evidence", "inspect_task_context", "inspect_saved_memories",
     "inspect_conversation_history",
+    "read_tool_result",
 }
 _NUDGE_AFTER = 4  # 修改模式下查看数据超过这么多次还没生成流程，就提醒一次
+
+
+def _checkpoint_tool_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep rich UI data in its authorized durable output, outside checkpoints."""
+    projected, seen = [], set()
+    for event in events:
+        reference = event.get("_tool_result_ref")
+        if isinstance(reference, dict) and reference.get("result_id"):
+            key = (reference["result_id"], event.get("tool_call_id"), reference.get("branch_id"))
+            if key not in seen:
+                seen.add(key)
+                projected.append({"type": "tool_result_events", "result_id": key[0],
+                                  "tool_call_id": key[1], "branch_id": key[2]})
+        else:
+            projected.append(event)
+    return projected
+
+
+def _hydrate_tool_events(ctx: AgentContext, events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    hydrated = []
+    for event in events:
+        if event.get("type") != "tool_result_events":
+            hydrated.append(event)
+            continue
+        reference = {"result_id": event["result_id"], "branch_id": event.get("branch_id")}
+        hydrated.extend({**item, "tool_call_id": event.get("tool_call_id"), "_tool_result_ref": reference}
+                        for item in ctx.host.resolve_tool_result_events(**reference))
+    return hydrated
 
 
 @dataclass
@@ -182,11 +214,12 @@ class _ToolBudget:
 
 class AgentExecutor:
     def __init__(self, llm: Any, registry: ToolRegistry | None = None, max_iterations: int = 12,
-                 max_tool_calls: int = 40):
+                 max_tool_calls: int = 40, max_parallel_tools: int = 3):
         self.llm = llm
         self.registry = registry or ToolRegistry()
         self.max_iterations = max_iterations
         self.max_tool_calls = max(1, max_tool_calls)
+        self.max_parallel_tools = max(1, min(3, max_parallel_tools))
 
     def new_budget(self) -> _ToolBudget:
         """一次任务共用的工具调用预算：计划的各个步骤、补做和自检共享同一份。"""
@@ -468,11 +501,15 @@ class AgentExecutor:
         saved = runtime.state.get("loop", {}) if runtime else {}
         restored = saved.get("original_scope", saved.get("scope")) == original_scope and saved.get("stop_scope") == stop_scope
         applied_revision = int(saved.get("revision", 0)) if restored else 0
+        reserved_call_ids = set(saved.get("reserved_call_ids", [])) if restored else set()
+        parallel_batch = saved.get("parallel_batch") if restored else None
+        projection_budget = ProjectionBudget(used_chars=int(saved.get("projection_used_chars", 0)) if restored else 0)
         if runtime:
             # An earlier phase may already have marked messages committed.
             # Their presence in runtime is not proof this loop has seen them.
-            await runtime.consume(ctx)
-            scope = runtime.effective_message(original_scope)
+            if not parallel_batch:
+                await runtime.consume(ctx)
+            scope = saved.get("scope", original_scope) if parallel_batch else runtime.effective_message(original_scope)
             self.configure_tools(ctx, scope)
             if tools and ctx.tool_group is not None:
                 tool_map.update({item.name: item for item in self.registry.for_context(ctx)})
@@ -517,11 +554,17 @@ class AgentExecutor:
                 "completion_retries": completion_retries, "no_progress": no_progress,
                 "failures": [[*key, count] for key, count in failures.items()],
                 "pending_response": durable_value(response), "terminal_events": terminal_events or [],
+                "reserved_call_ids": sorted(reserved_call_ids), "parallel_batch": durable_value(parallel_batch),
+                "projection_used_chars": projection_budget.used_chars,
             }
 
         async def consume(abandon: dict[str, Any] | None = None, completed: int = 0) -> bool:
             nonlocal scope, pending_response, applied_revision, no_progress, iteration_limit, protocol_pending
             if runtime is None:
+                return False
+            if parallel_batch:
+                # Finish the already authorized read batch before applying a
+                # newer requirement or abandoning any of its durable results.
                 return False
             await runtime.consume(ctx)
             if applied_revision == runtime.revision:
@@ -584,7 +627,7 @@ class AgentExecutor:
                 yield {"type": "error", "content": str(exc), "code": "tool_schema"}
                 return
             # 最后一轮只允许依据已有结果回答；服务商违规返回工具时会如实终止。
-            final_round = not protocol_pending and (
+            final_round = not pending_response and not protocol_pending and (
                 no_progress or budget_exhausted or (iteration == iteration_limit - 1 and definitions is not None)
             )
             iteration += 1
@@ -614,6 +657,8 @@ class AgentExecutor:
                           "budget_calls_before": getattr(getattr(self.llm, "budget", None), "calls", None),
                           "iteration_limit": iteration_limit, **budget.snapshot(self.max_tool_calls, ctx.branch_id)}
             resumed_response, pending_response = pending_response, None
+            if not resumed_response:
+                projection_budget = ProjectionBudget()
             if runtime is not None and not resumed_response:
                 runtime.state["inflight_model"] = model_call
                 runtime.state["model_calls_started"] = int(runtime.state.get("model_calls_started", 0)) + 1
@@ -871,28 +916,106 @@ class AgentExecutor:
 
             end_turn = False
             guidance: list[str] = []
+            prepared_parallel: set[str] = set()
             for call_index, call in enumerate(calls):
-                if call_index and await consume(assistant, call_index):
+                in_parallel = bool(parallel_batch and call["id"] in parallel_batch["call_ids"])
+                if call_index and not in_parallel and await consume(assistant, call_index):
                     if stop_scope in {"step", "agent"}:
                         if transcript is not None:
                             transcript.extend(msgs[start:])
                         yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
                         return
                     break
-                if no_progress or budget.exhausted(self.max_tool_calls, ctx.branch_id) or recovery.exhausted:
+                if not in_parallel and (no_progress or budget.exhausted(self.max_tool_calls, ctx.branch_id) or recovery.exhausted):
                     assistant["tool_calls"] = calls[:call_index]
                     break
-                budget.used += 1
-                if ctx.branch_id:
-                    budget.branch_used[ctx.branch_id] = budget.branch_used.get(ctx.branch_id, 0) + 1
+                if not in_parallel:
+                    remaining_budget = self.max_tool_calls - budget.used
+                    if ctx.branch_id in budget.branch_limits:
+                        remaining_budget = min(remaining_budget, budget.branch_limits[ctx.branch_id]
+                                               - budget.branch_used.get(ctx.branch_id, 0))
+                    candidates = independent_batch(calls, call_index, tool_map, ctx,
+                                                   min(self.max_parallel_tools, remaining_budget))
+                    if len(candidates) > 1:
+                        parallel_batch = {"call_ids": [item["id"] for item in candidates], "outcomes": {},
+                                          "sources": {item["id"]: snapshot_inputs(
+                                              ctx, item["function"]["name"], _parse_args(item["function"]["arguments"]))
+                                              for item in candidates}, "visible_events": []}
+                        reserved_call_ids.update(parallel_batch["call_ids"])
+                        budget.used += len(candidates)
+                        if ctx.branch_id:
+                            budget.branch_used[ctx.branch_id] = budget.branch_used.get(ctx.branch_id, 0) + len(candidates)
+                        in_parallel = True
+                if in_parallel and call["id"] not in prepared_parallel:
+                    batch_calls = [item for item in calls[call_index:] if item["id"] in parallel_batch["call_ids"]]
+
+                    def snapshot_batch() -> None:
+                        # Keep only fully paired messages in the checkpoint.
+                        # The pending response owns every not-yet-paired call.
+                        prefix = durable_value(msgs)
+                        if call_index:
+                            prefix[assistant_position]["tool_calls"] = calls[:call_index]
+                        else:
+                            prefix.pop(assistant_position)
+                        snapshot_loop(response={"display": "", "calls": calls[call_index:]}, snapshot_messages=prefix)
+
+                    snapshot_batch()
+                    if runtime:
+                        await runtime.checkpoint()
+                    pending_calls = []
+                    for item in batch_calls:
+                        item_args = _parse_args(item["function"]["arguments"])
+                        item_tool = tool_map[item["function"]["name"]]
+                        debug = externalize_script_references(item_args)
+                        yield {"type": "tool_call", "id": item["id"], "tool": item_tool.name,
+                               "label": item_tool.display(item_args),
+                               "params": item_tool.public_params(item_args) if item_tool.public_params else debug,
+                               "debug_params": debug}
+                        if item["id"] in parallel_batch["outcomes"]:
+                            if runtime:
+                                # A sibling checkpoint can retain a real result
+                                # even when its receipt transaction failed.
+                                # Finishing the same receipt is idempotent.
+                                snapshot_batch()
+                                await runtime.finished(item["id"], parallel_batch["outcomes"][item["id"]]["result"])
+                            continue
+                        cached = await runtime.started(item["id"], item_tool.name, item_args) if runtime else None
+                        if cached is not None:
+                            parallel_batch["outcomes"][item["id"]] = {"result": cached, "events": [], "duration_ms": 0}
+                            snapshot_batch()
+                            if runtime:
+                                await runtime.checkpoint()
+                        else:
+                            pending_calls.append(item)
+
+                    names = {item["id"]: item["function"]["name"] for item in batch_calls}
+
+                    async def save_outcome(outcome: ParallelOutcome) -> None:
+                        payload = asdict(outcome.result)
+                        payload["events"] = [*outcome.events, *payload["events"]]
+                        projected = project_tool_result(ctx, names[outcome.call_id], outcome.call_id,
+                                                        payload, budget=projection_budget)
+                        parallel_batch["outcomes"][outcome.call_id] = {
+                            "result": projected, "events": [], "duration_ms": outcome.duration_ms}
+                        snapshot_batch()
+                        if runtime:
+                            await runtime.finished(outcome.call_id, projected)
+
+                    await run_parallel_tools(pending_calls, tool_map, ctx, save_outcome)
+                    prepared_parallel.update(item["id"] for item in batch_calls)
+                if call["id"] not in reserved_call_ids:
+                    budget.used += 1
+                    if ctx.branch_id:
+                        budget.branch_used[ctx.branch_id] = budget.branch_used.get(ctx.branch_id, 0) + 1
+                prefetched = parallel_batch["outcomes"][call["id"]] if in_parallel else None
                 result: ToolResult | None = None
                 executed = False
                 name = call["function"]["name"]
                 args = _parse_args(call["function"]["arguments"])
                 tool = tool_map.get(name)
-                sources = snapshot_inputs(ctx, name, args)
-                cached_result = await runtime.started(call["id"], name, args or {}) if runtime else None
-                visible_events: list[dict[str, Any]] = []
+                sources = parallel_batch["sources"][call["id"]] if in_parallel else snapshot_inputs(ctx, name, args)
+                cached_result = await runtime.started(call["id"], name, args or {}) if runtime and not in_parallel else None
+                visible_events: list[dict[str, Any]] = list(prefetched["events"]) if prefetched else []
                 debug_params: Any = args if args is not None else call["function"]["arguments"]
                 script_ref: dict[str, Any] = {}
                 if name == _SCRIPT_TOOL and args is not None:
@@ -908,16 +1031,20 @@ class AgentExecutor:
                     debug_params = "工具参数不是合法的 JSON，未保存源码"
                 else:
                     debug_params = externalize_script_references(debug_params)
-                yield {"type": "tool_call", "id": call["id"], "tool": name,
-                       "label": tool.display(args or {}) if tool else name,
-                       "params": {**(tool.public_params(args or {}) if tool and tool.public_params else debug_params if isinstance(debug_params, dict) else {}), **script_ref},
-                       "debug_params": debug_params, **script_ref}
+                if not in_parallel:
+                    yield {"type": "tool_call", "id": call["id"], "tool": name,
+                           "label": tool.display(args or {}) if tool else name,
+                           "params": {**(tool.public_params(args or {}) if tool and tool.public_params else debug_params if isinstance(debug_params, dict) else {}), **script_ref},
+                           "debug_params": debug_params, **script_ref}
                 started = time.perf_counter()
                 script_key = None
                 attempt = None
                 repeated_script = False
                 method_blocked = False
-                if cached_result is not None:
+                if prefetched is not None:
+                    result = ToolResult(**prefetched["result"])
+                    executed = True
+                elif cached_result is not None:
                     result = ToolResult(**cached_result)
                     executed = True
                 elif tool is None:
@@ -958,6 +1085,18 @@ class AgentExecutor:
                                 else:
                                     yield {**item, "tool_call_id": call["id"]}
                 assert result is not None
+                payload = asdict(result)
+                payload["events"] = [*visible_events, *payload["events"]]
+                safe_payload, _ = sanitize_tool_payload(payload)
+                original_events = safe_payload["events"]
+                original_tables = safe_payload["tables"]
+                if prefetched is None and cached_result is None:
+                    result = ToolResult(**project_tool_result(ctx, name, call["id"], payload, budget=projection_budget))
+                output_reference = result_reference(result.text)
+                if output_reference and (prefetched is not None or cached_result is not None):
+                    original_events = ctx.host.resolve_tool_result_events(output_reference, branch_id=ctx.branch_id)
+                    original_tables = []  # The durable resolver also restores native table previews.
+                visible_events = []
                 if name == "load_tool_group" and result.ok:
                     tool_map.update({item.name: item for item in self.registry.for_context(ctx)})
                 if not executed:
@@ -978,10 +1117,14 @@ class AgentExecutor:
                         after_key = await asyncio.to_thread(_script_key, args, ctx)
                         if after_key:
                             budget.script_attempts[(ctx.branch_id, "default:" + after_key)] = attempt
-                for table in result.tables:
-                    visible_events.append({"type": "table", "tool_call_id": call["id"], "table": table})
-                for extra in result.events:
-                    visible_events.append({**extra, "tool_call_id": call["id"]})
+                for table in original_tables:
+                    visible_events.append({"type": "table", "tool_call_id": call["id"], "table": table,
+                                           **({"_tool_result_ref": {"result_id": output_reference, "branch_id": ctx.branch_id}}
+                                              if output_reference else {})})
+                for extra in original_events:
+                    visible_events.append({**extra, "tool_call_id": call["id"],
+                                           **({"_tool_result_ref": {"result_id": output_reference, "branch_id": ctx.branch_id}}
+                                              if output_reference else {})})
                 public_text = externalize_script_text(
                     result.public_text if result.public_text is not None else result.text,
                     python=name in {_SCRIPT_TOOL, "inspect_python_script"},
@@ -1002,7 +1145,7 @@ class AgentExecutor:
                        "text": public_text[:3000],
                        **({"details": result.public_details} if result.public_details else {}),
                        "debug_result": externalize_script_text(result.text, python=name in {_SCRIPT_TOOL, "inspect_python_script"}),
-                       "duration_ms": int((time.perf_counter() - started) * 1000)})
+                       "duration_ms": prefetched["duration_ms"] if prefetched else int((time.perf_counter() - started) * 1000)})
                 msgs.append({"role": "tool", "tool_call_id": call["id"],
                              "content": f"[evidence_id={evidence['id']}]\n{result.text}"})
                 budget.results[evidence["id"]] = {"tool": name, "ok": result.ok, "branch_id": ctx.branch_id, "scope": original_scope,
@@ -1041,17 +1184,30 @@ class AgentExecutor:
                         fallback_suggested = True
                 if recovery.must_switch and not recovery.exhausted:
                     guidance.append(_approach_switch_message(recovery))
+                ready_events = visible_events
+                if in_parallel:
+                    parallel_batch["visible_events"].extend(_checkpoint_tool_events(visible_events))
+                    reserved_call_ids.discard(call["id"])
+                    if any(identifier in reserved_call_ids for identifier in parallel_batch["call_ids"]):
+                        ready_events = []
+                    else:
+                        ready_events = _hydrate_tool_events(ctx, parallel_batch["visible_events"])
+                        parallel_batch = None
                 if runtime is not None:
                     saved_messages = durable_value(msgs)
                     saved_messages[assistant_position]["tool_calls"] = calls[:call_index + 1]
-                    remaining = [] if result.end_turn else calls[call_index + 1:]
+                    remaining = [] if end_turn and not parallel_batch else calls[call_index + 1:]
                     snapshot_loop(response={"display": "", "calls": remaining} if remaining else None,
                                   snapshot_messages=saved_messages)
-                    runtime.state["last_tool_events"] = durable_value(visible_events)
-                    await runtime.finished(call["id"], asdict(result))
-                for event in visible_events:
+                    if ready_events:
+                        runtime.state["last_tool_events"] = durable_value(_checkpoint_tool_events(ready_events))
+                    if in_parallel:
+                        await runtime.checkpoint()
+                    else:
+                        await runtime.finished(call["id"], asdict(result))
+                for event in ready_events:
                     yield event
-                if result.end_turn:
+                if end_turn and not parallel_batch:
                     # 等待用户回答时立即停止，后续调用不能覆盖确认或产生额外副作用。
                     # 只保留实际执行过的调用，保证计划模式接续时工具消息成对。
                     assistant["tool_calls"] = calls[:call_index + 1]

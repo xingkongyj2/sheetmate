@@ -7,6 +7,7 @@ import { settingsApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { LLMAdvancedConfig, LLMConfig, LLMProviderConfig, LLMProviderId } from '@/api/types'
 import { useToast } from '@/composables/useToast'
+import ExecutionMetrics from '@/components/settings/ExecutionMetrics.vue'
 
 const toast = useToast()
 
@@ -420,6 +421,7 @@ async function test(provider: LLMProviderConfig) {
           </div>
         </template>
       </template>
+      <ExecutionMetrics />
     </div>
   </div>
 </template>

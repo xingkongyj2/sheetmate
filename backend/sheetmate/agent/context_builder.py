@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from sheetmate.agent.llm_budget import request_size
+from sheetmate.agent.tool_results import result_reference
 
 _EVIDENCE = re.compile(r"^\[evidence_id=(ev_[a-zA-Z0-9_]+)\]\n")
 
@@ -34,11 +35,14 @@ def prepare_context(kwargs: dict[str, Any], max_chars: int) -> dict[str, Any]:
         if not reference or len(content) < 1200:
             continue
         evidence_id = reference.group(1)
+        output_id = result_reference(content)
         head = content[reference.end():reference.end() + 700]
         projected[index]["content"] = (
             f"[evidence_id={evidence_id}]\n{head}\n"
             "[旧工具结果的详细内容未重复注入；上面仅为摘要，不能据此推断省略数据。"
-            f"涉及具体数值或验收时，调用 inspect_execution_evidence(evidence_id='{evidence_id}') 分页查看完整依据。]"
+            + (f"涉及具体数值或验收时，调用 read_tool_result(result_id='{output_id}', "
+               "section='text', offset=0, limit=4000) 分页查看完整依据。]" if output_id else
+               f"涉及具体数值或验收时，调用 inspect_execution_evidence(evidence_id='{evidence_id}') 分页查看完整依据。]")
         )
         changed = True
         candidate = {**kwargs, "messages": projected}

@@ -109,6 +109,8 @@ class ToolHost(Protocol):
                                offset: int = 0, limit: int | None = None) -> dict[str, Any]: ...
     def inspect_conversation_history(self, *, message_id: int | None = None, query: str = "",
                                      role: str = "", offset: int = 0, limit: int | None = None) -> dict[str, Any]: ...
+    def read_tool_result(self, result_id: str, *, section: str = "text", offset: int = 0,
+                         limit: int = 4000, branch_id: str | None = None) -> dict[str, Any]: ...
     def remember(self, category: str, key: str, value: str, *, evidence_span: str = "") -> dict[str, Any]: ...
     def save_field_mapping(self, standard: str, aliases: list[str]) -> str: ...
 
@@ -138,6 +140,7 @@ class AgentContext:
     task_state: dict[str, Any] = field(default_factory=dict)
     enabled_tool_groups: set[str] = field(default_factory=set)
     evidence_store: dict[str, dict[str, Any]] = field(default_factory=dict)
+    parallel_read_only: bool = False  # Internal: publish only this read's target-table probe cache.
 
     def visible_tables(self) -> list[TableInfo]:
         tables = self.ws.list_tables()
@@ -191,6 +194,7 @@ class Tool:
     needs_customer: bool = False
     public_params: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     process_safe: bool = False  # Trusted pure data operation, published only after a killable worker succeeds.
+    parallel_read_safe: bool = False  # Explicit opt-in; the scheduler also validates per-call resources.
     _checked_schema: dict[str, Any] | None = field(default=None, init=False, repr=False, compare=False)
 
     def parameters_schema(self) -> dict[str, Any]:
@@ -1123,6 +1127,14 @@ def _static_tools() -> list[Tool]:
     both = frozenset({"analyze", "modify", "create"})
     analyze, modify = frozenset({"analyze"}), frozenset({"modify"})
     return [
+        Tool("read_tool_result", "按结果引用分页读取已保存的完整安全工具结果。预览不足时回查；省略部分不代表不存在。text 按文本分页，tables/events/payload 等结构按 JSON 字符分页。只能读取当前会话和当前专员范围内的结果。",
+             _obj({"result_id": _STR, "section": {"type": "string", "enum": [
+                 "text", "summary", "tables", "events", "public_text", "public_summary", "public_details", "error_details", "payload"]},
+                   "offset": {"type": "integer", "minimum": 0},
+                   "limit": {"type": "integer", "minimum": 1, "maximum": 8000}}, ["result_id"]), both,
+             run=lambda args, ctx: ToolResult(json.dumps(ctx.host.read_tool_result(
+                 **args, branch_id=ctx.branch_id), ensure_ascii=False), summary="已读取完整工具结果片段"),
+             label=lambda args: "回查工具结果"),
         Tool("inspect_execution_evidence", "按证据 ID 分页读取之前实际工具返回的完整原文与源表版本。上下文摘要不足时回查，不能把已压缩摘要当成完整数据。",
              _obj({"evidence_id": _STR, "offset": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 100, "maximum": 8000}}, ["evidence_id"]), both,
@@ -1279,7 +1291,7 @@ class ToolRegistry:
         "build_recipe", "revise_recipe", "run_recipe", "save_as_recipe", "get_recipe",
         "list_recipes", "delete_recipe", "delete_recipes",
     })
-    _BRANCH_TOOL_NAMES = frozenset({"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "ask_user", "inspect_task_context", "inspect_execution_evidence"})
+    _BRANCH_TOOL_NAMES = frozenset({"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "ask_user", "inspect_task_context", "inspect_execution_evidence", "read_tool_result"})
     _GROUP_TOOLS = {
         "workbook": frozenset({"create_workbook", "inspect_workbook_creation"}),
         "python": frozenset({"run_python_script", "inspect_python_script"}),
@@ -1288,8 +1300,10 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._static = {t.name: t for t in _static_tools()}
-        for name in ("run_sql", "column_stats", "value_counts", "table_info"):
+        for name in ("run_sql", "column_stats", "value_counts", "table_info", "preview_table"):
             self._static[name].process_safe = True
+        for name in ("column_stats", "value_counts", "table_info", "preview_table"):
+            self._static[name].parallel_read_safe = True
 
     def for_context(self, ctx: AgentContext, *, group: str | None = None) -> list[Tool]:
         tools = [t for t in self._static.values() if ctx.mode in t.modes and (not t.needs_customer or ctx.customer)]

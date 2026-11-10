@@ -408,3 +408,29 @@ class RecipeFieldMapping(Base):
     confirmed: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class AgentToolOutput(Base):
+    """Complete safe tool payloads; checkpoints carry only bounded references."""
+
+    __tablename__ = "agent_tool_outputs"
+
+    id: Mapped[str] = mapped_column(String(67), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    customer_id: Mapped[str | None] = mapped_column(
+        ForeignKey("customers.id", ondelete="CASCADE"), nullable=True
+    )
+    execution_id: Mapped[str | None] = mapped_column(
+        ForeignKey("agent_executions.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    call_id: Mapped[str] = mapped_column(String(200))
+    tool_name: Mapped[str] = mapped_column(String(128))
+    branch_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    payload: Mapped[str] = mapped_column(Text)
+    digest: Mapped[str] = mapped_column(String(64))
+    characters: Mapped[int] = mapped_column(Integer)
+    sanitized_fields: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

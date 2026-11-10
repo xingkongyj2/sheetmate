@@ -28,7 +28,7 @@ from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import runs as run_service
 from sheetmate.services.analysis import AnalysisWorkspace
-from sheetmate.services.errors import NotFound, ServiceError
+from sheetmate.services.errors import Forbidden, NotFound, ServiceError
 
 
 class MemoryRememberResult(dict):
@@ -85,6 +85,46 @@ class ConversationHost:
                             and isinstance(event.get("evidence_record"), dict)):
                         return event["evidence_record"]
         return None
+
+    def persist_tool_result(self, *, tool_name: str, call_id: str, payload: dict[str, Any],
+                            execution_id: str | None = None, branch_id: str | None = None) -> dict[str, Any]:
+        from sheetmate.db.models import AgentExecution
+        from sheetmate.services.tool_results import save_tool_result
+
+        with session_scope() as db:
+            try:
+                self._assert_current_memory_scope(db)
+            except ServiceError as exc:
+                raise Forbidden(exc.message) from exc
+            if execution_id is None and getattr(self, "request_message_id", None) is not None:
+                execution_id = db.scalar(select(AgentExecution.id).where(
+                    AgentExecution.conversation_id == self.conversation_id,
+                    AgentExecution.request_message_id == self.request_message_id,
+                    AgentExecution.user_id == self.user_id,
+                ))
+            return save_tool_result(db, user_id=self.user_id, conversation_id=self.conversation_id,
+                                    tool_name=tool_name, call_id=call_id, payload=payload,
+                                    execution_id=execution_id, branch_id=branch_id,
+                                    expected_customer_id=self.customer_id)
+
+    def read_tool_result(self, result_id: str, *, section: str = "text", offset: int = 0,
+                         limit: int = 4000, branch_id: str | None = None) -> dict[str, Any]:
+        from sheetmate.services.tool_results import read_tool_result
+
+        with session_scope() as db:
+            self._assert_current_memory_scope(db)
+            return read_tool_result(db, user_id=self.user_id, conversation_id=self.conversation_id,
+                                    result_id=result_id, section=section, offset=offset, limit=limit,
+                                    branch_id=branch_id, expected_customer_id=self.customer_id)
+
+    def resolve_tool_result_events(self, result_id: str, *, branch_id: str | None = None) -> list[dict[str, Any]]:
+        from sheetmate.services.tool_results import resolve_tool_result_events
+
+        with session_scope() as db:
+            self._assert_current_memory_scope(db)
+            return resolve_tool_result_events(db, user_id=self.user_id, conversation_id=self.conversation_id,
+                                               result_id=result_id, branch_id=branch_id,
+                                               expected_customer_id=self.customer_id)
 
     def list_files(self) -> list[dict[str, Any]]:
         loaded: dict[str, list[str]] = {}

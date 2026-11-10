@@ -8,6 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from sheetmate.engine.sqlutil import sql_table_refs
+from sheetmate.agent.tool_results import _preview_value, result_reference
 
 
 def _source(info: Any) -> dict[str, Any]:
@@ -57,18 +58,21 @@ def tool_evidence(ctx: Any, tool: str, args: dict[str, Any] | None, result: Any,
     for event in result.events:
         if event.get("type") == "file" and event.get("file_id"):
             artifacts.append({key: event[key] for key in ("type", "file_id", "filename") if key in event})
+    output_id = result_reference(getattr(result, "text", ""))
     return {"id": "ev_" + uuid4().hex, "call_id": call_id, "tool": tool,
             "status": "success" if result.ok else "failed", "executed": executed, "reused": reused,
             "source_tables": sources, "full_data": all(source["full_data"] for source in sources) if sources else None,
             "query_hash": hashlib.sha256(canonical.encode()).hexdigest(), "row_counts": row_counts,
-            "artifacts": artifacts, "branch_id": getattr(ctx, "branch_id", None)}
+            "artifacts": artifacts, "branch_id": getattr(ctx, "branch_id", None),
+            **({"tool_result_id": output_id} if output_id else {})}
 
 
 def evidence_projection(value: dict[str, Any] | None) -> dict[str, Any]:
     """Bound audit/context size while retaining evidence identity and versions."""
     if not value:
         return {}
-    return {**{key: value.get(key) for key in ("id", "call_id", "status", "executed", "reused", "reused_from", "full_data", "query_hash")},
-            "source_tables": (value.get("source_tables") or [])[:16],
+    return {**{key: value.get(key) for key in ("id", "call_id", "status", "executed", "reused", "reused_from", "full_data", "query_hash", "tool_result_id")},
+            "source_tables": [_preview_value(item, chars=300, items=16) for item in (value.get("source_tables") or [])[:16]],
             "omitted_sources": max(0, len(value.get("source_tables") or []) - 16),
-            "row_counts": (value.get("row_counts") or [])[:16], "artifacts": (value.get("artifacts") or [])[:16]}
+            "row_counts": [_preview_value(item, chars=300) for item in (value.get("row_counts") or [])[:16]],
+            "artifacts": [_preview_value(item, chars=300) for item in (value.get("artifacts") or [])[:16]]}

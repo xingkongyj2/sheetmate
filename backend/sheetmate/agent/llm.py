@@ -28,6 +28,7 @@ from openai import AsyncOpenAI
 from sheetmate.agent.content import user_content
 from sheetmate.agent.context_builder import DEFAULT_PROJECTION_CHARS, prepare_context
 from sheetmate.agent.llm_budget import BudgetExceeded, RequestBudget, context_profile, request_size
+from sheetmate.agent.prompt_cache import reported_cache_usage, request_prefix_profile, stable_request
 from sheetmate.agent.structured import StructuredOutputError, complete_structured, validate_payload
 from sheetmate.agent.watchdog import Phase, WatchdogTimeout, phase, wait_owned
 from sheetmate.config import LLMSettings, get_llm_settings, is_deepseek_url
@@ -297,6 +298,7 @@ class LLMClient:
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
         self.usage_by_stage: dict[str, dict[str, int]] = {}
         self.usage_calls: list[dict[str, Any]] = []
+        self._cache_prefixes: dict[tuple[str, str], dict[str, Any]] = {}
 
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
         context_metrics = extra.pop("_context_metrics", None)
@@ -360,7 +362,15 @@ class LLMClient:
                 "after_estimated_tokens": after_tokens,
                 "saved_estimated_tokens": max(0, before_tokens - after_tokens),
             }
-        return prepared
+        return stable_request(prepared)
+
+    def _profile_cache_prefix(self, kwargs: dict[str, Any], stage: str) -> dict[str, Any]:
+        # Stages can run concurrently. Compare only the preceding prepared
+        # request in this stage/model, never use another stage's mutable prompt.
+        key = (stage, str(kwargs.get("model") or self.model))
+        profile, snapshot = request_prefix_profile(kwargs, self._cache_prefixes.get(key))
+        self._cache_prefixes[key] = snapshot
+        return profile
 
     async def _within_deadline(self, request: Any, *, streaming: bool = False, retrying: bool = False,
                                wait_phase: Phase | None = None) -> Any:
@@ -403,7 +413,7 @@ class LLMClient:
                 will_retry = retryable and attempt < self.cfg.runtime_policy.sdk_retries
                 self._record_usage(stage, f"{call_id}:attempt{attempt + 1}", None,
                                    "retry" if will_retry else "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
-                                   round((time.monotonic() - started) * 1000))
+                                   round((time.monotonic() - started) * 1000), model=kwargs.get("model"))
                 if not retryable or attempt >= self.cfg.runtime_policy.sdk_retries:
                     raise
                 await self._within_deadline(asyncio.sleep(min(2.0, 0.25 * 2 ** attempt)), retrying=True)
@@ -414,27 +424,46 @@ class LLMClient:
         self.usage["prompt_tokens"] += int(getattr(usage, "prompt_tokens", 0) or 0)
         self.usage["completion_tokens"] += int(getattr(usage, "completion_tokens", 0) or 0)
 
-    def _record_usage(self, stage: str, call_id: str, usage: Any, status: str, duration_ms: int) -> None:
+    def _record_usage(self, stage: str, call_id: str, usage: Any, status: str, duration_ms: int, *,
+                      model: str | None = None, response_model: str | None = None) -> None:
         """Record reported usage, keeping unavailable usage distinct from zero."""
         prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
         completion = int(getattr(usage, "completion_tokens", 0) or 0)
-        cached = int(getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0) or 0)
+        cache = reported_cache_usage(usage)
         reasoning = int(getattr(getattr(usage, "completion_tokens_details", None), "reasoning_tokens", 0) or 0)
         totals = self.usage_by_stage.setdefault(stage, {"calls": 0, "usage_missing_calls": 0,
-            "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "reasoning_tokens": 0, "duration_ms": 0})
+            "prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "duration_ms": 0})
         values = {"prompt_tokens": prompt, "completion_tokens": completion,
-                  "cached_tokens": cached, "reasoning_tokens": reasoning, "duration_ms": duration_ms}
+                  "cached_tokens": cache["cached_tokens"], "cache_miss_tokens": cache["cache_miss_tokens"],
+                  "cached_tokens_missing_calls": int(not cache["cached_tokens_available"]),
+                  "cache_miss_tokens_missing_calls": int(not cache["cache_miss_tokens_available"]),
+                  "reasoning_tokens": reasoning, "duration_ms": duration_ms}
+        # Restored checkpoints can predate cache coverage counters. Their
+        # absent cache fields remain unknown rather than becoming reported zero.
+        for key in ("cached_tokens_missing_calls", "cache_miss_tokens_missing_calls"):
+            totals.setdefault(key, totals["calls"])
         totals["calls"] += 1
         totals["usage_missing_calls"] += int(usage is None)
         for key, value in values.items():
-            totals[key] += value
+            totals[key] = totals.get(key, 0) + value
         self.usage_calls.append({"call_id": call_id, "stage": stage, "status": status,
-                                 "usage_available": usage is not None, **values})
+                                 "model": model or self.model, "provider_id": self.cfg.provider_id,
+                                 "response_model": response_model,
+                                 "usage_available": usage is not None, **values, **cache})
 
     def usage_snapshot(self) -> dict[str, Any]:
         """Read-only task cost snapshot; missing provider usage is explicit."""
-        return {**self.usage, "model_calls": self.budget.calls, "budget": self.budget.snapshot(),
-                "usage_missing_calls": sum(not call["usage_available"] for call in self.usage_calls),
+        cache_totals = {key: sum(int(call.get(key, 0)) for call in self.usage_calls)
+                        for key in ("cached_tokens", "cache_miss_tokens")}
+        # A restored/lost call has no usage_calls entry. Charge its missing
+        # report explicitly; active calls remain separately visible in budget.
+        unrecorded = max(0, self.budget.calls - len(self.usage_calls) - len(self.budget.active))
+        cache_missing = {f"{key}_missing_calls": unrecorded + sum(not call.get(f"{key}_available", False)
+                                                                 for call in self.usage_calls)
+                         for key in ("cached_tokens", "cache_miss_tokens")}
+        return {**self.usage, **cache_totals, **cache_missing,
+                "model_calls": self.budget.calls, "budget": self.budget.snapshot(),
+                "usage_missing_calls": unrecorded + sum(not call["usage_available"] for call in self.usage_calls),
                 "stages": {stage: dict(values) for stage, values in self.usage_by_stage.items()}}
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, **extra: Any) -> Any:
@@ -446,9 +475,12 @@ class LLMClient:
         status = "error"
         response = None
         failure = None
+        request_model = self.model
         try:
             context_metrics: dict[str, Any] = {}
             kwargs = self._kwargs(messages, tools, _context_metrics=context_metrics, **extra)
+            request_model = kwargs["model"]
+            context_metrics["cache_prefix"] = self._profile_cache_prefix(kwargs, stage)
             record_event("llm.context", function, context_metrics, call_id=call_id, stage=stage)
             record_event("llm.request", function, kwargs, call_id=call_id)
             resp = await self._create(kwargs, call_id, stage)
@@ -475,7 +507,8 @@ class LLMClient:
             admitted = call_id in self.budget.active
             self.budget.finish(call_id, usage)
             if admitted:
-                self._record_usage(stage, call_id, usage, status, round((time.monotonic() - started) * 1000))
+                self._record_usage(stage, call_id, usage, status, round((time.monotonic() - started) * 1000),
+                                   model=request_model, response_model=getattr(response, "model", None))
             record_event("llm.response", function, response, call_id=call_id, status=status,
                          stage=stage,
                          **({"error": failure} if failure else {}),
@@ -499,6 +532,7 @@ class LLMClient:
         context_metrics: dict[str, Any] = {}
         kwargs = self._kwargs(messages, tools, stream=True, tool_choice=tool_choice if tools else None,
                               _context_metrics=context_metrics)
+        context_metrics["cache_prefix"] = self._profile_cache_prefix(kwargs, stage)
         finish_reason: str | None = None
         try:
             record_event("llm.context", function, context_metrics, call_id=call_id, stage=stage)
@@ -589,7 +623,8 @@ class LLMClient:
             admitted = call_id in self.budget.active
             self.budget.finish(call_id, usage)
             if admitted:
-                self._record_usage(stage, call_id, usage, status, round((time.monotonic() - started) * 1000))
+                self._record_usage(stage, call_id, usage, status, round((time.monotonic() - started) * 1000),
+                                   model=kwargs["model"], response_model=response_model)
             record_event("llm.response", function, {
                 "model": response_model,
                 "content": "".join(content_parts), "reasoning_content": "".join(reasoning_parts),

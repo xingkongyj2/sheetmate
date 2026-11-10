@@ -300,14 +300,16 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     recorder = WorkflowRecorder(message)
     recorder.request_message_id = message_id
     recorder.job_id = job.id
-    stored: list[dict[str, Any]] = deepcopy(saved.get("stored", []))
+    stored: list[dict[str, Any]] = _restore_ui_events(saved.get("stored", []), user_id, conversation_id)
     committed_delivery = control.checkpoint.get("delivery_manifest") if control else None
     if control and resumed:
-        for pending_event in (control.checkpoint.get("runtime") or {}).get("last_tool_events", []):
+        pending = (control.checkpoint.get("runtime") or {}).get("last_tool_events", [])
+        for pending_event in _restore_ui_events(pending, user_id, conversation_id):
             if pending_event not in stored and pending_event.get("type") in _KEEP_EVENTS:
                 stored.append(_slim(pending_event))
         if committed_delivery and committed_delivery not in stored:
             stored.append(_slim(committed_delivery))
+    delivery_candidates = _restore_delivery_candidates(stored, saved.get("delivery_candidates", {}))
     # Interruption notices do not become the continued answer or its verdict.
     if resumed:
         stored = [event for event in stored if event.get("type") not in {"execution_status", "execution_stop", "error"}]
@@ -323,7 +325,6 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     candidate_parts: list[str] = list(saved.get("candidate_parts", []))
     candidate_final = saved.get("candidate_final", "")
     final_text = saved.get("final_text", "")
-    delivery_candidates: dict[str, dict[str, Any]] = deepcopy(saved.get("delivery_candidates", {}))
     delivery_finished = bool(saved.get("delivery_finished", False))
     replace_file_ids: list[str] = list(saved.get("replace_file_ids", []))
     if resumed:
@@ -349,7 +350,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             last_checkpoint = time.monotonic()
 
     if control:
-        control.ui_snapshot = lambda: {"stored": deepcopy(stored), "assistant_message_id": recorder.message_id,
+        control.ui_snapshot = lambda: {"stored": _checkpoint_ui_events(stored), "assistant_message_id": recorder.message_id,
             "text_parts": list(text_parts), "candidate_parts": list(candidate_parts), "candidate_final": candidate_final,
             "final_text": final_text, "delivery_candidates": deepcopy(delivery_candidates),
             "delivery_finished": delivery_finished, "replace_file_ids": list(replace_file_ids), "run_id": run_id}
@@ -1066,6 +1067,53 @@ def _recipe_fallback(events: list[dict[str, Any]], *, interrupted: bool = False)
     elif not files:
         blocks.append("下一步需要检查输出步骤，生成可下载的结果文件后再确认完成。")
     return "\n\n".join(blocks)
+
+
+def _restore_delivery_candidates(events: list[dict[str, Any]], previous: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Receipted file events may outrun the UI checkpoint before a restart."""
+    candidates = deepcopy(previous)
+    for index, event in enumerate(events):
+        if event.get("type") != "file" or event.get("delivery_status") != "candidate" or not event.get("file_id"):
+            continue
+        if event["file_id"] in candidates:
+            event = events[index] = {**event, "explicit": False}
+        if not event.get("explicit"):
+            candidates.setdefault(event["file_id"], dict(event))
+    return candidates
+
+
+def _checkpoint_ui_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """UI keeps complete flows/cards; loop checkpoints keep scoped locators."""
+    result, seen = [], set()
+    for event in events:
+        reference = event.get("_tool_result_ref")
+        if isinstance(reference, dict) and reference.get("result_id"):
+            identity = (reference["result_id"], event.get("tool_call_id"), reference.get("branch_id"))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            result.append({"type": "tool_result_events", "result_id": identity[0],
+                           "tool_call_id": identity[1], "branch_id": identity[2]})
+        else:
+            result.append(deepcopy(event))
+    return result
+
+
+def _restore_ui_events(events: list[dict[str, Any]], user_id: int, conversation_id: str) -> list[dict[str, Any]]:
+    from sheetmate.services.tool_results import resolve_tool_result_events
+
+    result = []
+    for event in events:
+        if event.get("type") != "tool_result_events":
+            result.append(deepcopy(event))
+            continue
+        reference = {"result_id": event.get("result_id"), "branch_id": event.get("branch_id")}
+        with session_scope() as db:
+            recovered = resolve_tool_result_events(db, user_id=user_id, conversation_id=conversation_id,
+                result_id=reference["result_id"], branch_id=reference["branch_id"])
+        result.extend({**item, "tool_call_id": event.get("tool_call_id"), "_tool_result_ref": reference}
+                      for item in recovered)
+    return result
 
 
 def _slim(event: dict[str, Any]) -> dict[str, Any]:
