@@ -302,6 +302,11 @@ def _defer_owner_storage_cleanup(db: Session, roots: list[Path]) -> None:
                         path.rmdir()
                 except OSError:
                     continue
+            try:
+                root.rmdir()
+            except OSError:
+                # Shared files can outlive the original conversation/customer.
+                pass
 
     file_service.defer_after_commit(db, cleanup)
 

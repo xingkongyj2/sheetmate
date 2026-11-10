@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 客户/会话资源与单次回答的处理流程；表名按来源工作区定位。 */
-import { Download, Eye, FileCheck2, FileSpreadsheet, PanelRightClose, Trash2 } from '@lucide/vue'
+import { Download, Eye, FileCheck2, FileSpreadsheet, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 
 import { conversationApi } from '@/api'
@@ -75,13 +75,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </script>
 
 <template>
-  <button class="execution-backdrop" aria-label="收起执行明细" @click="emit('close')" />
-  <aside class="execution-panel" aria-label="执行明细">
-    <div class="flex h-11 shrink-0 items-center justify-between border-b border-line px-4">
-      <span class="text-sm font-semibold">执行明细</span>
-      <button class="icon-btn size-7 shrink-0" aria-label="收起执行明细" title="收起" @click="emit('close')"><PanelRightClose class="size-4" /></button>
+  <button type="button" class="execution-backdrop" aria-label="收起工作区面板" @click="emit('close')" />
+  <aside id="workspace-panel" class="execution-panel" aria-label="工作区面板">
+    <div class="flex h-11 shrink-0 items-center border-b border-line px-4">
+      <span class="text-sm font-semibold">工作区面板</span>
     </div>
-    <div class="flex shrink-0 gap-1 border-b border-line px-3 py-2 text-[13px]" role="tablist" aria-label="执行明细分类">
+    <div class="flex shrink-0 gap-1 border-b border-line px-3 py-2 text-[13px]" role="tablist" aria-label="工作区面板分类">
       <button
         v-for="item in tabs"
         :id="`execution-tab-${item.key}`"
@@ -190,7 +189,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 .execution-panel { display: flex; height: 100%; width: 392px; flex: none; flex-direction: column; border-left: 1px solid var(--color-line); background: white; }
 .execution-backdrop { display: none; }
 @media (max-width: 1279px) {
-  .execution-panel { position: fixed; top: 0; right: 0; z-index: 35; width: min(392px, 100vw); box-shadow: -12px 0 50px #00000012; }
-  .execution-backdrop { position: fixed; inset: 0; z-index: 34; display: block; background: #00000020; }
+  .execution-panel { position: fixed; top: var(--chat-header-space, 44px); right: 0; z-index: 35; height: calc(100% - var(--chat-header-space, 44px)); width: min(392px, 100vw); box-shadow: -12px 0 50px #00000012; }
+  .execution-backdrop { position: fixed; inset: var(--chat-header-space, 44px) 0 0; z-index: 34; display: block; background: #00000020; }
 }
 </style>

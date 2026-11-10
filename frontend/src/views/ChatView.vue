@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
- * 对话页：中间是消息流和输入框，右侧是执行明细。
- * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和执行明细开关。
+ * 对话页：中间是消息流和输入框，右侧是工作区面板。
+ * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和工作区面板开关。
  */
-import { ListTree, LoaderCircle, PanelRight, Pencil, Save } from '@lucide/vue'
+import { ListTree, LoaderCircle, Pencil, Save } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -20,6 +20,7 @@ import ExecutionPanel from '@/components/chat/ExecutionPanel.vue'
 import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
 import TaskChecklist from '@/components/chat/TaskChecklist.vue'
 import UserMessage from '@/components/chat/UserMessage.vue'
+import PanelToggleIcon from '@/components/common/PanelToggleIcon.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -57,7 +58,7 @@ const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
 const recentlyUploaded = ref<FileInfo[]>([])
 const uploadedReferences = ref<TableReference[]>([])
 const checklistOpen = ref(true) // 任务目录默认显示，可用顶部图标隐藏
-const panelOpen = ref(false) // 执行明细默认关闭，需要时点右上角打开
+const panelOpen = ref(false) // 工作区面板默认关闭，需要时点右上角打开
 const panelTab = ref<'recipes' | 'files' | 'data' | 'usage'>('recipes')
 const refreshingUsage = ref(false)
 const selectedKey = ref<string | null>(null)
@@ -94,7 +95,7 @@ const checklist = computed(() => {
 watch(() => checklist.value?.key, (key) => {
   if (key) checklistOpen.value = true
 })
-// 消息中的表名只在当前会话里解析；全客户的同名表由执行明细按来源定位。
+// 消息中的表名只在当前会话里解析；全客户的同名表由工作区面板按来源定位。
 const messageTables = computed(() => conversationTables(detail.value?.tables ?? [], props.id))
 const messageFiles = computed(() => {
   const files = new Map((detail.value?.files ?? []).map((file) => [file.file_id, file]))
@@ -455,10 +456,10 @@ function answer(option: string) {
 </script>
 
 <template>
-  <div class="flex h-full min-h-0">
+  <div class="chat-page flex h-full min-h-0">
     <div class="chat-workspace flex min-w-0 flex-1 flex-col">
       <!-- 顶部 -->
-      <header class="flex h-11 shrink-0 items-center gap-2 border-b border-line px-4">
+      <header class="chat-toolbar relative z-10 flex h-11 shrink-0 items-center gap-2 px-4">
         <div class="min-w-0 flex-1">
           <input
             v-if="editingTitle"
@@ -504,8 +505,17 @@ function answer(option: string) {
         >
           <ListTree class="size-4" aria-hidden="true" />
         </button>
-        <button class="icon-btn size-7 shrink-0" :class="{ '!bg-paper !text-ink': panelOpen }" title="执行明细" aria-label="执行明细" @click="panelTab = 'recipes'; panelOpen = !panelOpen">
-          <PanelRight class="size-4" />
+        <button
+          type="button"
+          class="icon-btn shrink-0"
+          :class="{ '!bg-paper !text-ink': panelOpen }"
+          :title="panelOpen ? '收起工作区面板' : '展开工作区面板'"
+          :aria-label="panelOpen ? '收起工作区面板' : '展开工作区面板'"
+          :aria-expanded="panelOpen"
+          aria-controls="workspace-panel"
+          @click="panelTab = 'recipes'; panelOpen = !panelOpen"
+        >
+          <PanelToggleIcon side="right" :expanded="panelOpen" class="size-5" />
         </button>
       </header>
 
@@ -618,6 +628,9 @@ function answer(option: string) {
 </template>
 
 <style scoped>
+.chat-page {
+  --chat-header-space: 44px;
+}
 .chat-workspace {
   container: chat-workspace / inline-size;
 }

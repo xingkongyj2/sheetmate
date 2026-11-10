@@ -33,12 +33,29 @@ from sheetmate.services.table_memory import FILE_MEMORY_KEY, FILE_VERSION_KEY, c
 logger = logging.getLogger(__name__)
 
 
+def _prune_empty_storage_parents(path: Path) -> None:
+    """Remove empty upload/output directories, keeping the storage roots themselves."""
+    parent = path.parent.resolve()
+    for storage_root in (settings.uploads_dir.resolve(), settings.outputs_dir.resolve()):
+        if not parent.is_relative_to(storage_root):
+            continue
+        while parent != storage_root:
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+        break
+
+
 @event.listens_for(Session, "after_commit")
 def _remove_deleted_files(db: Session) -> None:
     paths = set(db.info.pop("deleted_file_paths", set())) | set(db.info.pop("deleted_aux_paths", set()))
     for path in paths:
         try:
-            Path(path).unlink(missing_ok=True)
+            file_path = Path(path)
+            file_path.unlink(missing_ok=True)
+            _prune_empty_storage_parents(file_path)
         except OSError:
             logger.warning("无法清理已解除所有关联的文件 %s", path, exc_info=True)
     for callback in db.info.pop("after_commit_cleanup", []):

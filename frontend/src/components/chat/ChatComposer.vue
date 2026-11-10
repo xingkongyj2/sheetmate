@@ -155,11 +155,11 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
 
 <template>
   <div
-    class="relative rounded-[22px] bg-white transition"
+    class="relative transition"
     :class="[
       appearance === 'card'
-        ? 'shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.03)] focus-within:shadow-[0_6px_28px_rgba(0,0,0,0.09),0_2px_6px_rgba(0,0,0,0.04)]'
-        : ['border', dragging ? 'border-ink' : 'border-line shadow-[0_8px_30px_-18px_rgba(0,0,0,0.25)] focus-within:border-ink/30'],
+        ? 'chat-card'
+        : ['rounded-[22px] border bg-white', dragging ? 'border-ink' : 'border-line shadow-[0_8px_30px_-18px_rgba(0,0,0,0.25)] focus-within:border-ink/30'],
       dragging && 'ring-4 ring-black/5',
     ]"
     @dragover.prevent="dragging = true"
