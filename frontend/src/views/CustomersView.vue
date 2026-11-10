@@ -5,6 +5,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import type { CustomerCard } from '@/api/types'
+import CustomerLibraryIcon from '@/components/brand/CustomerLibraryIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import { timeAgo } from '@/composables/chatModel'
@@ -35,19 +36,19 @@ async function onSaved(customer: CustomerCard) {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[1200px] px-4 py-8 sm:px-8 sm:py-10">
-      <div class="flex items-center gap-3 sm:gap-4">
+    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-8 sm:px-8 sm:py-10">
+      <div class="flex shrink-0 items-center gap-3 sm:gap-4">
         <h1 class="shrink-0 text-2xl font-semibold tracking-tight sm:text-[28px]">客户库</h1>
         <div class="ml-auto flex min-w-0 items-center gap-2">
-          <label class="flex min-w-0 items-center gap-2 rounded-full border border-line bg-white px-3.5 py-2">
+          <label class="flex min-w-0 items-center gap-2 rounded-full bg-paper/80 px-3.5 py-2.5 sm:w-56">
             <Search class="size-4 shrink-0 text-faint" />
-            <input v-model="query" aria-label="搜索客户" class="w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-faint sm:w-48" placeholder="搜索客户" />
+            <input v-model="query" aria-label="搜索客户" class="w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-faint" placeholder="搜索客户" />
           </label>
           <button class="btn-ink shrink-0 whitespace-nowrap px-3 sm:px-5" @click="creating = true"><Plus class="size-4" />新建客户</button>
         </div>
       </div>
 
-      <div class="mt-7 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      <div v-if="list.length" class="mt-7 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         <RouterLink
           v-for="(c, i) in list"
           :key="c.id"
@@ -75,7 +76,10 @@ async function onSaved(customer: CustomerCard) {
         </RouterLink>
       </div>
 
-      <div v-if="!loading && !store.customers.length" class="mt-16 text-center text-sm text-faint">还没有客户</div>
+      <div v-else-if="!loading" class="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center text-sm text-faint" role="status">
+        <CustomerLibraryIcon class="size-12 opacity-65" />
+        <p>{{ store.customers.length ? '没有找到符合条件的客户' : '还没有客户' }}</p>
+      </div>
     </div>
     <CustomerFormDialog v-if="creating" @close="creating = false" @saved="onSaved" />
   </div>

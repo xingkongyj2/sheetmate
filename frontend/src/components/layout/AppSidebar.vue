@@ -2,7 +2,7 @@
 /**
  * 侧边栏：新对话、客户，下面是按时间分组的对话列表（显示绑定的客户），底部是用户名与账号操作。
  */
-import { LoaderCircle, LogOut, Plus, Settings, Trash2 } from '@lucide/vue'
+import { ChevronLeft, ChevronRight, LoaderCircle, LogOut, Plus, Settings, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -12,7 +12,6 @@ import CustomerLibraryIcon from '@/components/brand/CustomerLibraryIcon.vue'
 import FormulaLibraryIcon from '@/components/brand/FormulaLibraryIcon.vue'
 import LogoMark from '@/components/brand/LogoMark.vue'
 import { mascotStyle } from '@/components/brand/mascots'
-import PanelToggleIcon from '@/components/common/PanelToggleIcon.vue'
 import { useConfirm } from '@/composables/useConfirm'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
@@ -71,7 +70,7 @@ async function logout() {
     :class="collapsed ? 'w-[64px]' : 'w-[268px]'"
   >
     <!-- 顶部 -->
-    <div class="flex h-11 shrink-0 items-center justify-between px-3.5">
+    <div class="flex h-14 shrink-0 items-center justify-between px-3.5">
       <RouterLink v-if="!collapsed" to="/" class="pl-1"><LogoMark with-text :size="26" /></RouterLink>
       <button
         type="button"
@@ -81,11 +80,12 @@ async function logout() {
         :aria-expanded="!collapsed"
         @click="collapsed = !collapsed"
       >
-        <PanelToggleIcon side="left" :expanded="!collapsed" class="size-5" />
+        <ChevronRight v-if="collapsed" class="size-4" aria-hidden="true" />
+        <ChevronLeft v-else class="size-4" aria-hidden="true" />
       </button>
     </div>
 
-    <div class="px-3">
+    <div class="mt-2 px-3">
       <RouterLink :to="{ name: 'home' }" class="btn-ink w-full" :class="collapsed ? 'px-0' : ''" title="新对话">
         <Plus class="size-4" /><span v-if="!collapsed">新对话</span>
       </RouterLink>
@@ -155,7 +155,7 @@ async function logout() {
     <div v-else class="flex-1" />
 
     <!-- 账号 -->
-    <div class="relative border-t border-line p-3">
+    <div class="relative p-3">
       <div v-if="!collapsed" class="flex min-w-0 items-center gap-2 py-1 pl-3 pr-1.5">
         <span aria-hidden="true" class="flex size-8 shrink-0 items-center justify-center rounded-full bg-ink text-sm font-semibold text-white">{{ initial }}</span>
         <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="username">{{ username }}</span>

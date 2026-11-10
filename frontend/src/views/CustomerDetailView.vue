@@ -21,7 +21,6 @@ import { timeAgo } from '@/composables/chatModel'
 import { primaryFirst, workflowFiles } from '@/composables/customerWorkflow'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
-import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
@@ -32,7 +31,6 @@ const router = useRouter()
 const toast = useToast()
 const { confirmDelete } = useConfirm()
 const store = useWorkspaceStore()
-const auth = useAuthStore()
 
 type Tab = 'logic' | 'recipes' | 'files' | 'memory'
 const TABS: { key: Tab; label: string }[] = [
@@ -197,6 +195,7 @@ async function onEdited() {
               <span v-if="customer.code" class="shrink-0 font-mono text-xs text-faint">{{ customer.code }}</span>
             </div>
             <button class="icon-btn size-7 shrink-0" title="编辑客户" @click="editing = true"><Pencil class="size-3.5" /></button>
+            <button class="icon-btn size-7 shrink-0 hover:text-error" title="删除客户" aria-label="删除客户" @click="removeCustomer"><Trash2 class="size-3.5" /></button>
           </div>
           <p class="mt-2 text-sm leading-relaxed text-mute">{{ customer.description || '还没有介绍' }}</p>
           <div class="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-mute">
@@ -296,9 +295,6 @@ async function onEdited() {
             <MemoryPanel :customer-id="customer.id" :recipe-id="recipe.recipe_id" :memories="recipe.memories" :mapping="recipe.field_mapping" :mapping-entries="recipe.field_mapping_entries" :refresh="load" />
           </section>
           <div v-if="!orderedRecipes.length" class="card-soft py-12 text-center text-sm text-faint">保存流程后，可以维护对应的记忆和字段。</div>
-        </div>
-        <div v-if="auth.user?.role === 'admin' || customer" class="mt-8 flex justify-end">
-          <button class="btn-text text-error hover:!bg-error/5 hover:!text-error" @click="removeCustomer"><Trash2 class="size-4" />删除客户</button>
         </div>
       </section>
     </div>

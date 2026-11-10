@@ -423,3 +423,18 @@ async function test(provider: LLMProviderConfig) {
     </div>
   </div>
 </template>
+
+<style scoped>
+.toggle:checked {
+  --input-color: #6265dc;
+  background-color: var(--input-color);
+}
+
+.toggle:checked::before {
+  background-color: #fff;
+}
+
+input[type='checkbox']:not(.toggle) {
+  accent-color: #6265dc;
+}
+</style>

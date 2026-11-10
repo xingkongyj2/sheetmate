@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 客户/会话资源与单次回答的处理流程；表名按来源工作区定位。 */
 import { Download, Eye, FileCheck2, FileSpreadsheet, Trash2 } from '@lucide/vue'
-import { computed, onBeforeUnmount, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { conversationApi } from '@/api'
 import type { ConversationDetail, FileInfo, RecipeBrief, RecipeFlowData, TableBrief } from '@/api/types'
@@ -22,10 +22,12 @@ const props = withDefaults(defineProps<{
   messages?: UiMessage[]
   refreshingUsage?: boolean
   activeTab?: Tab
+  width: number
 }>(), { activeTab: 'recipes', messages: () => [], refreshingUsage: false })
 const emit = defineEmits<{
   close: []; openTable: [table: TableBrief]; openFile: [file: FileInfo]; refresh: []
   'update:activeTab': [tab: Tab]
+  'update:width': [width: number]
 }>()
 const { confirmDelete } = useConfirm()
 const tab = computed({ get: () => props.activeTab, set: (value: Tab) => emit('update:activeTab', value) })
@@ -37,6 +39,85 @@ const progresses = computed(() => (props.message?.artifacts ?? []).flatMap((arti
 const recipeSections = computed(() => executionRecipeSections(props.detail?.recipes ?? [], progresses.value))
 const tables = computed(() => executionTables(props.detail?.tables ?? []))
 const fileGroups = computed(() => executionFileGroups(props.detail?.files ?? []).filter((group) => group.files.length))
+const emptyState = computed(() => {
+  if (tab.value === 'recipes' && !recipeSections.value.saved.length && !recipeSections.value.progresses.length) {
+    return { emoji: '🙃', text: '暂无已保存的流程' }
+  }
+  if (tab.value === 'files' && !fileGroups.value.length) return { emoji: '🫠', text: '还没有文件' }
+  if (tab.value === 'data' && !tables.value.length) return { emoji: '😴', text: '暂无中间数据' }
+  return null
+})
+const viewportWidth = ref(window.innerWidth)
+const resizing = ref(false)
+const maxWidth = computed(() => Math.min(600, viewportWidth.value))
+const minWidth = computed(() => Math.min(280, maxWidth.value))
+const panelWidth = computed(() => clampWidth(props.width))
+let finishResize: (() => void) | undefined
+
+function clampWidth(width: number) {
+  return Math.min(maxWidth.value, Math.max(minWidth.value, Math.round(width)))
+}
+function setWidth(width: number) {
+  emit('update:width', clampWidth(width))
+}
+function startResize(event: PointerEvent) {
+  if (event.button !== 0 || !event.isPrimary || minWidth.value === maxWidth.value) return
+  event.preventDefault()
+  finishResize?.()
+  const handle = event.currentTarget as HTMLElement
+  const pointerId = event.pointerId
+  const startX = event.clientX
+  const startWidth = panelWidth.value
+  const root = document.documentElement
+  const previousCursor = root.style.cursor
+  const previousSelection = root.style.userSelect
+  handle.focus()
+  resizing.value = true
+  root.style.cursor = 'col-resize'
+  root.style.userSelect = 'none'
+
+  const move = (next: PointerEvent) => {
+    if (next.pointerId !== pointerId) return
+    next.preventDefault()
+    setWidth(startWidth + startX - next.clientX)
+  }
+  const end = (next: PointerEvent) => {
+    if (next.pointerId === pointerId) finish()
+  }
+  const finish = () => {
+    window.removeEventListener('pointermove', move)
+    window.removeEventListener('pointerup', end)
+    window.removeEventListener('pointercancel', end)
+    window.removeEventListener('blur', finish)
+    handle.removeEventListener('lostpointercapture', end)
+    root.style.cursor = previousCursor
+    root.style.userSelect = previousSelection
+    resizing.value = false
+    finishResize = undefined
+    if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId)
+  }
+  finishResize = finish
+  window.addEventListener('pointermove', move, { passive: false })
+  window.addEventListener('pointerup', end)
+  window.addEventListener('pointercancel', end)
+  window.addEventListener('blur', finish)
+  handle.addEventListener('lostpointercapture', end)
+  try { handle.setPointerCapture(pointerId) } catch { /* Window listeners also support hosts without pointer capture. */ }
+}
+function resizeWithKey(event: KeyboardEvent) {
+  let width: number
+  if (event.key === 'ArrowLeft') width = panelWidth.value + 20
+  else if (event.key === 'ArrowRight') width = panelWidth.value - 20
+  else if (event.key === 'Home') width = minWidth.value
+  else if (event.key === 'End') width = maxWidth.value
+  else return
+  event.preventDefault()
+  setWidth(width)
+}
+function onViewportResize() {
+  finishResize?.()
+  viewportWidth.value = window.innerWidth
+}
 
 function sourceLabel(table: TableBrief): string {
   return table.run_id ? table.run_title || `运行 ${table.run_id}` : table.conversation_title || '当前会话'
@@ -70,13 +151,35 @@ function progressStatus(progress: RecipeProgress): string {
 function onKey(event: KeyboardEvent) {
   if (event.key === 'Escape' && !document.querySelector('[role="dialog"]')) emit('close')
 }
-onMounted(() => window.addEventListener('keydown', onKey))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+onMounted(() => {
+  window.addEventListener('keydown', onKey)
+  window.addEventListener('resize', onViewportResize)
+})
+onBeforeUnmount(() => {
+  finishResize?.()
+  window.removeEventListener('keydown', onKey)
+  window.removeEventListener('resize', onViewportResize)
+})
 </script>
 
 <template>
   <button type="button" class="execution-backdrop" aria-label="收起工作区面板" @click="emit('close')" />
-  <aside id="workspace-panel" class="execution-panel" aria-label="工作区面板">
+  <aside id="workspace-panel" class="execution-panel" :class="{ 'is-resizing': resizing }" :style="{ width: `${panelWidth}px` }" aria-label="工作区面板">
+    <div
+      class="execution-resizer"
+      role="separator"
+      :tabindex="maxWidth > minWidth ? 0 : -1"
+      aria-label="调整工作区面板宽度"
+      aria-orientation="vertical"
+      aria-controls="workspace-panel"
+      :aria-valuemin="minWidth"
+      :aria-valuemax="maxWidth"
+      :aria-valuenow="panelWidth"
+      :aria-valuetext="`${panelWidth} 像素`"
+      title="拖动调整宽度"
+      @pointerdown="startResize"
+      @keydown="resizeWithKey"
+    />
     <div class="flex h-11 shrink-0 items-center border-b border-line px-4">
       <span class="text-sm font-semibold">工作区面板</span>
     </div>
@@ -97,9 +200,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </button>
     </div>
 
-    <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto p-4">
-      <ExecutionStatusNotice v-if="message && tab !== 'usage'" class="mb-4" :message="message" />
-      <ExecutionUsage v-if="tab === 'usage'" :message="message" :messages="messages" :refreshing="refreshingUsage" @refresh="emit('refresh')" />
+    <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto p-4" :class="{ 'flex flex-col': emptyState }">
+      <ExecutionStatusNotice v-if="message && tab !== 'usage'" class="mb-4 shrink-0" :message="message" />
+      <div v-if="emptyState" class="flex flex-1 flex-col items-center justify-center gap-3 py-8 text-center text-sm text-faint">
+        <span class="text-2xl leading-none" aria-hidden="true">{{ emptyState.emoji }}</span>
+        <p>{{ emptyState.text }}</p>
+      </div>
+      <ExecutionUsage v-else-if="tab === 'usage'" :message="message" :messages="messages" :refreshing="refreshingUsage" @refresh="emit('refresh')" />
       <template v-else-if="tab === 'recipes'">
         <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="mb-6 min-w-0 space-y-3">
           <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
@@ -134,7 +241,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
             <RouterLink v-if="recipe?.customer_id && !progress.deleted" :to="{ name: 'customer', params: { id: recipe.customer_id }, query: { tab: 'recipes' } }" class="btn-text -ml-2 mt-3 text-xs">在客户页查看与重复执行 →</RouterLink>
           </div>
         </article>
-        <div v-if="!recipeSections.saved.length && !recipeSections.progresses.length" class="py-14 text-center text-sm text-faint">暂无已保存的流程</div>
         <article v-for="recipe in recipeSections.saved" :key="recipe.recipe_id" class="mb-6 min-w-0 space-y-3">
           <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
             <h3 class="min-w-0 flex-1 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h3>
@@ -149,7 +255,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </template>
 
       <template v-else-if="tab === 'files'">
-        <div v-if="!fileGroups.length" class="py-14 text-center text-sm text-faint">还没有文件</div>
         <div v-for="group in fileGroups" :key="group.key" class="mb-5">
           <div class="label-mini mb-2 flex items-center gap-2">{{ group.label }}<span class="font-normal tabular-nums tracking-normal">{{ group.files.length }}</span></div>
           <div v-for="file in group.files" :key="file.file_id" class="mb-1.5 flex items-center gap-2.5 rounded-xl border border-line px-3 py-2">
@@ -162,8 +267,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
       </template>
 
       <template v-else-if="tab === 'data'">
-        <div v-if="!tables.length" class="py-14 text-center text-sm text-faint">暂无中间数据</div>
-        <div v-else>
+        <div>
           <div class="label-mini mb-2 flex items-center gap-2">中间数据<span class="font-normal tabular-nums tracking-normal">{{ tables.length }}</span></div>
           <div v-for="table in tables" :key="executionTableKey(table)" class="group mb-1.5 rounded-xl border border-line px-3 py-2.5 transition hover:border-ink/20">
             <div class="flex items-center gap-2">
@@ -186,10 +290,15 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </template>
 
 <style scoped>
-.execution-panel { display: flex; height: 100%; width: 392px; flex: none; flex-direction: column; border-left: 1px solid var(--color-line); background: white; }
+.execution-panel { position: relative; display: flex; height: 100%; flex: none; flex-direction: column; border-left: 1px solid var(--color-line); background: white; }
+.execution-resizer { position: absolute; inset: 0 auto 0 0; z-index: 1; width: 8px; cursor: col-resize; touch-action: none; outline: none; }
+.execution-resizer::after { position: absolute; inset: 0 auto 0 0; width: 2px; background: transparent; content: ''; transition: background-color 150ms; }
+.execution-resizer:hover::after,
+.execution-resizer:focus-visible::after,
+.is-resizing .execution-resizer::after { background: #6265dc; }
 .execution-backdrop { display: none; }
 @media (max-width: 1279px) {
-  .execution-panel { position: fixed; top: var(--chat-header-space, 44px); right: 0; z-index: 35; height: calc(100% - var(--chat-header-space, 44px)); width: min(392px, 100vw); box-shadow: -12px 0 50px #00000012; }
+  .execution-panel { position: fixed; top: var(--chat-header-space, 44px); right: 0; z-index: 35; height: calc(100% - var(--chat-header-space, 44px)); box-shadow: -12px 0 50px #00000012; }
   .execution-backdrop { position: fixed; inset: var(--chat-header-space, 44px) 0 0; z-index: 34; display: block; background: #00000020; }
 }
 </style>

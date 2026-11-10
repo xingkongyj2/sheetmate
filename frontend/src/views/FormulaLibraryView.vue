@@ -156,8 +156,8 @@ async function remove(f: LibraryFormula) {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[1200px] px-4 py-8 sm:px-8 sm:py-10">
-      <header class="flex flex-wrap items-center gap-3 sm:gap-4">
+    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-8 sm:px-8 sm:py-10">
+      <header class="flex shrink-0 flex-wrap items-center gap-3 sm:gap-4">
         <h1 class="mr-auto text-2xl font-semibold tracking-tight sm:text-[28px]">公式库</h1>
         <label class="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-paper/80 px-3.5 py-2.5 sm:max-w-56">
           <Search class="size-4 shrink-0 text-faint" />
@@ -167,7 +167,7 @@ async function remove(f: LibraryFormula) {
         <button class="btn-ink shrink-0 !bg-[#298c7a] hover:!bg-[#227867]" :disabled="loading || opening" @click="start('ai')"><Sparkles class="size-4" />AI 生成</button>
       </header>
 
-      <div class="mt-7 flex flex-wrap items-center gap-3">
+      <div class="mt-7 flex shrink-0 flex-wrap items-center gap-3">
         <div class="flex rounded-full bg-paper/80 p-1" role="tablist" aria-label="公式类型">
           <button role="tab" :aria-selected="tab === 'customer'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'customer' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'customer'">客户公式 <span class="ml-1 text-xs text-faint">{{ custom.length }}</span></button>
           <button role="tab" :aria-selected="tab === 'builtin'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'builtin' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'builtin'">内置公式 <span class="ml-1 text-xs text-faint">{{ builtin.length }}</span></button>
@@ -202,7 +202,10 @@ async function remove(f: LibraryFormula) {
             </div>
           </article>
         </div>
-        <div v-else class="py-24 text-center text-sm text-faint"><FormulaLibraryIcon class="mx-auto mb-4 !size-10 opacity-65" />{{ custom.length ? '没有找到符合条件的公式' : '还没有客户公式' }}</div>
+        <div v-else class="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center text-sm text-faint" role="status">
+          <FormulaLibraryIcon class="size-12 opacity-65" />
+          <p>{{ custom.length ? '没有找到符合条件的公式' : '还没有客户公式' }}</p>
+        </div>
       </template>
       <template v-else>
         <div v-if="filteredBuiltin.length" class="mt-6 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -211,7 +214,10 @@ async function remove(f: LibraryFormula) {
             <p class="mt-3 line-clamp-3 text-[13px] leading-7 text-mute">{{ f.intent }}</p>
           </button>
         </div>
-        <p v-else class="py-24 text-center text-sm text-faint">没有找到符合条件的公式</p>
+        <div v-else class="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center text-sm text-faint" role="status">
+          <FormulaLibraryIcon class="size-12 opacity-65" />
+          <p>没有找到符合条件的公式</p>
+        </div>
       </template>
     </div>
 

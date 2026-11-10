@@ -3,7 +3,7 @@
  * 对话页：中间是消息流和输入框，右侧是工作区面板。
  * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和工作区面板开关。
  */
-import { ListTree, LoaderCircle, Pencil, Save } from '@lucide/vue'
+import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Save } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -20,7 +20,6 @@ import ExecutionPanel from '@/components/chat/ExecutionPanel.vue'
 import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
 import TaskChecklist from '@/components/chat/TaskChecklist.vue'
 import UserMessage from '@/components/chat/UserMessage.vue'
-import PanelToggleIcon from '@/components/common/PanelToggleIcon.vue'
 import TableViewer from '@/components/common/TableViewer.vue'
 import DataTable from '@/components/common/DataTable.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -59,6 +58,7 @@ const recentlyUploaded = ref<FileInfo[]>([])
 const uploadedReferences = ref<TableReference[]>([])
 const checklistOpen = ref(true) // 任务目录默认显示，可用顶部图标隐藏
 const panelOpen = ref(false) // 工作区面板默认关闭，需要时点右上角打开
+const panelWidth = ref(320)
 const panelTab = ref<'recipes' | 'files' | 'data' | 'usage'>('recipes')
 const refreshingUsage = ref(false)
 const selectedKey = ref<string | null>(null)
@@ -459,7 +459,7 @@ function answer(option: string) {
   <div class="chat-page flex h-full min-h-0">
     <div class="chat-workspace flex min-w-0 flex-1 flex-col">
       <!-- 顶部 -->
-      <header class="chat-toolbar relative z-10 flex h-11 shrink-0 items-center gap-2 px-4">
+      <header class="flex h-11 shrink-0 items-center gap-2 border-b border-line px-4">
         <div class="min-w-0 flex-1">
           <input
             v-if="editingTitle"
@@ -507,7 +507,7 @@ function answer(option: string) {
         </button>
         <button
           type="button"
-          class="icon-btn shrink-0"
+          class="icon-btn size-7 shrink-0"
           :class="{ '!bg-paper !text-ink': panelOpen }"
           :title="panelOpen ? '收起工作区面板' : '展开工作区面板'"
           :aria-label="panelOpen ? '收起工作区面板' : '展开工作区面板'"
@@ -515,18 +515,20 @@ function answer(option: string) {
           aria-controls="workspace-panel"
           @click="panelTab = 'recipes'; panelOpen = !panelOpen"
         >
-          <PanelToggleIcon side="right" :expanded="panelOpen" class="size-5" />
+          <LayoutDashboard class="size-4" aria-hidden="true" />
         </button>
       </header>
 
-      <div class="chat-body min-h-0 flex-1">
+      <div class="chat-body min-h-0 flex-1" :class="{ 'has-directory': checklist && checklistOpen }">
       <aside v-if="checklist" v-show="checklistOpen" id="task-directory" class="chat-progress" aria-label="本轮任务进度">
         <TaskChecklist :key="checklist.key" :items="checklist.items" :running="checklist.running" />
       </aside>
 
+      <div class="chat-conversation">
       <!-- 消息 -->
       <div ref="scroller" class="chat-scroller min-h-0 flex-1 overflow-y-auto" @scroll.passive="onChatScroll">
-        <div ref="content" class="chat-messages pb-6 pt-8">
+      <div ref="content" class="chat-scroll-content">
+        <div class="chat-messages pb-6 pt-8">
           <div v-if="loading" class="flex justify-center py-20 text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
 
           <!-- 空对话 -->
@@ -567,10 +569,10 @@ function answer(option: string) {
             <LoaderCircle class="size-4 animate-spin" />回复连接已中断，正在重新连接…
           </div>
         </div>
-      </div>
 
       <!-- 输入框 -->
-      <div class="chat-input mx-auto w-full max-w-[680px] shrink-0 px-6 pb-5">
+      <div class="chat-composer-lane shrink-0">
+      <div class="chat-input mx-auto w-full max-w-[680px] shrink-0 px-6 pb-3">
         <div class="w-full">
           <div class="relative z-10">
           <ChatComposer
@@ -593,8 +595,11 @@ function answer(option: string) {
             @stop="stop"
           />
           </div>
-          <p class="mt-2 text-center text-[11px] text-faint">AI 生成的结果可能存在错误，请核对重要数据后再使用</p>
         </div>
+      </div>
+      </div>
+      </div>
+      </div>
       </div>
       </div>
     </div>
@@ -606,6 +611,7 @@ function answer(option: string) {
       :messages="messages"
       :refreshing-usage="refreshingUsage"
       v-model:active-tab="panelTab"
+      v-model:width="panelWidth"
       @close="panelOpen = false"
       @open-table="openTable"
       @open-file="(file) => (viewingFile = file)"
@@ -635,17 +641,38 @@ function answer(option: string) {
   container: chat-workspace / inline-size;
 }
 .chat-body {
+  --chat-directory-space: 0px;
   position: relative;
   isolation: isolate;
   display: flex;
   flex-direction: column;
 }
+.chat-conversation {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
 .chat-progress {
-  position: absolute;
-  top: 24px;
-  right: 20px;
-  z-index: 20;
-  width: min(304px, calc(100% - 40px));
+  flex: none;
+  align-self: stretch;
+  margin: 16px 20px 0;
+}
+.chat-scroller {
+  padding-right: var(--chat-directory-space);
+}
+.chat-scroll-content {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+}
+.chat-composer-lane {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  margin-top: auto;
+  background: #fff;
 }
 .chat-messages {
   --chat-message-width: calc(680px - 3rem);
@@ -653,5 +680,18 @@ function answer(option: string) {
   max-width: var(--chat-message-width);
   margin-left: max(4rem, calc((100% - var(--chat-message-width)) / 2));
   margin-right: 1.5rem;
+}
+@container chat-workspace (min-width: 840px) {
+  .chat-body.has-directory {
+    --chat-directory-space: 324px;
+  }
+  .chat-progress {
+    position: absolute;
+    top: 24px;
+    right: 20px;
+    z-index: 1;
+    width: 304px;
+    margin: 0;
+  }
 }
 </style>

@@ -145,13 +145,9 @@ body {
   .card-soft {
     @apply rounded-2xl border border-line bg-white;
   }
-  .chat-card,
-  .chat-toolbar {
-    @apply bg-white shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.03)]
-      transition focus-within:shadow-[0_6px_28px_rgba(0,0,0,0.09),0_2px_6px_rgba(0,0,0,0.04)];
-  }
   .chat-card {
-    @apply rounded-[22px];
+    @apply rounded-[22px] bg-white shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.03)]
+      transition focus-within:shadow-[0_6px_28px_rgba(0,0,0,0.09),0_2px_6px_rgba(0,0,0,0.04)];
   }
   .chip {
     @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-white px-2.5 py-1 text-xs text-mute;
