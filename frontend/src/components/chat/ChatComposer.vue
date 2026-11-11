@@ -266,14 +266,14 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
       </button>
 
       <div class="ml-auto flex items-center gap-2">
-        <button v-if="busy && stoppable" class="flex size-9 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/80" title="停止" @click="emit('stop')">
+        <button v-if="busy && stoppable && !canSend" type="button" class="flex size-9 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/80" title="停止" aria-label="停止" @click="emit('stop')">
           <Square class="size-3.5 fill-current" />
         </button>
         <button v-else-if="busy && !steering" type="button" class="flex size-9 items-center justify-center rounded-full bg-ink text-white opacity-60" aria-label="正在上传并创建对话" disabled>
           <LoaderCircle class="size-4 animate-spin" />
         </button>
         <button
-          v-if="!busy || steering"
+          v-else
           type="button"
           class="flex size-9 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/80 disabled:bg-line disabled:text-faint"
           :disabled="!canSend"
