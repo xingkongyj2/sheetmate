@@ -111,6 +111,7 @@ def public_sentence(text: str, limit: int = 160) -> str:
 
 
 STEP_TEXT_LIMIT = 30
+STEP_TITLE_LIMIT = 20
 
 
 def short_step_text(text: str, *, fallback: str = "", limit: int = STEP_TEXT_LIMIT) -> str:
@@ -140,6 +141,17 @@ def short_step_text(text: str, *, fallback: str = "", limit: int = STEP_TEXT_LIM
         if shown:
             return shown
     return public_sentence(fallback, max(1, limit))
+
+
+def short_step_title(text: str, *, fallback: str = "处理本项需求") -> str:
+    """清单里只显示动作概括；长度仅约束展示，不截断执行指令和结果。"""
+    value = short_step_text(text, fallback=fallback,
+                            limit=max(len(text or ""), len(fallback), STEP_TITLE_LIMIT + 1))
+    if len(value) > STEP_TITLE_LIMIT:
+        # 老计划没有独立标题时，优先保留首个完整短语，避免满屏半句话和省略号。
+        first = re.split(r"[，,：:]", value, maxsplit=1)[0].strip()
+        value = first if 4 <= len(first) <= STEP_TITLE_LIMIT else value[:STEP_TITLE_LIMIT]
+    return value.rstrip("…。，,；;：:、 ") or fallback[:STEP_TITLE_LIMIT]
 
 
 def step_summary(status: str, *, report: str = "", checked: str = "", reason: str = "",

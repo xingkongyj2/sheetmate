@@ -12,7 +12,7 @@
 
 给用户看的内容像同事边做边讲，不是「第 N 步」的报告：
 - 开场白：对需求的理解、默认口径、数据里要留意的、计划审查的结果；
-- 每项说明和收尾总结均不超过 30 字；完整业务指令和执行证据留给执行与最终核对；
+- 每项标题不超过 20 字；完整结果说明随 step_done.detail 提供，供用户点击标题查看；
 - 思考模式固定展示紧凑进度清单（plan_start.checklist）；AI 的 show_plan 判断只控制最终回答是否逐项回顾；
 - 过程中大模型在忙、界面上没有别的变化时，用 activity 事件告诉用户当前在做什么（临时状态，不存库）；
 - 回答核对的结果（audit_done）是结构化事件，界面在回答下面显示为一行小标识，不追加进回答文字。
@@ -56,10 +56,10 @@ from sheetmate.agent.tools import AgentContext
 
 log = logging.getLogger(__name__)
 
-MAX_STEP_FIXES = 1  # 每一步核对不通过时最多补做的次数
+MAX_STEP_FIXES = 3  # 每一步核对不通过时最多补做的次数
 CHECK_TIMEOUT = 60.0  # 步骤核对、回答核对各自最多等多久；超时就放弃这次核对，不能拖住整个回答
 CHECK_MAX_TOKENS = 2000  # 核对的输出很小，给个小上限，免得模型空转到默认的 8192 才停
-THINKING_TOOL_BUDGET = 60  # 思考模式的工具调用总预算：计划各步、补做和自检共用（普通模式是 40）
+THINKING_TOOL_BUDGET = 1000  # 计划各步、补做和自检共用（普通模式是 800）
 _DIGEST_RESULT = 700  # 送去核对的单个工具结果长度上限
 _AUDIT_RESULTS = 20  # 回答核对最多参考最近多少个工具结果
 
@@ -470,7 +470,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         if any(step_states.get(dep) != "done" for dep in dependencies):
             step_states[num] = "blocked"
             yield {"type": "step_done", "step_num": num, "status": "warning", "quiet": True,
-                   "summary": "依赖步骤尚未通过验收，本项未执行。", "blocked": True, "depends_on": dependencies}
+                   "summary": "依赖步骤尚未通过验收，本项未执行。",
+                   "detail": "依赖步骤尚未通过验收，本项未执行。", "blocked": True, "depends_on": dependencies}
             continue
         budget.allow_dependencies(getattr(ctx, "branch_id", None), step_scopes[num], {step_scopes[dep] for dep in dependencies})
         doing = plan.doing(num)
@@ -547,7 +548,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
             elif num in failed_checks:
                 verdict.issues = list(failed_checks[num])
             retry = not verdict.skipped and not verdict.passed and attempt < max_fixes and not exhausted
-            # 完整报告用于后续执行与核对，面板稍后只展示一行摘要。
+            # 完整报告用于后续执行与核对，也保留给用户点击标题后的详情。
             report = tidy_report(run.text)
             # 要补做时不展示有问题的数字；完整报告和核对证据仍留在执行对话里。
             if retry:
@@ -570,13 +571,17 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
 
         if run.failed:
             summary = step_summary("error", reason=run.error)
+            detail = "\n\n".join(part for part in (tidy_report(run.text), run.error) if part)
             yield _note(summary, num)
-            yield {"type": "step_done", "step_num": num, "status": "error", "summary": summary, "quiet": True}
+            yield {"type": "step_done", "step_num": num, "status": "error", "summary": summary,
+                   "detail": detail or summary, "quiet": True}
             return
         if run.waiting:
             summary = step_summary("waiting", reason=run.question)
+            detail = "\n\n".join(part for part in (tidy_report(run.text), run.question) if part)
             yield _note(summary, num)
-            yield {"type": "step_done", "step_num": num, "status": "waiting", "summary": summary, "quiet": True}
+            yield {"type": "step_done", "step_num": num, "status": "waiting", "summary": summary,
+                   "detail": detail or summary, "quiet": True}
             return
         ledger.summaries[num] = report + (f"\n（核对仍有问题：{'；'.join(verdict.issues[:3])}）" if not verdict.passed and verdict.issues else "")
         ledger.checks.append((public_sentence(description, 60) or f"第 {num} 项",
@@ -595,7 +600,16 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         carry = verdict.carry_over
         await checkpoint_plan()
         yield _note(summary, num)
-        yield {"type": "step_done", "step_num": num, "status": status, "summary": summary, "quiet": True}
+        detail_parts = [report]
+        if verdict.checked and not verdict.skipped:
+            detail_parts.append(f"核对结果：{verdict.checked}")
+        if verdict.issues:
+            detail_parts.append("待处理问题：\n" + "\n".join(f"- {issue}" for issue in verdict.issues))
+        if verdict.reason:
+            detail_parts.append(f"核对说明：{verdict.reason}")
+        detail = "\n\n".join(part for part in detail_parts if part) or summary
+        yield {"type": "step_done", "step_num": num, "status": status, "summary": summary,
+               "detail": detail, "quiet": True}
         if exhausted or run.incomplete:
             if exhausted:
                 break

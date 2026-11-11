@@ -23,7 +23,7 @@ from sheetmate.agent.contracts import PLAN_REVIEW_SCHEMA, PLAN_SCHEMA
 from sheetmate.agent.executor import build_system_prompt
 from sheetmate.agent.llm import LLMError, aux_json
 from sheetmate.agent.prompts import CLARIFY_PROMPT, THINK_PLAN_SYSTEM, THINK_REVIEW_SYSTEM
-from sheetmate.agent.reporting import public_sentence, short_step_text, strip_step_label
+from sheetmate.agent.reporting import public_sentence, short_step_text, short_step_title, strip_step_label
 from sheetmate.agent.tools import AgentContext
 from sheetmate.agent.task_state import task_projection
 from sheetmate.engine.analysis import table_info
@@ -171,8 +171,9 @@ class Plan:
         return f"{text}。" if text else ""
 
     def display_description(self, num: int) -> str:
-        """面板只用短描述，执行助手仍读取 steps 中的完整业务指令。"""
-        return short_step_text(self.steps[num - 1]["description"], fallback="处理本项需求")
+        """面板只用 20 字内的动作标题，执行助手仍读取完整业务指令。"""
+        step = self.steps[num - 1]
+        return short_step_title(step.get("title") or step.get("narration") or step["description"])
 
     def doing(self, num: int) -> str:
         """第 num 项进行中时「正在做什么」的短句（界面上随进度闪动的那一行）。"""
@@ -268,6 +269,9 @@ def _clean_steps(value: Any, *, require_checks: bool = False) -> list[dict[str, 
         source_ids.add(source_id)
         step = {"id": source_id, "description": description, "check": check or _DEFAULT_STEP_CHECK,
                 "depends_on": list(dict.fromkeys(dependencies))}
+        title = strip_step_label(clean_text(item.get("title"), 160))
+        if title:
+            step["title"] = short_step_title(title)
         narration = strip_step_label(clean_text(item.get("narration"), 160))
         if narration:
             step["narration"] = narration

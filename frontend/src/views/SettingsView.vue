@@ -110,10 +110,15 @@ function validationMessage(provider: LLMProviderConfig): string {
   if (!draft) return ''
   const numberInRange = (value: number, min: number, max: number, integer = false) =>
     typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isInteger(value))
-  if (!numberInRange(draft.timeout, 5, 900)) return '请求超时需为 5–900 秒。'
+  if (!numberInRange(draft.timeout, 5, 3600)) return '请求超时需为 5–3600 秒。'
   if (!numberInRange(draft.max_tokens, 1, 131072, true)) return '输出 Token 上限需为 1–131072 的整数。'
-  if (!numberInRange(draft.runtime_policy.structured_retries, 0, 3, true)) return '结构输出纠错次数需为 0–3 的整数。'
-  if (!numberInRange(draft.runtime_policy.tool_protocol_retries, 0, 5, true)) return '工具调用纠错次数需为 0–5 的整数。'
+  if (!numberInRange(draft.runtime_policy.structured_retries, 0, 10, true)) return '结构输出纠错次数需为 0–10 的整数。'
+  if (!numberInRange(draft.runtime_policy.tool_protocol_retries, 0, 20, true)) return '工具调用纠错次数需为 0–20 的整数。'
+  if (!numberInRange(draft.runtime_policy.stream_recovery_retries, 0, 10, true)) return '断流恢复次数需为 0–10 的整数。'
+  if (!numberInRange(draft.runtime_policy.sdk_retries, 0, 5, true)) return '连接重试次数需为 0–5 的整数。'
+  if (!numberInRange(draft.runtime_policy.stream_idle_seconds, 0.001, 3600)) return '回复流等待时间需大于 0 且不超过 3600 秒。'
+  if (!numberInRange(draft.runtime_policy.llm_hard_idle_seconds, 0.001, 7200)) return '模型等待时间需大于 0 且不超过 7200 秒。'
+  if (!numberInRange(draft.runtime_policy.tool_timeout_seconds, 0.001, 7200)) return '工具等待时间需大于 0 且不超过 7200 秒。'
   if (!numberInRange(draft.runtime_policy.max_model_calls, 0, 1000, true)) return '每任务模型调用上限需为 0–1000 的整数。'
   if (!numberInRange(draft.runtime_policy.max_prompt_tokens, 0, 10000000, true) ||
       !numberInRange(draft.runtime_policy.max_total_tokens, 0, 10000000, true)) return '任务 Token 预算需为 0–10000000 的整数。'
@@ -124,6 +129,19 @@ function validationMessage(provider: LLMProviderConfig): string {
 
 function resetTestResult(id: LLMProviderId) {
   testResults[id] = null
+}
+
+function resetWaitingAndRetries(id: LLMProviderId) {
+  const draft = drafts[id]
+  if (!draft) return
+  draft.timeout = 1800
+  Object.assign(draft.runtime_policy, {
+    compatibility_mode: 'relaxed', stream_recovery_retries: 5,
+    structured_retries: 6, tool_protocol_retries: 12, sdk_retries: 3,
+    structured_timeout: 0, llm_soft_idle_seconds: 90,
+    llm_hard_idle_seconds: 3600, stream_idle_seconds: 1800, tool_timeout_seconds: 1800,
+  })
+  resetTestResult(id)
 }
 
 function onModelChanged(provider: LLMProviderConfig) {
@@ -340,6 +358,8 @@ async function test(provider: LLMProviderConfig) {
             <section class="mt-7" :aria-labelledby="`${provider.id}-protocol-heading`">
               <h2 :id="`${provider.id}-protocol-heading`" class="mb-3 text-[16px] font-semibold">结构协议</h2>
               <div class="card-soft space-y-4 p-5 sm:p-6">
+                <button type="button" class="btn-line" :disabled="anyBusy" @click="resetWaitingAndRetries(provider.id)">恢复默认等待与重试</button>
+                <p class="text-xs leading-relaxed text-mute">系统会修复常见格式问题，并自动恢复断流。默认允许连续 30 分钟无新内容；90 秒时只提示等待，处理过程中可主动停止。调整后点击下方保存。</p>
                 <label class="block">
                   <span class="mb-1.5 block text-xs font-medium text-mute">结构输出协议</span>
                   <select v-model="drafts[provider.id]!.capabilities.structured_output" class="field"
@@ -353,7 +373,7 @@ async function test(provider: LLMProviderConfig) {
                 <div class="grid gap-4 sm:grid-cols-2">
                   <label class="block">
                     <span class="mb-1.5 block text-xs font-medium text-mute">请求超时（秒）</span>
-                    <input v-model.number="drafts[provider.id]!.timeout" type="number" min="5" max="900" step="1"
+                    <input v-model.number="drafts[provider.id]!.timeout" type="number" min="5" max="3600" step="1"
                       class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
                   </label>
                   <label class="block">
@@ -363,15 +383,41 @@ async function test(provider: LLMProviderConfig) {
                   </label>
                   <label class="block">
                     <span class="mb-1.5 block text-xs font-medium text-mute">结构输出纠错次数</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.structured_retries" type="number" min="0" max="3" step="1"
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.structured_retries" type="number" min="0" max="10" step="1"
                       class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
                   </label>
                   <label class="block">
                     <span class="mb-1.5 block text-xs font-medium text-mute">工具调用纠错次数</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.tool_protocol_retries" type="number" min="0" max="5" step="1"
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.tool_protocol_retries" type="number" min="0" max="20" step="1"
+                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                  </label>
+                  <label class="block">
+                    <span class="mb-1.5 block text-xs font-medium text-mute">回复流无新内容等待（秒）</span>
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.stream_idle_seconds" type="number" min="1" max="3600" step="1"
+                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                  </label>
+                  <label class="block">
+                    <span class="mb-1.5 block text-xs font-medium text-mute">模型等待上限（秒）</span>
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.llm_hard_idle_seconds" type="number" min="1" max="7200" step="1"
+                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                  </label>
+                  <label class="block">
+                    <span class="mb-1.5 block text-xs font-medium text-mute">工具执行等待（秒）</span>
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.tool_timeout_seconds" type="number" min="1" max="7200" step="1"
+                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                  </label>
+                  <label class="block">
+                    <span class="mb-1.5 block text-xs font-medium text-mute">断流自动恢复次数</span>
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.stream_recovery_retries" type="number" min="0" max="10" step="1"
+                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                  </label>
+                  <label class="block">
+                    <span class="mb-1.5 block text-xs font-medium text-mute">连接错误重试次数</span>
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.sdk_retries" type="number" min="0" max="5" step="1"
                       class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
                   </label>
                 </div>
+                <p class="text-xs leading-relaxed text-mute">实际等待采用请求超时、对应等待上限和已启用任务预算中的较小值。任务预算默认关闭，便于慢模型完成处理。</p>
               </div>
             </section>
 

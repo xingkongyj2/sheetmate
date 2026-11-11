@@ -10,7 +10,7 @@ export interface ChecklistItem {
   key: string
   num: number
   description: string
-  summary: string
+  detail: string
   status: PlanStatus
 }
 
@@ -24,10 +24,10 @@ export interface ChecklistSummary {
   tone: ChecklistTone
 }
 
-export const STEP_TEXT_LIMIT = 30
+export const STEP_TEXT_LIMIT = 20
 
 /** Compact display text only; the original plan and execution records stay intact. */
-export function shortStepText(value: string | undefined, fallback = ''): string {
+export function shortStepText(value: string | undefined, fallback = '', limit = STEP_TEXT_LIMIT): string {
   const source = (value ?? '')
     .replace(/^\s*(?:[-*+]\s*)?\[[ xX]\]\s*/gm, '')
     .replace(/^\s*(?:#{1,6}|>+|[-*+]|\d+[.)、])\s+/gm, '')
@@ -37,10 +37,11 @@ export function shortStepText(value: string | undefined, fallback = ''): string 
     .replace(/\*\*|__|~~|\*|_/g, '')
     .replace(/<[^>]*>/g, '')
     .replace(/\s+/g, ' ').trim() || fallback
-  const characters = Array.from(text)
-  return characters.length > STEP_TEXT_LIMIT
-    ? `${characters.slice(0, STEP_TEXT_LIMIT - 1).join('')}…`
-    : text
+  const sentence = text.split(/[。！？]/, 1)[0]?.trim() || text
+  const phrase = sentence.split(/[，,:：；;]/, 1)[0]?.trim() || sentence
+  const title = Array.from(sentence).length > limit && Array.from(phrase).length >= 4 && Array.from(phrase).length <= limit
+    ? phrase : sentence
+  return Array.from(title).slice(0, limit).join('').replace(/[\s，,:：；;。.!！?？…]+$/, '') || fallback
 }
 
 const STEP_SUMMARY_FALLBACK: Record<PlanStatus, string> = {
@@ -52,13 +53,26 @@ const STEP_SUMMARY_FALLBACK: Record<PlanStatus, string> = {
 export function stepSummary(message: UiMessage, item: Extract<TimelineItem, { kind: 'plan' }>): string {
   const fallback = STEP_SUMMARY_FALLBACK[item.status]
   if (item.status === 'pending' || item.status === 'running') return fallback
-  const summary = shortStepText(item.summary)
+  const summary = shortStepText(item.summary, '', 30)
   if (summary) return summary
   if (item.status === 'done') {
     const note = [...message.timeline].reverse().find((entry) => entry.kind === 'note' && entry.step === item.num)
-    if (note?.kind === 'note') return shortStepText(note.text, fallback)
+    if (note?.kind === 'note') return shortStepText(note.text, fallback, 30)
   }
   return fallback
+}
+
+/** Keep result paragraphs intact; compact display helpers would discard their detail. */
+export function stepDetail(message: UiMessage, item: Extract<TimelineItem, { kind: 'plan' }>): string {
+  const fallback = STEP_SUMMARY_FALLBACK[item.status]
+  if (item.status === 'pending' || item.status === 'running') return fallback
+  if (item.detail?.trim()) return item.detail.trim()
+  // Older events only carry a short summary; a completed step's note can retain the full report.
+  if (item.status === 'done') {
+    const note = [...message.timeline].reverse().find((entry) => entry.kind === 'note' && entry.step === item.num)
+    if (note?.kind === 'note' && note.text.trim()) return note.text.trim()
+  }
+  return item.summary?.trim() || fallback
 }
 
 /** 当前助手消息的进度项；旧记录没有启用清单时返回空数组。 */
@@ -66,7 +80,7 @@ export function checklistItems(message: UiMessage | undefined): ChecklistItem[] 
   if (!message || message.role !== 'assistant' || !message.checklist) return []
   return message.timeline.flatMap((item): ChecklistItem[] => item.kind === 'plan'
     ? [{ key: item.key, num: item.num, description: shortStepText(item.description, `第 ${item.num} 项`),
-      summary: stepSummary(message, item), status: item.status }]
+      detail: stepDetail(message, item), status: item.status }]
     : []).sort((left, right) => left.num - right.num)
 }
 

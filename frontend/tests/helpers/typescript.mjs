@@ -1,10 +1,10 @@
 import { existsSync } from 'node:fs'
-import { registerHooks } from 'node:module'
+import * as nodeModule from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 // Application modules use Vite's extensionless imports; keep these tests on Node's native TS runtime.
-registerHooks({
+if (typeof nodeModule.registerHooks === 'function') nodeModule.registerHooks({
   resolve(specifier, context, nextResolve) {
     try {
       return nextResolve(specifier, context)
@@ -16,3 +16,4 @@ registerHooks({
     }
   },
 })
+else nodeModule.register(new URL('./typescriptLoader.mjs', import.meta.url))

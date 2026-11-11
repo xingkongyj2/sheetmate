@@ -286,7 +286,6 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
         </button>
       </div>
     </div>
-    <p v-if="steering" class="px-4 pb-3 text-xs leading-5 text-faint">可以继续补充要求，会在下一次处理前采纳。</p>
     <p v-if="attachmentError" role="alert" class="px-4 pb-3 text-xs text-error">{{ attachmentError }}</p>
     <div v-if="dragging" class="pointer-events-none absolute inset-0 flex items-center justify-center rounded-[22px] bg-white/80 text-sm font-medium">
       松开即可上传表格或图片

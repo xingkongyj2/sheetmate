@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator, Callable
 from collections import OrderedDict
 from contextlib import contextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 import openai
@@ -37,7 +38,10 @@ from sheetmate.conversation_log import record_event
 
 log = logging.getLogger(__name__)
 _LLM_STAGE: contextvars.ContextVar[str | None] = contextvars.ContextVar("sheetmate_llm_stage", default=None)
-_CHEAP_AUX_STAGES = frozenset({"request_intent", "recipe_persistence", "title", "memory_extraction", "history_compaction", "customer_summary"})
+_AUXILIARY_JSON_STAGES = frozenset({
+    "request_intent", "recipe_persistence", "title", "memory_extraction", "history_compaction", "customer_summary",
+    "execution_plan", "plan_review", "plan_repair", "step_verdict", "answer_audit", "task_completion", "final_delivery",
+})
 
 
 @contextmanager
@@ -284,6 +288,34 @@ def _unsupported_format(exc: LLMError) -> bool:
         rf"{target}{punctuation}extra inputs are not permitted", message))
 
 
+def _complete_tool_stream(calls: dict[int, dict[str, str]], tools: list[dict[str, Any]] | None,
+                          tool_choice: str | None) -> bool:
+    """An omitted terminal SSE field can be repaired only for complete calls.
+
+    A normal EOF is not evidence that arbitrary answer text is complete. Tool
+    calls have an inspectable boundary: offered name, unique identity and one
+    fully parsed JSON object. Execution still performs its ordinary schema and
+    authorization checks; this never repairs an interrupted transport.
+    """
+    if not calls or tool_choice == "none":
+        return False
+    offered = {(item.get("function") or {}).get("name") for item in tools or []
+               if isinstance(item, dict) and item.get("type") == "function"}
+    identifiers = set()
+    for call in calls.values():
+        identifier, name = call.get("id", ""), call.get("name", "")
+        if not identifier.strip() or identifier in identifiers or name not in offered:
+            return False
+        identifiers.add(identifier)
+        try:
+            arguments = parse_json(call.get("arguments", ""), allow_text=False)
+        except (ValueError, TypeError, RecursionError):
+            return False
+        if not isinstance(arguments, dict):
+            return False
+    return True
+
+
 class LLMClient:
     """异步客户端。chat / stream_chat 与 TabClaw 一致，另加 complete_json。"""
 
@@ -330,10 +362,15 @@ class LLMClient:
             extra_body["thinking"] = {"type": "enabled" if self.cfg.thinking_enabled else "disabled"}
         extra_body.update(extra.pop("extra_body", None) or {})
         if auxiliary and not self.cfg.runtime_policy.auxiliary_thinking_enabled:
-            if qwen:
+            if qwen or "enable_thinking" in extra_body:
                 extra_body["enable_thinking"] = False
-            elif deepseek_thinking:
+            if deepseek_thinking or isinstance(extra_body.get("thinking"), dict):
                 extra_body["thinking"] = {"type": "disabled"}
+            # Private Qwen servers can expose the same setting through the
+            # tokenizer template. Only change flags the user already supplied.
+            template = extra_body.get("chat_template_kwargs")
+            if isinstance(template, dict) and "enable_thinking" in template:
+                extra_body["chat_template_kwargs"] = {**template, "enable_thinking": False}
         if legacy_chat:
             # 兼容曾保存的额外参数和单次请求覆盖，Chat 不接收思考模式参数。
             for name in ("thinking", "reasoning_effort"):
@@ -585,6 +622,19 @@ class LLMClient:
                     yield chunk
                 if not saw_choice:
                     raise LLMError("模型服务返回了空响应，本轮没有执行结果。", code="empty_response")
+                if finish_reason is None and _complete_tool_stream(calls, tools, tool_choice):
+                    # A few self-hosted gateways close SSE cleanly after a
+                    # complete tool call but omit finish_reason. Tell every
+                    # consumer about this narrow inference explicitly. A
+                    # partial argument or timed-out read never reaches here.
+                    finish_reason = "tool_calls"
+                    record_event("llm.stream.compatibility", function, {
+                        "reason": "complete_tools_without_finish_reason", "tool_calls": len(calls),
+                        "inferred_finish_reason": finish_reason,
+                    }, call_id=call_id, stage=stage)
+                    yield SimpleNamespace(choices=[SimpleNamespace(index=0, finish_reason=finish_reason,
+                        delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=None))],
+                        usage=None, model=response_model, _sheetmate_compatibility="missing_tool_finish_reason")
                 if finish_reason is None:
                     raise LLMError("模型回复流提前结束，未收到正常结束原因，本轮响应不完整。", code="stream_incomplete")
                 if finish_reason == "tool_calls" and not calls:
@@ -658,11 +708,13 @@ class LLMClient:
                              image_parts: list[dict[str, Any]] | None, max_tokens: int | None,
                              schema: dict[str, Any] | None, schema_name: str,
                              validator: Callable[[Any], None] | None) -> Any:
-        # Auxiliary structured calls (planning, verification and completion
-        # checks) deliberately pass a small output budget.  Thinking-capable
-        # providers may include hidden reasoning in this limit; that must not erase
-        # the caller's output limit and silently fall back to the
-        # global 8192-token setting.
+        # Keep the caller's small initial auxiliary budget. A private server
+        # can ignore the thinking-off flag, so bounded repairs may grow this
+        # budget after explicit truncation, within the user's configured cap.
+        auxiliary = schema_name in _AUXILIARY_JSON_STAGES
+        output_tokens = max_tokens
+        if auxiliary and self.cfg.max_tokens > 0:
+            output_tokens = min(max_tokens, self.cfg.max_tokens) if max_tokens else self.cfg.max_tokens
         if schema is not None:
             prompt += ("\n\n请只返回符合以下 JSON Schema 的 json，不要省略必填字段，不能把布尔值或数组写成字符串：\n"
                        + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
@@ -693,8 +745,8 @@ class LLMClient:
             elif output_format == "json_object":
                 response_format = {"type": "json_object"}
             try:
-                msg = await self.chat(messages, response_format=response_format, max_tokens=max_tokens,
-                                      _auxiliary=schema_name in _CHEAP_AUX_STAGES)
+                msg = await self.chat(messages, response_format=response_format, max_tokens=output_tokens,
+                                      _auxiliary=auxiliary)
             except LLMError as exc:
                 if len(formats) > 1 and _unsupported_format(exc):
                     record_event("llm.structured.fallback", "sheetmate.agent.llm.LLMClient._complete_json",
@@ -726,6 +778,13 @@ class LLMClient:
                 if repairs_left <= 0:
                     break
                 repairs_left -= 1
+                if (auxiliary and getattr(msg, "_sheetmate_finish_reason", None) == "length"
+                        and output_tokens and self.cfg.max_tokens > output_tokens):
+                    previous_tokens = output_tokens
+                    output_tokens = min(self.cfg.max_tokens, output_tokens * 2)
+                    record_event("llm.structured.output_budget", "sheetmate.agent.llm.LLMClient._complete_json",
+                                 {"schema_name": schema_name, "from": previous_tokens, "to": output_tokens,
+                                  "reason": "output_truncated", "repairs_left": repairs_left})
                 details = (json.dumps(exc.errors, ensure_ascii=False) if isinstance(exc, StructuredOutputError)
                            else last_error[:500])
                 messages.append({"role": "assistant", "content": content})
@@ -767,8 +826,13 @@ async def aux_json(llm: Any, prompt: str, *, system: str | None = None, timeout:
     """限时的 JSON 调用，给计划审查、步骤核对、回答核对这类「可有可无」的环节用。
 
     超时、模型报错和意外异常都不往外抛，而是把原因带回去，由调用方降级并如实告诉用户，同时写一行日志。
-    不加限时的话，一次调用最坏要等 4 个 120 秒（解析失败重试 1 次，SDK 超时后又各重试 1 次），比整个任务还长。
+    沿用用户配置的模型等待时间，避免较慢模型被步骤核对的短时钟提前截断。
     用户点「停止」引发的取消照常向上传递。"""
+    cfg = getattr(llm, "cfg", None)
+    policy = getattr(cfg, "runtime_policy", None)
+    model_timeout = getattr(cfg, "timeout", timeout)
+    hard_idle = getattr(policy, "llm_hard_idle_seconds", model_timeout)
+    timeout = max(timeout, min(model_timeout, hard_idle))
     extra: dict[str, Any] = {}
     if image_parts:
         extra["image_parts"] = image_parts

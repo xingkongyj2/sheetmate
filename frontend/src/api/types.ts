@@ -541,6 +541,8 @@ export interface LLMCapabilities {
 }
 
 export interface LLMRuntimePolicy {
+  compatibility_mode: 'relaxed'
+  stream_recovery_retries: number
   budget_enabled: boolean
   structured_retries: number
   tool_protocol_retries: number
@@ -552,6 +554,11 @@ export interface LLMRuntimePolicy {
   max_task_seconds: number
   max_input_chars: number
   auxiliary_thinking_enabled: boolean
+  llm_soft_idle_seconds: number
+  llm_hard_idle_seconds: number
+  stream_idle_seconds: number
+  tool_timeout_seconds: number
+  cancellation_grace_seconds: number
 }
 
 export interface LLMAdvancedConfig {

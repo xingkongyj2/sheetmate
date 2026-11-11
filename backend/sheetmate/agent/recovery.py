@@ -9,8 +9,8 @@ from sheetmate.agent.public_feedback import public_detail as _public_detail
 from sheetmate.agent.tools import Tool, ToolResult
 
 RECONSIDER_TOOL = "reconsider_approach"
-METHOD_FAILURE_LIMIT = 2
-MAX_METHODS = 3
+METHOD_FAILURE_LIMIT = 6
+MAX_METHODS = 10
 
 
 def _public_params(args: dict[str, Any]) -> dict[str, str]:
@@ -47,6 +47,8 @@ class _ObservedResult:
     tool: str
     ok: bool
     method: int
+    # These aliases come from actual result receipts, never from the model's claims.
+    aliases: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -74,10 +76,20 @@ class RecoveryState:
         return (not self.pending or
                 (self.current.failures > 0 and sum(method.failures > 0 for method in self.methods) >= 2))
 
-    def observe(self, name: str, result: ToolResult, *, call_id: str, diagnostic: bool, reused: bool = False) -> None:
+    def observe(self, name: str, result: ToolResult, *, call_id: str, diagnostic: bool, reused: bool = False,
+                evidence_id: str | None = None, result_events: list[dict[str, Any]] | None = None) -> None:
         if reused:
             return  # 缓存复用没有产生新证据，也不重置既有失败。
-        self.results[call_id] = _ObservedResult(name, result.ok, len(self.methods) - 1)
+        aliases = {evidence_id} if evidence_id else set()
+        for event in result.events if result_events is None else result_events:
+            # Showing an existing file is not a new creation receipt for that file.
+            produced_file = event.get("type") == "file" and not event.get("explicit")
+            if event.get("type") in {"script", "recipe_run_done", "recipe_completed"} or produced_file:
+                if isinstance(event.get("run_id"), str) and event["run_id"]:
+                    aliases.add(event["run_id"])
+            if produced_file and isinstance(event.get("file_id"), str) and event["file_id"]:
+                aliases.add(event["file_id"])
+        self.results[call_id] = _ObservedResult(name, result.ok, len(self.methods) - 1, sorted(aliases))
         self.current.attempts += 1
         if not result.ok:
             self.current.failures += 1
@@ -87,6 +99,28 @@ class RecoveryState:
             if not diagnostic:
                 self.pending.clear()
 
+    def _resolve_result(self, reference: Any) -> tuple[str | None, _ObservedResult | None]:
+        if not isinstance(reference, str):
+            return None, None
+        reference = reference.strip().strip("`")
+        if reference in self.results:
+            return reference, self.results[reference]
+        matches = [(call_id, result) for call_id, result in self.results.items() if reference in result.aliases]
+        # Do not guess between different executions, including failed or invalid ones.
+        return matches[0] if len(matches) == 1 else (None, None)
+
+    def _reference_error(self) -> ToolResult:
+        candidates = [call_id for call_id, result in self.results.items()
+                      if result.ok and call_id not in self.invalid_results][-5:]
+        correction = (f"\n本任务可引用的成功调用 result_call_id：{'、'.join(candidates)}。" if candidates else
+                      "\n当前任务没有可引用的成功执行结果，请先执行所需操作。")
+        return ToolResult(
+            "只能引用真实成功、且未判定业务无效的执行结果；可填写实际调用 ID、证据 ID，或唯一对应的运行/产出文件 ID。"
+            "失败、未执行或无法唯一定位的结果不能作为已完成依据。" + correction,
+            ok=False, public_summary="需要核对结果引用",
+            public_text="正在核对已有执行结果，尚未确认本次处理完成。",
+        )
+
     def choose(self, args: dict[str, Any]) -> ToolResult:
         action = args.get("action", "switch_method")
         if action not in {"switch_method", "use_existing_result"}:
@@ -95,11 +129,10 @@ class RecoveryState:
         if any(not isinstance(value, str) or not value.strip() or len(value) > 2000
                for value in (evidence, validation)):
             return ToolResult("请说明实际证据 evidence 和校验依据 validation。", ok=False)
-        source_id = args.get("result_call_id")
-        source = self.results.get(source_id) if isinstance(source_id, str) else None
+        source_id, source = self._resolve_result(args.get("result_call_id"))
         if action == "use_existing_result":
             if source is None or not source.ok or source_id in self.invalid_results:
-                return ToolResult("只能引用真实成功、且未判定业务无效的工具调用 result_call_id；失败或未执行的结果不能作为已完成依据。", ok=False)
+                return self._reference_error()
             self.pending.clear()
             public = _public_params(args)
             return ToolResult(
@@ -168,7 +201,7 @@ class RecoveryState:
             "只描述可观察的操作、依据和待验证结果，不输出内部推理。只改变量、名称、描述或重复相同代码不算换方法。不会向用户要求批准。",
             {"type": "object", "properties": {
                 "action": {"type": "string", "enum": ["switch_method", "use_existing_result"], "description": "默认 switch_method 选择新方法；use_existing_result 核实已有正确结果已满足目标"},
-                "result_call_id": {"type": "string", "description": "引用真实工具调用的 ID；业务结果不对但工具成功、或核实已有结果时必填"},
+                "result_call_id": {"type": "string", "description": "引用真实工具调用 ID 或 evidence_id；也可填唯一对应的运行 run_id 或产出 file_id。业务结果不对但工具成功、或核实已有结果时必填"},
                 "method": {"type": "string", "description": "新方法的具体名称，说明定位或计算思路"},
                 "target": {"type": "string", "description": "实际要调整的文件名、工作表名、字段或单元格范围；已有结果核对时写被核对的结果对象"},
                 "before": {"type": "string", "description": "之前实际使用的做法：依据哪个来源、如何定位、匹配或计算；不要补造未执行的做法"},

@@ -39,6 +39,11 @@ export function mount(component, initialProps, components = {}) {
     get firstChild() { return this.children[0] ?? null },
     get tagName() { return tag.toUpperCase() },
     get options() { return this.children.filter(child => child.tag === 'option') },
+    getRootNode() {
+      let root = this
+      while (root.parent) root = root.parent
+      return root
+    },
     addEventListener() {}, removeEventListener() {},
     focus() {}, replaceChildren(fragment) { this.children = fragment?.childNodes ?? [] } })
   const root = node('root')

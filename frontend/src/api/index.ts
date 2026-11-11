@@ -54,7 +54,7 @@ export const settingsApi = {
   testLLM: async (payload: LLMConfigUpdate) =>
     (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/llm/test', payload,
       // 留出后端返回超时说明的时间，避免慢模型被前端固定的 120 秒超时提前中断。
-      { timeout: (payload.timeout ?? 120) * 1000 + 10_000, validateStatus: () => true })).data,
+      { timeout: (payload.timeout ?? 1800) * 1000 + 10_000, validateStatus: () => true })).data,
 }
 
 // ---------------------------------------------------------------- 客户
@@ -66,11 +66,12 @@ export const customerApi = {
   update: async (id: string, payload: Partial<{ name: string; code: string; description: string; mascot: string; primary_recipe_id: string }>) =>
     (await http.put<{ customer: CustomerCard }>(`/customers/${id}`, payload)).data.customer,
   remove: async (id: string) => http.delete(`/customers/${id}`),
+  // 模型调用由后端的等待和重试策略控制，前端不另用短时限截断。
   refreshSummary: async (id: string, recipeId?: string) =>
-    (await http.post<{ summary: string; by_ai: boolean }>(`/customers/${id}/summary`, {}, { params: { recipe_id: recipeId }, timeout: 180_000 })).data,
+    (await http.post<{ summary: string; by_ai: boolean }>(`/customers/${id}/summary`, {}, { params: { recipe_id: recipeId }, timeout: 0 })).data,
   upgradeSummary: async (id: string, recipeId?: string) =>
     (await http.post<{ summary: string; updated: boolean; summary_by: 'ai' | 'human' }>(
-      `/customers/${id}/summary`, {}, { params: { only_if_outdated: true, recipe_id: recipeId }, timeout: 180_000 },
+      `/customers/${id}/summary`, {}, { params: { only_if_outdated: true, recipe_id: recipeId }, timeout: 0 },
     )).data,
   uploadFile: async (id: string, file: File, kind = 'input', recipeId?: string) => {
     const form = new FormData()
@@ -86,7 +87,7 @@ export const customerApi = {
   // ---- 客户独有公式（参数声明 + {{参数}} SQL 模板）
   formulas: async (id: string) => (await http.get<{ formulas: CustomerFormula[] }>(`/customers/${id}/formulas`)).data.formulas,
   generateFormula: async (id: string, payload: { description: string; file_ids?: string[]; formula?: Record<string, unknown> }) =>
-    (await http.post<FormulaGenerationResult>(`/customers/${id}/formulas/generate`, payload, { timeout: 180_000 })).data,
+    (await http.post<FormulaGenerationResult>(`/customers/${id}/formulas/generate`, payload, { timeout: 0 })).data,
   /** 新增 / 升级：同一个 id 每保存一次升一个版本。返回保存后的公式，used_by[].problems 是它让哪些流程的哪一步出了问题 */
   saveFormula: async (id: string, body: Record<string, unknown>) =>
     (await http.post<{ formula: CustomerFormula }>(`/customers/${id}/formulas`, body)).data.formula,

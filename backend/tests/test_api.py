@@ -375,15 +375,22 @@ def test_modify_mode_refines_until_verified(client, samples, fake_llm):
 
 
 def test_modify_mode_publishes_selected_earlier_run_after_failed_refinement(client, samples, fake_llm):
+    from types import SimpleNamespace
+
+    from sheetmate.model_policy import LLMRuntimePolicy
+
     conversation = _modify_conversation(client, samples)
     first_recipe = _llm_recipe(broken="no_fill")
     first_recipe["validation_rules"] = []
     first_recipe["steps"][1]["params"]["expression"] = "0"
-    fake_llm(
+    policy = LLMRuntimePolicy()
+    llm = fake_llm(
         intent_mode="modify",
-        script=[{"tools": [("build_recipe", {"requirement": "整理账单"})]}, {"text": ""}],
+        script=[{"tools": [("build_recipe", {"requirement": "整理账单"})]}] +
+               [{"text": ""} for _ in range(policy.stream_recovery_retries + 1)],
         json_handlers=[("比对没有通过", _llm_recipe(broken="wrong_key")), ("Recipe 生成器", first_recipe)],
     )
+    llm.cfg = SimpleNamespace(runtime_policy=policy)
     events = _chat(client, conversation, "整理账单")
     runs = [event for event in events if event["type"] == "recipe_run_done"]
     assert len(runs) == 2
@@ -411,8 +418,10 @@ def test_modify_mode_publishes_selected_earlier_run_after_failed_refinement(clie
     assert stored["report"]["status"] == runs[0]["status"]
     assert len(stored["report"]["steps"]) == len(selected["report"]["steps"])
     assert all("preview" not in step and "sql" not in step for step in stored["report"]["steps"])
-    # The selected file survives, but an empty final model response is an
-    # incomplete response rather than a silently successful end to the task.
+    # The selected file survives, but empty final responses exhausting the
+    # configured recovery attempts cannot silently become task completion.
+    assert not llm.script
+    assert sum(event.get("will_retry") is True for event in events if event["type"] == "model_call_done") == policy.stream_recovery_retries
     assert "尚未完成最终结果确认" in message["content"]
     assert message["meta"]["execution"]["status"] == "failed"
     assert message["meta"]["execution"]["code"] == "empty_response"

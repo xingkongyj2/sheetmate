@@ -121,9 +121,9 @@ def _load_settings() -> Settings:
         host=_env("HOST", "127.0.0.1"),
         port=_env_int("PORT", 8000),
         max_upload_mb=_env_int("MAX_UPLOAD_MB", 50),
-        agent_max_iterations=_env_int("AGENT_MAX_ITERATIONS", 12),
-        repair_max_attempts=_env_int("REPAIR_MAX_ATTEMPTS", 3),
-        verify_max_rounds=_env_int("VERIFY_MAX_ROUNDS", 2),
+        agent_max_iterations=_env_int("AGENT_MAX_ITERATIONS", 200),
+        repair_max_attempts=_env_int("REPAIR_MAX_ATTEMPTS", 6),
+        verify_max_rounds=_env_int("VERIFY_MAX_ROUNDS", 4),
         seed_demo=_env_bool("SEED_DEMO", True),
         admin_account=_env("ADMIN_ACCOUNT", "admin"),
         admin_password=_env("ADMIN_PASSWORD", "admin123"),
@@ -148,7 +148,7 @@ class LLMSettings:
     base_url: str
     model: str
     temperature: float = 0.1
-    timeout: float = 120.0
+    timeout: float = 1800.0
     max_tokens: int = 8192  # Recipe JSON 较长，默认预留 8K
     extra_body: dict = field(default_factory=dict)
     thinking_enabled: bool = False
@@ -231,6 +231,29 @@ def _saved_policy(model: type[BaseModel], value: object) -> BaseModel:
         return model()
 
 
+_LEGACY_POLICY_DEFAULTS = {
+    "structured_retries": 1, "tool_protocol_retries": 2, "sdk_retries": 1,
+    "max_task_seconds": 600, "llm_hard_idle_seconds": 540,
+    "stream_idle_seconds": 90, "tool_timeout_seconds": 120,
+}
+
+
+def _saved_runtime_policy(value: object) -> LLMRuntimePolicy:
+    """Upgrade legacy shipped defaults once; retain customized limits.
+
+    Any explicit compatibility mode marks the new schema. Legacy ``strict``
+    normalizes to ``relaxed`` without migrating its explicit numeric values.
+    A subsequent save writes that marker so old numeric choices stay exact.
+    """
+    if isinstance(value, dict) and "compatibility_mode" not in value:
+        value = dict(value)
+        defaults = LLMRuntimePolicy()
+        for key, previous in _LEGACY_POLICY_DEFAULTS.items():
+            if value.get(key) == previous:
+                value[key] = getattr(defaults, key)
+    return _saved_policy(LLMRuntimePolicy, value)
+
+
 def _provider_defaults(provider_id: str) -> tuple[str, str]:
     if provider_id == "deepseek":
         return DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL
@@ -282,10 +305,15 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         enabled = True
     base_url = str(overrides.get("base_url") or default_base_url).strip()
     model = str(overrides.get("model") or default_model).strip()
+    policy = overrides.get("runtime_policy")
+    legacy = not isinstance(policy, dict) or "compatibility_mode" not in policy
+    saved_timeout = overrides.get("timeout", 1800)
+    if legacy and saved_timeout == 120:
+        saved_timeout = 1800
     try:
-        timeout = _timeout_adapter.validate_python(float(overrides.get("timeout", 120)))
+        timeout = _timeout_adapter.validate_python(float(saved_timeout))
     except (TypeError, ValueError):
-        timeout = 120.0
+        timeout = 1800.0
     try:
         max_tokens = _max_tokens_adapter.validate_python(overrides.get("max_tokens", 8192))
     except (TypeError, ValueError):
@@ -301,7 +329,7 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         thinking_enabled=thinking_enabled,
         provider_id=provider_id,
         capabilities=_saved_policy(LLMCapabilities, overrides.get("capabilities")),
-        runtime_policy=_saved_policy(LLMRuntimePolicy, overrides.get("runtime_policy")),
+        runtime_policy=_saved_runtime_policy(policy),
         enabled=enabled,
     )
     cfg.thinking_enabled = thinking_enabled and cfg.thinking_supported
@@ -344,6 +372,11 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
         data = _read_settings_file()
         providers = _provider_overrides(data.get("llm", {}))
         llm = dict(providers.get(provider_id, {}))
+        current = _build_provider_settings(provider_id, llm)
+        # Materialize the legacy upgrade before applying explicit user edits.
+        # In particular a newly selected 120 seconds must not be migrated again.
+        llm["timeout"] = current.timeout
+        llm["runtime_policy"] = current.runtime_policy.model_dump()
         if api_key is not None:
             llm["api_key"] = api_key.strip()
         if base_url is not None:
@@ -358,7 +391,6 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
             llm["timeout"] = _timeout_adapter.validate_python(timeout)
         if max_tokens is not None:
             llm["max_tokens"] = _max_tokens_adapter.validate_python(max_tokens)
-        current = _build_provider_settings(provider_id, llm)
         for name, policy, schema in (("capabilities", capabilities, LLMCapabilities),
                                      ("runtime_policy", runtime_policy, LLMRuntimePolicy)):
             if policy is not None:

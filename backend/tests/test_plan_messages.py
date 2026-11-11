@@ -51,6 +51,7 @@ def test_plan_summaries_are_separate_from_progress_and_final_reply(client, sampl
     assert all(event["step_num"] == 1 for event in notes)
     done = [event for event in events if event["type"] == "step_done"]
     assert done[0]["summary"] == summary
+    assert done[0]["detail"] == summary
     assert all(event["status"] == "done" for event in done)
     assert "".join(event["content"] for event in events if event["type"] == "text_chunk") == answer
     stored = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"][-1]
@@ -70,6 +71,7 @@ def test_plan_waits_for_clarification_without_executing_remaining_steps(client, 
     assert len(llm.calls) == 1
     done = next(event for event in events if event["type"] == "step_done")
     assert done["status"] == "waiting" and done["summary"] == question
+    assert done["detail"] == question
     assert sum(event["type"] == "step_start" for event in events) == 1
     assert not any(event["type"] == "reflect_start" for event in events)
 
@@ -86,6 +88,7 @@ def test_plan_stream_error_is_recorded_as_failed_step(client, fake_llm):
     events = _chat(client, conversation, "统计重量", plan_steps=[{"id": 1, "description": "统计"}])
     done = next(event for event in events if event["type"] == "step_done")
     assert done["status"] == "error" and done["summary"] == "模拟连接中断"
+    assert "模拟连接中断" in done["detail"]
     stored = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"][-1]
     assert done in stored["events"]
 
@@ -102,3 +105,45 @@ def test_plan_does_not_hide_unresolved_tool_errors(client, samples, fake_llm, re
     events = _chat(client, conversation, "查看结构", plan_steps=[{"id": 1, "description": "查看结构"}])
     done = next(event for event in events if event["type"] == "step_done")
     assert done["status"] == ("done" if recovered else "warning")
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_short_step_titles_keep_full_instructions_and_result_details(client, fake_llm, thinking):
+    conversation = _new_conversation(client)
+    description = "核对三人两周原表的所有日期与排班，逐格检查姓名、候选人数和休息日；保留原有备注并单独说明空白格的影响。"
+    check = "全部日期与三人的记录一一对应，候选人数与原表相同，并保留全部备注。"
+    title = "核对三人两周原表"
+    report = ("已逐格核对三人的原始排班与候选记录，原有备注均已保留。\n\n"
+              "处理口径：按原表日期与姓名逐一对应，空白格保留为空，不自动推断为休息。\n\n"
+              "- 姓名与日期对应一致。\n- 未确认的空白格已单独列出，等待补充业务口径。")
+    llm = fake_llm(script=[{"text": report}, {"text": "核对结果已整理。"}])
+    events = _chat(client, conversation, "按计划核对原表", thinking=thinking,
+                   plan_steps=[{"id": 1, "title": title, "description": description, "check": check}])
+    plan = next(event for event in events if event["type"] == "plan_start")
+    started = next(event for event in events if event["type"] == "step_start")
+    assert plan["steps"] == [{"id": 1, "description": title}]
+    assert started["description"] == title
+    instruction = "\n".join(item.get("content") or "" for item in llm.calls[0] if item["role"] == "user")
+    assert description in instruction and check in instruction
+    done = next(event for event in events if event["type"] == "step_done")
+    assert done["detail"] == report
+    if thinking:
+        assert len(done["summary"]) <= 30
+    stored = client.get(f"/api/conversations/{conversation}").json()["conversation"]["messages"][-1]
+    assert next(event for event in stored["events"] if event["type"] == "step_done")["detail"] == report
+    assert len(llm.calls) == 2
+
+
+def test_step_title_fallback_is_local_and_does_not_modify_business_requirements():
+    from sheetmate.agent.planner import plan_from_steps
+
+    description = "核对原表日期与姓名，逐格核对三个人连续两周的全部排班记录，并完整保留备注。"
+    plan = plan_from_steps([{"description": description}])
+    assert plan.display_description(1) == "核对原表日期与姓名"
+    assert plan.steps[0]["description"] == description
+
+    long_title = "核对所有人员两周内全部日期姓名候选人数和原有备注的逐格对应情况"
+    plan = plan_from_steps([{"title": long_title, "description": description}])
+    assert len(plan.display_description(1)) <= 20
+    assert "…" not in plan.display_description(1)
+    assert plan.steps[0]["description"] == description

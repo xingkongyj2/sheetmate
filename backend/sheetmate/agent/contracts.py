@@ -39,6 +39,7 @@ _PLAN_STEP = {
     "type": "object",
     "properties": {
         "id": {"type": "integer", "minimum": 1},
+        "title": _TEXT,
         "description": {**_NONEMPTY_TEXT, "maxLength": 4000},
         "narration": _TEXT,
         "check": {**_NONEMPTY_TEXT, "maxLength": 3000},

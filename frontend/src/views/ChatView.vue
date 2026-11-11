@@ -691,7 +691,7 @@ function answer(option: string) {
             :steer-pending="sendingSteer"
             large
             appearance="card"
-            :placeholder="streaming ? '补充或调整本次处理要求…' : '继续追问...'"
+            placeholder="继续提问..."
             @attach="attach"
             @remove="removeAttachment"
             @preview="previewAttachment"

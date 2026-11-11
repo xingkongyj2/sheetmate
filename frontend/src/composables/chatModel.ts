@@ -59,7 +59,7 @@ export type TimelineItem =
       details?: PublicOperationDetail[]
       step?: number
     }
-  | { kind: 'plan'; key: string; num: number; total: number; description: string; status: PlanStatus; summary?: string }
+  | { kind: 'plan'; key: string; num: number; total: number; description: string; status: PlanStatus; summary?: string; detail?: string }
   | { kind: 'agent'; key: string; id: string; table: string; status: AgentStatus; conclusion?: string }
   | { kind: 'info'; key: string; text: string; tone?: 'memory' | 'mapping' | 'compact' | 'reflect' | 'aggregate'; step?: number }
 
@@ -669,7 +669,11 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       break
     case 'step_start': {
       const item = msg.timeline.find((entry) => entry.kind === 'plan' && entry.num === e.step_num)
-      if (item?.kind === 'plan') item.status = 'running'
+      if (item?.kind === 'plan') {
+        item.status = 'running'
+        item.summary = undefined
+        item.detail = undefined
+      }
       else msg.timeline.push({ kind: 'plan', key: uid('t'), num: e.step_num, total: e.total, description: e.description, status: 'running' })
       break
     }
@@ -677,7 +681,8 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       const item = [...msg.timeline].reverse().find((t) => t.kind === 'plan' && t.num === e.step_num)
       if (item && item.kind === 'plan') {
         item.status = ['done', 'warning', 'waiting', 'error', 'stopped'].includes(e.status) ? e.status : 'done'
-        if (typeof e.summary === 'string') item.summary = e.summary
+        item.summary = typeof e.summary === 'string' ? e.summary : undefined
+        item.detail = typeof e.detail === 'string' ? e.detail : undefined
       }
       break
     }
@@ -722,7 +727,10 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
     case 'error': {
       msg.error = e.content
       const step = activePlan(msg)
-      if (step) step.status = e.content?.includes('已停止') ? 'stopped' : 'error'
+      if (step) {
+        step.status = e.content?.includes('已停止') ? 'stopped' : 'error'
+        if (typeof e.content === 'string') step.detail = e.content
+      }
       break
     }
     case 'done':
@@ -904,6 +912,7 @@ export function finishMessage(msg: UiMessage): void {
       item.status = msg.execution?.status === 'waiting' ? 'waiting'
         : msg.execution?.status === 'incomplete' ? 'warning'
           : msg.execution?.status === 'failed' || msg.error && !msg.error.includes('已停止') ? 'error' : 'stopped'
+      item.detail = msg.error || msg.execution?.summary || item.summary
     }
     if (item.kind === 'agent' && item.status === 'running') item.status = 'error'
   }

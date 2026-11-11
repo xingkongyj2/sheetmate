@@ -1400,7 +1400,7 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
     from sheetmate.model_policy import LLMRuntimePolicy
 
     policy = getattr(getattr(ctx.llm, "cfg", None), "runtime_policy", None) or LLMRuntimePolicy()
-    timeout = getattr(policy, "tool_timeout_seconds", 120)
+    timeout = getattr(policy, "tool_timeout_seconds", 1800)
     grace = getattr(policy, "cancellation_grace_seconds", 5)
     cancelled = threading.Event()
     publication = threading.Lock()
@@ -1530,7 +1530,7 @@ async def _stream_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> A
     from sheetmate.model_policy import LLMRuntimePolicy
 
     policy = getattr(getattr(ctx.llm, "cfg", None), "runtime_policy", None) or LLMRuntimePolicy()
-    timeout = getattr(policy, "tool_timeout_seconds", 120)
+    timeout = getattr(policy, "tool_timeout_seconds", 1800)
     grace = getattr(policy, "cancellation_grace_seconds", 5)
     stream = tool.stream(args, ctx)
     with phase("executing_tool", tool.name) as item:

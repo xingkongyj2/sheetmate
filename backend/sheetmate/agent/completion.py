@@ -12,7 +12,7 @@ from sheetmate.agent.llm import aux_json
 from sheetmate.agent.evidence import evidence_projection
 
 COMPLETION_TIMEOUT = 30.0
-MAX_COMPLETION_RETRIES = 2
+MAX_COMPLETION_RETRIES = 12
 _SCHEMA = {
     "type": "object",
     "properties": {

@@ -8,7 +8,7 @@ from typing import Any
 from sheetmate.agent.llm import aux_json
 from sheetmate.agent.planner import Plan
 
-MAX_PLAN_REPAIRS = 1
+MAX_PLAN_REPAIRS = 3
 REPAIR_TIMEOUT = 30.0
 _SCHEMA = {
     "type": "object",

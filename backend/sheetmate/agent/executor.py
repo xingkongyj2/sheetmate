@@ -66,10 +66,13 @@ _TOOL_RE = re.compile(r"<｜tool[\s\S]*?(?:<｜tool▁calls?▁end｜>|$)")
 _ROLE_TAGS = {"input": "", "expected": "，⭐期望结果（人工做好的样例）", "derived": "，分析结果", "result": "，流程产出"}
 _EXPLORE_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "list_files", "get_recipe"}
 _READ_OBSERVATION_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql"}
-_MAX_IDENTICAL_OBSERVATIONS = 3
+_MAX_IDENTICAL_OBSERVATIONS = 20
+_RECOVERABLE_MODEL_ERRORS = frozenset({
+    "stream_incomplete", "empty_response", "tool_protocol", "connection_error", "timeout", "stream_idle_timeout",
+})
 _RECIPE_TOOLS = {"build_recipe", "revise_recipe", "run_recipe"}
 _SCRIPT_TOOL = "run_python_script"
-_SCRIPT_EXTRA_ITERATIONS = 12
+_SCRIPT_EXTRA_ITERATIONS = 60
 _DIAGNOSTIC_TOOLS = (_EXPLORE_TOOLS - {"run_sql"}) | {
     "inspect_python_script", "inspect_workbook_creation", "list_recipes", "load_file", "show_files",
     "remember", "save_field_mapping", "save_as_recipe", "delete_recipe", "delete_recipes", "ask_user",
@@ -130,6 +133,7 @@ class _ReadProgress:
 class _ToolBudget:
     used: int = 0
     protocol_retries: int = 0
+    stream_recoveries: int = 0
     results: dict[str, dict[str, Any]] = field(default_factory=dict)
     branch_used: dict[str, int] = field(default_factory=dict)
     branch_limits: dict[str, int] = field(default_factory=dict)
@@ -148,7 +152,8 @@ class _ToolBudget:
                     "invalid_results": sorted(value.invalid_results)}
 
         return durable_value({
-            "used": self.used, "protocol_retries": self.protocol_retries, "results": self.results,
+            "used": self.used, "protocol_retries": self.protocol_retries,
+            "stream_recoveries": self.stream_recoveries, "results": self.results,
             "branch_used": self.branch_used, "branch_limits": self.branch_limits,
             "script_attempts": rows(self.script_attempts, asdict), "recoveries": rows(self.recoveries, recovery),
             "read_progress": rows(self.read_progress, asdict),
@@ -158,6 +163,7 @@ class _ToolBudget:
     @classmethod
     def from_state(cls, state: dict[str, Any]) -> _ToolBudget:
         budget = cls(used=int(state.get("used", 0)), protocol_retries=int(state.get("protocol_retries", 0)),
+                     stream_recoveries=int(state.get("stream_recoveries", 0)),
                      results=state.get("results", {}), branch_used=state.get("branch_used", {}),
                      branch_limits=state.get("branch_limits", {}))
         for row in state.get("script_attempts", []):
@@ -166,10 +172,19 @@ class _ToolBudget:
                 ToolResult(**value["result"]), int(value["executions"]), value.get("evidence_id"))
         for row in state.get("recoveries", []):
             value = row["state"]
-            budget.recoveries[(row["branch"], row["scope"])] = RecoveryState(
+            recovery = RecoveryState(
                 methods=[_Method(**method) for method in value["methods"]], pending=set(value["pending"]),
                 results={key: _ObservedResult(**item) for key, item in value["results"].items()},
                 invalid_results=set(value["invalid_results"]))
+            # Older checkpoints indexed only call IDs, although model feedback
+            # exposed evidence IDs. Recover their known identity without text guesses.
+            for evidence_id, receipt in budget.results.items():
+                observed = recovery.results.get(receipt.get("call_id"))
+                if (observed is None or receipt.get("branch_id") != row["branch"]
+                        or receipt.get("scope") != row["scope"]):
+                    continue
+                observed.aliases = sorted(set(observed.aliases) | {evidence_id})
+            budget.recoveries[(row["branch"], row["scope"])] = recovery
         for row in state.get("read_progress", []):
             budget.read_progress[(row["branch"], row["scope"])] = _ReadProgress(**row["state"])
         for row in state.get("scope_dependencies", []):
@@ -213,11 +228,11 @@ class _ToolBudget:
 
 
 class AgentExecutor:
-    def __init__(self, llm: Any, registry: ToolRegistry | None = None, max_iterations: int = 12,
-                 max_tool_calls: int = 40, max_parallel_tools: int = 3):
+    def __init__(self, llm: Any, registry: ToolRegistry | None = None, max_iterations: int = 200,
+                 max_tool_calls: int = 800, max_parallel_tools: int = 3):
         self.llm = llm
         self.registry = registry or ToolRegistry()
-        self.max_iterations = max_iterations
+        self.max_iterations = max(1, max_iterations)
         self.max_tool_calls = max(1, max_tool_calls)
         self.max_parallel_tools = max(1, min(3, max_parallel_tools))
 
@@ -365,7 +380,7 @@ class AgentExecutor:
                 await runtime.checkpoint()
 
         await checkpoint_plan()
-        yield {"type": "plan_start", "steps": [{"id": index, "description": str(step.get("description") or f"第 {index} 步")}
+        yield {"type": "plan_start", "steps": [{"id": index, "description": plan.display_description(index)}
                                                 for index, step in enumerate(steps, start=1)]}
         for i, step in enumerate(steps, start=1):
             if runtime and await runtime.consume(ctx):
@@ -380,9 +395,10 @@ class AgentExecutor:
                 step_states[i] = "blocked"
                 pending.append(description)
                 yield {"type": "step_done", "step_num": i, "status": "warning",
-                       "summary": "依赖步骤尚未通过验收，本项未执行。", "blocked": True, "depends_on": dependencies}
+                       "summary": "依赖步骤尚未通过验收，本项未执行。",
+                       "detail": "依赖步骤尚未通过验收，本项未执行。", "blocked": True, "depends_on": dependencies}
                 continue
-            yield {"type": "step_start", "step_num": i, "total": len(steps), "description": description}
+            yield {"type": "step_start", "step_num": i, "total": len(steps), "description": plan.display_description(i)}
             step_message = (PLAN_STEP_MESSAGE.format(num=i, total=len(steps), description=description)
                             + f"\n本项验收标准：{step['check']}")
             step_scopes[i] = step_message
@@ -416,7 +432,9 @@ class AgentExecutor:
                     continue
                 yield event
                 if event["type"] == "error":
-                    yield {"type": "step_done", "step_num": i, "status": "error", "summary": event.get("content", "执行失败")}
+                    error = event.get("content", "执行失败")
+                    detail = "\n\n".join(part for part in (step_text.strip(), error) if part)
+                    yield {"type": "step_done", "step_num": i, "status": "error", "summary": error, "detail": detail}
                     return
                 if event["type"] == "clarify":
                     waiting = True
@@ -438,7 +456,9 @@ class AgentExecutor:
             if status != "done":
                 pending.append(description)
             await checkpoint_plan()
-            yield {"type": "step_done", "step_num": i, "status": status, "summary": question if waiting else step_text.strip()}
+            summary = question if waiting else step_text.strip()
+            detail = "\n\n".join(part for part in (step_text.strip(), question if waiting else "") if part)
+            yield {"type": "step_done", "step_num": i, "status": status, "summary": summary, "detail": detail}
             if waiting:
                 return
             if budget_exhausted or incomplete:
@@ -491,9 +511,11 @@ class AgentExecutor:
         script_budget_added, fallback_suggested = False, False
         failures: dict[tuple[str, str], int] = {}
         policy = getattr(getattr(self.llm, "cfg", None), "runtime_policy", None)
-        protocol_retry_limit = getattr(policy, "tool_protocol_retries", 2)
+        protocol_retry_limit = getattr(policy, "tool_protocol_retries", 12)
+        stream_retry_limit = getattr(policy, "stream_recovery_retries", 5)
         protocol_pending = False
         completion_retries = 0
+        recovery_finish_prompts = 0
         finish_reason: str | None = None
         stream_id = uuid4().hex
         no_progress = False
@@ -526,8 +548,12 @@ class AgentExecutor:
             iteration_limit = int(saved.get("iteration_limit", iteration_limit))
             explored, built, nudged = saved.get("explored", 0), saved.get("built", False), saved.get("nudged", False)
             script_budget_added = saved.get("script_budget_added", False)
+            # Existing checkpoints keep spent rounds, but can use a newly increased limit.
+            iteration_limit = max(iteration_limit, self.max_iterations +
+                                  (_SCRIPT_EXTRA_ITERATIONS if script_budget_added else 0))
             fallback_suggested, protocol_pending = saved.get("fallback_suggested", False), saved.get("protocol_pending", False)
             completion_retries, no_progress = saved.get("completion_retries", 0), saved.get("no_progress", False)
+            recovery_finish_prompts = int(saved.get("recovery_finish_prompts", 0))
             failures = {(row[0], row[1]): row[2] for row in saved.get("failures", [])}
             if saved.get("terminal_events") and applied_revision == runtime.revision:
                 if transcript is not None:
@@ -551,7 +577,8 @@ class AgentExecutor:
                 "budget": budget_state, "iteration": iteration, "iteration_limit": iteration_limit,
                 "explored": explored, "built": built, "nudged": nudged, "script_budget_added": script_budget_added,
                 "fallback_suggested": fallback_suggested, "protocol_pending": protocol_pending,
-                "completion_retries": completion_retries, "no_progress": no_progress,
+                "completion_retries": completion_retries, "recovery_finish_prompts": recovery_finish_prompts,
+                "no_progress": no_progress,
                 "failures": [[*key, count] for key, count in failures.items()],
                 "pending_response": durable_value(response), "terminal_events": terminal_events or [],
                 "reserved_call_ids": sorted(reserved_call_ids), "parallel_batch": durable_value(parallel_batch),
@@ -639,7 +666,7 @@ class AgentExecutor:
                              "max_iterations": "本轮执行轮数已达到上限，任务尚未确认全部完成。"}.get(limit_code, "")
             if final_round:
                 if no_progress:
-                    msgs.append({"role": "user", "content": "对相同版本输入已连续读取三次并得到相同结果，本轮停止重复操作。请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。"})
+                    msgs.append({"role": "user", "content": f"对相同版本输入已连续读取{_MAX_IDENTICAL_OBSERVATIONS}次并得到相同结果，本轮停止重复操作。请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。"})
                 if budget_exhausted:
                     msgs.append({"role": "user", "content": RECOVERY_BUDGET_MESSAGE})
                 msgs.append({"role": "user", "content": FINAL_ROUND_MESSAGE})
@@ -648,6 +675,7 @@ class AgentExecutor:
             # 文件任务要先确认没有违规工具调用再发布正文；普通闲聊保留逐字流式输出。
             # 即使 tool_choice=none，也不能提前把尚未执行的声明当作最终回答。
             live = not tools and not protocol_pending
+            streamed_text = False
             suppress = False
             finish_reason = None
             saw_choice = False
@@ -693,6 +721,7 @@ class AgentExecutor:
                         content += delta.content
                         suppress = suppress or _TOOL_MARKER in content
                         if live and not suppress:
+                            streamed_text = True
                             yield {"type": "text_chunk", "content": delta.content}
                     for tc in delta.tool_calls or []:
                         slot = calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
@@ -716,6 +745,8 @@ class AgentExecutor:
                 if not content.strip() and not calls_acc:
                     raise LLMError("模型没有返回正文或可执行操作，任务尚未完成。", code="empty_response", finish_reason=finish_reason)
             except asyncio.CancelledError:
+                if runtime is not None:
+                    runtime.state.pop("inflight_model", None)
                 yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason,
                        "status": "cancelled", "code": "cancelled", "summary": "模型调用已取消。",
                        "duration_ms": int((time.perf_counter() - model_started) * 1000)}
@@ -724,9 +755,28 @@ class AgentExecutor:
                 exc = translate_error(raw)
                 finish_reason = getattr(exc, "finish_reason", None) or finish_reason
                 code = getattr(exc, "code", "llm_error")
+                # Only the current, unexecuted response is discarded. Earlier
+                # tool receipts remain paired in msgs and are never replayed.
+                # Live chat text cannot be silently replaced after display.
+                retry = (code in _RECOVERABLE_MODEL_ERRORS and not streamed_text
+                         and budget.stream_recoveries < stream_retry_limit)
+                if runtime is not None:
+                    runtime.state.pop("inflight_model", None)
+                if retry:
+                    budget.stream_recoveries += 1
+                    # A failed transport attempt spends the shared model/time
+                    # budget, but does not consume a successful decision turn.
+                    iteration -= 1
+                    snapshot_loop()
+                    if runtime is not None:
+                        await runtime.checkpoint()
                 yield {"type": "model_call_done", **model_call, "finish_reason": finish_reason,
                        "status": "error", "code": code, "summary": str(exc),
+                       "will_retry": retry,
                        "duration_ms": int((time.perf_counter() - model_started) * 1000)}
+                if retry:
+                    yield {"type": "activity", "text": f"模型回复中断，正在自动恢复（{budget.stream_recoveries}/{stream_retry_limit}）"}
+                    continue
                 if transcript is not None:
                     transcript.extend(msgs[start:])
                 yield stop("failed", code, str(exc))
@@ -781,12 +831,13 @@ class AgentExecutor:
                     iteration_limit += 1
                     msgs.append({"role": "user", "content": _PROTOCOL_CORRECTION_MESSAGE})
                     continue
-                if not final_round and definitions and not recovery.may_finish:
+                if not final_round and definitions and not recovery.may_finish and recovery_finish_prompts < 3:
                     # 单一路径失败时先自主恢复；不同方法确实尝试后由 AI 决定是否收尾。
                     # 候选文字尚未展示，可以直接继续恢复，不改变已有内容。
                     if display:
                         msgs.append(reply)
                     msgs.append({"role": "user", "content": AUTONOMOUS_RECOVERY_MESSAGE})
+                    recovery_finish_prompts += 1
                     continue
                 if tools:
                     yield {"type": "activity", "text": "正在确认任务完成情况"}
@@ -1158,8 +1209,10 @@ class AgentExecutor:
                 end_turn = end_turn or result.end_turn
                 if name != RECONSIDER_TOOL and not method_blocked:
                     recovery.observe(name, result, call_id=call["id"], diagnostic=name in _DIAGNOSTIC_TOOLS,
-                                     reused=repeated_script)
+                                     reused=repeated_script, evidence_id=evidence["id"], result_events=original_events)
                 if executed:
+                    if name != RECONSIDER_TOOL:
+                        recovery_finish_prompts = 0
                     observation = _read_observation_key(name, args, sources, result)
                     no_progress = read_progress.observe(observation)
                 explored += name in _EXPLORE_TOOLS
