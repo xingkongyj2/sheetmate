@@ -87,8 +87,12 @@ function isFollowedByProcess(index: number): boolean {
 }
 const typing = computed(() => props.message.streaming || revealing.value)
 const activity = computed(() => {
-  if (!props.message.streaming) return ''
-  return props.message.activity?.trim() || '正在回复'
+  if (!props.message.streaming || revealing.value) return ''
+  const loading = displayGroups.value.some((group) => group.kind === 'process'
+    ? processHeaders.value.get(group.key)?.status === 'running'
+    : !group.closed && !!group.text.trim())
+  if (loading) return ''
+  return props.message.activity?.trim() || '正在思考'
 })
 const audit = computed(() => auditLine(props.message.audit))
 const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
@@ -180,7 +184,7 @@ onBeforeUnmount(() => {
         <MarkdownView v-else-if="group.text" :source="group.text" :streaming="!group.closed && typing" stable />
       </template>
 
-      <!-- 整轮回复结束前持续显示状态；已有正文和历史操作不代表 AI 已经停止。 -->
+      <!-- 正文和处理模块都没有展示加载状态时，才显示独立的思考提示。 -->
       <div v-if="activity" class="assistant-activity flex items-start gap-1.5 py-0.5 text-[13px] leading-5 text-mute" role="status" aria-live="polite" data-testid="activity">
         <LoaderCircle class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
         <span class="process-title-running min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ activity }}…</span>
