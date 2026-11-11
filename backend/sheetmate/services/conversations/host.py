@@ -13,7 +13,7 @@ from sqlalchemy import select
 
 from sheetmate.agent.memory.long_term.extraction import supported_memory_value, validate_memory_candidates
 from sheetmate.db.session import session_scope
-from sheetmate.db.models import Conversation, Customer, FileRecord, Message, RecipeProfile, Run, User
+from sheetmate.db.models import Conversation, Customer, FileRecord, FileRecipe, Message, RecipeProfile, RecipeRecord, Run, User
 from sheetmate.engine.workbooks.copies import FileCopies
 from sheetmate.engine.workbooks.reader import ReadError
 from sheetmate.engine.workbooks.builder import write_created_workbook
@@ -28,7 +28,7 @@ from sheetmate.services.memory import long_term as memory_service
 from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import runs as run_service
 from sheetmate.services.execution.workspace import AnalysisWorkspace
-from sheetmate.core.errors import Forbidden, NotFound, ServiceError
+from sheetmate.core.errors import Conflict, Forbidden, NotFound, ServiceError
 
 
 class MemoryRememberResult(dict):
@@ -51,6 +51,9 @@ class ConversationHost:
         self.saved_recipes: list[dict[str, Any]] = []
         self.deleted_recipes: list[dict[str, Any]] = []
         self.save_recipe_requested = False
+        self.recipe_edit: dict[str, Any] = {}
+        self._edit_base_recipe: Recipe | None = None
+        self._revision_versions: dict[str, int] = {}
         self.delete_recipe_ids: set[str] = set()
         self._last_recipe: Recipe | None = None
         self.analysis: AnalysisWorkspace | None = None
@@ -413,6 +416,8 @@ class ConversationHost:
         return briefs
 
     def get_recipe(self, recipe_id: str) -> Recipe | None:
+        if self._edit_base_recipe is not None and self._edit_base_recipe.id == recipe_id:
+            return self._edit_base_recipe.model_copy(deep=True)
         pending = self._recent_recipe(recipe_id)
         with session_scope() as db:
             try:
@@ -422,20 +427,47 @@ class ConversationHost:
                 if record.customer_id:
                     recipe_service.ensure_profile(db, record)
                 recipe = recipe_service.get_recipe(db, recipe_id)
+                self._revision_versions.setdefault(recipe_id, recipe.version)
             except NotFound:
+                self._revision_versions.setdefault(recipe_id, 0)
                 return pending
         if recipe.customer_id and recipe.customer_id != self.customer_id and recipe.learned_from.get("conversation_id") != self.conversation_id:
             return None
+        if pending is not None and pending.version >= recipe.version:
+            from sheetmate.services.workflows.editing import assert_pending_base
+            assert_pending_base(pending, recipe)
         return pending if pending is not None and pending.version >= recipe.version else recipe
 
+    def recipe_saved_version(self, recipe_id: str) -> int:
+        if self.recipe_edit.get("recipe_id") == recipe_id:
+            return self.recipe_edit["saved_version"]
+        if recipe_id not in self._revision_versions:
+            with session_scope() as db:
+                self._assert_current_memory_scope(db)
+                try:
+                    self._revision_versions[recipe_id] = recipe_service.get_record(db, recipe_id).version
+                except NotFound:
+                    self._revision_versions[recipe_id] = 0
+        return self._revision_versions[recipe_id]
+
+    def prune_recipe_results(self, recipe_id: str, keep_names: set[str]) -> None:
+        with session_scope() as db:
+            self._assert_current_memory_scope(db)
+        if recipe_id != self.recipe_id:
+            raise ServiceError("只能更新当前流程的结果表。")
+        workspace = self.analysis.source if self.analysis is not None else self.ws
+        for table in workspace.list_tables():
+            if table.role == "result" and table.created_by == f"recipe:{recipe_id}" and table.name not in keep_names:
+                workspace.drop(table.name)
+
     def latest_conversation_recipe(self) -> Recipe | None:
-        recent = self._recent_recipe(self.recipe_id)
-        if recent is not None:
-            return recent
         if self.recipe_id:
             selected = self.get_recipe(self.recipe_id)
             if selected is not None:
                 return selected
+        recent = self._recent_recipe()
+        if recent is not None:
+            return self.get_recipe(recent.id)
         with session_scope() as db:
             records = recipe_service.latest_records(db, conversation_id=self.conversation_id)
             return recipe_service.record_to_recipe(records[0]) if records else None
@@ -453,11 +485,12 @@ class ConversationHost:
         legacy_run_id = None
         with session_scope() as db:
             query = select(Run).where(Run.conversation_id == self.conversation_id,
-                                      Run.kind.in_(("modify", "replay", "script", "analysis"))).order_by(Run.finished_at.desc(), Run.created_at.desc())
+                                      Run.kind.in_(("modify", "replay", "script", "analysis")),
+                                      Run.status.in_(("success", "warning"))).order_by(Run.finished_at.desc(), Run.created_at.desc())
             if recipe_id is not None:
                 query = query.where(Run.recipe_id == recipe_id)
             for run in db.scalars(query):
-                if (run.validation or {}).get("recipe_deleted"):
+                if (run.validation or {}).get("recipe_deleted") or (run.validation or {}).get("revision_save_conflict"):
                     continue
                 if (run.validation or {}).get("workflow_save_error"):
                     raise ServiceError(f"最近一次处理的依赖记录不完整：{run.validation['workflow_save_error']}。请指定要保存的运行记录。")
@@ -474,12 +507,54 @@ class ConversationHost:
         return None
 
     def store_recipe(self, recipe: Recipe, *, note: str = "") -> dict[str, Any]:
+        try:
+            return self._store_recipe(recipe, note=note)
+        except Conflict as exc:
+            run_id = (recipe.metadata.get("last_run") or {}).get("run_id")
+            if run_id:
+                with session_scope() as db:
+                    run = db.get(Run, run_id)
+                    if run is not None and run.conversation_id == self.conversation_id and run.recipe_id == recipe.id:
+                        run.validation = {**(run.validation or {}), "revision_save_conflict": str(exc)}
+                if self._last_recipe is not None and (self._last_recipe.metadata.get("last_run") or {}).get("run_id") == run_id:
+                    self._last_recipe = None
+            raise
+
+    def _store_recipe(self, recipe: Recipe, *, note: str = "") -> dict[str, Any]:
         if not self.save_recipe_requested:
             raise ServiceError("用户没有要求保存重复流程，本次只执行处理。")
+        if self.recipe_edit and recipe.id != self.recipe_edit["recipe_id"]:
+            raise ServiceError("本次对话选中了其他流程，只能保存所选流程的修订。")
         if note:
             recipe.metadata["version_note"] = note
         recipe.customer_id = recipe.customer_id or self.customer_id
         with session_scope() as db:
+            # SQLite has no SELECT FOR UPDATE; acquire its writer lock before
+            # checking the version and keep that check in the save transaction.
+            if db.get_bind().dialect.name == "sqlite":
+                db.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            self._assert_current_memory_scope(db)
+            if recipe.customer_id != self.customer_id:
+                raise Forbidden("不能把流程保存到其他客户。")
+            previous = db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe.id)
+                                  .order_by(RecipeRecord.version.desc()).limit(1)).first()
+            if previous is not None and (previous.customer_id != self.customer_id or
+                    (not self.customer_id and previous.conversation_id != self.conversation_id)):
+                raise Forbidden("这个流程不属于当前客户或会话。")
+            base_version = recipe.metadata.get("revision_base_version")
+            if base_version is not None:
+                edit = self.recipe_edit if self.recipe_edit.get("recipe_id") == recipe.id else {}
+                expected = edit.get("saved_version", recipe.metadata.get("revision_saved_version",
+                                    self._revision_versions.get(recipe.id, base_version)))
+                current_version = previous.version if previous is not None else 0
+                if current_version != expected:
+                    # Recovery may repeat the already committed save after a
+                    # disconnect. Only that exact run/definition is idempotent.
+                    prior = recipe_service.record_to_recipe(previous) if previous is not None else None
+                    same_run = prior is not None and prior.metadata.get("last_run") == recipe.metadata.get("last_run")
+                    if not (same_run and recipe_service._definition(prior) == recipe_service._definition(recipe)
+                            and prior.learned_from.get("input_bindings") == recipe.learned_from.get("input_bindings")):
+                        raise Conflict(f"流程已更新到 v{current_version}，本次修改未覆盖新版本，请刷新后重试。")
             if recipe.customer_id and db.get(Customer, recipe.customer_id) is None:
                 conversation = db.get(Conversation, self.conversation_id)
                 recipe.customer_id = conversation.customer_id if conversation else None
@@ -489,18 +564,58 @@ class ConversationHost:
                 raise ServiceError("这个流程已删除，不能从历史快照重新保存。")
             if last_run is not None and last_run.status not in {"success", "warning"}:
                 raise ServiceError("本次执行未完成，尚不能保存流程。")
+            if base_version is not None and (last_run is None or last_run.conversation_id != self.conversation_id
+                                            or last_run.recipe_id != recipe.id):
+                raise ServiceError("修改后的流程尚未完整重跑，不能保存。")
+            if base_version is not None:
+                snapshot = (last_run.validation or {}).get("recipe_snapshot")
+                executed = Recipe.model_validate(snapshot) if isinstance(snapshot, dict) else None
+                if (executed is None or recipe_service._definition(executed) != recipe_service._definition(recipe)
+                        or executed.learned_from.get("input_bindings") != recipe.learned_from.get("input_bindings")):
+                    raise ServiceError("待保存的修改与本次实际执行的流程不一致，请重新跑完整流程后保存。")
             original_id = recipe.id
             record = recipe_service.save_recipe_if_changed(db, recipe, conversation_id=self.conversation_id)
+            if base_version is not None and self.customer_id and last_run is not None:
+                self._sync_revision_files(db, recipe, previous, last_run)
             brief = recipe_service.recipe_brief(record)
             if last_run is not None and last_run.conversation_id == self.conversation_id and last_run.recipe_id == original_id:
                 last_run.recipe_id = recipe.id
                 last_run.recipe_version = recipe.version
                 last_run.validation = {**(last_run.validation or {}), "recipe_snapshot": recipe.to_dict()}
         self.activate_recipe(recipe)
+        self._edit_base_recipe = None
         self._last_recipe = recipe.model_copy(deep=True)
         self.saved_recipes = [item for item in self.saved_recipes if item["recipe_id"] != brief["recipe_id"]]
         self.saved_recipes.append(brief)
         return brief
+
+    def _sync_revision_files(self, db, recipe: Recipe, previous: RecipeRecord | None, run: Run) -> None:
+        """Change this workflow's active references, preserving source/history files."""
+        def file_ids(bindings: dict[str, Any]) -> set[str]:
+            return {value if isinstance(value, str) else value.get("file_id")
+                    for value in bindings.values() if isinstance(value, (str, dict))} - {None, ""}
+
+        current_inputs = file_ids(recipe.learned_from.get("input_bindings", {}))
+        old_inputs = file_ids(((previous.body or {}).get("learned_from", {}).get("input_bindings", {})) if previous else {})
+        old_runs = list(db.scalars(select(Run).where(Run.recipe_id == recipe.id, Run.customer_id == self.customer_id,
+                                                     Run.id != run.id)))
+        old_outputs = {item.output_file_id for item in old_runs if item.output_file_id}
+        if old_runs:
+            old_outputs.update(db.scalars(select(FileRecord.id).where(
+                FileRecord.run_id.in_([item.id for item in old_runs]), FileRecord.kind == "output")))
+        current_outputs = {item.get("file_id") for item in (run.validation or {}).get("files", []) if item.get("file_id")}
+        if run.output_file_id:
+            current_outputs.add(run.output_file_id)
+        for file_id in (old_inputs - current_inputs) | (old_outputs - current_outputs):
+            link = db.get(FileRecipe, (file_id, recipe.id))
+            if link is None:
+                db.add(FileRecipe(file_id=file_id, recipe_id=recipe.id, customer_id=self.customer_id, excluded=True))
+            else:
+                link.excluded = True
+        for file_id in current_inputs | current_outputs:
+            record = db.get(FileRecord, file_id)
+            if record is not None:
+                file_service.retain_for_recipe(db, record, self.customer_id, recipe.id)
 
     def request_recipe_deletion(self, recipe_ids: list[str]) -> dict[str, Any]:
         from sheetmate.services.workflows.deletion import prepare_confirmation
@@ -543,11 +658,14 @@ class ConversationHost:
 
     def activate_recipe(self, recipe: Recipe) -> None:
         """执行和修订沿用目标流程的资料，避免跨流程读写记忆。"""
-        self.recipe_id = recipe.id
+        if self.recipe_edit and recipe.id != self.recipe_edit["recipe_id"]:
+            raise ServiceError("请在本次选中的流程上修改，不能切换到其他流程执行。")
         with session_scope() as db:
+            self._assert_current_memory_scope(db)
             conversation = db.get(Conversation, self.conversation_id)
             if conversation is not None:
                 conversation.recipe_id = recipe.id
+        self.recipe_id = recipe.id
 
     def open_run(self, kind: str, recipe: Recipe, request_text: str = "") -> RunHandle:
         self.activate_recipe(recipe)
@@ -604,7 +722,7 @@ class ConversationHost:
             run.validation = {**(run.validation or {}), "recipe_snapshot": snapshot.to_dict(), "files": delivered}
             if register_output:
                 recipe.learned_from["input_bindings"] = dict(snapshot.learned_from["input_bindings"])
-                if not run.validation.get("recipe_deleted"):
+                if not run.validation.get("recipe_deleted") and report.get("status") in {"success", "warning"}:
                     self._last_recipe = snapshot
                 elif self._last_recipe is not None and self._last_recipe.id == recipe.id:
                     self._last_recipe = None

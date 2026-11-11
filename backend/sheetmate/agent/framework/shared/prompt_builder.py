@@ -164,6 +164,13 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
     stage = "specialist" if ctx.table_filter is not None else "planning" if thinking else "execution"
     blocks = [
         ContextBlock("system_policy", policy + (THINKING_RULES if thinking else ""), required=True),
+        ContextBlock("recipe_edit", ("## 用户选中的流程修改对象（已由服务端校验）\n"
+            + json.dumps(ctx.recipe_edit, ensure_ascii=False)
+            + "\n结合当前消息理解操作；如果只是询问解释，不执行修改。要求修改时必须使用 revise_recipe，明确 recipe_id、base_version、instruction，"
+              "单步修改传 step_ids，输入变更传 input_changes；通过完整流程重跑适配依赖并核对结果后才能报告完成。"
+              "移除输入或输出指解除流程绑定/交付声明，原文件与历史记录保留。用户上传的新输入必须实际绑定到重跑，不能只改名称。"
+              "除用户要求及必要的依赖适配外保留原流程。重跑失败不得声称已更新。"
+            if ctx.recipe_edit else ""), required=True),
         ContextBlock("customer", "## 客户\n" + build_customer_block(ctx), required=True),
         ContextBlock("business_memory", "## 客户与当前流程的长期记忆（用户维护的规则优先于 AI 参考）\n" + (ctx.host.memory_text(message) or "（没有）"), required=True),
         ContextBlock("task_requirements", "## 当前任务状态\n" + task if task else "", required=True,

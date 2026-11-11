@@ -16,6 +16,7 @@ from sheetmate.recipe.execution.pipeline import RecipePipeline
 from sheetmate.recipe.definition.schema import Recipe
 from sheetmate.agent.tools.contracts import AgentContext, ToolResult
 from sheetmate.agent.tools.workflows.repair import LLMStepRepairer
+from sheetmate.agent.tools.workflows.revision import RevisionStepRepairer, apply_input_changes, revision_request
 from sheetmate.agent.tools.presentation import _clip, _status_label, table_payload
 
 
@@ -138,8 +139,8 @@ async def _stream_build_recipe(args: dict[str, Any], ctx: AgentContext) -> Async
     requirement = str(args.get("requirement") or "").strip()
     if not requirement:
         raise ValueError("requirement 不能为空：请把用户的处理需求写成清楚的处理说明")
-    input_tables = [str(t) for t in (args.get("input_tables") or _default_inputs(ctx))]
-    expected_tables = [str(t) for t in (args.get("expected_tables") or _default_expected(ctx))]
+    input_tables = [str(t) for t in args.get("input_tables", _default_inputs(ctx))]
+    expected_tables = [str(t) for t in args.get("expected_tables", _default_expected(ctx))]
     expected_tables = [t for t in expected_tables if t not in input_tables]
     file_inputs = {str(k): str(v) for k, v in (args.get("input_files") or {}).items()}
     if not input_tables and not file_inputs:
@@ -156,33 +157,56 @@ async def _stream_revise_recipe(args: dict[str, Any], ctx: AgentContext) -> Asyn
     instruction = str(args.get("instruction") or "").strip()
     if not instruction:
         raise ValueError("instruction 不能为空")
-    recipe = ctx.host.get_recipe(str(args["recipe_id"])) if args.get("recipe_id") else ctx.host.latest_conversation_recipe()
+    edit = getattr(ctx, "recipe_edit", None) or {}
+    selected_id = args.get("recipe_id") or edit.get("recipe_id")
+    recipe = ctx.host.get_recipe(str(selected_id)) if selected_id else ctx.host.latest_conversation_recipe()
     if recipe is None:
         raise ValueError("没有找到要修订的流程。请先用 build_recipe 生成，或提供 recipe_id")
+    revision = revision_request(recipe, args, edit, ctx.library)
+    saved_version = getattr(ctx.host, "recipe_saved_version", None)
+    revision["saved_version"] = (edit["saved_version"] if "saved_version" in edit else
+                                 saved_version(recipe.id) if saved_version is not None else
+                                 recipe.metadata.get("revision_saved_version", recipe.version))
+    resolved_recipe, explicit = apply_input_changes(recipe, revision["input_changes"], args.get("inputs"), revision)
+    mapping = _resolve_inputs(ctx, resolved_recipe, explicit)
     activate = getattr(ctx.host, "activate_recipe", None)
     if activate is not None:
         activate(recipe)
-    mapping = _resolve_inputs(ctx, recipe, args.get("inputs"))
-    expected_tables = [str(t) for t in (args.get("expected_tables") or _default_expected(ctx))]
+    expected_tables = [str(t) for t in args.get("expected_tables", _default_expected(ctx))]
     previous = recipe.metadata.get("requirement") or recipe.description or ""
     requirement = (
         f"历史处理说明（仅沿用未被本次要求覆盖的部分）：\n{previous}\n\n"
-        f"本次修改要求（沿用用户维护的流程记忆；未明确取舍的冲突先澄清，用户已明确本次例外则直接执行）：\n{instruction}"
+        f"本次修改要求（沿用用户维护的流程记忆；未明确取舍的冲突先澄清，用户已明确本次例外则直接执行）：\n{instruction}\n\n"
+        f"本次已确认的结构修改与范围（必须按当前真实输入重新运行完整流程）：\n{json.dumps(revision, ensure_ascii=False)}"
     )
-    file_aliases = {i.alias for i in recipe.inputs if i.kind == "file"}
+    file_aliases = {i.alias for i in resolved_recipe.inputs if i.kind == "file"}
     lctx = _learn_context(ctx, requirement, {k: v for k, v in mapping.items() if k not in file_aliases}, expected_tables, mode="revise",
                           file_inputs={k: v for k, v in mapping.items() if k in file_aliases})
-    pipeline = RecipePipeline(ctx.llm, ctx.library, ctx.host.pipeline_host(), repairer=LLMStepRepairer(ctx.llm),
+    lctx.revision = revision
+    protected_ids = {step["id"] for step in revision.get("protected_steps", [])}
+    lctx.protected_steps = {step.id: step.model_copy(deep=True) for step in recipe.steps if step.id in protected_ids}
+    pipeline = RecipePipeline(ctx.llm, ctx.library, ctx.host.pipeline_host(),
+                              repairer=RevisionStepRepairer(LLMStepRepairer(ctx.llm), revision),
                               max_rounds=ctx.verify_rounds, max_repair=ctx.max_repair)
-    async for event in pipeline.build(lctx, base=recipe, instruction=instruction, save_recipe=ctx.save_recipe_requested):
+    async for event in pipeline.build(lctx, base=resolved_recipe, instruction=instruction, save_recipe=ctx.save_recipe_requested):
         yield event
     yield _finish_recipe_tool(ctx, pipeline.result)
 
 
 def _finish_recipe_tool(ctx: AgentContext, result: dict[str, Any]) -> ToolResult:
     tables = []
-    if result.get("ok") and result.get("outputs"):
-        tables = _copy_results(ctx, result["outputs"], result["recipe"])
+    if result.get("ok"):
+        recipe = result["recipe"]
+        tables = _copy_results(ctx, result.get("outputs") or {}, recipe)
+        if "revision_base_version" in recipe.metadata:
+            retained = {table["name"] for table in tables}
+            for previous in ctx.ws.list_tables():
+                if (previous.role == "result" and previous.created_by == f"recipe:{recipe.id}"
+                        and previous.name not in retained):
+                    ctx.ws.drop(previous.name)
+            prune = getattr(ctx.host, "prune_recipe_results", None)
+            if prune is not None:
+                prune(recipe.id, retained)
     ok = bool(result.get("ok"))
     recipe = result.get("recipe")
     summary = (f"流程「{recipe.name}」v{recipe.version}：{_status_label(result['report']['status'])}" if recipe and result.get("report")

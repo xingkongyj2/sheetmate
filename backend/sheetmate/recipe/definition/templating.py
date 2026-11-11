@@ -67,7 +67,7 @@ def plan_outputs(
         if source.sheet not in edits or score > edits[source.sheet][0]:
             edits[source.sheet] = (score, index)
     edit_indices = {index for _, index in edits.values()}
-    keep_original_name = not recipe.metadata.get("has_expected")
+    keep_original_name = not recipe.metadata.get("has_expected") and not recipe.metadata.get("explicit_outputs")
     plans: list[OutputPlan] = []
     for i, (name, df, src) in enumerate(candidates):
         spec = spec_by_name.get(name)

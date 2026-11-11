@@ -19,6 +19,7 @@ import type {
   LLMConfigUpdate,
   MemoryItem,
   RecipeBrief,
+  RecipeEditRequest,
   RecipeFlowData,
   RecipeJSON,
   RunBrief,
@@ -142,7 +143,7 @@ export const conversationApi = {
   withdrawSteer: async (id: string, messageId: number) => http.delete(`/conversations/${id}/steer/${messageId}`),
   resume: (id: string, onEvent: (e: AgentEvent) => void) => postStream(`/conversations/${id}/resume`, {}, onEvent),
   /** thinking=true 是思考模式：后端先规划、再逐步执行并核对，中途不需要用户确认计划 */
-  chat: (id: string, body: { message: string; attachments?: string[]; thinking?: boolean }, onEvent: (e: AgentEvent) => void) =>
+  chat: (id: string, body: { message: string; attachments?: string[]; thinking?: boolean; recipe_edit?: RecipeEditRequest }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/conversations/${id}/chat`, body, onEvent),
   events: (id: string, jobId: string, onEvent: (e: AgentEvent) => void) =>
     getStream(`/conversations/${id}/events?job_id=${encodeURIComponent(jobId)}&snapshot=true`, onEvent),

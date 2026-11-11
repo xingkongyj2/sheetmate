@@ -871,6 +871,7 @@ class AgentExecutor:
                     check = await check_completion(
                         self.llm, msgs, display, scope=scope, results=budget.evidence(ctx.branch_id),
                         eligible_evidence_ids=budget.eligible_evidence(ctx.branch_id, original_scope) if stop_scope == "step" else None,
+                        require_workflow_revision=bool(ctx.recipe_edit and ctx.mode == "modify" and stop_scope != "step"),
                     )
                     yield {**check.event(), "call_id": check_id}
                     if not check.completed:

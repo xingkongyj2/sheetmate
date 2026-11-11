@@ -234,7 +234,8 @@ def build_context(user_id: int, conversation_id: str, llm: Any) -> tuple[AgentCo
 
 def start_chat(user: User, conversation_id: str, message: str, *,
                plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None,
-               thinking: bool = False, http_request: dict[str, Any] | None = None) -> Job:
+               thinking: bool = False, recipe_edit: dict[str, Any] | None = None,
+               http_request: dict[str, Any] | None = None) -> Job:
     # Authorise before creating a log; untrusted ids must not create arbitrary files.
     with session_scope() as db:
         conv_service.get_conversation(db, user, conversation_id)
@@ -243,10 +244,11 @@ def start_chat(user: User, conversation_id: str, message: str, *,
         record_event("turn.start", "sheetmate.services.conversations.chat.start_chat", {"user_id": user.id, "source": "chat"})
         record_event("chat.input", "sheetmate.services.conversations.chat.start_chat",
                      http_request if http_request is not None else {
-                         "body": {"message": message, "plan_steps": plan_steps, "attachments": attachments, "thinking": thinking}})
+                         "body": {"message": message, "plan_steps": plan_steps, "attachments": attachments,
+                                  "thinking": thinking, "recipe_edit": recipe_edit}})
         try:
             return _start_chat(user, conversation_id, message, plan_steps=plan_steps,
-                               attachments=attachments, thinking=thinking)
+                               attachments=attachments, thinking=thinking, recipe_edit=recipe_edit)
         except BaseException as exc:
             record_event("turn.error", "sheetmate.services.conversations.chat.start_chat", error_data(exc))
             record_event("turn.end", "sheetmate.services.conversations.chat.start_chat", {"status": "rejected"})
@@ -255,7 +257,7 @@ def start_chat(user: User, conversation_id: str, message: str, *,
 
 def _start_chat(user: User, conversation_id: str, message: str, *,
                 plan_steps: list[dict[str, Any]] | None = None, attachments: list[str] | None = None,
-                thinking: bool = False) -> Job:
+                thinking: bool = False, recipe_edit: dict[str, Any] | None = None) -> Job:
     text = (message or "").strip()
     if not text:
         raise ServiceError("消息不能为空")
@@ -263,6 +265,8 @@ def _start_chat(user: User, conversation_id: str, message: str, *,
         conv = conv_service.get_conversation(db, user, conversation_id)
         if jobs.running(conversation_id):
             raise Conflict("上一个任务还在处理中，请稍等它完成")
+        from sheetmate.services.workflows.editing import validate_recipe_edit
+        edit = validate_recipe_edit(db, user, conv, recipe_edit)
         submitted = list(dict.fromkeys(attachments or []))
         for record in _attachment_records(db, conv, submitted):
             file_service.retain_for_conversation(db, record, conv.id)
@@ -274,9 +278,11 @@ def _start_chat(user: User, conversation_id: str, message: str, *,
             meta["plan"] = plan_steps
         if thinking:
             meta["thinking"] = True
+        if edit:
+            meta["recipe_edit"] = {key: edit[key] for key in ("recipe_id", "version", "target", "operation")}
         message_id = conv_service.add_message(db, conv, "user", text, meta=meta).id
         execution = execution_state.create_execution(db, conversation_id, user.id, message_id,
-            request={"message": text, "plan_steps": plan_steps, "use_planning": thinking},
+            request={"message": text, "plan_steps": plan_steps, "use_planning": thinking, "recipe_edit": edit},
             input_fingerprint=input_snapshot(db, conv))
         execution_id = execution.id
     user_id = user.id
@@ -702,6 +708,21 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             assert conv is not None and request is not None
             records = _attachment_records(db, conv, (request.meta or {}).get("attachments", []))
             ctx.image_parts = _image_parts(records)
+            edit = (request.meta or {}).get("recipe_edit")
+            if edit:
+                from sheetmate.services.workflows.editing import resolve_edit_recipe, validate_recipe_edit
+                user = db.get(User, user_id)
+                assert user is not None
+                saved_here = any(item["recipe_id"] == edit["recipe_id"] for item in host.saved_recipes)
+                adapted_here = (host._last_recipe is not None and host._last_recipe.id == edit["recipe_id"]
+                                and host._last_recipe.metadata.get("revision_base_version") == edit["version"])
+                # A completed adaptation can be awaiting final delivery when
+                # recovery starts, including an explicitly unsaved revision.
+                if not (resumed and ctx.recipe_edit and (saved_here or adapted_here)):
+                    ctx.recipe_edit = validate_recipe_edit(db, user, conv, edit)
+                    base, _, _ = resolve_edit_recipe(db, user, conv, edit["recipe_id"])
+                    host._edit_base_recipe = base.model_copy(deep=True)
+                host.recipe_edit = dict(ctx.recipe_edit)
         history = await _history(conversation_id, llm, emit, current_message_id=message_id)
         _limit_history_images(history, ctx.image_parts)
         ctx.runtime_image_parts = [part for item in history for part in item.get("image_parts", [])] + ctx.image_parts
@@ -752,7 +773,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             return
         if intent.action == "process":
             ctx.save_recipe_requested = (ctx.save_recipe_requested if saved_intent else intent.save_recipe if intent.save_recipe is not None
-                                         else await infer_recipe_persistence(llm, effective_request, history))
+                                         else await infer_recipe_persistence(llm, effective_request, history, recipe_edit=ctx.recipe_edit))
             host.save_recipe_requested = ctx.save_recipe_requested
             if not saved_intent:
                 ctx.task_state = _advance_conversation_task(

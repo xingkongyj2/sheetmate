@@ -132,11 +132,24 @@ def _static_tools() -> list[Tool]:
                    "expected_tables": {**_STR_LIST, "description": "人工做好的期望结果表（如有）；不填会自动使用标记为期望结果的表"},
                    "recipe_name": {**_STR, "description": "可选：流程名"}}, ["requirement"]),
              modify, stream=_stream_build_recipe, label=lambda a: "生成处理流程"),
-        Tool("revise_recipe", "按用户的修改意见调整本次处理，重新执行和验证；仅明确要求保存/更新重复流程时才持久保存新版本。",
+        Tool("revise_recipe", "通过对话修改流程的输入、输出或指定步骤，并从输入开始重新执行完整流程、适配上下游依赖和验证。"
+             "输入新增/删除/替换用 input_changes；单步修改用 step_ids；输出表增删改可提供完整 output_sheets。"
+             "删除流程中的输入/输出仅修改流程定义，不删除用户原文件。保存授权由本轮用户意图决定。",
              _obj({"instruction": {**_STR, "description": "修改要求"},
                    "recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
-                   "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；键使用 get_recipe 返回的完整输入 alias。table 对应真实工作区表名，file 对应完整文件 file_id；省略时优先沿用当前范围内的已有绑定，再自动匹配"},
-                   "expected_tables": _STR_LIST}, ["instruction"]),
+                   "base_version": {"type": "integer", "minimum": 1, "description": "所修改流程的当前版本，选中流程时必须与选择版本相同；版本已更新时先刷新"},
+                   "inputs": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}, "description": "可选：{保留输入的完整alias: 表名或文件file_id}。仅覆盖运行绑定，不增加或删除定义；结构变动用input_changes"},
+                   "input_changes": {"type": "array", "maxItems": 40, "items": _obj({
+                       "operation": {"type": "string", "enum": ["add", "replace", "remove"]},
+                       "alias": {"type": "string", "minLength": 1, "description": "完整输入别名，删除文件时列出该文件的全部输入别名"},
+                       "kind": {"type": "string", "enum": ["table", "file"], "description": "add默认table，replace默认沿用；remove不填"},
+                       "source": {"type": "string", "minLength": 1, "description": "add/replace必填：table用真实原始输入表名，file用当前可访问file_id；remove不填"}}, ["operation", "alias"])},
+                   "step_ids": {"type": "array", "uniqueItems": True, "items": {"type": "integer", "minimum": 1}, "description": "本次修改的真实步骤编号；其余步骤保留，仅因依赖适配所需时同步修改"},
+                   "output_sheets": {"type": "array", "maxItems": 100, "description": "可选完整最终工作表声明，遗漏项将不再输出；保留未选中输出。[]明确取消普通表输出。脚本文件产物由instruction调整脚本声明", "items": _obj({
+                       "name": {"type": "string", "minLength": 1}, "source": {"type": "string", "minLength": 1},
+                       "description": _STR, "columns": {"type": ["array", "null"], "items": _STR},
+                       "split_by": {"type": ["string", "null"]}}, ["name", "source"])},
+                   "expected_tables": {**_STR_LIST, "description": "人工期望结果表；省略沿用当前样例，[]明确移除样例约束"}}, ["instruction"]),
              modify, stream=_stream_revise_recipe, label=lambda a: "修订处理流程"),
         Tool("run_recipe", "用已保存的公式、SQL、Python 或混合流程直接处理当前表和文件，不需要重新生成步骤或重写代码，输出正式结果。",
              _obj({"recipe_id": _STR, "inputs": {"type": "object", "description": "可选：{流程输入名: 表名或文件file_id}；键使用 get_recipe 返回的完整输入 alias；省略时优先沿用当前范围内的已有绑定，再按列或文件名匹配"},

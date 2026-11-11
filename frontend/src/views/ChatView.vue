@@ -3,7 +3,7 @@
  * 对话页：中间是消息流和输入框，右侧是工作区面板。
  * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和工作区面板开关。
  */
-import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Play, Save } from '@lucide/vue'
+import { LayoutDashboard, ListTree, LoaderCircle, MessageSquare, Pencil, Play, Save, X } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -11,7 +11,7 @@ import { useRouter } from 'vue-router'
 import { conversationApi, runApi } from '@/api'
 import { ApiError, errorText } from '@/api/http'
 import type { StreamHandle } from '@/api/sse'
-import type { AgentEvent, ConversationDetail, FileInfo, RunSteer, TableBrief } from '@/api/types'
+import type { AgentEvent, ConversationDetail, FileInfo, RecipeEditRequest, RunSteer, TableBrief } from '@/api/types'
 import FunObject from '@/components/brand/FunObject.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
@@ -36,6 +36,8 @@ import { useWorkspaceStore } from '@/stores/conversations'
 import { useAuthStore } from '@/stores/auth'
 import { useChatPreferencesStore } from '@/stores/chatPreferences'
 import { pendingStarts } from '@/stores/pending'
+import { pendingRecipeEdits } from '@/stores/recipeEdits'
+import { recipeEditLabel, recipeEditPlaceholder, type RecipeEditDraft } from '@/composables/recipeEditing'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
@@ -54,6 +56,7 @@ const sendingSteer = ref(false)
 const startingResume = ref(false)
 const withdrawingSteer = ref<number | null>(null)
 const text = ref('')
+const recipeEdit = ref<RecipeEditDraft | null>(null)
 const preferences = useChatPreferencesStore()
 const auth = useAuthStore()
 if (auth.user) preferences.hydrate(auth.user.id)
@@ -90,6 +93,13 @@ let scrollFrame = 0
 let forceScroll = false
 let followOutput = true
 let previousScrollTop = 0
+
+watch([() => pendingRecipeEdits.get(props.id), streaming, reconnecting], ([draft, busy, reconnecting]) => {
+  if (!draft || busy || reconnecting) return
+  recipeEdit.value = draft
+  pendingRecipeEdits.delete(props.id)
+  void nextTick(() => composer.value?.focus())
+}, { immediate: true })
 
 const selectedMessage = computed(() => {
   const assistants = messages.value.filter((m) => m.role === 'assistant')
@@ -369,19 +379,33 @@ async function onSend() {
   }
   const message = attachmentMessage(text.value, attachments.value.filter((a) => a.status === 'done'))
   if (!message) return
+  const submittedText = text.value
+  const submittedAttachments = [...attachments.value]
+  const submittedEdit = recipeEdit.value
   const ids = attachments.value.filter((a) => a.status === 'done').map((a) => a.key)
   text.value = ''
-  await send(message, { attachments: ids, thinking: thinking.value })
+  recipeEdit.value = null
+  await send(message, { attachments: ids, thinking: thinking.value, recipeEdit: submittedEdit?.request,
+    ...(submittedEdit ? { onRejected: (err: unknown) => {
+      recipeEdit.value ??= submittedEdit
+      text.value = [submittedText, text.value].filter(Boolean).join('\n')
+      attachments.value = [...new Map([...submittedAttachments, ...attachments.value].map((item) => [item.key, item])).values()]
+      toast.error(errorText(err))
+      void nextTick(() => composer.value?.focus())
+    } } : {}),
+  })
 }
 
-async function send(message: string, opts: { attachments?: string[]; thinking?: boolean } = {}) {
+async function send(message: string, opts: { attachments?: string[]; thinking?: boolean; recipeEdit?: RecipeEditRequest; onRejected?: (err: unknown) => void } = {}) {
   if (disposed || streaming.value || reconnecting.value) return
   const useThinking = opts.thinking ?? thinking.value
   sideRefreshVersion++
   steerRevision++
   steers.value = []
   message = serializeTableReferences(message, tableReferences.value, fileReferences.value)
-  messages.value.push(reactive(newUser(message, { attachments: opts.attachments ?? [], ...(useThinking ? { thinking: true } : {}) })) as UiMessage)
+  const userMessage = reactive(newUser(message, { attachments: opts.attachments ?? [], ...(useThinking ? { thinking: true } : {}),
+    ...(opts.recipeEdit ? { recipe_edit: opts.recipeEdit } : {}) })) as UiMessage
+  messages.value.push(userMessage)
   const assistant = reactive(newAssistant()) as UiMessage
   messages.value.push(assistant)
   selectedKey.value = assistant.key
@@ -390,11 +414,15 @@ async function send(message: string, opts: { attachments?: string[]; thinking?: 
   store.patchConversation(props.id, { running: true })
 
   await receiveStream(assistant, (onEvent) => conversationApi.chat(
-    props.id, { message, attachments: opts.attachments, ...(useThinking ? { thinking: true } : {}) }, onEvent,
-  ))
+    props.id, { message, attachments: opts.attachments, ...(useThinking ? { thinking: true } : {}),
+      ...(opts.recipeEdit ? { recipe_edit: opts.recipeEdit } : {}) }, onEvent,
+  ), false, opts.onRejected ? (err) => {
+    messages.value = messages.value.filter((item) => item.key !== userMessage.key && item.key !== assistant.key)
+    opts.onRejected!(err)
+  } : undefined)
 }
 
-async function receiveStream(assistant: UiMessage, open: (onEvent: (event: AgentEvent) => void) => StreamHandle, resuming = false) {
+async function receiveStream(assistant: UiMessage, open: (onEvent: (event: AgentEvent) => void) => StreamHandle, resuming = false, onRejected?: (err: unknown) => void) {
   streaming.value = true
   scheduleUsageRefresh()
   let received = false
@@ -429,7 +457,10 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
       retry = received || status === 409 || (resuming && (status === 0 || status >= 500 || status === 404))
       if ([401, 403].includes(status)) retry = false
       if (resuming && [404, 409].includes(status)) retryDelay = 0
-      if (!retry) assistant.error = errorText(err)
+      if (onRejected && !received && status >= 400 && status < 500) {
+        retry = false
+        onRejected(err)
+      } else if (!retry) assistant.error = errorText(err)
     }
   } finally {
     if (disposed || handle !== currentHandle) return
@@ -726,6 +757,11 @@ function answer(option: string) {
         <div class="w-full">
           <div class="relative z-10">
           <RunSteeringQueue :items="visibleSteers" :withdrawing="withdrawingSteer" @withdraw="withdrawSteer" />
+          <div v-if="recipeEdit" class="mb-3 flex items-start gap-2.5 rounded-xl border border-[#6265dc]/20 bg-[#6265dc]/[0.05] px-3.5 py-3" aria-label="流程修改目标">
+            <MessageSquare class="mt-0.5 size-4 shrink-0 text-[#6265dc]" />
+            <div class="min-w-0 flex-1"><p class="text-xs font-medium text-[#6265dc]">{{ recipeEdit.title }} · v{{ recipeEdit.request.version }}</p><p class="mt-1 break-words text-xs text-ink">{{ recipeEditLabel(recipeEdit.request) }}</p><p class="mt-1 text-[11px] leading-5 text-mute">说明修改要求，可上传或引用文件。发送后重新执行流程并验证适配。</p></div>
+            <button type="button" class="icon-btn size-6 shrink-0" aria-label="取消流程修改" @click="recipeEdit = null"><X class="size-3.5" /></button>
+          </div>
           <div v-if="canResume" class="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-paper/50 px-3.5 py-3 text-xs" role="status">
             <p class="min-w-0 flex-1 text-mute">{{ detail?.execution?.resume_reason || '上次处理已中断，可以从已保存的进度继续。' }}</p>
             <button type="button" class="btn-line h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="resume"><Play class="size-3.5" />继续处理</button>
@@ -744,7 +780,7 @@ function answer(option: string) {
             :steer-pending="sendingSteer"
             large
             appearance="card"
-            placeholder="继续提问..."
+            :placeholder="recipeEdit ? recipeEditPlaceholder(recipeEdit.request) : '继续提问...'"
             @attach="attach"
             @remove="removeAttachment"
             @preview="previewAttachment"

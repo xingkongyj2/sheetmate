@@ -80,7 +80,7 @@ const busyText = computed(() => {
 <template>
   <div class="card-soft relative min-w-0 animate-rise overflow-hidden">
     <!-- 标题 -->
-    <div class="flex items-center gap-3 border-b border-line bg-paper/60 py-3 pl-4" :class="flow ? 'pr-[138px]' : 'pr-4'">
+    <div class="flex items-center gap-3 border-b border-line bg-paper/60 py-3 pl-4" :class="flow ? 'pr-[238px] max-sm:pr-4 max-sm:pb-12' : 'pr-4'">
       <FunObject kind="blocks" :size="30" class="shrink-0" />
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <span class="truncate text-[14px] font-semibold leading-6">{{ progress.saved?.name || progress.recipeName || MODE_LABEL[progress.mode] }}</span>

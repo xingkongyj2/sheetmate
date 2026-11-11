@@ -208,6 +208,7 @@ class ExecutionControl:
                 "enabled_tool_groups": sorted(self.ctx.enabled_tool_groups),
                 "requested_tool_groups": list(self.ctx.requested_tool_groups),
                 "save_recipe_requested": self.ctx.save_recipe_requested,
+                "recipe_edit": self.ctx.recipe_edit,
                 "replace_file_ids": list(self.ctx.replace_file_ids),
                 "evidence_store": self.ctx.evidence_store,
                 "saved_recipes": self.ctx.host.saved_recipes, "deleted_recipes": self.ctx.host.deleted_recipes,
@@ -309,7 +310,7 @@ class ExecutionControl:
             original = self.request.get("message", "")
             requirements = original + "\n\n用户执行中更正（后面的要求优先）：\n" + "\n".join(
                 item["content"] for item in messages)
-            allowed = await infer_recipe_persistence(self.llm, requirements, [])
+            allowed = await infer_recipe_persistence(self.llm, requirements, [], recipe_edit=self.ctx.recipe_edit)
             self.ctx.save_recipe_requested = self.ctx.host.save_recipe_requested = allowed
         return messages
 
@@ -337,6 +338,8 @@ class ExecutionControl:
         ctx.enabled_tool_groups = set(data.get("enabled_tool_groups", []))
         ctx.requested_tool_groups = tuple(data.get("requested_tool_groups", []))
         ctx.replace_file_ids = tuple(data.get("replace_file_ids", []))
+        ctx.recipe_edit = dict(data.get("recipe_edit", {}))
+        ctx.host.recipe_edit = dict(ctx.recipe_edit)
         ctx.evidence_store.update(data.get("evidence_store", {}))
         ctx.host.save_recipe_requested = ctx.save_recipe_requested
         ctx.host.saved_recipes = list(data.get("saved_recipes", []))

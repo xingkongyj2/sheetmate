@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ArrowDownToLine, ArrowLeft, Check, FileSpreadsheet, LoaderCircle, TriangleAlert } from '@lucide/vue'
+import { ArrowDownToLine, ArrowLeft, Check, FileSpreadsheet, LoaderCircle, MessageSquare, Replace, Trash2, TriangleAlert } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { conversationApi, customerApi, fileApi, recipeApi, runApi, scriptApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { FileInfo, FormulaInfo, RecipeFlowData, RecipeJSON, ScriptFile, StepReport } from '@/api/types'
+import type { FileInfo, FormulaInfo, RecipeEditRequest, RecipeFlowData, RecipeJSON, ScriptFile, StepReport } from '@/api/types'
 import DataTable from '@/components/common/DataTable.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import { duration, type StepState } from '@/composables/chatModel'
@@ -23,8 +23,9 @@ const props = withDefaults(defineProps<{
   context?: RecipeFlowContext
   files?: FileInfo[]
   recipe?: RecipeJSON
+  editable?: boolean
 }>(), { states: () => [], files: () => [] })
-const emit = defineEmits<{ close: []; preview: [file: FileInfo] }>()
+const emit = defineEmits<{ close: []; preview: [file: FileInfo]; edit: [operation: RecipeEditRequest['operation']] }>()
 
 const fetchedRecipe = ref<RecipeJSON>()
 const runRecipe = ref<RecipeJSON>()
@@ -282,6 +283,14 @@ function paramValue(value: unknown): string {
     </header>
 
     <div class="flow-inspector-body">
+      <section v-if="editable" class="rounded-xl border border-[#6265dc]/15 bg-[#6265dc]/[0.04] p-3">
+        <div class="flex flex-wrap items-center gap-2">
+          <button type="button" class="btn-text gap-1.5 px-1 py-1 text-xs !text-[#6265dc]" @click="emit('edit', 'modify')"><MessageSquare class="size-3.5" />{{ step ? '对话修改这一步' : '对话修改' }}</button>
+          <button v-if="fileNode" type="button" class="btn-text gap-1 px-1 py-1 text-xs" @click="emit('edit', 'replace')"><Replace class="size-3.5" />替换{{ fileNode.direction === 'input' ? '输入' : '输出' }}</button>
+          <button v-if="fileNode" type="button" class="btn-text gap-1 px-1 py-1 text-xs !text-error" @click="emit('edit', 'remove')"><Trash2 class="size-3.5" />从流程移除</button>
+        </div>
+        <p class="mt-2 text-[11px] leading-5 text-mute">在对话中说明修改要求，可附加新文件。发送后会重新执行流程并检查适配。</p>
+      </section>
       <template v-if="step">
         <p v-if="step.description" class="whitespace-pre-wrap break-words text-[13px] leading-7 text-ink">{{ step.description }}</p>
         <p v-if="step.explanation && step.explanation !== step.description" class="rounded-xl bg-[#6265dc]/[0.06] px-3 py-2.5 text-xs leading-6 text-mute">{{ step.explanation }}</p>

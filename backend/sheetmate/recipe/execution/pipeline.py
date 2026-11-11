@@ -20,7 +20,7 @@ from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.tables.workspace import Workspace
 from sheetmate.recipe.learning.differ import diff_tables, diff_view
 from sheetmate.recipe.execution.runner import InputSource, RecipeRunner, StepRepairer
-from sheetmate.recipe.learning.learner import LearnContext, RecipeLearner
+from sheetmate.recipe.learning.learner import LearnContext, RecipeLearner, revision_problems
 from sheetmate.recipe.definition.schema import Recipe, check_recipe
 from sheetmate.recipe.validation.rules import validate_run
 from sheetmate.recipe.validation.comparison import verify_outputs
@@ -38,7 +38,7 @@ class _Attempt:
     def score(self) -> tuple[int, int, float]:
         """执行成功 > 失败；再比比对状态和匹配率。"""
         executed = 0 if self.runner.report.get("failed_stage") in {"input", "step", "error", "checkpoint"} else 1
-        valid = 0 if self.runner.report.get("failed_stage") == "validation" else 1
+        valid = 0 if self.runner.report.get("failed_stage") in {"validation", "output_contract"} else 1
         if self.informational:
             return (executed, valid, 0.0)
         rank = {"pass": 2, "warn": 1, "fail": 0}.get((self.verification or {}).get("status", "pass"), 0)
@@ -106,10 +106,12 @@ class RecipePipeline:
 
         # ---- 2. 执行 + 比对（不通过就修正，最多 max_rounds 轮；保留效果最好的一轮）----
         attempts: list[_Attempt] = []
+        delivery_contract = _revision_delivery_contract(ctx, base)
         for round_no in range(1, self.max_rounds + 2):
             handle = self.host.open_run("modify", recipe, ctx.requirement)
             runner = RecipeRunner(recipe, self.library, handle.ws, field_mapping=ctx.field_mapping,
-                                  repairer=self.repairer, max_repair=self.max_repair, run_id=handle.run_id)
+                                  repairer=self.repairer, max_repair=self.max_repair, run_id=handle.run_id,
+                                  delivery_contract=delivery_contract)
             async for event in runner.run(self._sources(ctx), output_path=handle.output_path,
                                           history=self.host.history_metrics(recipe.id)):
                 yield {**event, "round": round_no}
@@ -120,11 +122,13 @@ class RecipePipeline:
             stage = report.get("failed_stage")
             if stage in {"input", "step", "error", "checkpoint"}:
                 break  # 执行层面的失败（已经过内层修复），交给用户处理
-            if revising and instruction and not stage:
+            if revising and instruction and not stage and not ctx.output_revision:
                 added = await asyncio.to_thread(_keep_requested_columns, recipe, runner, handle, instruction)
                 if added:
                     yield {"type": "recipe_thinking", "message": f"按你的要求，输出里保留了新列：{'、'.join(added)}"}
-            if ctx.expected and revising:
+            if stage == "output_contract":
+                feedback = _validation_feedback(report["validation"])
+            elif ctx.expected and revising:
                 # 修订是用户有意改了规则：和原人工结果的对比只作参考（看看改动之外有没有误伤），不据此自动修正
                 attempt.verification = verify_outputs(runner.collect_outputs(), ctx.expected)
                 attempt.verification["informational"] = True
@@ -176,7 +180,8 @@ class RecipePipeline:
             yield {"type": "recipe_diff", "diff": before_after}
 
         # ---- 4. 记录本次运行与交付；保存重复流程是独立的显式请求 ----
-        file_info = self.host.finish_run(handle, recipe, report, verification=verification, diff=before_after)
+        file_info = self.host.finish_run(handle, recipe, report, verification=verification, diff=before_after,
+                                         register_output=report.get("failed_stage") != "output_contract")
         if file_info:
             for item in file_info.get("files", [file_info]):
                 yield {"type": "file", **item}
@@ -208,10 +213,10 @@ class RecipePipeline:
         }
 
     async def _ensure_structure(self, ctx: LearnContext, recipe: Recipe) -> Recipe | None:
-        problems = check_recipe(recipe, self.library)
+        problems = check_recipe(recipe, self.library) + revision_problems(ctx, recipe)
         if problems:
             recipe = await self.learner.fix_structure(ctx, recipe, problems)
-            problems = check_recipe(recipe, self.library)
+            problems = check_recipe(recipe, self.library) + revision_problems(ctx, recipe)
         if problems:
             self.result = {"ok": False, "recipe": recipe, "error": "生成的流程结构有问题：" + "；".join(problems)}
             return None
@@ -236,6 +241,30 @@ def _validation_feedback(validation: dict[str, Any]) -> dict[str, Any]:
     bad = [f"{c['description']}：{c.get('message') or c.get('actual')}" for c in validation.get("checks", [])
            if c["status"] in {"fail", "not_evaluated"}]
     return {"status": "fail", "summary": "运行校验未通过", "details": bad, "sheets": [], "overall_match_rate": 0.0}
+
+
+def _revision_delivery_contract(ctx: LearnContext, base: Recipe | None) -> dict[str, Any]:
+    """Resolve output edits against the original flow and executed files."""
+    if base is None:
+        return {}
+    contract: dict[str, Any] = {"protected_files": list(ctx.revision.get("protected_output_files", [])), "removed_files": []}
+    target = ctx.revision.get("target") or {}
+    contract["validate_declared_files"] = target.get("kind") == "output" and ctx.revision.get("operation") in {
+        "add", "modify", "replace",
+    }
+    if target.get("kind") != "output" or ctx.revision.get("operation") != "remove":
+        return contract
+    selected_ref = ctx.revision.get("target_file_ref")
+    if not selected_ref:
+        return contract  # Sheet and ordinary workbook removals use output_spec.
+    files = [item for item in base.flow()["output_files"] if item.get("ref")]
+    selected = [item for item in files if item["ref"] == selected_ref]
+    for name in dict.fromkeys(item["name"] for item in selected):
+        # Two steps may produce the same filename. Keep the unselected one's
+        # exact reference; a renamed namespace cannot hide the removed file.
+        retained_refs = [item["ref"] for item in files if item["name"] == name and item not in selected]
+        contract["removed_files"].append({"name": name, "retained_refs": retained_refs})
+    return contract
 
 
 def _relax_rules(recipe: Recipe, report: dict[str, Any]) -> bool:

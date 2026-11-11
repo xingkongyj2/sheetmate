@@ -201,6 +201,7 @@ async def chat(conversation_id: str, body: ChatBody, request: Request, user: Use
     # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）
     job = chat_service.start_chat(user, conversation_id, body.message, plan_steps=body.plan_steps,
                                   attachments=body.attachments, thinking=body.thinking,
+                                  recipe_edit=body.recipe_edit.model_dump(exclude_none=True) if body.recipe_edit else None,
                                   http_request=await http_request_data(request))
     return sse_response(job)
 

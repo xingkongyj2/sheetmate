@@ -93,10 +93,11 @@ def save_recipe_if_changed(db: Session, recipe: Recipe, *, conversation_id: str)
     if same_id is None:
         same_id = db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe.id)
                              .order_by(RecipeRecord.version.desc()).limit(1)).first()
-    matches = [same_id] if same_id is not None else [record for record in candidates if record.name == recipe.name]
+    matches = ([same_id] if same_id is not None else [] if "revision_base_version" in recipe.metadata
+               else [record for record in candidates if record.name == recipe.name])
     for record in matches:
         saved = record_to_recipe(record)
-        if same_id is None and saved.learned_from.get("input_bindings") != recipe.learned_from.get("input_bindings"):
+        if saved.learned_from.get("input_bindings") != recipe.learned_from.get("input_bindings"):
             continue
         if _definition(saved) == definition:
             recipe.id, recipe.version = record.recipe_id, record.version

@@ -1,7 +1,8 @@
 """HTTP 请求数据契约。"""
 from __future__ import annotations
-from typing import Any, Literal
+from typing import Any
 from pydantic import BaseModel
+from sheetmate.services.workflows.contracts import RecipeEditBody
 
 
 class CreateBody(BaseModel):
@@ -26,6 +27,7 @@ class ChatBody(BaseModel):
     plan_steps: list[dict[str, Any]] | None = None  # 调用方自带的计划步骤（高级用法；界面不再让用户确认计划）
     attachments: list[str] | None = None
     thinking: bool = False  # 思考模式：后端先规划、再逐步执行并核对，不需要用户确认计划
+    recipe_edit: RecipeEditBody | None = None
 
 
 class MessageBody(BaseModel):

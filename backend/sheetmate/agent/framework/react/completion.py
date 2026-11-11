@@ -230,7 +230,8 @@ def _usable_result(item: dict[str, Any]) -> bool:
 async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: str, *,
                            scope: str, results: dict[str, dict[str, Any]],
                            eligible_evidence_ids: set[str] | None = None,
-                           require_full_data: bool = False) -> CompletionCheck:
+                           require_full_data: bool = False,
+                           require_workflow_revision: bool = False) -> CompletionCheck:
     """核对失败也不能偷偷标成功；保留未确认状态和具体原因。"""
     # Explicit promises without an outcome cannot become success even if a weak
     # verifier repeats the executing model's mistake. Instructions such as
@@ -243,6 +244,11 @@ async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: 
     # Filter before sending material to the verifier, not only after it cites it.
     eligible = {identifier: item for identifier, item in results.items()
                 if eligible_evidence_ids is None or _identifiers(identifier, item) & eligible_evidence_ids}
+    if require_workflow_revision and not any(item.get("tool") == "revise_recipe" and _usable_result(item)
+                                             for item in eligible.values()):
+        return CompletionCheck(reason="所选流程还没有完成修改和完整重跑。",
+                               remaining=["调用 revise_recipe 修改所选流程，完整重跑并核对输入、步骤和输出。"],
+                               can_continue=True, source="local", requires_execution=True)
     requests = [text_content(item.get("content"))[:4000] for item in messages if item.get("role") == "user"]
     payload = {"scope": scope[:6000], "requests_and_step_context": requests[-5:],
                "candidate_answer": candidate[:8000], **_completion_material(eligible),

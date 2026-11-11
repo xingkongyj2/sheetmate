@@ -113,6 +113,7 @@ class RecipeRunner:
         max_repair: int = 3,
         run_id: str = "",
         artifact_dir: Path | None = None,
+        delivery_contract: dict[str, Any] | None = None,
     ):
         self.recipe = recipe
         self.library = library
@@ -135,6 +136,7 @@ class RecipeRunner:
         self._cancel_event = threading.Event()
         self._script_results: dict[int, ScriptResult] = {}
         self._pending_python: dict[int, dict[str, Any]] = {}
+        self.delivery_contract = delivery_contract or {}
         self.report: dict[str, Any] = {
             "run_id": run_id,
             "recipe_id": recipe.id,
@@ -236,16 +238,23 @@ class RecipeRunner:
                 outputs = await self._in_worker(self.collect_outputs)
                 written = await self._in_worker(self.write_outputs, output_path, outputs) if outputs else []
                 self.report["outputs"] = written
+                contract_checks = self._delivery_contract_checks()
+                intentionally_empty = not outputs and bool(self.recipe.metadata.get("explicit_outputs")) and not self.recipe.flow()["output_files"]
                 if not outputs:
                     deliveries = self._delivery_files()
-                    if not deliveries:
+                    if not deliveries and not intentionally_empty and not contract_checks:
                         raise ValueError("没有可以输出的结果：流程没有生成结果表或交付文件")
-                    self.output_path = Path(deliveries[-1]["path"])
-                    self.report["output_style"] = "script"
-                if self.output_path is None:
+                    if deliveries:
+                        self.output_path = Path(deliveries[-1]["path"])
+                        self.report["output_style"] = "script"
+                if self.output_path is None and not intentionally_empty and not contract_checks:
                     raise ValueError("没有可以输出的结果：流程没有生成结果表或交付文件")
-                yield {"type": "recipe_output", "path": str(self.output_path), "sheets": written}
+                if self.output_path is not None:
+                    yield {"type": "recipe_output", "path": str(self.output_path), "sheets": written}
                 validation = await self._in_worker(self._validate_outputs, outputs, history)
+                if contract_checks:
+                    validation = self._validation_summary([*validation["checks"], *contract_checks])
+                    self.report["output_contract_failed"] = True
                 self.report["validation"] = validation
                 yield {"type": "recipe_validation", "report": validation}
             if self.report["status"] == "running":
@@ -253,8 +262,11 @@ class RecipeRunner:
                     self.report["output_warnings"] + self.report["checkpoint_warnings"]))
                 failed = self.report["validation"] and self.report["validation"]["status"] in {"fail", "not_evaluated"}
                 if failed:
-                    self.report["failed_stage"] = "validation"
-                    self.report["escalation"] = validation_report_text(self.report)
+                    self.report["failed_stage"] = "output_contract" if self.report.get("output_contract_failed") else "validation"
+                    self.report["escalation"] = ("实际生成的文件不符合本次输出修改要求，尚未交付：" + "；".join(
+                        item["message"] for item in self.report["validation"]["checks"]
+                        if item["status"] == "fail" and item.get("rule_type") == "output_contract")
+                        if self.report.get("output_contract_failed") else validation_report_text(self.report))
                 warned = bool(self.report.get("output_warnings")) or any(s.get("warnings") for s in self.report["steps"]) or (
                     self.report["validation"] and self.report["validation"]["status"] == "warn"
                 )
@@ -418,6 +430,41 @@ class RecipeRunner:
         intermediate_exports = {step.id for step in steps[:-1] if step.params.get("workbook_export") is not None}
         return [dict(item) for item in self.report["artifacts"]
                 if item["ref"] not in consumed and item["step_id"] not in intermediate_exports]
+
+    def _delivery_contract_checks(self) -> list[dict[str, Any]]:
+        """Check output edits against real final artifacts in the current attempt."""
+        deliveries = self._delivery_files()
+        checks = []
+        if self.delivery_contract.get("validate_declared_files"):
+            # flow() excludes files consumed by later steps. Read the current
+            # recipe each round because refinement may change its declarations.
+            generated = {item["ref"] for item in deliveries}
+            missing = [item for item in self.recipe.flow()["output_files"]
+                       if item.get("ref") and item["ref"] not in generated]
+            if missing:
+                checks.append({"rule_id": "revision_declared_files", "rule_type": "output_contract",
+                               "description": "实际生成声明的输出文件", "status": "fail", "severity": "error",
+                               "actual": [item["ref"] for item in missing],
+                               "message": "本次新增或修改的流程声明了尚未实际生成的最终输出文件："
+                                          + "、".join(item["ref"] for item in missing)
+                                          + "；请修改生成代码和 deliver_files，并完整重跑后交付。"})
+        for selected in self.delivery_contract.get("removed_files", []):
+            retained = set(selected.get("retained_refs", []))
+            unexpected = [item for item in deliveries
+                          if item["name"] == selected["name"] and item["ref"] not in retained]
+            if unexpected:
+                checks.append({"rule_id": "revision_removed_file", "rule_type": "output_contract",
+                               "description": "移除所选输出文件", "status": "fail", "severity": "error",
+                               "actual": [item["ref"] for item in unexpected],
+                               "message": f"本次要求移除的输出文件「{selected['name']}」仍被脚本实际生成并保留为最终产物；"
+                                          "请修改生成代码并完整重跑，不能只删除 output_files 声明。"})
+        missing = set(self.delivery_contract.get("protected_files", [])) - {item["name"] for item in deliveries}
+        if missing:
+            checks.append({"rule_id": "revision_protected_files", "rule_type": "output_contract",
+                           "description": "保留未修改的输出文件", "status": "fail", "severity": "error",
+                           "actual": sorted(missing),
+                           "message": "本次未要求删除的输出文件没有实际生成：" + "、".join(sorted(missing))})
+        return checks
 
     @contextmanager
     def _working_files(self) -> Iterator[FileCopies]:
@@ -776,6 +823,12 @@ class RecipeRunner:
 
     def _validate_outputs(self, outputs: dict[str, pd.DataFrame], history: list[dict[str, Any]] | None) -> dict[str, Any]:
         validation = validate_run(self.recipe, self.input_frames or self._input_frames(), outputs, history)
+        if not outputs and self.recipe.metadata.get("explicit_outputs") and not self.recipe.flow()["output_files"]:
+            checks = [item for item in validation["checks"] if item["rule_id"] != "auto_not_empty"]
+            checks.append({"rule_id": "auto_output_contract", "rule_type": "output_contract",
+                           "description": "按要求取消最终输出", "status": "pass", "severity": "error", "actual": 0,
+                           "message": "完整执行流程，当前输出声明为空"})
+            return self._validation_summary(checks)
         if outputs or not self.report["artifacts"] or self.recipe.output_spec:
             return validation
         # 文件脚本的交付物已经过沙箱文件检查；不能要求它额外伪造一张结果表。

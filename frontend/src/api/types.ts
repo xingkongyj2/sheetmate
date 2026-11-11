@@ -92,6 +92,20 @@ export interface RecipeFlowData {
   output_files?: { name: string; ref: string; source: string; sources: string[]; file_id?: string; download_url?: string }[]
 }
 
+export interface RecipeEditRequest {
+  recipe_id: string
+  version: number
+  target: {
+    kind: 'workflow' | 'input' | 'output' | 'step'
+    aliases?: string[]
+    name?: string
+    source?: string
+    sources?: string[]
+    step_id?: number
+  }
+  operation: 'modify' | 'add' | 'remove' | 'replace'
+}
+
 export interface Verification {
   status: 'pass' | 'warn' | 'fail'
   match_rate: number
@@ -364,6 +378,7 @@ export interface TablePage {
 
 export interface ConversationBrief {
   id: string
+  recipe_id?: string | null
   title: string
   mode: 'analyze' | 'modify' | 'create'
   mode_label: string

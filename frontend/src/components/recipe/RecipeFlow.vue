@@ -1,14 +1,21 @@
 <script setup lang="ts">
 /** A flow stays on its page: shared canvas, fullscreen layer, resource inspector and live replay. */
-import { Check, CircleAlert, Focus, LoaderCircle, LocateFixed, Maximize2, Minus, Play, Plus, X } from '@lucide/vue'
+import { Check, CircleAlert, Focus, LoaderCircle, LocateFixed, Maximize2, MessageSquare, Minus, Play, Plus, X } from '@lucide/vue'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
-import type { FileInfo, RecipeFlowData } from '@/api/types'
+import { conversationApi, recipeApi } from '@/api'
+import { ApiError, errorText } from '@/api/http'
+import type { FileInfo, RecipeEditRequest, RecipeFlowData, RecipeJSON } from '@/api/types'
 import type { StepState } from '@/composables/chatModel'
 import { progressFlow } from '@/composables/recipeFlow'
 import { progressDeliveryFiles } from '@/composables/deliveryFiles'
 import type { FlowFileNode, FlowSelection, RecipeFlowContext } from '@/composables/recipeFlowInteraction'
 import { useFlowReplay } from '@/composables/useFlowReplay'
+import { conversationMatchesRecipeEdit, recipeEditTarget } from '@/composables/recipeEditing'
+import { useToast } from '@/composables/useToast'
+import { useWorkspaceStore } from '@/stores/conversations'
+import { pendingRecipeEdits } from '@/stores/recipeEdits'
 
 import RecipeFlowCanvas from './RecipeFlowCanvas.vue'
 import RecipeFlowInspector from './RecipeFlowInspector.vue'
@@ -25,6 +32,10 @@ const props = withDefaults(defineProps<{
   toolbarPlacement?: 'inline' | 'card'
 }>(), { states: () => [], direction: 'horizontal', activeStep: null, compact: false, context: () => ({}), toolbarPlacement: 'inline' })
 const emit = defineEmits<{ changed: [] }>()
+const router = useRouter()
+const store = useWorkspaceStore()
+const toast = useToast()
+const openingEdit = ref(false)
 const fullscreen = ref(false)
 const selection = ref<FlowSelection | null>(null)
 const preview = ref<FileInfo | null>(null)
@@ -62,6 +73,7 @@ const currentStep = computed(() => running.value ? states.value.find((step) => [
 const completed = computed(() => states.value.filter((step) => ['success', 'warning', 'repaired'].includes(step.status)).length)
 const failed = computed(() => (replay.progress.value ? replay.progress.value.status === 'failed' : props.context.failed) || states.value.some((step) => step.status === 'failed'))
 const canReplay = computed(() => !context.value.deleted && !!(context.value.recipeId || context.value.recipe?.id || context.value.runId))
+const canEdit = computed(() => !context.value.deleted && !!(context.value.recipeId || context.value.recipe?.id))
 const dialogOpen = computed(() => fullscreen.value || !!selection.value)
 const stageSize = computed(() => ({
   width: Math.max(dimensions.value.viewportWidth, dimensions.value.width * zoom.value + 96),
@@ -118,6 +130,47 @@ function selectStep(id: number) {
 function selectFile(file: FlowFileNode) {
   replay.closeSetup()
   selection.value = { kind: 'file', file }
+}
+async function editFlow(operation: RecipeEditRequest['operation'] = 'modify', target = recipeEditTarget(selection.value)) {
+  if (!canEdit.value || running.value || openingEdit.value) return
+  openingEdit.value = true
+  const current = context.value
+  try {
+    const recipeId = current.recipeId || current.recipe!.id
+    const route = router.currentRoute.value
+    let conversationId = route.name === 'chat' && route.params.id === current.conversationId ? current.conversationId : null
+    let savedRecipe: RecipeJSON | undefined
+    const displayedVersion = current.version ?? current.recipe?.version
+    if (!conversationId || displayedVersion === undefined) {
+      try {
+        savedRecipe = (await recipeApi.get(recipeId)).recipe
+      } catch (err) {
+        if (!(err instanceof ApiError && err.status === 404 && current.conversationId && displayedVersion !== undefined)) throw err
+      }
+    }
+    const version = displayedVersion ?? savedRecipe?.version
+    if (version === undefined) throw new Error('无法确认流程版本，请刷新流程后重试。')
+    const request: RecipeEditRequest = { recipe_id: recipeId, version, operation, target }
+    if (!conversationId) {
+      if (savedRecipe && current.customerId) {
+        const conversation = await conversationApi.create({ customer_id: current.customerId, recipe_id: recipeId })
+        store.upsertConversation(conversation)
+        conversationId = conversation.id
+      } else {
+        if (!current.conversationId) throw new Error('请从生成这个流程的对话发起修改。')
+        const conversation = await conversationApi.get(current.conversationId)
+        if (!conversationMatchesRecipeEdit(conversation, request)) throw new Error('原对话中的流程与所选版本不匹配，请刷新流程后重试。')
+        conversationId = conversation.id
+      }
+    }
+    pendingRecipeEdits.set(conversationId, { title: current.title || '处理流程', request })
+    closeDialog()
+    await router.push({ name: 'chat', params: { id: conversationId } })
+  } catch (err) {
+    toast.error(errorText(err))
+  } finally {
+    openingEdit.value = false
+  }
 }
 async function prepareRun() {
   if (running.value) return
@@ -205,6 +258,7 @@ onBeforeUnmount(() => {
   <div class="recipe-flow-viewer min-w-0">
     <div class="recipe-flow-toolbar flex min-h-6 items-center justify-end gap-1" :class="toolbarPlacement === 'card' ? 'recipe-flow-toolbar--card' : 'mb-2'">
       <span v-if="running && toolbarPlacement === 'inline'" class="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-[#6265DC]" role="status"><LoaderCircle class="size-3 shrink-0 animate-spin" /><span class="truncate">{{ currentStep?.name || '执行中' }}</span></span>
+      <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageSquare class="size-3.5" />对话修改</button>
       <button v-if="canReplay" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running" @click="prepareRun"><Play class="size-3.5" />重新执行</button>
       <button type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="openFullscreen"><Maximize2 class="size-3.5" />全屏</button>
     </div>
@@ -216,13 +270,16 @@ onBeforeUnmount(() => {
       <section ref="dialog" role="dialog" aria-modal="true" :aria-label="fullscreen ? `${context.title || '处理流程'} · 全屏流程图` : '流程节点详情'" tabindex="-1" class="flow-dialog" :class="fullscreen ? 'flow-dialog--full' : 'flow-dialog--detail'">
         <template v-if="fullscreen">
           <header class="flow-header">
-            <div class="flex min-w-0 flex-1 items-center gap-2.5">
+            <div class="flow-header-title flex min-w-0 flex-1 items-center gap-2.5">
               <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-[#6265DC]/10 text-[#6265DC]"><Focus class="size-4" /></span>
               <h2 class="truncate text-[15px] font-semibold">{{ context.title || '处理流程' }}</h2>
               <span v-if="context.version" class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ context.version }}</span>
             </div>
+            <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 text-xs" :disabled="running || openingEdit" @click="editFlow('add', { kind: 'input' })"><Plus class="size-3.5" />输入</button>
+            <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 text-xs" :disabled="running || openingEdit" @click="editFlow('add', { kind: 'output' })"><Plus class="size-3.5" />输出</button>
+            <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 text-xs" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageSquare class="size-3.5" />对话修改</button>
             <button v-if="canReplay" type="button" class="flow-run-button" :disabled="running || replay.loading.value" @click="prepareRun"><LoaderCircle v-if="running" class="size-3.5 animate-spin" /><Play v-else class="size-3.5" /><span>{{ running ? '执行中' : '重新执行' }}</span></button>
-            <button type="button" class="icon-btn ml-1 shrink-0" aria-label="退出全屏" title="退出全屏 · Esc" @click="closeDialog"><X class="size-5" /></button>
+            <button type="button" class="flow-header-close icon-btn ml-1 shrink-0" aria-label="退出全屏" title="退出全屏 · Esc" @click="closeDialog"><X class="size-5" /></button>
           </header>
           <div class="flow-workspace">
             <div class="flow-canvas-area">
@@ -249,12 +306,12 @@ onBeforeUnmount(() => {
             </div>
             <aside v-if="replay.setupOpen.value || selection" class="flow-side-panel" :aria-label="replay.setupOpen.value ? '执行设置' : '节点详情'">
               <RecipeFlowRunSetup v-if="replay.setupOpen.value" :controller="replay" @close="replay.closeSetup()" @started="runStarted" @preview="(file) => (preview = file)" />
-              <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" @close="selection = null" @preview="(file) => (preview = file)" />
+              <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation) => editFlow(operation)" @close="selection = null" @preview="(file) => (preview = file)" />
             </aside>
           </div>
           <div v-if="replay.error.value && !replay.setupOpen.value" class="border-t border-error/10 bg-error/5 px-5 py-2 text-xs text-error" role="alert">{{ replay.error.value }}</div>
         </template>
-        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" @close="closeDialog" @preview="(file) => (preview = file)" />
+        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation) => editFlow(operation)" @close="closeDialog" @preview="(file) => (preview = file)" />
       </section>
     </div>
   </Teleport>
@@ -292,5 +349,12 @@ onBeforeUnmount(() => {
   .flow-tools { left: 12px; bottom: 12px; }
   .flow-run-status { top: 12px; right: 12px; bottom: auto; max-width: calc(100% - 24px); }
   .flow-layer--detail { padding: 12px; }
+}
+@media (max-width: 640px) {
+  .recipe-flow-toolbar--card { top: 46px; left: 12px; right: 12px; }
+  .flow-header { flex-wrap: wrap; }
+  .flow-header-title { flex-basis: calc(100% - 42px); }
+  .flow-header > button { order: 2; }
+  .flow-header > .flow-header-close { order: 1; }
 }
 </style>

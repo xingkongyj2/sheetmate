@@ -171,6 +171,8 @@ class Recipe(BaseModel):
     def final_outputs(self) -> list[str]:
         if self.output_spec:
             return [o.source for o in self.output_spec]
+        if self.metadata.get("explicit_outputs"):
+            return []
         steps = self.ordered_steps()
         return step_output_tables(steps[-1]) if steps else []
 

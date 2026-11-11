@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
@@ -76,6 +78,12 @@ class LearnContext:
     recipe_name: str | None = None
     # learn：照着人工结果学（输出列对齐人工结果）；revise：按用户意见修改（人工结果只作对比参考）
     mode: str = "learn"
+    revision: dict[str, Any] = field(default_factory=dict)  # 已校验的本次输入/输出/步骤修改范围
+    protected_steps: dict[int, RecipeStep] = field(default_factory=dict, repr=False)  # 本次修订的瞬态恢复基线，不写入流程元数据
+
+    @property
+    def output_revision(self) -> bool:
+        return "output_sheets" in self.revision or (self.revision.get("target") or {}).get("kind") == "output"
 
 
 class RecipeLearner:
@@ -111,7 +119,7 @@ class RecipeLearner:
         )
         result = await complete_structured(self.llm, prompt, system=RECIPE_SYSTEM,
                                            schema=RECIPE_RESPONSE_SCHEMA, schema_name="recipe",
-                                           validator=validate_recipe_response)
+                                           validator=lambda result: validate_recipe_response(_revision_result(result, ctx)))
         return build_recipe(result, ctx, base=recipe)
 
     async def revise(self, ctx: LearnContext, recipe: Recipe, instruction: str) -> Recipe:
@@ -119,12 +127,14 @@ class RecipeLearner:
             instruction=instruction,
             recipe=_recipe_json(recipe),
             inputs=inputs_text(ctx),
+            revision=json.dumps(ctx.revision, ensure_ascii=False),
+            expected=expected_text(ctx),
             memory=ctx.memory_text or "（无）",
             catalog=ctx.library.catalog_text(),
         )
         result = await complete_structured(self.llm, prompt, system=RECIPE_SYSTEM,
                                            schema=RECIPE_RESPONSE_SCHEMA, schema_name="recipe",
-                                           validator=validate_recipe_response)
+                                           validator=lambda result: validate_recipe_response(_revision_result(result, ctx)))
         return build_recipe(result, ctx, base=recipe)
 
     async def fix_structure(self, ctx: LearnContext, recipe: Recipe, problems: list[str]) -> Recipe:
@@ -138,7 +148,7 @@ class RecipeLearner:
         )
         result = await complete_structured(self.llm, prompt, system=RECIPE_SYSTEM,
                                            schema=RECIPE_RESPONSE_SCHEMA, schema_name="recipe",
-                                           validator=validate_recipe_response)
+                                           validator=lambda result: validate_recipe_response(_revision_result(result, ctx)))
         return build_recipe(result, ctx, base=recipe)
 
 
@@ -206,7 +216,17 @@ def _recipe_json(recipe: Recipe) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _revision_result(result: dict[str, Any], ctx: LearnContext) -> dict[str, Any]:
+    if "output_sheets" in ctx.revision:
+        # This complete declaration came from the tool contract, not the
+        # learner's guesses. Adapt steps to it rather than restoring old output.
+        result = {**result, "output_sheets": ctx.revision["output_sheets"]}
+        result.pop("output_spec", None)
+    return result
+
+
 def build_recipe(result: dict[str, Any], ctx: LearnContext, base: Recipe | None = None) -> Recipe:
+    result = _revision_result(result, ctx)
     validate_recipe_response(result)
     steps = parse_steps(result, ctx.library)
     key_columns = result.get("key_columns") if isinstance(result.get("key_columns"), dict) else {}
@@ -214,6 +234,13 @@ def build_recipe(result: dict[str, Any], ctx: LearnContext, base: Recipe | None 
     outputs = parse_outputs(result, steps, ctx, base)
     rules = [ValidationRule(**raw) for raw in result.get("validation_rules", [])]
     metadata = dict(base.metadata) if base else {}
+    if base is not None:
+        metadata["revision_base_version"] = ctx.revision.get("base_version", base.version)
+        metadata["revision"] = ctx.revision
+        if "saved_version" in ctx.revision:
+            metadata["revision_saved_version"] = ctx.revision["saved_version"]
+    if ctx.output_revision:
+        metadata["explicit_outputs"] = True
     alignment = result.get("alignment_report") if isinstance(result.get("alignment_report"), dict) else {}
     metadata.update(
         {
@@ -250,7 +277,9 @@ def build_recipe(result: dict[str, Any], ctx: LearnContext, base: Recipe | None 
     )
     if base is not None:
         recipe.id = base.id
-        recipe.version = base.version
+        # Unsaved revisions also need a distinct version so an old flow card
+        # cannot accidentally edit the newer in-conversation definition.
+        recipe.version = ctx.revision["base_version"] + 1 if "base_version" in ctx.revision else base.version
         recipe.created_at = base.created_at
     return recipe
 
@@ -291,6 +320,7 @@ def parse_steps(result: dict[str, Any], library: FormulaLibrary) -> list[RecipeS
                 explanation=str(raw.get("explanation") or ""),
                 confidence=max(0.0, min(1.0, confidence)),
                 assertions=assertions,
+                enabled=raw.get("enabled", True),
             )
         )
     if not steps:
@@ -342,7 +372,7 @@ def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnCon
     outputs: list[OutputSheet] = []
     table_outputs = [name for step in steps for name in step_output_tables(step)]
     known = set(table_outputs)
-    field = "output_sheets" if result.get("output_sheets") else "output_spec"
+    field = "output_sheets" if "output_sheets" in result else "output_spec"
     for index, raw in enumerate(result.get(field) or []):
         source = str(raw.get("source") or "")
         match = re.fullmatch(r"step_(\d+)(?:_output)?", source)
@@ -359,14 +389,14 @@ def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnCon
             split_by=raw.get("split_by"),
             columns=[str(c) for c in columns] if isinstance(columns, list) and columns else None,
         ))
-    if not outputs and known:
+    if not outputs and known and not ctx.output_revision:
         last = table_outputs[-1]
         name = next(iter(ctx.expected)) if len(ctx.expected) == 1 else "结果"
         outputs.append(OutputSheet(name=name, source=last))
     previous = {o.name: o for o in (base.output_spec if base else [])}
     dynamic_outputs = _dynamic_schema_outputs(steps, ctx.library)
     for out in outputs:
-        if ctx.mode == "revise":
+        if ctx.mode == "revise" and not ctx.output_revision:
             # 修订：模型给了列就用模型的；没给就沿用修订前的列顺序
             if out.columns is None and out.name in previous:
                 out.columns = previous[out.name].columns
@@ -386,8 +416,9 @@ def build_inputs(ctx: LearnContext, steps: list[RecipeStep], key_columns: dict[s
         columns = [str(c) for c in df.columns]
         meta = ctx.input_meta.get(alias, InputMeta())
         old = previous.get(alias)
-        if meta.kind == "file" or (old is not None and old.kind == "file"):
+        if meta.kind == "file":
             continue
+        same_source = old is not None and old.kind == "table" and old.source_file == meta.filename
         required = [c for c in columns if c in used.get(alias, set())]
         if not required:  # SheetAgent 的兜底：前 10 个没有空值的列
             required = [c for c in columns if df[c].notna().all()][:10]
@@ -396,36 +427,113 @@ def build_inputs(ctx: LearnContext, steps: list[RecipeStep], key_columns: dict[s
         inputs.append(
             RecipeInput(
                 alias=alias,
-                description=(old.description if old and old.description else f"来自「{meta.filename or alias}」" + (f"的「{meta.sheet}」" if meta.sheet else "")),
-                file_pattern=(old.file_pattern if old and old.file_pattern else file_pattern_from_name(meta.filename) if meta.filename else ""),
+                description=(old.description if same_source and old.description else f"来自「{meta.filename or alias}」" + (f"的「{meta.sheet}」" if meta.sheet else "")),
+                file_pattern=(old.file_pattern if same_source and old.file_pattern else file_pattern_from_name(meta.filename) if meta.filename else ""),
                 sheet=meta.sheet,
                 source_file=meta.filename,
                 expected_columns=columns,
                 required_columns=required,
-                key_columns=keys or (old.key_columns if old else []),
+                key_columns=keys or ([column for column in old.key_columns if column in columns] if same_source else []),
                 column_matching="fuzzy",
                 expected_row_range=[max(1, int(rows * 0.3)), max(10, int(rows * 3) + 10)],
                 header=meta.header,
             )
         )
-    file_refs = {
-        str(ref)
-        for step in steps if step.kind == "python"
-        for ref in (step.params.get("input_files") if isinstance(step.params.get("input_files"), dict) else {}).values()
-    }
-    aliases = {item.alias for item in inputs}
-    for alias in sorted(file_refs - aliases):
+    # Current source metadata is authoritative. Do not resurrect removed file
+    # inputs from old steps; structure validation will require adapting them.
+    for alias, meta in ctx.input_meta.items():
+        if meta.kind != "file":
+            continue
         old = previous.get(alias)
-        meta = ctx.input_meta.get(alias)
-        if old is not None and old.kind == "file":
+        if old is not None and old.kind == "file" and old.source_file == meta.filename:
             inputs.append(old.model_copy(deep=True))
-        elif meta is not None and meta.kind == "file":
+        else:
             inputs.append(RecipeInput(
                 alias=alias, kind="file", description=f"来自「{meta.filename or alias}」的完整文件",
                 file_pattern=file_pattern_from_name(meta.filename) if meta.filename else "",
                 source_file=meta.filename,
             ))
     return inputs
+
+
+def step_execution_signature(step: RecipeStep) -> str:
+    """Compare behavior without treating script storage or display text as edits."""
+    params = dict(step.params)
+    if step.kind == "python":
+        try:
+            code = resolve_script_code(params)
+        except (OSError, ValueError):
+            # Invalid scripts still reach the ordinary structure diagnostics;
+            # their references must not compare equal to a valid baseline.
+            code = None
+        for key in ("code", "script_id", "script_title", "script_filename", "title"):
+            params.pop(key, None)
+        params["code"] = code
+    definition = {
+        "id": step.id, "kind": step.kind, "formula": step.formula,
+        "params": params, "output": step.output, "enabled": step.enabled,
+        "assertions": [assertion.model_dump(exclude={"description"}, mode="json") for assertion in step.assertions],
+    }
+    return hashlib.sha256(json.dumps(definition, ensure_ascii=False, sort_keys=True,
+                                     separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def output_delivery_identities(recipe: Recipe) -> list[tuple[str, str]]:
+    """Delivery names identify additions; changing a table's source does not."""
+    identities = [("sheet", output.name) for output in recipe.output_spec]
+    # The automatically named workbook remains one delivery when the recipe is
+    # renamed. Repeated script filenames still represent distinct final files.
+    identities.extend(("file", output["name"]) if output.get("ref") else ("workbook", "")
+                      for output in recipe.flow().get("output_files", []))
+    return identities
+
+
+def revision_problems(ctx: LearnContext, recipe: Recipe) -> list[str]:
+    """Enforce the trusted structural scope throughout revision and refinement."""
+    problems = []
+    steps = {step.id: step for step in recipe.steps}
+    for protected in ctx.revision.get("protected_steps", []):
+        step_id = protected["id"]
+        current = steps.get(step_id)
+        if current is None or step_execution_signature(current) != protected["signature"]:
+            problem = f"第 {step_id} 步不在本次选中步骤及其下游依赖范围内，必须恢复原执行定义，不能删除、停用或修改公式、参数、输出及断言。"
+            original = ctx.protected_steps.get(step_id)
+            if original is not None:
+                restore = original.model_dump(mode="json", exclude={"sql"})
+                if original.kind == "python":
+                    restore["params"]["code"] = resolve_script_code(original.params)
+                problem += "原定义：" + json.dumps(restore, ensure_ascii=False)
+            problems.append(problem)
+    missing = set(ctx.revision.get("protected_output_names", [])) - {output.name for output in recipe.output_spec}
+    if missing:
+        problems.append(f"本次未要求删除这些输出，必须保留并适配来源：{'、'.join(sorted(missing))}")
+    files = recipe.flow().get("output_files", [])
+    missing_files = set(ctx.revision.get("protected_output_files", [])) - {output["name"] for output in files}
+    if missing_files:
+        problems.append(f"本次未要求删除这些输出文件，必须保留实际生成代码与声明：{'、'.join(sorted(missing_files))}")
+    target = ctx.revision.get("target") or {}
+    if (target.get("kind") == "output" and ctx.revision.get("operation") == "add"
+            and "base_output_identities" in ctx.revision):
+        baseline = Counter(tuple(item) for item in ctx.revision["base_output_identities"])
+        if not Counter(output_delivery_identities(recipe)) - baseline:
+            problems.append("本次要求新增输出，必须在保留原有输出的基础上新增至少一个最终工作表或文件；原样返回或仅修改来源不算新增。")
+    if target.get("kind") == "output" and ctx.revision.get("operation") == "remove":
+        file_target = "sources" in target
+        selected_ref = ctx.revision.get("target_file_ref")
+        for output in files if file_target else recipe.flow().get("outputs", []):
+            if file_target and selected_ref:
+                selected = output.get("ref") == selected_ref
+            elif file_target and selected_ref == "":
+                # A workbook remains the same delivery when its contributing
+                # tables change. Script files with that name are independent.
+                selected = not output.get("ref") and output.get("name") == target.get("name")
+            else:
+                selected = output.get("name") == target.get("name") and (
+                    not target.get("source") or output.get("source") == target["source"])
+            if selected:
+                problems.append("选中的输出文件仍被声明为最终产物，请同步移除对应工作表/脚本 output_files 并适配后续引用。")
+                break
+    return problems
 
 
 def _referenced_columns(steps: list[RecipeStep], ctx: LearnContext) -> dict[str, set[str]]:
