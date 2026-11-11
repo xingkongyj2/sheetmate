@@ -6,7 +6,7 @@ import copy
 
 import pytest
 
-from sheetmate.demo.samples import demo_recipe_body
+from sheetmate.services.bootstrap.samples import demo_recipe_body
 from tests.conftest import read_sse
 
 
@@ -93,7 +93,7 @@ def test_demo_customer_detail(client):
 
 
 def test_customer_detail_counts_all_output_files(client, tmp_path):
-    from sheetmate.db.database import session_scope
+    from sheetmate.db.session import session_scope
     from sheetmate.db.models import FileRecord
 
     customer = client.post("/api/customers", json={"name": "输出文件计数客户"}).json()["customer"]
@@ -116,7 +116,7 @@ def test_customer_detail_counts_all_output_files(client, tmp_path):
 def test_customer_detail_lists_all_conversations_in_recent_order(client):
     from datetime import datetime, timedelta
 
-    from sheetmate.db.database import session_scope
+    from sheetmate.db.session import session_scope
     from sheetmate.db.models import Conversation
 
     customer = client.post("/api/customers", json={"name": "完整会话列表客户"}).json()["customer"]
@@ -377,7 +377,7 @@ def test_modify_mode_refines_until_verified(client, samples, fake_llm):
 def test_modify_mode_publishes_selected_earlier_run_after_failed_refinement(client, samples, fake_llm):
     from types import SimpleNamespace
 
-    from sheetmate.model_policy import LLMRuntimePolicy
+    from sheetmate.core.config.model_policy import LLMRuntimePolicy
 
     conversation = _modify_conversation(client, samples)
     first_recipe = _llm_recipe(broken="no_fill")
@@ -591,7 +591,7 @@ def test_revise_rule_change_is_not_reverted(client, samples, fake_llm):
 
 
 def test_legacy_human_edited_summary_is_not_overwritten(client, samples, fake_llm):
-    from sheetmate.db.database import session_scope
+    from sheetmate.db.session import session_scope
     from sheetmate.db.models import Customer
 
     fake_llm()
@@ -616,7 +616,7 @@ def test_new_category_next_month_is_caught_and_revisable(client, samples, fake_l
     """下个月出现新的费用类型：执行要标记失败并说清原因（不能悄悄少算钱），文件仍可下载核对；修订后能通过。"""
     import pandas as pd
 
-    from sheetmate.demo.samples import fee_rows
+    from sheetmate.services.bootstrap.samples import fee_rows
 
     rows = fee_rows(11, 40, seed=11)
     rows += [{**r, "费用类型": "偏远费", "金额": 12.0} for i, r in enumerate(list(rows)) if i % 9 == 0]

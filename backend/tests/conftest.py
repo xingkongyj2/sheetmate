@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest  # noqa: E402
 
-from sheetmate.demo.samples import write_samples  # noqa: E402
+from sheetmate.services.bootstrap.samples import write_samples # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +131,7 @@ def client():
 @pytest.fixture
 def fake_llm():
     """安装假 LLM，测试结束后还原。用法：fake_llm(script=[...], json_handlers=[...])"""
-    from sheetmate.agent import llm as llm_module
+    from sheetmate.agent.llm import client as llm_module
 
     holder: dict[str, FakeLLM] = {}
 

@@ -15,12 +15,12 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
-from sheetmate.demo.samples import demo_recipe_body
+from sheetmate.services.bootstrap.samples import demo_recipe_body
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.reader import read_workbook
-from sheetmate.engine.workspace import Workspace
-from sheetmate.recipe.executor import InputSource, RecipeRunner
-from sheetmate.recipe.schema import Recipe
+from sheetmate.engine.workbooks.reader import read_workbook
+from sheetmate.engine.tables.workspace import Workspace
+from sheetmate.recipe.execution.runner import InputSource, RecipeRunner
+from sheetmate.recipe.definition.schema import Recipe
 from tests.conftest import read_sse
 
 HEADER_FILL = "FF1F4E78"

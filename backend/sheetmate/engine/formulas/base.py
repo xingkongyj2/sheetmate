@@ -19,14 +19,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from sheetmate.engine.sqlutil import (
+from sheetmate.engine.tables.sql import (
     UnsafeSQLError,
     assert_safe_expression,
     assert_single_select,
     quote_ident,
     quote_literal,
 )
-from sheetmate.engine.workspace import Workspace, WorkspaceError
+from sheetmate.engine.tables.workspace import Workspace, WorkspaceError
 
 ParamType = Literal[
     "table",  # 工作区里的一张表

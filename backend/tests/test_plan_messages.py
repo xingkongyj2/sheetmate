@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from sheetmate.agent.llm import LLMError
+from sheetmate.agent.llm.client import LLMError
 from tests.conftest import _chunk
 from tests.test_api import _chat, _new_conversation, _upload
 
@@ -135,7 +135,7 @@ def test_short_step_titles_keep_full_instructions_and_result_details(client, fak
 
 
 def test_step_title_fallback_is_local_and_does_not_modify_business_requirements():
-    from sheetmate.agent.planner import plan_from_steps
+    from sheetmate.agent.framework.planning.planner import plan_from_steps
 
     description = "核对原表日期与姓名，逐格核对三个人连续两周的全部排班记录，并完整保留备注。"
     plan = plan_from_steps([{"description": description}])

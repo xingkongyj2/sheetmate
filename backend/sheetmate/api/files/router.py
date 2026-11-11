@@ -1,0 +1,103 @@
+"""文件：信息、预览、下载、删除（权限：所属客户或所属会话）。"""
+
+from __future__ import annotations
+
+from typing import Any
+from urllib.parse import quote
+
+from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi.responses import FileResponse
+from sqlalchemy.orm import Session
+
+from sheetmate.api.deps import current_user
+from sheetmate.db.session import get_db
+from sheetmate.db.models import FileRecord, User
+from sheetmate.services.files import service as file_service
+from sheetmate.services.files import inspection
+from sheetmate.core.errors import Forbidden, NotFound, ServiceError
+
+router = APIRouter(prefix="/api/files", tags=["files"])
+
+
+@router.post("/preview-upload")
+def preview_upload(file: UploadFile = File(...), sheet: str | None = None,
+                   offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=500),
+                   raw: bool = False,
+                   user: User = Depends(current_user)) -> dict[str, Any]:
+    """首页文件临时预览，不创建会话或持久化文件记录。"""
+    preview = inspection.preview_upload(file.file, filename=file.filename, sheet=sheet,
+                                        offset=offset, limit=limit, raw=raw)
+    return {"ok": True, "preview": preview}
+
+
+def _check(db: Session, user: User, record: FileRecord) -> None:
+    if not file_service.can_access_file(db, user, record):
+        raise Forbidden("你没有权限访问这个文件")
+
+
+@router.get("/{file_id}")
+def file_info(file_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    record = file_service.get_file(db, file_id)
+    _check(db, user, record)
+    return {"ok": True, "file": file_service.file_dict(record)}
+
+
+@router.get("/{file_id}/preview")
+def file_preview(file_id: str, sheet: str | None = None, offset: int = Query(0, ge=0),
+                 limit: int = Query(50, ge=1, le=500), raw: bool = False,
+                 db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    record = file_service.get_file(db, file_id)
+    _check(db, user, record)
+    return {"ok": True, "preview": inspection.preview_file(record, sheet=sheet, offset=offset, limit=limit, raw=raw)}
+
+
+@router.get("/{file_id}/download")
+def download(file_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> FileResponse:
+    record = file_service.get_file(db, file_id)
+    _check(db, user, record)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(record.filename)}"}
+    return FileResponse(record.stored_path, headers=headers,
+                        media_type=file_service.file_media_type(record))
+
+
+@router.get("/{file_id}/image")
+def image_preview(file_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> FileResponse:
+    record = file_service.get_file(db, file_id)
+    _check(db, user, record)
+    media_type = inspection.image_media_type(record)
+    headers = {
+        "Content-Disposition": f"inline; filename*=UTF-8''{quote(record.filename)}",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "private, no-store",
+    }
+    return FileResponse(record.stored_path, headers=headers, media_type=media_type)
+
+
+@router.delete("/{file_id}")
+def delete_file(file_id: str, customer_id: str | None = None, conversation_id: str | None = None,
+                recipe_id: str | None = None,
+                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    # 删除关联也适用于原件已丢失的旧记录，让用户可以清理损坏条目。
+    record = db.get(FileRecord, file_id)
+    if record is None:
+        raise NotFound("文件不存在或已被删除")
+    _check(db, user, record)
+    if customer_id and conversation_id:
+        raise ServiceError("请指定客户或会话中的一个删除范围")
+    scope = customer_id or record.customer_id
+    if recipe_id:
+        if not scope or conversation_id:
+            raise ServiceError("流程文件需要指定客户")
+        deleted = file_service.remove_from_recipe(db, record, user, scope, recipe_id)
+    elif conversation_id:
+        deleted = file_service.remove_from_conversation(db, record, user, conversation_id)
+    elif scope:
+        deleted = file_service.remove_from_customer(db, record, user, scope)
+    elif record.conversation_id:
+        deleted = file_service.remove_from_conversation(db, record, user, record.conversation_id)
+    else:
+        # 引用保存在其他会话时，读取权限不代表有权删除其他会话的文件。
+        deleted = file_service.delete_if_unowned(db, record)
+        if not deleted:
+            raise ServiceError("文件仍被会话使用，请在所属会话中管理")
+    return {"ok": True, "deleted": deleted}

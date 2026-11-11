@@ -1,4 +1,4 @@
-"""SheetMate 引擎闭环：读取 → 画像 → 字段标准化 → 公式（SQL 模板）→ DuckDB 执行 → 写回。
+"""确定性数据引擎：tables、workbooks、formulas、scripts。
 
-这一层只做确定性的数据处理，不调用 LLM。Agent 层负责「想」，这一层负责「做」。
+提供工作区、SQL、表格读写、公式和隔离脚本执行，不依赖 Agent、工作流或业务数据库。
 """

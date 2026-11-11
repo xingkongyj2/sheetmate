@@ -10,11 +10,11 @@ from fastapi import Cookie, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from sheetmate.db.database import get_db
+from sheetmate.db.session import get_db
 from sheetmate.db.models import User
-from sheetmate.services.auth import COOKIE_NAME, verify_token
-from sheetmate.services.errors import Forbidden, Unauthorized
-from sheetmate.services.jobs import Job
+from sheetmate.services.identity.auth import COOKIE_NAME, verify_token
+from sheetmate.core.errors import Forbidden, Unauthorized
+from sheetmate.services.execution.jobs import Job
 
 
 def current_user(db: Session = Depends(get_db), sm_session: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> User:

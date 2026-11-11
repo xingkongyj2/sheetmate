@@ -166,80 +166,36 @@ AI Python 脚本在所有平台固定使用 `backend/.venv`：Windows 为 `.venv
 
 ## 目录结构
 
-```
+后端按请求流程与模块职责封装，完整职责、依赖方向和扩展说明见 [后端模块文档](backend/README.md)。
+
+```text
 sheetmate/
-├── start.sh / start.bat           macOS/Linux / Windows 一键启动
-├── .env.example                   配置模板
-├── docs/                          设计文档（原有的 4 份）
+├── start.sh / start.bat
 ├── backend/
-│   ├── requirements.txt
 │   ├── sheetmate/
-│   │   ├── app.py                 FastAPI 入口；托管前端构建产物（单端口）
-│   │   ├── config.py              运行配置：.env；模型配置：设置页（默认 DeepSeek）
-│   │   ├── db/                    SQLite 模型：用户、客户、会话、消息、文件、公式、Recipe、运行记录、记忆、字段映射；启动时自动补新增的列
-│   │   ├── engine/                ── SheetMate 引擎闭环 ──
-│   │   │   ├── reader.py          Excel/CSV 读取：表头探测、合并单元格、多行表头、类型推断（编号保持文本）
-│   │   │   ├── profile.py         画像：列类型、空值率、样本、候选主键、重复键（一单多行）
-│   │   │   ├── field_mapping.py   字段标准化：别名 → 标准名；Recipe 期望列与新文件列的匹配
-│   │   │   ├── workspace.py       DuckDB 工作区：沙箱（禁外部访问）、表登记、内部错误自动恢复
-│   │   │   ├── formulas/          公式库
-│   │   │   │   ├── base.py        公式定义、参数声明与校验、{{param}} 模板安全渲染
-│   │   │   │   └── builtin.py     23 个内置公式（清洗、计算、匹配、汇总、重塑、自定义 SQL）
-│   │   │   ├── runner.py          执行一个公式：校验 → SQL → 建表 → 行数/匹配率/警告 → 预览
-│   │   │   ├── analysis.py        只读分析：表结构、取值分布、描述统计
-│   │   │   ├── writer.py          统计结果、CSV 等无工作簿模板的数据写出新 Excel：表头样式、冻结首行、自动列宽
-│   │   │   ├── workbook_builder.py 新建带格式工作簿：结构化网格、合并、范围样式、行高列宽与公式校验
-│   │   │   ├── script_runner.py   Python 子进程：隔离副本、超时取消、输出与日志限制
-│   │   │   ├── script_worker.py   脚本上下文、核对记录、数据与文件结果传输
-│   │   │   ├── template_writer.py 复制原文件改写：沿用标题行、合并、表头/数据样式、列宽、冻结窗格，汇总 sheet 追加
-│   │   │   └── sqlutil.py         标识符/字面量转义、表达式与查询安全检查、JSON 安全转换
-│   │   ├── recipe/                ── SheetAgent 核心逻辑 ──
-│   │   │   ├── schema.py          Recipe / RecipeInput / RecipeStep / StepAssertion / OutputSheet / ValidationRule
-│   │   │   ├── differ.py          输入 vs 输出四层 diff + 给 LLM 的证据文本 + 前后对比卡片
-│   │   │   ├── executor.py        RecipeRunner：输入映射、逐步执行、断言、修复回调、断点续跑、输出、人话报告
-│   │   │   ├── validator.py       运行校验：自动检查 + Recipe 规则（含历史区间）
-│   │   │   ├── verifier.py        与人工结果比对：按主键对齐、单元格匹配率、合计、差异样例
-│   │   │   ├── learner.py         LLM 学习 / 修正 / 修订 Recipe；根据真实输入生成输入定义
-│   │   │   ├── pipeline.py        学习 → 执行 → 修复 → 校验 → 比对，按用户明确要求保存
-│   │   │   ├── compiler.py        把公式、SQL、成功脚本及输入输出绑定沉淀成 Recipe，不调用 AI
-│   │   │   └── matcher.py         重复执行时：新文件的哪个 sheet 对应流程的哪个输入
-│   │   ├── agent/                 ── TabClaw Agent 框架 ──
-│   │   │   ├── intent.py          每轮结合用户要求和历史自动判断分析 / 修改 / 建表
-│   │   │   ├── persistence.py     独立判断用户是否明确要求保存或更新重复流程，默认不保存
-│   │   │   ├── creation.py        独立建表技能：数据引用、布局检查、继承快照与局部调整
-│   │   │   ├── scripting.py       独立脚本技能：执行反馈、取消、结果预览与历史代码查看
-│   │   │   ├── llm.py             OpenAI 兼容客户端（流式、工具调用、JSON 模式、中文错误提示）
-│   │   │   ├── prompts.py         全部提示词
-│   │   │   ├── tools.py           工具注册：只读分析、公式工具（自动生成）、文件、Recipe、记忆、澄清
-│   │   │   ├── executor.py        ReAct 循环 + 按给定计划逐步执行 + 自检（普通模式）
-│   │   │   ├── thinking.py        思考模式：勘察 → 起草并审查计划 → 逐项执行并核对 → 整理结论 → 回答核对
-│   │   │   ├── reporting.py       思考模式写给用户的文字：去掉「第 N 步」式编号标题、核对行、数字依据检查
-│   │   │   ├── multi_agent.py     多表并行专员 + 汇总（[一致] / [待确认]）
-│   │   │   ├── planner.py         数据勘察、起草与审查计划（思考模式）、澄清判断
-│   │   │   ├── repair.py          内层 ReAct：Recipe 某一步出错时修复
-│   │   │   ├── memory.py          记忆抽取与筛选
-│   │   │   ├── recorder.py        工作流记录（工具调用序列）
-│   │   │   └── summarizer.py      会话标题、历史压缩、客户整体处理逻辑
-│   │   ├── services/              业务服务：客户、会话、文件、Recipe、运行记录、记忆、对话编排、重复执行、后台任务、示例数据
-│   │   ├── api/                   HTTP 接口：auth / settings / customers / conversations / files / recipes / runs
-│   │   └── demo/samples.py        示例文件生成（快递月结账单场景）
-│   ├── tests/                     引擎、Recipe、脚本隔离、接口 + Agent 全链路测试（用假 LLM，不需要 Key）
-│   └── data/                      本地数据（运行后生成）：app.db、uploads/、outputs/、workspaces/、runs/、log/
-└── frontend/                      Vue 3 + Vite + TypeScript + Tailwind 4 + daisyUI 5 + Lucide 图标
-    └── src/
-        ├── api/                   接口封装、类型、POST 流式读取（SSE）
-        ├── stores/                登录状态、会话与客户列表
-        ├── composables/           事件归并（chatModel.ts）、提示、鼠标跟随
-        ├── components/
-        │   ├── brand/             原创 IP「墨墨家族」（眼睛跟随鼠标、眨眼、表情）、彩色小物件插画、标志
-        │   ├── chat/              输入框（含思考模式开关）、任务进度清单、助手消息、过程时间线、结果表卡片、客户选择、执行明细面板
-        │   ├── recipe/            流程图、流程进度卡片、单步详情、比对报告、前后对比
-        │   ├── customer/          流程面板、运行详情、用新文件执行、记忆与字段映射、公式库
-        │   └── common/            表格、弹窗、Markdown、状态标记
-        └── views/                 登录、引导、首页（新对话）、对话、客户列表、客户详情、设置
+│   │   ├── app.py / __main__.py     应用装配与启动
+│   │   ├── api/<功能>/              HTTP 路由与请求契约
+│   │   ├── services/<业务>/         请求编排、权限、事务、资源管理
+│   │   ├── agent/
+│   │   │   ├── framework/          planning / react / shared
+│   │   │   ├── llm/                模型接口、调用、结构输出、预算与缓存
+│   │   │   ├── memory/             short_term / long_term
+│   │   │   └── tools/<功能>/        工具契约、注册、执行与具体技能
+│   │   ├── engine/                 tables / workbooks / formulas / scripts
+│   │   ├── recipe/                 definition / learning / execution / validation
+│   │   ├── db/                     session / models/<领域>
+│   │   └── core/                   config / security / observability / errors
+│   ├── scripts/                    开发诊断脚本
+│   ├── tests/                      行为回归、模块边界、冷启动与子进程验证
+│   └── data/                       本地持久化数据
+├── frontend/                       Vue 前端
+└── docs/                           设计资料与历史审计
 ```
 
----
+API 调用服务，服务装配 Agent。计划模式复用 ReAct；LLM、工具、记忆相互协作。
+Agent 通过宿主协议使用持久化能力；数据引擎独立于业务数据库。
+后续优化某项能力，优先修改对应功能目录；依赖方向由架构测试约束。
+
 
 ## 对话日志
 

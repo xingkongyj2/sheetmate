@@ -12,9 +12,9 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.workspace import Workspace
-from sheetmate.recipe.executor import InputSource, RecipeRunner
-from sheetmate.recipe.schema import Recipe
+from sheetmate.engine.tables.workspace import Workspace
+from sheetmate.recipe.execution.runner import InputSource, RecipeRunner
+from sheetmate.recipe.definition.schema import Recipe
 
 
 def _run_filter(source: Path, output: Path, *, condition: str = '"工时" > 0') -> RecipeRunner:

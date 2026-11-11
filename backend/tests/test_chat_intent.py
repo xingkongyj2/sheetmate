@@ -8,13 +8,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from sheetmate.agent.executor import AgentExecutor
-from sheetmate.agent.tools import AgentContext, Tool, ToolResult, execute_tool, table_payload
+from sheetmate.agent.framework.react.executor import AgentExecutor
+from sheetmate.agent.tools.contracts import AgentContext, Tool, ToolResult
+from sheetmate.agent.tools.execution import execute_tool
+from sheetmate.agent.tools.presentation import table_payload
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.workspace import Workspace
-from sheetmate.services.analysis import analysis_workspace
-from sheetmate.services import chat as chat_service
-from sheetmate.services import conversations as conv_service
+from sheetmate.engine.tables.workspace import Workspace
+from sheetmate.services.execution.workspace import analysis_workspace
+from sheetmate.services.conversations import chat as chat_service
+from sheetmate.services.conversations import service as conv_service
 from tests.test_api import _chat, _new_conversation, _upload
 
 

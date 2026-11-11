@@ -2,7 +2,7 @@
 
 import uvicorn
 
-from sheetmate.config import settings
+from sheetmate.core.config.settings import settings
 
 
 def main() -> None:

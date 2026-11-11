@@ -16,7 +16,7 @@ from sheetmate.engine.formulas.base import (
     template_inputs,
 )
 from sheetmate.engine.formulas.builtin import BUILTIN_FORMULAS, referenced_tables
-from sheetmate.engine.workspace import Workspace
+from sheetmate.engine.tables.workspace import Workspace
 
 __all__ = [
     "BUILTIN_FORMULAS",

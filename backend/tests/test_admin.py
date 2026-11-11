@@ -12,15 +12,15 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-from sheetmate.db.database import session_scope
+from sheetmate.db.session import session_scope
 from sheetmate.db.models import UserCustomer
 from sheetmate.engine.formulas import Formula, FormulaLibrary
 from sheetmate.engine.formulas.base import quoted_placeholders
-from sheetmate.engine.reader import ReadError, read_pasted_table
-from sheetmate.recipe.schema import OutputSheet, Recipe, RecipeInput, RecipeStep, check_recipe
-from sheetmate.services import formulas as formula_service
-from sheetmate.services import recipes as recipe_service
-from sheetmate.services.errors import Forbidden
+from sheetmate.engine.workbooks.reader import ReadError, read_pasted_table
+from sheetmate.recipe.definition.schema import OutputSheet, Recipe, RecipeInput, RecipeStep, check_recipe
+from sheetmate.services.formulas import service as formula_service
+from sheetmate.services.workflows import service as recipe_service
+from sheetmate.core.errors import Forbidden
 
 # ---------------------------------------------------------------------------
 # 工具函数
@@ -482,7 +482,7 @@ def test_revoked_customer_grant_blocks_existing_conversation_context(client):
     denied = member.get(f"/api/conversations/{conversation_id}")
     assert denied.status_code == 403
     # Agent context construction uses the same live authorization gate.
-    from sheetmate.services.chat import build_context
+    from sheetmate.services.conversations.chat import build_context
 
     with pytest.raises(Forbidden, match="没有权限访问这个客户"):
         build_context(member_id, conversation_id, llm=None)

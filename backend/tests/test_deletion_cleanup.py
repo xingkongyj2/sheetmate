@@ -23,8 +23,8 @@ def _new_customer(client, name: str) -> str:
 
 
 def test_deleting_conversation_removes_storage_directories_and_preserves_other_conversations(client):
-    from sheetmate.config import settings
-    from sheetmate.db.database import session_scope
+    from sheetmate.core.config.settings import settings
+    from sheetmate.db.session import session_scope
     from sheetmate.db.models import FileConversation, FileRecord
 
     conversation_id = _new_conversation(client)
@@ -59,8 +59,8 @@ def test_deleting_conversation_removes_storage_directories_and_preserves_other_c
 @pytest.mark.parametrize("base_name", ["uploads_dir", "outputs_dir"])
 @pytest.mark.parametrize("shared_owner", ["conversation", "customer"])
 def test_storage_directory_is_removed_only_after_last_file_reference(client, base_name, shared_owner):
-    from sheetmate.config import settings
-    from sheetmate.db.database import session_scope
+    from sheetmate.core.config.settings import settings
+    from sheetmate.db.session import session_scope
     from sheetmate.db.models import FileConversation, FileCustomer, FileRecord
 
     conversation_id = _new_conversation(client)
@@ -96,10 +96,10 @@ def test_storage_directory_is_removed_only_after_last_file_reference(client, bas
 
 
 def test_rolled_back_conversation_deletion_preserves_storage_directories(client):
-    from sheetmate.config import settings
-    from sheetmate.db.database import SessionLocal
+    from sheetmate.core.config.settings import settings
+    from sheetmate.db.session import SessionLocal
     from sheetmate.db.models import Conversation
-    from sheetmate.services import conversations as conversation_service
+    from sheetmate.services.conversations import service as conversation_service
 
     conversation_id = _new_conversation(client)
     paths = []
@@ -121,12 +121,19 @@ def test_rolled_back_conversation_deletion_preserves_storage_directories(client)
 
 
 def test_deleting_conversation_reclaims_private_data_and_preserves_shared_file(client, tmp_path):
-    from sheetmate.config import settings
-    from sheetmate.db.database import session_scope
-    from sheetmate.db.models import Conversation, FileConversation, FileCustomer, FileRecord, RecipeRecord, Run
-    from sheetmate.services import conversations as conversation_service
-    from sheetmate.services import runs as run_service
-    from sheetmate.conversation_log import new_turn
+    from sheetmate.core.config.settings import settings
+    from sheetmate.db.session import session_scope
+    from sheetmate.db.models import (
+        Conversation,
+        FileConversation,
+        FileCustomer,
+        FileRecord,
+        RecipeRecord,
+        Run,
+    )
+    from sheetmate.services.conversations import service as conversation_service
+    from sheetmate.services.workflows import runs as run_service
+    from sheetmate.core.observability.conversation_log import new_turn
 
     conversation_id = _new_conversation(client)
     other_conversation_id = _new_conversation(client)
@@ -200,8 +207,8 @@ def test_deleting_conversation_reclaims_private_data_and_preserves_shared_file(c
 
 
 def test_deleting_customer_cleans_customer_records_and_only_unreferenced_files(client, tmp_path):
-    from sheetmate.config import settings
-    from sheetmate.db.database import session_scope
+    from sheetmate.core.config.settings import settings
+    from sheetmate.db.session import session_scope
     from sheetmate.db.models import (
         Conversation,
         Customer,
@@ -216,9 +223,9 @@ def test_deleting_customer_cleans_customer_records_and_only_unreferenced_files(c
         RecipeRecord,
         Run,
     )
-    from sheetmate.services import runs as run_service
-    from sheetmate.services import conversations as conversation_service
-    from sheetmate.conversation_log import new_turn
+    from sheetmate.services.workflows import runs as run_service
+    from sheetmate.services.conversations import service as conversation_service
+    from sheetmate.core.observability.conversation_log import new_turn
 
     customer_id = _new_customer(client, f"待删除客户-{uuid4().hex[:8]}")
     other_customer_id = _new_customer(client, f"保留客户-{uuid4().hex[:8]}")

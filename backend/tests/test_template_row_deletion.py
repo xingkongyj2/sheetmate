@@ -7,9 +7,9 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import PatternFill
 
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.workspace import Workspace
-from sheetmate.recipe.executor import InputSource, RecipeRunner
-from sheetmate.recipe.schema import Recipe
+from sheetmate.engine.tables.workspace import Workspace
+from sheetmate.recipe.execution.runner import InputSource, RecipeRunner
+from sheetmate.recipe.definition.schema import Recipe
 
 
 def _source(path):

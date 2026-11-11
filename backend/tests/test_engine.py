@@ -6,11 +6,11 @@ import pandas as pd
 import pytest
 
 from sheetmate.engine.formulas import FormulaError, FormulaLibrary
-from sheetmate.engine.profile import profile_workbook
-from sheetmate.engine.reader import read_workbook
-from sheetmate.engine.runner import apply_formula
-from sheetmate.engine.sqlutil import UnsafeSQLError, assert_safe_expression, assert_single_select
-from sheetmate.engine.workspace import Workspace, WorkspaceError
+from sheetmate.engine.workbooks.profile import profile_workbook
+from sheetmate.engine.workbooks.reader import read_workbook
+from sheetmate.engine.formulas.runner import apply_formula
+from sheetmate.engine.tables.sql import UnsafeSQLError, assert_safe_expression, assert_single_select
+from sheetmate.engine.tables.workspace import Workspace, WorkspaceError
 
 
 @pytest.fixture
@@ -130,7 +130,7 @@ def test_db_migration_adds_missing_columns(tmp_path):
 
     from sqlalchemy import create_engine
 
-    from sheetmate.db.database import _add_missing_columns
+    from sheetmate.db.session import _add_missing_columns
 
     path = tmp_path / "old.db"
     with sqlite3.connect(path) as raw:

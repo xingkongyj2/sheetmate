@@ -1,0 +1,246 @@
+"""脚本运行的权限、审计、文件登记和工作区交付。引擎不访问数据库。"""
+
+from __future__ import annotations
+
+import logging
+import shutil
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any
+from uuid import uuid4
+
+from sqlalchemy import delete
+
+from sheetmate.db.session import session_scope
+from sheetmate.db.models import FileRecord, Run
+from sheetmate.engine.workbooks.reader import ReadError
+from sheetmate.engine.scripts.store import bind_script, read_script, script_params
+from sheetmate.engine.tables.sql import sanitize_table_name
+from sheetmate.recipe.definition.compiler import compile_script
+from sheetmate.recipe.definition.schema import check_recipe
+from sheetmate.services.workflows import service as recipe_service
+from sheetmate.services.files import service as file_service
+from sheetmate.services.workflows import runs as run_service
+from sheetmate.core.errors import ServiceError
+
+logger = logging.getLogger(__name__)
+
+
+def _scoped(db, host, record) -> bool:
+    if isinstance(record, FileRecord):
+        return file_service.can_access_in_conversation(
+            db, record, conversation_id=host.conversation_id, customer_id=host.customer_id,
+        )
+    return record.conversation_id == host.conversation_id or bool(host.customer_id and record.customer_id == host.customer_id)
+
+
+def execute_for_conversation(host, *, code: str, description: str, input_tables: list[str],
+                             input_files: dict[str, str], cancel_event: threading.Event,
+                             title: str = "", script_id: str | None = None) -> dict[str, Any]:
+    from sheetmate.engine.scripts.runner import execute_script
+
+    started = time.perf_counter()
+    host._last_recipe = None
+    if len(input_tables) > 20 or len(input_files) > 20 or len(set(input_tables)) != len(input_tables):
+        raise ValueError("一次脚本最多使用 20 张不同的表和 20 个文件")
+    tables = {}
+    source_files: dict[str, Path] = {}
+    input_file_ids: list[str] = []
+    for name in input_tables:
+        info = host.ws.require(name)
+        tables[name] = host.ws.df(name)
+        if info.file_id:
+            input_file_ids.append(info.file_id)
+    with session_scope() as db:
+        for alias, file_id in input_files.items():
+            if not alias.strip() or len(alias) > 100:
+                raise ValueError("文件别名应为 1~100 个字符")
+            record = file_service.get_file(db, file_id)
+            if not _scoped(db, host, record):
+                raise ServiceError("这个文件不属于当前客户或会话")
+            file_service.retain_for_conversation(db, record, host.conversation_id)
+            source_files[alias] = Path(record.stored_path)
+            input_file_ids.append(file_id)
+        source_params: dict[str, Any] = {"code": code, "description": description,
+                                       "input_tables": input_tables, "input_files": input_files}
+        if title:
+            source_params["script_title"] = title
+        if script_id:
+            source_params["script_id"] = script_id
+        params = script_params(source_params, title=description)
+        script = {key: params[key] for key in ("script_id", "script_title", "script_filename")}
+        bind_script(script["script_id"], user_id=host.user_id, customer_id=host.customer_id,
+                    conversation_id=host.conversation_id)
+        run = run_service.create_run(db, kind="script", user_id=host.user_id, customer_id=host.customer_id,
+                                     conversation_id=host.conversation_id, request_text=description,
+                                     input_file_ids=list(dict.fromkeys(input_file_ids)))
+        run.steps = [{"tool": "run_python_script", "label": script["script_title"], "params": params}]
+        run.tool_sequence = "run_python_script"
+        run_id = run.id
+    report: dict[str, Any] = {"run_id": run_id, **script, "ok": False, "status": "failed", "error": "", "files": [],
+                              "table_names": [], "tables": [], "internal_tables": [], "warnings": [], "checks": [], "result": {}, "stdout": "", "stderr": ""}
+    committed_paths: list[Path] = []
+    created_tables: list[str] = []
+    saved_internal_tables = False
+    previous_tables = {table.name for table in host.ws.list_tables()}
+    output_tables: dict[str, str] = {}
+    file_tables: dict[str, dict[str, Any]] = {}
+    try:
+        with TemporaryDirectory(prefix="sheetmate_script_delivery_") as folder:
+            outcome = execute_script(code, tables, source_files, Path(folder), cancel_event=cancel_event)
+            report.update(ok=outcome.ok, status=outcome.status, error=outcome.error, stdout=outcome.stdout,
+                          stderr=outcome.stderr, checks=outcome.checks, result=outcome.result)
+            if cancel_event.is_set():
+                report.update(ok=False, status="cancelled", error="用户已停止脚本")
+            if report["ok"]:
+                with session_scope() as db:
+                    run = db.get(Run, run_id)
+                    assert run is not None
+                    for output in outcome.output_files:
+                        if cancel_event.is_set():
+                            raise InterruptedError("用户已停止脚本")
+                        name = file_service.safe_filename(output.name)
+                        path = run_service.output_path(run, f"{uuid4().hex[:8]}_{name}")
+                        # 只创建新文件，禁止覆盖旧结果或任何输入件。
+                        with output.open("rb") as source, path.open("xb") as destination:
+                            committed_paths.append(path)
+                            shutil.copyfileobj(source, destination)
+                        record = file_service.register_output(db, path=path, filename=name, customer_id=host.customer_id,
+                                                              conversation_id=host.conversation_id, run_id=run_id, user_id=host.user_id,
+                                                              delivery_status="candidate" if host.defer_delivery else "final")
+                        report["files"].append({**file_service.file_dict(record), "script_run_id": run_id})
+                        report["files"][-1]["ref"] = f"脚本_{run_id}/{output.name}"
+                        try:
+                            loaded = file_service.load_into_workspace(host.ws, record)
+                            for info in loaded:
+                                created_tables.append(info.name)
+                                host.ws.update_meta(info.name, created_by="run_python_script",
+                                                    description=f"Python 脚本结果，run_id={run_id}")
+                                file_tables[info.name] = {"ref": f"脚本_{run_id}/{output.name}", "sheet": info.sheet, "header": info.header}
+                        except ReadError:
+                            report["warnings"].append(f"「{name}」没有可供数据分析的非空表，文件仍可下载。")
+                    for label, df in outcome.result_tables.items():
+                        name = host.ws.unique_name(sanitize_table_name(str(label)))
+                        host.ws.put_dataframe(name, df, label=str(label), source="computed", role="derived",
+                                              created_by="run_python_script", description=f"Python 脚本结果，run_id={run_id}")
+                        output_tables[str(label)] = name
+                        if label in outcome.display_tables:
+                            created_tables.append(name)
+                        else:
+                            # 分析工作区在本轮结束时清理；中间表另存运行快照，供执行明细查看，
+                            # 不产生 table 事件，也不把调试数据当作正式交付结果。
+                            saved_internal_tables = True
+                            diagnostics = run_service.run_workspaces.get(run_id)
+                            diagnostics.put_dataframe(
+                                name, df, label=str(label), source="computed", role="derived",
+                                created_by="run_python_script", description=f"Python 脚本中间数据，run_id={run_id}",
+                            )
+                            report["internal_tables"].append({"name": name, "rows": len(df),
+                                                              "columns": [str(column) for column in df.columns], "run_id": run_id})
+                    if cancel_event.is_set():
+                        raise InterruptedError("用户已停止脚本")
+                    report["table_names"] = created_tables
+                    report["tables"] = [{"name": name, "rows": host.ws.require(name).rows,
+                                         "columns": host.ws.require(name).column_names} for name in created_tables]
+                    if not outcome.checks:
+                        report["warnings"].append("脚本执行成功，尚未声明业务校验；请继续核对用户要求，不将无异常视为全部达标。")
+                    if not report["files"] and not report["table_names"] and not report["internal_tables"] and not outcome.result and not outcome.stdout:
+                        report["warnings"].append("脚本没有返回文件、数据表或结果摘要，仍需完成用户目标。")
+                    if not report["files"]:
+                        report["warnings"].append("本次未声明交付文件；如需交付，将最终文件列入 deliver_files，临时测试文件不要列入。")
+                    # 文件登记和全部表元信息准备好后再提交；失败不留下可下载的半成品。
+                    run.output_file_id = report["files"][-1]["file_id"] if report["files"] else None
+                # 只记录实际执行的代码和依赖，不再次执行，也不创建永久流程卡片。
+                try:
+                    with session_scope() as db:
+                        library = recipe_service.library_for(db, host.customer_id)
+                    recipe = compile_script(host.ws, library, run_id=run_id, code=code, description=description,
+                                            script_id=script["script_id"], script_title=script["script_title"],
+                                            input_tables=input_tables, input_files=input_files,
+                                            output_tables=output_tables, file_tables=file_tables,
+                                            display_tables=outcome.display_tables,
+                                            output_files=[{"name": item["filename"], "ref": item["ref"]}
+                                                          for item in report["files"]],
+                                            file_resolver=host.file_dependency, customer_id=host.customer_id,
+                                            conversation_id=host.conversation_id, field_mapping=host.field_mapping())
+                    problems = check_recipe(recipe, library)
+                    if problems:
+                        raise ValueError("；".join(problems))
+                    snapshot = recipe.to_dict()
+                    for table in [*output_tables.values(), *file_tables]:
+                        host.ws.update_meta(table, step={"recipe_snapshot": snapshot, "table_ref": table, "run_id": run_id})
+                    report["recipe_snapshot"] = snapshot
+                    host._last_recipe = recipe
+                except Exception as exc:
+                    # 依赖快照只是附加记录；记录器异常不能撤销已经校验并登记的交付文件。
+                    logger.exception("脚本 %s 的流程依赖记录失败，保留已完成的交付文件", run_id)
+                    report["workflow_save_error"] = str(exc) or type(exc).__name__
+                    report["warnings"].append(f"处理已完成，但流程依赖记录不完整：{report['workflow_save_error']}")
+        if cancel_event.is_set():
+            raise InterruptedError("用户已停止脚本")
+    except Exception as exc:
+        # 多 sheet 导入也可能在中间出错，不能仅清理完整返回的 loaded 列表。
+        for name in {table.name for table in host.ws.list_tables()} - previous_tables:
+            host.ws.drop(name)
+        for path in committed_paths:
+            path.unlink(missing_ok=True)
+        if saved_internal_tables:
+            run_service.run_workspaces.delete(run_id)
+        host._last_recipe = None
+        report.pop("recipe_snapshot", None)
+        report.update(ok=False, status="cancelled" if cancel_event.is_set() else "failed", error=str(exc)[:4000],
+                      files=[], table_names=[], tables=[], internal_tables=[])
+    finally:
+        with session_scope() as db:
+            run = db.get(Run, run_id)
+            if run is not None:
+                if not report["ok"]:
+                    # 异常也可能发生在文件登记事务提交之后；清理记录，避免留下指向已删文件的卡片。
+                    run.output_file_id = None
+                    db.execute(delete(FileRecord).where(FileRecord.run_id == run_id, FileRecord.kind == "output"))
+                run.status = "success" if report["ok"] else "failed"
+                run.error = report["error"]
+                run.summary = ("脚本执行成功" if report["ok"] else "脚本未完成") + f"：{description[:500]}"
+                run.duration_ms = int((time.perf_counter() - started) * 1000)
+                run.finished_at = datetime.now()
+                run.validation = {"status": "pass" if report["ok"] and report["checks"] else "not_checked" if report["ok"] else "fail",
+                                  "checks": report["checks"], "outputs": report["files"], "tables": report["tables"],
+                                  "internal_tables": report["internal_tables"],
+                                  "result": report["result"], "warnings": report["warnings"], "script_status": report["status"]}
+                if report["ok"] and report.get("recipe_snapshot"):
+                    run.validation = {**run.validation, "recipe_snapshot": report["recipe_snapshot"]}
+                    run.recipe_id = report["recipe_snapshot"]["id"]
+                    run.recipe_version = report["recipe_snapshot"]["version"]
+                if report.get("workflow_save_error"):
+                    run.validation = {**run.validation, "workflow_save_error": report["workflow_save_error"]}
+                steps = list(run.steps)
+                steps[0] = {**steps[0], "ok": report["ok"], "stdout": report["stdout"], "stderr": report["stderr"],
+                            "summary": run.summary, "error": report["error"], "duration_ms": run.duration_ms}
+                run.steps = steps
+    return report
+
+
+def inspect_for_conversation(host, run_id: str) -> dict[str, Any]:
+    with session_scope() as db:
+        run = run_service.get_run(db, run_id)
+        if not _scoped(db, host, run):
+            raise ServiceError("这次脚本运行不属于当前客户或会话")
+        if run.kind != "script":
+            raise ServiceError("这条记录不是 Python 脚本运行")
+        params = next((step.get("params", {}) for step in run.steps if step.get("tool") == "run_python_script"), {})
+        if params.get("script_id"):
+            source = read_script(params["script_id"])
+        else:
+            params = script_params(params, title=run.request_text)
+            source = read_script(params["script_id"])
+            run.steps = [{**step, "params": params} if step.get("tool") == "run_python_script" else step for step in run.steps]
+        bind_script(source["script_id"], user_id=run.user_id, customer_id=run.customer_id,
+                    conversation_id=run.conversation_id)
+        return {"run_id": run.id, "status": run.status, **params, **source, "error": run.error,
+                "stdout": run.steps[0].get("stdout", "") if run.steps else "",
+                "stderr": run.steps[0].get("stderr", "") if run.steps else "",
+                "checks": (run.validation or {}).get("checks", []), "result": (run.validation or {}).get("result", {}),
+                "files": (run.validation or {}).get("outputs", [])}

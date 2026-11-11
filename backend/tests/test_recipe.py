@@ -7,17 +7,17 @@ import asyncio
 import pandas as pd
 import pytest
 
-from sheetmate.demo.samples import demo_recipe_body
+from sheetmate.services.bootstrap.samples import demo_recipe_body
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.reader import read_workbook
-from sheetmate.engine.runner import apply_formula
-from sheetmate.engine.workspace import Workspace
-from sheetmate.recipe.compiler import compile_from_workspace
-from sheetmate.recipe.differ import diff_tables, diff_to_text
-from sheetmate.recipe.executor import InputSource, RecipeRunner, RepairContext
-from sheetmate.recipe.matcher import Candidate, match_inputs
-from sheetmate.recipe.schema import Recipe, check_recipe, file_pattern_from_name
-from sheetmate.recipe.verifier import verify_outputs
+from sheetmate.engine.workbooks.reader import read_workbook
+from sheetmate.engine.formulas.runner import apply_formula
+from sheetmate.engine.tables.workspace import Workspace
+from sheetmate.recipe.definition.compiler import compile_from_workspace
+from sheetmate.recipe.learning.differ import diff_tables, diff_to_text
+from sheetmate.recipe.execution.runner import InputSource, RecipeRunner, RepairContext
+from sheetmate.recipe.learning.matcher import Candidate, match_inputs
+from sheetmate.recipe.definition.schema import Recipe, check_recipe, file_pattern_from_name
+from sheetmate.recipe.validation.comparison import verify_outputs
 
 
 def _run(runner: RecipeRunner, sources, out) -> list[dict]:
@@ -170,7 +170,7 @@ def test_compile_recipe_from_analysis(samples):
 
 
 def test_validator_flags_numbers_stored_as_text():
-    from sheetmate.recipe.validator import validate_run
+    from sheetmate.recipe.validation.rules import validate_run
 
     ws = Workspace(None)
     ws.put_dataframe("t", pd.DataFrame({"金额": [str(i * 1.5) for i in range(20)]}), source="uploaded")
@@ -181,8 +181,8 @@ def test_validator_flags_numbers_stored_as_text():
 
 def test_validation_rule_param_aliases_and_bad_rules():
     """模型写规则时参数名不统一：output_column / input_table 也要认；列名写错时报「规则写错了」，不能误报合计对不上。"""
-    from sheetmate.recipe.schema import ValidationRule
-    from sheetmate.recipe.validator import validate_run
+    from sheetmate.recipe.definition.schema import ValidationRule
+    from sheetmate.recipe.validation.rules import validate_run
 
     inputs = {"明细": pd.DataFrame({"金额": [0.1, 0.2, 1.0]})}
     outputs = {"汇总": pd.DataFrame({"合计": [0.30000000000000004, 1.0]})}
@@ -205,8 +205,8 @@ def test_validation_rule_param_aliases_and_bad_rules():
 
 def test_sum_preservation_with_input_filter():
     """流程先筛选再汇总时，合计校验要按同样的条件算输入合计。"""
-    from sheetmate.recipe.schema import ValidationRule
-    from sheetmate.recipe.validator import validate_run
+    from sheetmate.recipe.definition.schema import ValidationRule
+    from sheetmate.recipe.validation.rules import validate_run
 
     inputs = {"明细": pd.DataFrame({"状态": ["已完成", "已取消", "已完成"], "金额": [10.0, 99.0, 5.5]})}
     outputs = {"汇总": pd.DataFrame({"金额合计": [15.5]})}
@@ -223,8 +223,8 @@ def test_sum_preservation_with_input_filter():
 
 
 def test_sum_preservation_between_output_sheets():
-    from sheetmate.recipe.schema import ValidationRule
-    from sheetmate.recipe.validator import validate_run
+    from sheetmate.recipe.definition.schema import ValidationRule
+    from sheetmate.recipe.validation.rules import validate_run
 
     outputs = {"订单汇总": pd.DataFrame({"金额合计": [10.0, 5.5]}), "等级汇总": pd.DataFrame({"金额合计": [15.5]})}
     rule = ValidationRule(type="sum_preservation", severity="error",

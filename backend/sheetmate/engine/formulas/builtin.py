@@ -18,13 +18,13 @@ from sheetmate.engine.formulas.base import (
     ParamSpec,
     check_columns,
 )
-from sheetmate.engine.sqlutil import (
+from sheetmate.engine.tables.sql import (
     assert_single_select,
     quote_ident as q,
     quote_literal as lit,
     sql_table_refs,
 )
-from sheetmate.engine.workspace import Workspace
+from sheetmate.engine.tables.workspace import Workspace
 
 _MAX_PIVOT_VALUES = 200
 

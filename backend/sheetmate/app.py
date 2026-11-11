@@ -16,26 +16,37 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from sheetmate import __version__
-from sheetmate.agent.llm import LLMError
-from sheetmate.api import auth, conversations, customers, files, observability, recipes, runs, scripts, tool_results
-from sheetmate.api import settings as settings_api
-from sheetmate.config import get_llm_settings, settings
-from sheetmate.services.errors import ServiceError
-from sheetmate.services.seed import bootstrap
+from sheetmate.agent.llm.client import LLMError
+from sheetmate.api.auth import router as auth
+from sheetmate.api.conversations import router as conversations
+from sheetmate.api.customers import router as customers
+from sheetmate.api.files import router as files
+from sheetmate.api.observability import router as observability
+from sheetmate.api.recipes import router as recipes
+from sheetmate.api.runs import router as runs
+from sheetmate.api.scripts import router as scripts
+from sheetmate.api.tool_results import router as tool_results
+from sheetmate.api.settings import router as settings_api
+from sheetmate.core.config.settings import get_llm_settings, settings
+from sheetmate.core.errors import ServiceError
+from sheetmate.services.bootstrap.seed import bootstrap
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     # 初始化里会同步跑一遍示例流程（内部用 asyncio.run），放到线程里执行，避免和服务的事件循环冲突
     await asyncio.to_thread(bootstrap)
-    from sheetmate.services.chat import recover_interrupted_executions, resume_startup_executions
+    from sheetmate.services.conversations.chat import (
+        recover_interrupted_executions,
+        resume_startup_executions,
+    )
 
     await asyncio.to_thread(recover_interrupted_executions)
     await resume_startup_executions()
     yield
-    from sheetmate.services.conversations import conversation_workspaces
-    from sheetmate.services.runs import run_workspaces
-    from sheetmate.services.jobs import jobs
+    from sheetmate.services.conversations.service import conversation_workspaces
+    from sheetmate.services.workflows.runs import run_workspaces
+    from sheetmate.services.execution.jobs import jobs
 
     await jobs.shutdown()
     conversation_workspaces.close_all()
@@ -46,7 +57,18 @@ def _error(status: int, kind: str, message: str) -> JSONResponse:
     return JSONResponse(status_code=status, content={"ok": False, "error": {"type": kind, "message": message}})
 
 
+def _conversation_exists(conversation_id: str) -> bool:
+    from sheetmate.db.session import SessionLocal
+    from sheetmate.db.models import Conversation
+
+    with SessionLocal() as db:
+        return db.get(Conversation, conversation_id) is not None
+
+
 def create_app() -> FastAPI:
+    from sheetmate.core.observability.conversation_log import configure_conversation_probe
+
+    configure_conversation_probe(_conversation_exists)
     app = FastAPI(title="SheetMate", version=__version__, lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins, allow_credentials=True,
                        allow_methods=["*"], allow_headers=["*"])

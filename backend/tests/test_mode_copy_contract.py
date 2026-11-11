@@ -5,11 +5,13 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from sheetmate.agent.tools import AgentContext, ToolRegistry, _learn_context, _recipe_result_text, _resolve_inputs
+from sheetmate.agent.tools.contracts import AgentContext
+from sheetmate.agent.tools.registry import ToolRegistry
+from sheetmate.agent.tools.workflows.builtin import _learn_context, _recipe_result_text, _resolve_inputs
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.workspace import Workspace
-from sheetmate.recipe.compiler import compile_from_workspace
-from sheetmate.recipe.schema import Recipe
+from sheetmate.engine.tables.workspace import Workspace
+from sheetmate.recipe.definition.compiler import compile_from_workspace
+from sheetmate.recipe.definition.schema import Recipe
 
 
 def test_analysis_can_transform_and_editing_uses_recipe_writer():

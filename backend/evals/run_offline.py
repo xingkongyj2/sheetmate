@@ -19,13 +19,18 @@ def context_memory_eval(ctx, registry) -> tuple[dict[str, bool], dict]:
     """Measure source-to-prompt projections without models or external I/O."""
     from copy import deepcopy
 
-    from sheetmate.agent.context import (
-        ContextBlock, ContextOverflow, HISTORY_TOKEN_BUDGETS, assemble_context, stage_history,
+    from sheetmate.agent.memory.short_term.context import (
+        ContextBlock,
+        HISTORY_TOKEN_BUDGETS,
+        assemble_context,
+        stage_history,
     )
-    from sheetmate.agent.memory import format_memories, retrieve_memories
-    from sheetmate.agent.privacy import contains_sensitive_memory, redact_derived_text
-    from sheetmate.agent.summarizer import estimate_tokens, history_tokens
-    from sheetmate.conversation_log import _normalise
+    from sheetmate.agent.memory.short_term.errors import ContextOverflow
+    from sheetmate.agent.memory.long_term.formatting import format_memories
+    from sheetmate.agent.memory.long_term.retrieval.selector import retrieve_memories
+    from sheetmate.core.security.privacy import contains_sensitive_memory, redact_derived_text
+    from sheetmate.agent.memory.short_term.tokens import estimate_tokens, history_tokens
+    from sheetmate.core.observability.conversation_log import _normalise
 
     def text_size(text: str, *, preview_chars: int = 1_400) -> dict:
         original = text
@@ -198,14 +203,17 @@ def main() -> int:
     with TemporaryDirectory(prefix="sheetmate-eval-") as directory:
         os.environ["SHEETMATE_DATA_DIR"] = directory
         import pandas as pd
-        from sheetmate.agent.memory import MemoryContextLimit, select_relevant
-        from sheetmate.agent.tools import AgentContext, ToolRegistry, _tool_value_counts
+        from sheetmate.agent.memory.long_term.policy import MemoryContextLimit
+        from sheetmate.agent.memory.long_term.retrieval.selector import select_relevant
+        from sheetmate.agent.tools.contracts import AgentContext
+        from sheetmate.agent.tools.registry import ToolRegistry
+        from sheetmate.agent.tools.analysis.builtin import _tool_value_counts
         from sheetmate.engine.formulas import FormulaLibrary
-        from sheetmate.engine.table_memory import format_table_memory
-        from sheetmate.engine.workspace import Workspace
-        from sheetmate.recipe.schema import Recipe, ValidationRule
-        from sheetmate.recipe.validator import validate_run
-        from sheetmate.recipe.verifier import values_equal, verify_outputs
+        from sheetmate.engine.tables.memory import format_table_memory
+        from sheetmate.engine.tables.workspace import Workspace
+        from sheetmate.recipe.definition.schema import Recipe, ValidationRule
+        from sheetmate.recipe.validation.rules import validate_run
+        from sheetmate.recipe.validation.comparison import values_equal, verify_outputs
 
         checks = {}
         for name, left, right in (("identifier", "10000001", "10000002"),

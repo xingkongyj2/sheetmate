@@ -9,16 +9,16 @@ import openpyxl
 import pytest
 from openpyxl.styles import Font, PatternFill
 
-from sheetmate.agent.tools import Tool, ToolResult
-from sheetmate.engine.file_copies import temporary_file_copies
+from sheetmate.agent.tools.contracts import Tool, ToolResult
+from sheetmate.engine.workbooks.copies import temporary_file_copies
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.reader import ReadError
-from sheetmate.engine.workspace import Workspace
-from sheetmate.recipe import executor
-from sheetmate.recipe.executor import InputSource, RecipeRunner
-from sheetmate.recipe.schema import Recipe
-from sheetmate.services import chat as chat_service
-from sheetmate.services import files as file_service
+from sheetmate.engine.workbooks.reader import ReadError
+from sheetmate.engine.tables.workspace import Workspace
+from sheetmate.recipe.execution import runner as executor
+from sheetmate.recipe.execution.runner import InputSource, RecipeRunner
+from sheetmate.recipe.definition.schema import Recipe
+from sheetmate.services.conversations import chat as chat_service
+from sheetmate.services.files import service as file_service
 from tests.test_api import _chat, _new_conversation, _upload
 
 
