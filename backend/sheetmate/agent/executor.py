@@ -1211,7 +1211,10 @@ class AgentExecutor:
                        "debug_result": externalize_script_text(result.text, python=name in {_SCRIPT_TOOL, "inspect_python_script"}),
                        "duration_ms": prefetched["duration_ms"] if prefetched else int((time.perf_counter() - started) * 1000)})
                 msgs.append({"role": "tool", "tool_call_id": call["id"],
-                             "content": f"[evidence_id={evidence['id']}]\n{result.text}"})
+                             "content": (f"[evidence_id={evidence['id']}]\n"
+                                         f"[execution_receipt status={evidence['status']} "
+                                         f"executed={str(evidence['executed']).lower()} "
+                                         f"reused={str(evidence['reused']).lower()}]\n{result.text}")})
                 budget.results[evidence["id"]] = {"tool": name, "ok": result.ok, "branch_id": ctx.branch_id, "scope": original_scope,
                                               "call_id": call["id"], "evidence": evidence,
                                               "result": externalize_script_text(result.text, python=name == _SCRIPT_TOOL)}

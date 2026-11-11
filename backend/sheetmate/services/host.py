@@ -70,6 +70,11 @@ class ConversationHost:
             return inspect_history(db, user_id=self.user_id, conversation_id=self.conversation_id,
                                    message_id=message_id, query=query, role=role, offset=offset, limit=limit)
 
+    def assert_live_context_scope(self) -> None:
+        """Revalidate access before reading cached execution data or source code."""
+        with session_scope() as db:
+            self._assert_current_memory_scope(db)
+
     def resolve_execution_evidence(self, evidence_id: str) -> dict[str, Any] | None:
         """Fetch older exact evidence on demand, always within this conversation."""
         if not isinstance(evidence_id, str) or not evidence_id.startswith("ev_") or len(evidence_id) > 100:
@@ -380,6 +385,7 @@ class ConversationHost:
     def inspect_python_script(self, run_id: str) -> dict[str, Any]:
         from sheetmate.services.script_execution import inspect_for_conversation
 
+        self.assert_live_context_scope()
         return inspect_for_conversation(self, run_id)
 
     # ------------------------------------------------------------------

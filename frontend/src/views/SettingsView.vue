@@ -119,6 +119,8 @@ function validationMessage(provider: LLMProviderConfig): string {
   if (!numberInRange(draft.runtime_policy.stream_idle_seconds, 0.001, 3600)) return '回复流等待时间需大于 0 且不超过 3600 秒。'
   if (!numberInRange(draft.runtime_policy.llm_hard_idle_seconds, 0.001, 7200)) return '模型等待时间需大于 0 且不超过 7200 秒。'
   if (!numberInRange(draft.runtime_policy.tool_timeout_seconds, 0.001, 7200)) return '工具等待时间需大于 0 且不超过 7200 秒。'
+  if (!numberInRange(draft.runtime_policy.context_target_chars, 0, 2000000, true)) return '上下文压缩字符目标需为 0–2000000 的整数。'
+  if (!numberInRange(draft.runtime_policy.context_window_tokens, 0, 2000000, true)) return '模型上下文容量需为 0–2000000 的整数。'
   if (!numberInRange(draft.runtime_policy.max_model_calls, 0, 1000, true)) return '每任务模型调用上限需为 0–1000 的整数。'
   if (!numberInRange(draft.runtime_policy.max_prompt_tokens, 0, 10000000, true) ||
       !numberInRange(draft.runtime_policy.max_total_tokens, 0, 10000000, true)) return '任务 Token 预算需为 0–10000000 的整数。'
@@ -418,6 +420,25 @@ async function test(provider: LLMProviderConfig) {
                   </label>
                 </div>
                 <p class="text-xs leading-relaxed text-mute">实际等待采用请求超时、对应等待上限和已启用任务预算中的较小值。任务预算默认关闭，便于慢模型完成处理。</p>
+              </div>
+            </section>
+
+            <section class="mt-7" :aria-labelledby="`${provider.id}-context-heading`">
+              <h2 :id="`${provider.id}-context-heading`" class="mb-3 text-[16px] font-semibold">上下文压缩</h2>
+              <div class="card-soft space-y-4 p-5 sm:p-6">
+                <p class="text-xs leading-relaxed text-mute">长任务自动收起旧过程，保留当前要求和原始结果回查；独立于任务预算，达到压缩目标不会停止任务。</p>
+                <div class="grid gap-4 sm:grid-cols-2">
+                  <label class="block">
+                    <span class="mb-1.5 block text-xs font-medium text-mute">压缩字符目标（0 不按字符触发）</span>
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.context_target_chars" type="number" min="0" max="2000000" step="1000"
+                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                  </label>
+                  <label class="block">
+                    <span class="mb-1.5 block text-xs font-medium text-mute">模型上下文容量（Token，0 未指定）</span>
+                    <input v-model.number="drafts[provider.id]!.runtime_policy.context_window_tokens" type="number" min="0" max="2000000" step="1"
+                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
+                  </label>
+                </div>
               </div>
             </section>
 

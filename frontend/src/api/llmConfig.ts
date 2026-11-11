@@ -46,6 +46,8 @@ function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
       tool_protocol_retries: boundedNumber(policy.tool_protocol_retries, 12, 0, 20, true),
       sdk_retries: boundedNumber(policy.sdk_retries, 3, 0, 5, true),
       structured_timeout: boundedNumber(policy.structured_timeout, 0, 0, 900),
+      context_target_chars: boundedNumber(policy.context_target_chars, 80000, 0, 2000000, true),
+      context_window_tokens: boundedNumber(policy.context_window_tokens, 0, 0, 2000000, true),
       max_model_calls: boundedNumber(policy.max_model_calls, 1000, 0, 1000, true),
       max_prompt_tokens: boundedNumber(policy.max_prompt_tokens, 300000, 0, 10000000, true),
       max_total_tokens: boundedNumber(policy.max_total_tokens, 500000, 0, 10000000, true),

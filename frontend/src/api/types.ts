@@ -550,6 +550,8 @@ export interface LLMRuntimePolicy {
   tool_protocol_retries: number
   sdk_retries: number
   structured_timeout: number
+  context_target_chars: number
+  context_window_tokens: number
   max_model_calls: number
   max_prompt_tokens: number
   max_total_tokens: number

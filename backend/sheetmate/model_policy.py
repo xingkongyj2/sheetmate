@@ -25,6 +25,10 @@ class LLMRuntimePolicy(BaseModel):
     sdk_retries: int = Field(default=3, ge=0, le=5)
     # 0 保持原行为：不额外限制整次结构化调用的总时长，单次请求仍由 cfg.timeout 控制。
     structured_timeout: float = Field(default=0, ge=0, le=900, allow_inf_nan=False)
+    # 软压缩目标独立于任务预算；只整理旧执行过程，不据此中止任务。
+    context_target_chars: int = Field(default=80000, ge=0, le=2000000)
+    # 填实际服务端上下文容量；0 表示未知，不从模型名称猜测。
+    context_window_tokens: int = Field(default=0, ge=0, le=2000000)
     # 默认仅记录用量；用户主动开启后，才执行下面的任务预算。
     budget_enabled: bool = False
     # 单次用户任务共享；嵌套工具、核对、重试也计入。0 表示关闭相应限制。

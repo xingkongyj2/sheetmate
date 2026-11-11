@@ -27,7 +27,7 @@ import httpx
 from openai import AsyncOpenAI
 
 from sheetmate.agent.content import user_content
-from sheetmate.agent.context_builder import DEFAULT_PROJECTION_CHARS, prepare_context
+from sheetmate.agent.context_builder import prepare_context
 from sheetmate.agent.llm_budget import BudgetExceeded, RequestBudget, context_profile, request_size
 from sheetmate.agent.prompt_cache import reported_cache_usage, request_prefix_profile, stable_request
 from sheetmate.agent.structured import StructuredOutputError, complete_structured, validate_payload
@@ -382,16 +382,31 @@ class LLMClient:
             kwargs["tools"] = tools
         kwargs.update({k: v for k, v in extra.items() if v is not None})
         policy = self.cfg.runtime_policy
-        projection_chars = (policy.max_input_chars if policy.budget_enabled and policy.max_input_chars
-                            else DEFAULT_PROJECTION_CHARS)
+        projection_chars = policy.context_target_chars
+        if policy.budget_enabled and policy.max_input_chars:
+            projection_chars = (min(projection_chars, policy.max_input_chars) if projection_chars
+                                else policy.max_input_chars)
+        # Capacity is supplied by the operator, never guessed from a model name.
+        # Reserve the requested output plus a safety margin before estimating
+        # the input target. These are soft targets; inability to shrink does
+        # not change output settings, execution limits or request admission.
+        context_window = policy.context_window_tokens
+        output_reserve = int(kwargs.get("max_tokens") or 8192) if context_window else 0
+        safety_reserve = math.ceil(context_window * 0.1)
+        projection_tokens = max(1, context_window - output_reserve - safety_reserve) if context_window else 0
         before_chars, before_tokens = request_size(kwargs) if context_metrics is not None else (0, 0)
-        prepared = prepare_context(kwargs, projection_chars)
+        prepared = prepare_context(kwargs, projection_chars, max_tokens=projection_tokens)
         if context_metrics is not None:
             after_profile = context_profile(prepared)
             after_chars, after_tokens = request_size(prepared)
             context_metrics.update(after_profile)
             context_metrics["projection"] = {
                 "applied": after_chars < before_chars,
+                "target_chars": projection_chars,
+                "target_input_tokens": projection_tokens,
+                "context_window_tokens": context_window,
+                "reserved_output_tokens": output_reserve,
+                "reserved_safety_tokens": safety_reserve,
                 "before_serialized_chars": before_chars,
                 "after_serialized_chars": after_chars,
                 "saved_serialized_chars": max(0, before_chars - after_chars),
