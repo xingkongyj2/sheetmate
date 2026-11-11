@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import re
 import time
@@ -47,6 +48,7 @@ from sheetmate.agent.prompts import (
     TOOL_FALLBACK_MESSAGE,
 )
 from sheetmate.agent.recovery import MAX_METHODS, METHOD_FAILURE_LIMIT, RECONSIDER_TOOL, RecoveryState, _Method, _ObservedResult
+from sheetmate.agent.reflection import classify_failure, guidance as failure_guidance
 from sheetmate.agent.runtime import durable_value, restore_messages, runtime_images
 from sheetmate.agent.scripting import ScriptRequest
 from sheetmate.agent.summarizer import estimate_tokens
@@ -510,6 +512,8 @@ class AgentExecutor:
         iteration, iteration_limit = 0, max(1, self.max_iterations)
         script_budget_added, fallback_suggested = False, False
         failures: dict[tuple[str, str], int] = {}
+        reflected_failures: set[tuple[str, str]] = set()
+        pending_reflections: list[str] = []
         policy = getattr(getattr(self.llm, "cfg", None), "runtime_policy", None)
         protocol_retry_limit = getattr(policy, "tool_protocol_retries", 12)
         stream_retry_limit = getattr(policy, "stream_recovery_retries", 5)
@@ -555,6 +559,8 @@ class AgentExecutor:
             completion_retries, no_progress = saved.get("completion_retries", 0), saved.get("no_progress", False)
             recovery_finish_prompts = int(saved.get("recovery_finish_prompts", 0))
             failures = {(row[0], row[1]): row[2] for row in saved.get("failures", [])}
+            reflected_failures = {tuple(row) for row in saved.get("reflected_failures", [])}
+            pending_reflections = list(saved.get("pending_reflections", []))
             if saved.get("terminal_events") and applied_revision == runtime.revision:
                 if transcript is not None:
                     transcript.extend(msgs[start:])
@@ -580,6 +586,8 @@ class AgentExecutor:
                 "completion_retries": completion_retries, "recovery_finish_prompts": recovery_finish_prompts,
                 "no_progress": no_progress,
                 "failures": [[*key, count] for key, count in failures.items()],
+                "reflected_failures": [list(key) for key in sorted(reflected_failures)],
+                "pending_reflections": list(pending_reflections),
                 "pending_response": durable_value(response), "terminal_events": terminal_events or [],
                 "reserved_call_ids": sorted(reserved_call_ids), "parallel_batch": durable_value(parallel_batch),
                 "projection_used_chars": projection_budget.used_chars,
@@ -636,6 +644,11 @@ class AgentExecutor:
             yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
             return
         while iteration < iteration_limit:
+            if pending_reflections and pending_response is None and not parallel_batch:
+                # A process may have stopped after the durable tool receipt
+                # but before its hint was appended to the next decision.
+                msgs.extend({"role": "user", "content": message} for message in pending_reflections)
+                pending_reflections.clear()
             if await consume() and stop_scope in {"step", "agent"}:
                 if transcript is not None:
                     transcript.extend(msgs[start:])
@@ -1235,6 +1248,28 @@ class AgentExecutor:
                     elif _SCRIPT_TOOL in tool_map and not fallback_suggested:
                         guidance.append(TOOL_FALLBACK_MESSAGE)
                         fallback_suggested = True
+                if (executed and not result.ok and not result.end_turn and cached_result is None
+                        and not repeated_script and not method_blocked and name != RECONSIDER_TOOL
+                        and result.error_kind not in {"schema", "protocol"}):
+                    technical_error = "\n".join(str(safe_payload.get(key) or "") for key in ("summary", "text"))
+                    kind = classify_failure(name, technical_error)
+                    reflection_key = (name, kind) if kind else None
+                    if reflection_key is not None and reflection_key not in reflected_failures:
+                        experience_text = ""
+                        retrieve_experience = getattr(ctx.host, "repair_experience_text", None)
+                        if callable(retrieve_experience):
+                            try:
+                                experience_text = retrieve_experience(f"{name} {kind}")
+                                if inspect.isawaitable(experience_text):
+                                    experience_text = await experience_text
+                                if not isinstance(experience_text, str):
+                                    experience_text = ""
+                            except Exception:
+                                # Experience is optional; its availability
+                                # must never interrupt the user's work.
+                                experience_text = ""
+                        pending_reflections.append(failure_guidance(name, technical_error, experience_text))
+                        reflected_failures.add(reflection_key)
                 if recovery.must_switch and not recovery.exhausted:
                     guidance.append(_approach_switch_message(recovery))
                 ready_events = visible_events
@@ -1266,6 +1301,8 @@ class AgentExecutor:
                     assistant["tool_calls"] = calls[:call_index + 1]
                     break
             msgs.extend({"role": "user", "content": message} for message in guidance)
+            msgs.extend({"role": "user", "content": message} for message in pending_reflections)
+            pending_reflections.clear()
             if end_turn:
                 if transcript is not None:
                     transcript.extend(msgs[start:])

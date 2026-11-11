@@ -22,6 +22,9 @@ MEMORY_MESSAGE_CHARS = 8_000
 MEMORY_ANSWER_CHARS = 2_000
 MEMORY_CONTEXT_CHARS = 12_000
 MEMORY_EXTRACTION_TOKENS = 2_400
+REPAIR_EXPERIENCE_LIMIT = 3
+REPAIR_EXPERIENCE_CHARS = 2_200
+REPAIR_FAILURE_KINDS = frozenset({"missing_column", "missing_table", "date_parse", "type_mismatch", "merged_cell"})
 
 
 class MemoryContextLimit(ValueError):
@@ -366,6 +369,23 @@ def _memory_identity(item: dict[str, Any]) -> tuple[Any, ...]:
     return (*scope, item.get("category"), value)
 
 
+def is_verified_repair_memory(item: dict[str, Any]) -> bool:
+    """Recognize executor-backed technical experience, never chat extraction."""
+    evidence = item.get("execution_evidence")
+    if (item.get("category") != "history_insights" or item.get("source") != "ai"
+            or not isinstance(evidence, dict)):
+        return False
+    failed, repaired = evidence.get("failed_evidence_id"), evidence.get("repaired_evidence_id")
+    return bool(
+        evidence.get("kind") == "verified_repair" and evidence.get("verified") is True
+        and evidence.get("failure_kind") in REPAIR_FAILURE_KINDS
+        and isinstance(evidence.get("execution_id"), str) and evidence["execution_id"]
+        and isinstance(failed, str) and failed
+        and isinstance(repaired, str) and repaired and failed != repaired
+        and evidence.get("verification") in {"completion_check", "python_checks", "recipe_verification"}
+    )
+
+
 def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
                       max_chars: int = MEMORY_CONTEXT_CHARS) -> dict[str, Any]:
     """Select scoped memories with lexical MMR, recency and explicit receipts.
@@ -375,6 +395,7 @@ def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
     changes AI ordering; only same-scope, exact-value duplicates are removed.
     """
     terms = _query_terms(query)
+    queried_failures = terms & REPAIR_FAILURE_KINDS
     scored = [(index, item, _memory_relevance(item, terms, query)) for index, item in enumerate(items)]
     human = sorted((row for row in scored if row[1].get("source") == "human"),
                    key=lambda row: (-row[2], row[0]))
@@ -389,9 +410,18 @@ def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
 
     seen = {_memory_identity(item) for _, item, _ in human}
     candidates = []
-    duplicate_count = unrelated_count = 0
+    duplicate_count = unrelated_count = unverified_experience_count = 0
     for index, item, score in scored:
         if item.get("source") == "human":
+            continue
+        if item.get("category") == "history_insights" and not is_verified_repair_memory(item):
+            # Legacy experience stays browsable, but a model's old guess must
+            # not become an automatically applied repair or business rule.
+            unverified_experience_count += 1
+            continue
+        if (item.get("category") == "history_insights" and queried_failures
+                and item["execution_evidence"]["failure_kind"] not in queried_failures):
+            unrelated_count += 1
             continue
         identity = _memory_identity(item)
         if identity in seen:
@@ -426,13 +456,20 @@ def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
         mmr = 0.7 * score / highest - 0.3 * similarity + 0.05 / (index + 1)
         return bool(score), mmr, -index
 
+    experiences = []
     while pool and len(chosen) - len(human) < ai_limit:
         row = max(pool, key=rank)
         pool.remove(row)
         index, item, score = row
+        is_experience = item.get("category") == "history_insights"
+        if is_experience and (len(experiences) >= REPAIR_EXPERIENCE_LIMIT
+                              or len(format_memories([*experiences, item])) > REPAIR_EXPERIENCE_CHARS):
+            continue
         if len(format_memories([*chosen, item])) > max_chars:
             continue
         chosen.append(item)
+        if is_experience:
+            experiences.append(item)
         selection.append({"memory_id": item.get("id"), "reason": "lexical_match" if score else "recent_standing",
                           "lexical_score": score})
         selected_terms.append(lexical[index])
@@ -444,6 +481,9 @@ def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
         "available_count": len(items), "candidate_count": len(candidates),
         "selected_count": len(chosen), "required_human_count": len(human),
         "duplicate_count": duplicate_count, "unrelated_count": unrelated_count,
+        "unverified_experience_count": unverified_experience_count,
+        "selected_experience_count": len(experiences),
+        "experience_limit": REPAIR_EXPERIENCE_LIMIT, "experience_max_chars": REPAIR_EXPERIENCE_CHARS,
         "omitted_count": len(items) - len(chosen), "selected_memory_ids": selected_ids,
         "selection": selection,
         "max_chars": max_chars, "used_chars": len(format_memories(chosen)),
@@ -494,7 +534,8 @@ def search_memory_candidates(items: list[dict[str, Any]], query: str = "") -> li
 def format_memories(items: list[dict[str, Any]], field_mapping: dict[str, list[str]] | None = None) -> str:
     lines = []
     human = [i for i in items if i.get("source") == "human"]
-    auxiliary = [i for i in items if i.get("source") != "human"]
+    auxiliary = [i for i in items if i.get("source") != "human" and i.get("category") != "history_insights"]
+    experiences = [i for i in items if i.get("source") != "human" and i.get("category") == "history_insights"]
     if human:
         lines.append("用户维护的记忆（最高优先级）：处理本流程时必须遵守；与 AI 参考冲突时以这些内容为准，AI 不得改写。")
         for item in human:
@@ -504,6 +545,12 @@ def format_memories(items: list[dict[str, Any]], field_mapping: dict[str, list[s
         lines.append("AI 参考记忆（辅助参考，不得覆盖用户维护的记忆）：")
         lines.extend(f"- [{CATEGORY_LABELS.get(i['category'], i['category'])}·{i.get('scope_label', '')}；{_memory_reference(i)}] {i['key']}：{i['value']}"
                      for i in auxiliary)
+    if experiences:
+        lines.append("历史修复经验（仅技术参考）：先核对本轮文件、表、字段和工具结果，再判断是否适用；"
+                     "不得覆盖用户要求、人工规则或 Recipe，不得把旧数据或一次性处理变成业务规则。")
+        for item in experiences:
+            proof = "已验证执行" if is_verified_repair_memory(item) else "未核验旧记录"
+            lines.append(f"- [{item.get('scope_label', '')}；{_memory_reference(item)}；{proof}] {item['key']}：{item['value']}")
     if field_mapping:
         lines.append("- [字段映射] " + "；".join(f"{std} ← {'/'.join(aliases)}" for std, aliases in field_mapping.items()))
     return "\n".join(lines)

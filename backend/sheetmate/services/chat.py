@@ -56,6 +56,7 @@ from sheetmate.services import files as file_service
 from sheetmate.services import memory as memory_service
 from sheetmate.services import recipes as recipe_service
 from sheetmate.services import recipe_deletion
+from sheetmate.services.repair_experiences import learn_verified_repairs
 from sheetmate.services import runs as run_service
 from sheetmate.services.delivery import select_delivery
 from sheetmate.services.file_view import file_references, file_view_answer, select_files
@@ -365,11 +366,35 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         await emit({"type": "execution_status", **recorder.execution(),
                     "request_message_id": recorder.request_message_id, "job_id": recorder.job_id,
                     "assistant_message_id": recorder.message_id})
+        # Learning reads the durable terminal answer and tool evidence, never a
+        # candidate answer or the running UI checkpoint written by emit().
+        verified = recorder.result.get("status") == "completed" and recorder.result.get("verified") is True
+        if verified:
+            _save_assistant(conversation_id, content, stored, recorder, run_id)
         if control:
             result = recorder.execution().get("status")
             status = {"completed": "completed", "failed": "failed", "cancelled": "cancelled",
                       "interrupted": "interrupted"}.get(result, "paused")
             control.persist(control.runtime.state if control.runtime else None, status=status)
+        if verified and recorder.message_id is not None:
+            try:
+                with session_scope() as db:
+                    learned = learn_verified_repairs(
+                        db, conversation_id=conversation_id, user_id=user_id,
+                        assistant_message_id=recorder.message_id, execution_id=job.execution_id,
+                    )
+                    items = [memory_service.memory_dict(item) for item in learned]
+                if items:
+                    event = {"type": "memory_saved", "items": items, "source": "verified_repair"}
+                    stored.append(_slim(event))
+                    _save_assistant(conversation_id, content, stored, recorder, run_id)
+                    # Terminal checkpoints are immutable; the finished
+                    # assistant message retains this optional learning receipt.
+                    record_event("memory.saved", "sheetmate.services.repair_experiences.learn_verified_repairs",
+                                 {"items": items})
+                    await job.emit(event)
+            except Exception as exc:
+                record_event("memory.error", "sheetmate.services.repair_experiences.learn_verified_repairs", error_data(exc))
 
     def cancel_execution() -> None:
         user_stop = job.cancel_source == "user"

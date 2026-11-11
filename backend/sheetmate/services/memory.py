@@ -8,7 +8,8 @@ from sqlalchemy import func, insert, literal, or_, select, update
 from sqlalchemy.orm import Session
 
 from sheetmate.agent.memory import (
-    CATEGORIES, CATEGORY_LABELS, MEMORY_CONTEXT_CHARS, MemoryContextLimit, format_memories,
+    CATEGORIES, CATEGORY_LABELS, MEMORY_CONTEXT_CHARS, REPAIR_EXPERIENCE_CHARS,
+    REPAIR_EXPERIENCE_LIMIT, MemoryContextLimit, format_memories, is_verified_repair_memory,
     retrieve_memories, search_memory_candidates,
 )
 from sheetmate.agent.privacy import contains_sensitive_memory
@@ -160,6 +161,7 @@ def set_memory(db: Session, *, category: str, key: str, value: str, user_id: int
             Memory.value == item.value, *([~collision] if source == "ai" else []),
         ).values(value=value, source=source, source_message_id=source_message_id,
                  source_turn_id=source_turn_id, evidence_span=evidence_span,
+                 execution_evidence={},
                  version=int(item.version or 0) + 1, updated_at=now())
           .execution_options(synchronize_session=False))
         if updated.rowcount == 1:
@@ -204,7 +206,66 @@ def memory_dict(m: Memory) -> dict[str, Any]:
             "user_id": m.user_id, "customer_id": m.customer_id, "conversation_id": m.conversation_id,
             "source": m.source, "source_message_id": m.source_message_id,
             "source_turn_id": m.source_turn_id, "evidence_span": m.evidence_span or "", "version": m.version or 1,
+            "execution_evidence": _execution_evidence_summary(getattr(m, "execution_evidence", None)),
             "updated_at": m.updated_at.isoformat()}
+
+
+def _execution_evidence_summary(value: Any) -> dict[str, Any]:
+    """Expose bounded provenance identifiers, without arguments or result data."""
+    if not isinstance(value, dict):
+        return {}
+    summary = {}
+    for key in ("kind", "failure_kind", "tool", "conversation_id", "execution_id", "failed_call_id",
+                "failed_evidence_id", "repaired_call_id", "repaired_evidence_id", "completion_check_id",
+                "verification"):
+        part = value.get(key)
+        if isinstance(part, str) and part:
+            summary[key] = part[:160]
+    if isinstance(value.get("verified"), bool):
+        summary["verified"] = value["verified"]
+    for key in ("request_message_id", "assistant_message_id"):
+        part = value.get(key)
+        if isinstance(part, int) and not isinstance(part, bool) and part > 0:
+            summary[key] = part
+    versions = []
+    for item in value.get("source_versions", [])[:6] if isinstance(value.get("source_versions"), list) else []:
+        if not isinstance(item, dict):
+            continue
+        version = {}
+        for key in ("table", "revision", "file_id", "file_version"):
+            part = item.get(key)
+            if isinstance(part, str) and part:
+                version[key] = part[:160]
+            elif isinstance(part, int) and not isinstance(part, bool):
+                version[key] = part
+        if version:
+            versions.append(version)
+    if versions:
+        summary["source_versions"] = versions
+    return summary
+
+
+def repair_experience_text(db: Session, *, user_id: int, customer_id: str | None,
+                           conversation_id: str | None, recipe_id: str | None = None,
+                           query: str) -> str:
+    """Recall a few verified repairs only within the exact current work scope."""
+    if not query.strip() or not (customer_id or conversation_id):
+        return ""
+    items = memories_for(db, user_id=user_id, customer_id=customer_id,
+                         conversation_id=conversation_id, recipe_id=recipe_id)
+    scoped = []
+    for item in items:
+        if not is_verified_repair_memory(item) or item.get("recipe_id") != recipe_id:
+            continue
+        if customer_id:
+            in_scope = item.get("customer_id") == customer_id and not item.get("conversation_id")
+        else:
+            in_scope = not item.get("customer_id") and item.get("conversation_id") == conversation_id
+        if in_scope:
+            scoped.append(item)
+    selected = retrieve_memories(scoped, query, limit=REPAIR_EXPERIENCE_LIMIT,
+                                 max_chars=REPAIR_EXPERIENCE_CHARS)["items"]
+    return format_memories(selected)
 
 
 def memory_write_result(item: Memory) -> dict[str, Any]:
@@ -235,6 +296,12 @@ def customer_memories(db: Session, customer_id: str, *, recipe_id: str | None = 
     if source is not None:
         stmt = stmt.where(Memory.source == source)
     return [memory_dict(m) for m in db.scalars(stmt.order_by(Memory.updated_at.desc(), Memory.id.desc()))]
+
+
+def customer_visible_memories(db: Session, customer_id: str, *, recipe_id: str | None = None) -> list[dict[str, Any]]:
+    """Customer UI: user-maintained rules and inspectable verified repairs."""
+    return [item for item in customer_memories(db, customer_id, recipe_id=recipe_id)
+            if item.get("source") == "human" or is_verified_repair_memory(item)]
 
 
 def delete_memory(db: Session, memory_id: int) -> Memory:
@@ -272,6 +339,7 @@ def move_conversation_memories(db: Session, conversation_id: str, customer_id: s
                 existing.value, existing.source = item.value, item.source
                 existing.source_message_id, existing.source_turn_id = item.source_message_id, item.source_turn_id
                 existing.evidence_span = item.evidence_span
+                existing.execution_evidence = getattr(item, "execution_evidence", None) or {}
                 existing.version = int(existing.version or 0) + 1
             db.delete(item)
         else:

@@ -188,6 +188,7 @@ export interface MemoryItem {
   scope_label: string
   source: string
   recipe_id?: string | null
+  execution_evidence?: { kind?: string; verified?: boolean }
   updated_at: string
 }
 
@@ -249,6 +250,7 @@ export interface CustomerDetail extends Omit<CustomerCard, 'recipes'> {
   recipes: CustomerWorkflow[]
   memories: MemoryItem[]
   field_mapping: Record<string, string[]>
+  field_mapping_entries?: FieldMappingEntry[]
   formulas: CustomerFormula[]
   runs: RunBrief[]
   conversations: { id: string; title: string; mode: string; updated_at: string }[]

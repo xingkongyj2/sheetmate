@@ -11,7 +11,7 @@ import { useToast } from '@/composables/useToast'
 
 const props = defineProps<{
   customerId: string
-  recipeId: string
+  recipeId?: string
   memories: MemoryItem[]
   mapping: Record<string, string[]>
   mappingEntries: FieldMappingEntry[]
@@ -25,6 +25,10 @@ const editValue = ref('')
 const saving = ref(false)
 const savingMapping = ref(false)
 const humanMemories = computed(() => props.memories.filter((m) => m.source === 'human'))
+const repairExperiences = computed(() => props.memories.filter((m) =>
+  m.source === 'ai' && m.category === 'history_insights'
+  && m.execution_evidence?.kind === 'verified_repair' && m.execution_evidence.verified === true,
+))
 let active = true
 onBeforeUnmount(() => { active = false })
 
@@ -148,6 +152,25 @@ async function saveMapping() {
         <div class="mt-2 flex justify-end">
           <button class="btn-ink px-3 py-2 text-xs" :disabled="saving || !value.trim()" @click="add"><LoaderCircle v-if="saving" class="size-3.5 animate-spin" /><Plus v-else class="size-3.5" />添加记忆</button>
         </div>
+      </div>
+    </section>
+
+    <section v-if="repairExperiences.length" class="card-soft p-5 sm:p-6">
+      <div class="flex flex-wrap items-center gap-2">
+        <h3 class="text-[15px] font-semibold">修复经验</h3>
+        <span class="rounded-full bg-[#6265DC]/8 px-2 py-0.5 text-[10px] text-[#6265DC]">已执行核对</span>
+      </div>
+      <p class="mt-1.5 text-xs leading-5 text-mute">从修复成功的操作中积累，供当前客户和流程遇到类似错误时参考，业务规则仍以你的要求为准。</p>
+      <div class="mt-4 space-y-2">
+        <article v-for="memory in repairExperiences" :key="memory.id" class="rounded-xl bg-paper/60 px-3 py-3">
+          <div class="flex items-start gap-2">
+            <div class="min-w-0 flex-1">
+              <p class="whitespace-pre-wrap break-words text-[13px] leading-6">{{ memory.value }}</p>
+            </div>
+            <button class="icon-btn size-7 shrink-0 hover:text-error" title="删除修复经验" aria-label="删除修复经验" :disabled="saving" @click="remove(memory)"><Trash2 class="size-3.5" /></button>
+          </div>
+          <p class="mt-1 text-[10px] text-faint">{{ timeAgo(memory.updated_at) }}</p>
+        </article>
       </div>
     </section>
 

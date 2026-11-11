@@ -637,6 +637,14 @@ class ConversationHost:
             return memory_service.memory_text(db, user_id=self.user_id, customer_id=self.customer_id,
                                               conversation_id=self.conversation_id, recipe_id=self.recipe_id, query=query)
 
+    def repair_experience_text(self, query: str) -> str:
+        with session_scope() as db:
+            self._assert_current_memory_scope(db)
+            return memory_service.repair_experience_text(
+                db, user_id=self.user_id, customer_id=self.customer_id,
+                conversation_id=self.conversation_id, recipe_id=self.recipe_id, query=query,
+            )
+
     def inspect_saved_memories(self, *, query: str = "", memory_id: int | None = None,
                                offset: int = 0, limit: int | None = None) -> dict[str, Any]:
         """Recover exact scoped memory text without broadening access."""

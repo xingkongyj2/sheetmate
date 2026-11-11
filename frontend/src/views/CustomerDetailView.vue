@@ -294,7 +294,7 @@ async function onEdited() {
             </header>
             <MemoryPanel :customer-id="customer.id" :recipe-id="recipe.recipe_id" :memories="recipe.memories" :mapping="recipe.field_mapping" :mapping-entries="recipe.field_mapping_entries" :refresh="load" />
           </section>
-          <div v-if="!orderedRecipes.length" class="card-soft py-12 text-center text-sm text-faint">保存流程后，可以维护对应的记忆和字段。</div>
+          <MemoryPanel v-if="!orderedRecipes.length" :key="customer.id" :customer-id="customer.id" :memories="customer.memories" :mapping="customer.field_mapping" :mapping-entries="customer.field_mapping_entries ?? []" :refresh="load" />
         </div>
       </section>
     </div>

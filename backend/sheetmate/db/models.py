@@ -358,6 +358,8 @@ class Memory(Base):
     source_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     source_turn_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     evidence_span: Mapped[str] = mapped_column(Text, default="")
+    # 自动修复经验的执行依据独立存放，原始错误、样例和代码不进入可复用规则。
+    execution_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSON, default=dict, nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
