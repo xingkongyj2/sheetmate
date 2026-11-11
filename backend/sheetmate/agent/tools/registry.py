@@ -47,17 +47,17 @@ def _static_tools() -> list[Tool]:
     both = frozenset({"analyze", "modify", "create"})
     analyze, modify = frozenset({"analyze"}), frozenset({"modify"})
     return [
-        Tool("read_tool_result", "按结果引用分页读取已保存的完整安全工具结果。预览不足时回查；省略部分不代表不存在。text 按文本分页，tables/events/payload 等结构按 JSON 字符分页。只能读取当前会话和当前专员范围内的结果。",
-             _obj({"result_id": _STR, "section": {"type": "string", "enum": [
+        Tool("read_tool_result", "按 tool_result_id=tr_… 引用分页读取已保存的完整安全工具结果；只接受实际返回的 tr_ ID。ev_ 是执行证据，应调用 inspect_execution_evidence(evidence_id='ev_…',section='text')。text 按文本分页，tables/events/payload 等结构按 JSON 字符分页。只能读取当前会话和当前专员范围内的结果。",
+             _obj({"result_id": {**_STR, "pattern": "^tr_[a-f0-9]{64}$", "description": "实际返回的 tool_result_id（tr_ 前缀），不能填 evidence_id（ev_ 前缀）。"}, "section": {"type": "string", "enum": [
                  "text", "summary", "tables", "events", "public_text", "public_summary", "public_details", "error_details", "payload"]},
                    "offset": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 1, "maximum": 8000}}, ["result_id"]), both,
              run=lambda args, ctx: ToolResult(json.dumps(ctx.host.read_tool_result(
                  **args, branch_id=ctx.branch_id), ensure_ascii=False), summary="已读取完整工具结果片段"),
              label=lambda args: "回查工具结果"),
-        Tool("inspect_execution_evidence", "按证据 ID 分页读取实际执行记录：section=text（默认）读取完整返回原文，args 读取原始调用参数，facts 读取执行状态与源表版本；args/facts 按 JSON 文本分页。"
-             "上下文摘要不足时回查，不能把已压缩摘要当成完整数据。args 若以 script_id 引用代码，请先用 text 取得 run_id，再调用 inspect_python_script 读取完整代码。",
-             _obj({"evidence_id": _STR, "section": {"type": "string", "enum": ["text", "args", "facts"]},
+        Tool("inspect_execution_evidence", "按 evidence_id=ev_… 分页读取实际执行记录；tr_ 工具结果引用应调用 read_tool_result(result_id='tr_…',section='text')。section=text（默认）读取当次工具返回原文，args 读取原始调用参数，facts 读取执行状态与源表版本；args/facts 按 JSON 文本分页。"
+             "工具原文若是表格预览，回查不会补齐省略行，应按其 next_call 读取表。args 若以 script_id 引用代码，请先用 text 取得 run_id，再调用 inspect_python_script 读取完整代码。",
+             _obj({"evidence_id": {**_STR, "pattern": "^ev_[A-Za-z0-9_]{1,97}$", "description": "实际返回的 evidence_id（ev_ 前缀），不能填 tool_result_id（tr_ 前缀）。"}, "section": {"type": "string", "enum": ["text", "args", "facts"]},
                    "offset": {"type": "integer", "minimum": 0},
                    "limit": {"type": "integer", "minimum": 100, "maximum": 8000}}, ["evidence_id"]), both,
              run=_tool_inspect_evidence, label=lambda args: "回查执行证据"),
@@ -96,10 +96,13 @@ def _static_tools() -> list[Tool]:
         Tool("column_stats", "列的描述统计：最小、最大、均值、分位数、空值比例，按当前表版本和字段保存并复用。已有所需统计时直接使用。",
              _obj({"table": _STR, "columns": {**_STR_LIST, "description": "可选，只统计这些列"}}, ["table"]), both,
              run=_tool_column_stats, label=lambda a: f"描述统计 · {a.get('table', '')}"),
-        Tool("preview_table", "读取表的若干行供分析核对，不代表交付完整表格。正式明细和较大结果通过文件卡片预览下载；不要为展示工作簿而反复读取或拼接行数据。",
-             _obj({"table": _STR, "offset": {"type": "integer"}, "limit": {"type": "integer", "description": "最多 100"}}, ["table"]),
+        Tool("preview_table", "读取表数据供分析核对，按字符预算返回完整行；complete 仅表示本条观察是否包含整表，不代表源数据读取质量。截断时按 next_call 及 expected_revision 续读；超长行的 json_fragment 按 text_offset 拼接同一行后解析。正式明细和较大结果通过文件交付。",
+             _obj({"table": _STR, "offset": {"type": "integer", "minimum": 0},
+                   "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "行读取上限，默认 100；实际回传还受字符预算约束。"},
+                   "expected_revision": {**_STR, "minLength": 1, "maxLength": 100, "description": "续读时填写上次返回的 revision；版本变化会停止拼接。"},
+                   "text_offset": {"type": "integer", "minimum": 0, "description": "仅用于 json_fragment，照抄 next_call 的字符偏移，并同时传 expected_revision。"}}, ["table"]),
              both, run=_tool_preview, label=lambda a: f"查看数据 · {a.get('table', '')}"),
-        Tool("run_sql", "［优先数据处理工具］在分析副本上执行一条 DuckDB SELECT，适合关联、筛选、分组汇总、窗口计算和复杂条件，优先于 Python 脚本。列名和表名用双引号。给 result_name 可保存中间表并供后续公式或流程使用；不改原件或最终格式副本。0 行查询无需展示空表，正式明细或较大结果需通过文件交付。",
+        Tool("run_sql", "［优先数据处理工具］在分析副本上执行一条 DuckDB SELECT，适合关联、筛选、分组汇总、窗口计算和复杂条件。列名和表名用双引号。给 result_name 保存有版本的结果表，可按 next_call 稳定续读。未命名查询受读取上限约束，total_rows=null 表示总数未知；不完整时需提供 result_name 重新执行，不能拼接两次执行结果。0 行查询无需展示空表，正式明细或较大结果需通过文件交付。",
              _obj({"sql": {**_STR, "description": "一条 SELECT 语句"},
                    "result_name": {**_STR, "description": "可选：辅助分析结果表名，两种模式均可使用"},
                    "description": {**_STR, "description": "可选：这条查询做什么"}}, ["sql"]),

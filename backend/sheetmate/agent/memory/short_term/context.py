@@ -27,8 +27,8 @@ class ContextBlock:
 
 
 SYSTEM_TOKEN_BUDGETS = {"execution": 22_000, "planning": 16_000, "specialist": 16_000, "chat": 10_000}
-HISTORY_TOKEN_BUDGETS = {"execution": 12_000, "planning": 5_000, "specialist": 3_000,
-                        "chat": 8_000, "request_intent": 6_000, "recipe_persistence": 4_000}
+HISTORY_TOKEN_BUDGETS = {"execution": 12_000, "planning": 8_000, "specialist": 8_000,
+                        "chat": 8_000, "request_intent": 8_000, "recipe_persistence": 8_000}
 
 
 def assemble_context(blocks: list[ContextBlock], *, stage: str = "execution",
@@ -103,7 +103,7 @@ def stage_history(history: list[dict[str, Any]], stage: str, *, token_budget: in
     Returned objects are request-local copies. Image parts follow only selected
     messages; omitted history can be recovered by source message ID.
     """
-    budget = HISTORY_TOKEN_BUDGETS.get(stage, 5_000) if token_budget is None else token_budget
+    budget = HISTORY_TOKEN_BUDGETS.get(stage, 8_000) if token_budget is None else token_budget
     source_history = history
     # Shared user goals cross the branch boundary; global assistant answers and
     # their summaries can contain conclusions about another specialist's table.

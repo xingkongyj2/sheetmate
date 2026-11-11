@@ -29,9 +29,13 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_DEFAULT_MODEL = "deepseek-v4-pro"
 DEEPSEEK_THINKING_MODELS = (DEEPSEEK_DEFAULT_MODEL, "deepseek-flash")
 DEEPSEEK_MODELS = DEEPSEEK_THINKING_MODELS
+# Exact compatibility aliases observed on official responses or compatible
+# gateways. Unknown endpoints still need an explicit protocol or body flag.
+DEEPSEEK_THINKING_ALIASES = ("deepseek-v4-flash", "deepseek-v4-1-flash", "deepseek-v4-1-pro")
 QWEN_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 QWEN_DEFAULT_MODEL = "qwen-plus"
 QWEN_MODELS = (QWEN_DEFAULT_MODEL, "qwen-max", "deepseek-v3")
+QWEN_THINKING_MODELS = (QWEN_DEFAULT_MODEL, "qwen-flash", "qwen3.8-max", "qwen3.8-flash")
 LLM_PROVIDER_PRIORITY = ("deepseek", "qwen", "custom")
 
 
@@ -158,10 +162,38 @@ class LLMSettings:
     enabled: bool = True
 
     @property
+    def thinking_protocol(self) -> str:
+        return self.resolve_thinking_protocol(self.extra_body)
+
+    def resolve_thinking_protocol(self, body: dict | None = None) -> str:
+        configured = self.capabilities.thinking_protocol
+        if configured != "auto":
+            return configured
+        if self.model == "deepseek-chat" and is_deepseek_url(self.base_url):
+            return "none"
+        # A hand-written protocol flag is also explicit authorization for a
+        # proxy. Never infer one dialect from conflicting flags.
+        body = body or {}
+        thinking = body.get("thinking")
+        deepseek = isinstance(thinking, dict) and thinking.get("type") in {"enabled", "disabled"}
+        template = body.get("chat_template_kwargs")
+        qwen = (isinstance(body.get("enable_thinking"), bool)
+                or isinstance(template, dict) and isinstance(template.get("enable_thinking"), bool))
+        if deepseek or qwen:
+            return "none" if deepseek and qwen else "deepseek" if deepseek else "qwen"
+        if is_deepseek_url(self.base_url) and self.model in (*DEEPSEEK_THINKING_MODELS, *DEEPSEEK_THINKING_ALIASES):
+            return "deepseek"
+        qwen_urls = {QWEN_BASE_URL, "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                     "https://dashscope-us.aliyuncs.com/compatible-mode/v1"}
+        if (self.base_url.rstrip("/") in qwen_urls
+                and (self.model in QWEN_THINKING_MODELS
+                     or self.model.startswith(("qwen-plus-", "qwen-flash-")))):
+            return "qwen"
+        return "none"
+
+    @property
     def thinking_supported(self) -> bool:
-        if self.provider_id == "qwen":
-            return True
-        return is_deepseek_url(self.base_url) and self.model in DEEPSEEK_THINKING_MODELS
+        return self.thinking_protocol != "none"
 
     @property
     def configured(self) -> bool:
@@ -299,7 +331,13 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         extra_body = {}
     thinking_enabled = overrides.get("thinking_enabled")
     if not isinstance(thinking_enabled, bool):
-        thinking_enabled = False
+        # Preserve manually configured flags when upgrading older settings
+        # that never exposed a separate switch for a custom service.
+        thinking = extra_body.get("thinking")
+        template = extra_body.get("chat_template_kwargs")
+        thinking_enabled = (extra_body.get("enable_thinking") is True
+                            or isinstance(template, dict) and template.get("enable_thinking") is True
+                            or isinstance(thinking, dict) and thinking.get("type") == "enabled")
     enabled = overrides.get("enabled", True)
     if not isinstance(enabled, bool):
         enabled = True
@@ -332,7 +370,6 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         runtime_policy=_saved_runtime_policy(policy),
         enabled=enabled,
     )
-    cfg.thinking_enabled = thinking_enabled and cfg.thinking_supported
     return cfg
 
 

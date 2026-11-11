@@ -18,7 +18,7 @@ import uuid
 from collections.abc import AsyncIterator, Callable
 from collections import OrderedDict
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -250,7 +250,8 @@ _FORMAT_CACHE_TTL = 1800.0
 def _format_cache_key(cfg: LLMSettings) -> tuple[str, ...]:
     return (cfg.base_url.rstrip("/"), cfg.model, cfg.provider_id, cfg.capabilities.structured_output,
             hashlib.sha256(cfg.api_key.encode()).hexdigest(),
-            str(cfg.thinking_enabled), json.dumps(cfg.extra_body, sort_keys=True, ensure_ascii=False, default=str))
+            cfg.capabilities.thinking_protocol, str(cfg.thinking_enabled),
+            json.dumps(cfg.extra_body, sort_keys=True, ensure_ascii=False, default=str))
 
 
 def _cache_format(key: tuple[str, ...], value: str) -> None:
@@ -336,9 +337,12 @@ class LLMClient:
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
         context_metrics = extra.pop("_context_metrics", None)
         auxiliary = extra.pop("_auxiliary", False)
-        qwen = self.cfg.provider_id == "qwen"
-        deepseek_thinking = not qwen and self.cfg.thinking_supported
-        legacy_chat = not qwen and self.model == "deepseek-chat" and is_deepseek_url(self.cfg.base_url)
+        extra_body = {**self.cfg.extra_body, **(extra.pop("extra_body", None) or {})}
+        protocol = self.cfg.resolve_thinking_protocol(extra_body)
+        qwen = protocol == "qwen"
+        deepseek_thinking = protocol == "deepseek"
+        legacy_chat = (self.cfg.capabilities.thinking_protocol == "auto" and protocol == "none" and self.model == "deepseek-chat"
+                       and is_deepseek_url(self.cfg.base_url))
         if tools and deepseek_thinking:
             # 历史摘要没有原始思考字段；新模型携带 tools 时仍要求该字段存在。
             messages = [{"reasoning_content": "", **message} if message.get("role") == "assistant" else message
@@ -355,23 +359,24 @@ class LLMClient:
         }
         if self.cfg.max_tokens > 0:
             kwargs["max_tokens"] = self.cfg.max_tokens
-        extra_body = dict(self.cfg.extra_body)
+        # An explicitly selected dialect controls both the primary switch and
+        # auxiliary calls. Unknown/disabled protocols leave custom body fields
+        # untouched; field names alone must never override explicit `none`.
+        thinking_enabled = self.cfg.thinking_enabled and (
+            not auxiliary or self.cfg.runtime_policy.auxiliary_thinking_enabled)
         if qwen:
             extra_body.pop("thinking", None)
-            extra_body["enable_thinking"] = self.cfg.thinking_enabled
-        elif deepseek_thinking:
-            extra_body["thinking"] = {"type": "enabled" if self.cfg.thinking_enabled else "disabled"}
-        extra_body.update(extra.pop("extra_body", None) or {})
-        if auxiliary and not self.cfg.runtime_policy.auxiliary_thinking_enabled:
-            if qwen or "enable_thinking" in extra_body:
-                extra_body["enable_thinking"] = False
-            if deepseek_thinking or isinstance(extra_body.get("thinking"), dict):
-                extra_body["thinking"] = {"type": "disabled"}
-            # Private Qwen servers can expose the same setting through the
-            # tokenizer template. Only change flags the user already supplied.
+            extra_body["enable_thinking"] = thinking_enabled
             template = extra_body.get("chat_template_kwargs")
             if isinstance(template, dict) and "enable_thinking" in template:
-                extra_body["chat_template_kwargs"] = {**template, "enable_thinking": False}
+                extra_body["chat_template_kwargs"] = {**template, "enable_thinking": thinking_enabled}
+        elif deepseek_thinking:
+            extra_body.pop("enable_thinking", None)
+            configured_thinking = extra_body.get("thinking")
+            extra_body["thinking"] = {
+                **(configured_thinking if isinstance(configured_thinking, dict) else {}),
+                "type": "enabled" if thinking_enabled else "disabled",
+            }
         if legacy_chat:
             # 兼容曾保存的额外参数和单次请求覆盖，Chat 不接收思考模式参数。
             for name in ("thinking", "reasoning_effort"):
@@ -724,9 +729,9 @@ class LLMClient:
                              image_parts: list[dict[str, Any]] | None, max_tokens: int | None,
                              schema: dict[str, Any] | None, schema_name: str,
                              validator: Callable[[Any], None] | None) -> Any:
-        # Keep the caller's small initial auxiliary budget. A private server
-        # can ignore the thinking-off flag, so bounded repairs may grow this
-        # budget after explicit truncation, within the user's configured cap.
+        # Honour the stage's output headroom, including hidden reasoning. A
+        # private server can ignore thinking-off, so explicit truncation may
+        # still grow the budget within the user's configured cap.
         auxiliary = schema_name in _AUXILIARY_JSON_STAGES
         output_tokens = max_tokens
         if auxiliary and self.cfg.max_tokens > 0:
@@ -891,16 +896,11 @@ def get_llm() -> LanguageModel:
 
 async def test_connection(cfg: LLMSettings) -> dict[str, Any]:
     """设置页「测试连接」：沿用输出预算，并限制整次测试的等待时间。"""
-    client = LLMClient(cfg)
-    extra: dict[str, Any] = {}
-    if cfg.thinking_supported:
-        # 已知协议的连接探测无需思考；中转或其他模型仍可能默认开启思考。
-        extra["extra_body"] = ({"enable_thinking": False} if cfg.provider_id == "qwen"
-                               else {"thinking": {"type": "disabled"}})
+    client = LLMClient(replace(cfg, thinking_enabled=False))
     try:
         # 思考内容可能计入输出额度，不能为两个字的回复强制缩成 10 Token。
         msg = await asyncio.wait_for(
-            client.chat([{"role": "user", "content": "回复两个字：你好"}], **extra), cfg.timeout,
+            client.chat([{"role": "user", "content": "回复两个字：你好"}], _auxiliary=True), cfg.timeout,
         )
     except (asyncio.TimeoutError, LLMTimeout) as exc:
         raise LLMTimeout(

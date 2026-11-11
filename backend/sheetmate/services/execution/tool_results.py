@@ -68,6 +68,9 @@ def read_tool_result(db: Session, *, user_id: int, conversation_id: str, result_
     # locators and confer no authority after customer access is revoked.
     conversation = _scope(db, user_id, conversation_id, expected_customer_id)
     if not isinstance(result_id, str) or not _RESULT_ID.fullmatch(result_id):
+        if isinstance(result_id, str) and re.fullmatch(r"ev_[A-Za-z0-9_]{1,97}", result_id):
+            raise NotFound("这是执行证据 ID，不能用于读取工具结果；请调用 " + canonical({
+                "tool": "inspect_execution_evidence", "args": {"evidence_id": result_id, "section": "text"}}))
         raise NotFound("工具结果不存在。")
     output = db.get(AgentToolOutput, result_id)
     if (output is None or output.conversation_id != conversation_id

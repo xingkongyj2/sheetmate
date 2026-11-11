@@ -20,6 +20,8 @@ SUMMARY_TOKEN_BUDGET = 3_000
 # visible summary is short. Keep the persisted text budget separate from the
 # provider output headroom so a complete summary is not cut off mid-response.
 COMPACTION_MODEL_MAX_TOKENS = 6_000
+# A short title can still consume hidden reasoning tokens before visible text.
+TITLE_MODEL_MAX_TOKENS = 2_048
 RECENT_USER_ANCHORS = 2
 USER_ANCHOR_TOKEN_BUDGET = 600
 PRIMER_TOKEN_BUDGET = 600
@@ -113,7 +115,7 @@ async def make_title(llm: Any, message: str, answer: str) -> str:
     try:
         msg = await llm.chat([{"role": "user", "content": TITLE_PROMPT.format(
             message=redact_derived_text(message)[:500], answer=redact_derived_text(answer)[:300])}],
-                             max_tokens=60, _stage="title", _auxiliary=True)
+                             max_tokens=TITLE_MODEL_MAX_TOKENS, _stage="title", _auxiliary=True)
         title = re.sub(r"[\"'“”‘’《》。！!？?]", "", redact_derived_text(msg.content or "").strip()).strip()
         return title[:24] or fallback_title(message)
     except Exception:
@@ -301,7 +303,7 @@ async def customer_summary(llm: Any, customer: str, files: list[dict[str, Any]],
         memory="\n".join(f"- {line}" for line in _business_memory_lines(memory_text)) or "（无）",
         previous_summary=previous_summary[:3000] or "（无）",
     )
-    msg = await llm.chat([{"role": "user", "content": redact_derived_text(prompt)}], max_tokens=2400,
+    msg = await llm.chat([{"role": "user", "content": redact_derived_text(prompt)}], max_tokens=4096,
                          _stage="customer_summary", _auxiliary=True)
     return redact_derived_text(msg.content or "").strip()
 

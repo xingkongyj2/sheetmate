@@ -8,7 +8,8 @@ from typing import Any
 from sheetmate.agent.llm import LLMError, test_connection
 from sheetmate.core.config.settings import (
     DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MODELS, DEEPSEEK_THINKING_MODELS,
-    QWEN_BASE_URL, QWEN_MODELS, LLMSettings, get_all_llm_settings,
+    DEEPSEEK_THINKING_ALIASES,
+    QWEN_BASE_URL, QWEN_MODELS, QWEN_THINKING_MODELS, LLMSettings, get_all_llm_settings,
     get_llm_provider_settings, save_llm_settings, select_llm_settings,
 )
 from sheetmate.core.config.model_policy import LLMCapabilities, LLMRuntimePolicy
@@ -33,9 +34,10 @@ class ModelSettingsUpdate:
 PROVIDERS = [
     {"id": "deepseek", "name": "DeepSeek", "base_url": DEEPSEEK_BASE_URL,
      "models": list(DEEPSEEK_MODELS), "thinking_models": list(DEEPSEEK_THINKING_MODELS),
+     "thinking_model_aliases": list(DEEPSEEK_THINKING_ALIASES),
      "description": "使用 DeepSeek 官方接口，自动填写接口地址和支持的模型。"},
     {"id": "qwen", "name": "千问", "base_url": QWEN_BASE_URL,
-     "models": list(QWEN_MODELS),
+     "models": list(QWEN_MODELS), "thinking_models": list(QWEN_THINKING_MODELS),
      "description": "使用阿里云百炼的 OpenAI 兼容接口，并提供常用模型作为输入建议。"},
     {"id": "custom", "name": "自定义兼容服务", "base_url": "", "models": [],
      "description": "用于代理、私有部署或其他兼容 OpenAI Chat Completions 的服务，需要手动填写接口地址和模型。"},
@@ -58,7 +60,7 @@ def _provider_view(provider: dict[str, Any], cfg: LLMSettings) -> dict[str, Any]
         "base_url": cfg.base_url,
         "model": cfg.model,
         "thinking_supported": cfg.thinking_supported,
-        "thinking_enabled": cfg.thinking_enabled and cfg.thinking_supported,
+        "thinking_enabled": cfg.thinking_enabled,
     }
 
 
@@ -76,7 +78,7 @@ def _view() -> dict[str, Any]:
         "key_hint": active.key_hint(),
         "default_model": DEEPSEEK_DEFAULT_MODEL,
         "thinking_supported": active.thinking_supported,
-        "thinking_enabled": active.thinking_enabled and active.thinking_supported,
+        "thinking_enabled": active.thinking_enabled,
         **_policy_view(active),
         "providers": [_provider_view(provider, configs[provider["id"]]) for provider in PROVIDERS],
     }

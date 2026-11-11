@@ -163,7 +163,7 @@ async def select_delivery(llm: Any, *, request: str, answer: str, candidates: li
                "candidates": [_candidate_metadata(item) for item in unique], "actual_results": results}
     response = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=_SYSTEM,
                               schema=_SCHEMA, schema_name="final_delivery", timeout=DELIVERY_TIMEOUT,
-                              max_tokens=1200, label="最终交付核对")
+                              max_tokens=4096, label="最终交付核对")
     if not response.ok:
         return DeliverySelection(summary=f"正式交付范围尚未确认：{response.reason}")
     value = response.value

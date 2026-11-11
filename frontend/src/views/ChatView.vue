@@ -79,7 +79,10 @@ let handle: StreamHandle | null = null
 let pollTimer = 0
 let usageRefreshTimer = 0
 let usagePendingSince = 0
+let metadataRefreshVersion = 0
+let savingTitle = false
 let sideRefreshVersion = 0
+let sideRequestVersion = 0
 let steerRevision = 0
 let loadVersion = 0
 let disposed = false
@@ -165,12 +168,18 @@ function acknowledgeUploads(files: FileInfo[]) {
 async function load(silent = false) {
   const requestVersion = ++loadVersion
   const version = sideRefreshVersion
+  const metadataVersion = ++metadataRefreshVersion
   clearTimeout(pollTimer)
   if (!silent) loading.value = true
   try {
     const data = await conversationApi.get(props.id)
     if (disposed || requestVersion !== loadVersion) return
-    if (detail.value && version !== sideRefreshVersion) data.files = detail.value.files
+    if (detail.value && version !== sideRefreshVersion) {
+      data.files = detail.value.files
+    }
+    if (detail.value && (savingTitle || version !== sideRefreshVersion || metadataVersion !== metadataRefreshVersion)) {
+      data.title = detail.value.title
+    }
     detail.value = data
     acknowledgeUploads(data.files)
     if (!streaming.value) {
@@ -186,6 +195,7 @@ async function load(silent = false) {
         selectedKey.value = assistant.key
         void receiveStream(assistant, (onEvent) => conversationApi.events(props.id, job.id, onEvent), true)
       }
+      scheduleUsageRefresh()
     }
   } catch (err) {
     if (disposed || requestVersion !== loadVersion) return
@@ -207,7 +217,9 @@ function schedulePoll(delay = 1000) {
 }
 
 async function refreshSide() {
+  const requestVersion = ++sideRequestVersion
   const version = ++sideRefreshVersion
+  const metadataVersion = ++metadataRefreshVersion
   const queueRevision = steerRevision
   refreshingUsage.value = true
   try {
@@ -216,7 +228,10 @@ async function refreshSide() {
       detail.value.tables = data.tables
       detail.value.files = data.files
       detail.value.recipes = data.recipes
-      detail.value.title = data.title
+      if (!savingTitle && metadataVersion === metadataRefreshVersion) {
+        detail.value.title = data.title
+        store.patchConversation(props.id, { title: data.title })
+      }
       detail.value.customer = data.customer
       detail.value.messages = data.messages
       detail.value.execution = data.execution
@@ -233,7 +248,7 @@ async function refreshSide() {
   } catch {
     /* 忽略 */
   } finally {
-    if (!disposed && version === sideRefreshVersion) {
+    if (!disposed && requestVersion === sideRequestVersion) {
       refreshingUsage.value = false
       scheduleUsageRefresh()
     }
@@ -242,12 +257,30 @@ async function refreshSide() {
 
 function scheduleUsageRefresh() {
   clearTimeout(usageRefreshTimer)
-  if (disposed || !panelOpen.value || panelTab.value !== 'usage') return
+  if (disposed) return
   const pending = messages.value.some((message) => message.execution?.llm_usage_pending === true)
   if (!pending) usagePendingSince = 0
   else if (!usagePendingSince) usagePendingSince = Date.now()
-  if (streaming.value || pending && Date.now() - usagePendingSince < 60000) {
-    usageRefreshTimer = window.setTimeout(() => { void refreshSide() }, 2000)
+  if (streaming.value && panelOpen.value && panelTab.value === 'usage' || pending && Date.now() - usagePendingSince < 180000) {
+    usageRefreshTimer = window.setTimeout(() => { void refreshMetadata() }, 2000)
+  }
+}
+
+async function refreshMetadata() {
+  const requestVersion = ++metadataRefreshVersion
+  const version = sideRefreshVersion
+  try {
+    const data = await conversationApi.get(props.id)
+    if (disposed || !detail.value || version !== sideRefreshVersion || requestVersion !== metadataRefreshVersion) return
+    if (!savingTitle) {
+      detail.value.title = data.title
+      store.patchConversation(props.id, { title: data.title })
+    }
+    syncMessageUsage(messages.value, data.messages)
+  } catch {
+    /* 临时断网时继续有界轮询，已有正文保持可读。 */
+  } finally {
+    if (!disposed && requestVersion === metadataRefreshVersion) scheduleUsageRefresh()
   }
 }
 
@@ -255,6 +288,7 @@ watch([panelOpen, panelTab], ([open, tab]) => {
   clearTimeout(usageRefreshTimer)
   usagePendingSince = 0
   if (open && tab === 'usage') void refreshSide()
+  else scheduleUsageRefresh()
 })
 
 let resizeObserver: ResizeObserver | null = null
@@ -380,6 +414,7 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
       if (item.type === 'delivery_manifest') applyDeliveryManifest(messages.value, item)
     }
     if (title && detail.value) {
+      metadataRefreshVersion++
       detail.value.title = title.title
       store.patchConversation(props.id, { title: title.title })
     }
@@ -524,10 +559,28 @@ function startEditTitle() {
 async function saveTitle() {
   editingTitle.value = false
   const title = titleDraft.value.trim()
-  if (!title || !detail.value || title === detail.value.title) return
+  if (!title || !detail.value || title === detail.value.title || savingTitle) return
+  savingTitle = true
+  const previous = detail.value.title
+  sideRefreshVersion++
+  metadataRefreshVersion++
   detail.value.title = title
-  await conversationApi.update(props.id, { title }).catch(() => undefined)
   store.patchConversation(props.id, { title })
+  try {
+    await conversationApi.update(props.id, { title })
+  } catch (err) {
+    if (!disposed && detail.value) {
+      detail.value.title = previous
+      store.patchConversation(props.id, { title: previous })
+      toast.error(errorText(err))
+    }
+  } finally {
+    // Discard GETs issued during the PATCH, which may have read the old title.
+    sideRefreshVersion++
+    metadataRefreshVersion++
+    savingTitle = false
+    scheduleUsageRefresh()
+  }
 }
 
 async function onSaved() {

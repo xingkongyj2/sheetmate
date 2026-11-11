@@ -12,6 +12,7 @@ class LLMCapabilities(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
     structured_output: Literal["auto", "json_schema", "json_object", "prompt"] = "auto"
+    thinking_protocol: Literal["auto", "deepseek", "qwen", "none"] = "auto"
 
 
 class LLMRuntimePolicy(BaseModel):

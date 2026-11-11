@@ -58,7 +58,7 @@ async def repair_unfinished_plan(llm: Any, requirement: str, plan: Plan, states:
     }
     outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=_SYSTEM,
                              schema=_SCHEMA, schema_name="plan_repair", timeout=REPAIR_TIMEOUT,
-                             max_tokens=2000, label="未完成计划修复")
+                             max_tokens=4096, label="未完成计划修复")
     if not outcome.ok or not isinstance(outcome.value, dict):
         return {}
     repairs = outcome.value.get("repairs")

@@ -19,6 +19,13 @@ _COMBINED_INTENT_POLICY = """
   历史仅帮助解析用户指代；上一项任务的保存授权不延续到新任务。
 - task_relation=new 表示独立的新任务、不同月份或批次；continue 表示补充、修正、回答澄清或继续当前目标。
   有旧文件不等于继续旧任务；当前任务原始要求与补充要求由 task_state 提供，应一并理解。
+同时返回 tool_groups 和 memory_candidate，不为它们新增调用或向用户提问：
+- tool_groups 是本次目标明确需要的扩展能力，可为空：workbook=从零设计新工作簿；workflow=查看/执行/修订/保存/删除流程；
+  python=明确需要脚本或特殊原始工作簿处理；formulas=适用的内置表格变换。普通 SQL 统计与 Markdown 回答排版不需要 workbook。
+  按完整语义和当前目标判断，不根据单个词触发；能力不确定时不预加载，执行助手仍可按需加载。
+- memory_candidate=false 仅表示确信本轮没有用户新提供的长期信息，例如问候、致谢、只问一次性统计或只查看文件。
+  用户背景、稳定业务规则、长期偏好、对已有规则的修正或要求记住的信息为 true；不能确定返回 null。
+  一次性文件里的取值和助手推测不是长期记忆，普通聊天也可能包含有价值的背景。
 无需为这些内部判断额外提问。"""
 
 
@@ -37,6 +44,8 @@ class RequestIntent:
     replace_file_ids: tuple[str, ...] = ()
     save_recipe: bool | None = None  # None retains compatibility with legacy endpoints.
     task_relation: str = "continue"
+    tool_groups: tuple[str, ...] = ()
+    memory_candidate: bool | None = None
 
 
 def _file_selection(value: Any) -> FileSelection:
@@ -75,17 +84,19 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
     try:
         result = await complete_structured(llm, json.dumps(context, ensure_ascii=False),
                                            system=INTENT_PROMPT + _COMBINED_INTENT_POLICY,
-                                           schema=INTENT_SCHEMA, schema_name="request_intent", max_tokens=900, **image_kwargs)
+                                           schema=INTENT_SCHEMA, schema_name="request_intent", max_tokens=4096, **image_kwargs)
     except (LLMError, StructuredOutputError) as exc:
         raise LLMError(f"暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。（{exc}）") from exc
     mode = result.get("mode") if isinstance(result, dict) else None
     if not isinstance(mode, str) or mode not in {"analyze", "modify", "create"}:
         raise LLMError("暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。")
     action = result.get("action", "process")
+    hints = {"tool_groups": tuple(result.get("tool_groups", [])),
+             "memory_candidate": result.get("memory_candidate")}
     if action == "chat":
-        return RequestIntent("analyze", action="chat")
+        return RequestIntent("analyze", action="chat", **hints)
     if action == "show_files":
-        return RequestIntent("analyze", _file_selection(result.get("files")), action="show_files")
+        return RequestIntent("analyze", _file_selection(result.get("files")), action="show_files", **hints)
     if action != "process":
         raise LLMError("暂时无法确定这次需求的处理方式，本次尚未处理文件，请重试。")
     replacements = result.get("replace_file_ids", [])
@@ -97,7 +108,7 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
             for file_id in replacements)):
         raise LLMError("无法确认要更新的已有结果，本次尚未处理文件。只能更新当前可访问的已交付结果，上传原件保持不变。")
     return RequestIntent(mode, replace_file_ids=tuple(dict.fromkeys(replacements)),
-                         save_recipe=result.get("save_recipe"), task_relation=result.get("task_relation", "continue"))
+                         save_recipe=result.get("save_recipe"), task_relation=result.get("task_relation", "continue"), **hints)
 
 
 async def infer_mode(llm: Any, ctx: AgentContext, message: str, history: list[dict[str, Any]],

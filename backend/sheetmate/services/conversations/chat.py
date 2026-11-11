@@ -100,6 +100,7 @@ from sheetmate.services.execution.control import (
 
 _registry = ToolRegistry()
 _background: set[asyncio.Task] = set()  # 持有后台任务的引用，防止被垃圾回收
+_titles_inflight: set[str] = set()
 _MAX_MESSAGE_IMAGES = 10
 _MAX_HISTORY_IMAGES = 8
 _MAX_IMAGE_REQUEST_BYTES = 20 * 1024 * 1024
@@ -326,6 +327,8 @@ def resume_chat(user: User, conversation_id: str) -> Job:
 
 async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
                     message_id: int, thinking: bool = False, *, resumed: bool = False) -> None:
+    started_at = time.monotonic()
+    first_reply_at: float | None = None
     control = ExecutionControl(job, user_id) if job.execution_id else None
     saved = (control.checkpoint.get("ui") or {}) if control else {}
     recorder = WorkflowRecorder(message)
@@ -445,7 +448,11 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         await job.emit(event)
 
     async def emit(event: dict[str, Any]) -> None:
-        nonlocal final_text
+        nonlocal final_text, first_reply_at
+        if event.get("type") == "text_chunk" and event.get("content") and first_reply_at is None:
+            first_reply_at = time.monotonic()
+            record_event("chat.first_reply", "sheetmate.services.conversations.chat._run_chat",
+                         {"elapsed_seconds": round(first_reply_at - started_at, 3), "job_id": job.id})
         if event.get("type") in {"model_call_done", "completion_check"}:
             snapshot = getattr(llm, "usage_snapshot", None)
             if callable(snapshot):
@@ -716,6 +723,7 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             break
         record_event("chat.intent.result", "sheetmate.agent.framework.shared.intent.infer_request", intent)
         ctx.mode = intent.mode
+        ctx.requested_tool_groups = tuple(intent.tool_groups)
         ctx.execution_action = intent.action
         host.defer_delivery = intent.action == "process"
         replace_file_ids = list(intent.replace_file_ids)
@@ -953,33 +961,29 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
     recorder.llm_usage_pending = True
     await finish_execution(answer)
     _save_assistant(conversation_id, answer, stored, recorder, run_id)
-    try:
-        title = await _maybe_title(conversation_id, llm, message, answer)
-    except BaseException:
-        _persist_llm_usage(conversation_id, recorder.message_id, llm, pending=False)
-        raise
     execution = _persist_llm_usage(conversation_id, recorder.message_id, llm)
     if execution is not None:
         await job.emit({"type": "execution_status", **execution,
                         "request_message_id": recorder.request_message_id, "job_id": recorder.job_id})
-    if title:
-        await job.emit({"type": "title", "title": title})
     if host.saved_recipes or host.deleted_recipes:
         await job.emit({"type": "recipes_changed", "recipes": host.saved_recipes,
                         "deleted_recipe_ids": [item["recipe_id"] for item in host.deleted_recipes]})
         customer_service.schedule_summary_refresh(ctx.host.customer_id)  # 流程变了：后台更新客户的整体处理逻辑
-    await job.emit({"type": "done"})
-    # 普通聊天也可能提供客户背景；与处理任务一样提取用户明确提供的长期信息。
-    # 抽取放到独立的后台任务里，不占用这次请求的连接。
+    record_event("chat.answer_ready", "sheetmate.services.conversations.chat._run_chat",
+                 {"elapsed_seconds": round(time.monotonic() - started_at, 3), "job_id": job.id,
+                  "memory_candidate": intent.memory_candidate})
+    # 标题和记忆共享一个后台生命周期，只有两者都结束才结清本轮用量。
     trace = current_trace()
-    task = asyncio.create_task(_learn_memories(
+    task = asyncio.create_task(_finish_background(
         llm, user_id, conversation_id, ctx.host.customer_id, message, answer,
         recipe_id=ctx.host.recipe_id, source_message_id=message_id,
         source_turn_id=trace.turn_id if trace is not None else None,
-        assistant_message_id=recorder.message_id,
+        assistant_message_id=recorder.message_id, memory_candidate=intent.memory_candidate,
+        additional_memory_sources=deepcopy(control.runtime.state.get("steers", [])) if control and control.runtime else None,
     ))
     _background.add(task)
     task.add_done_callback(_background.discard)
+    await job.emit({"type": "done"})
 
 
 def _script_fallback(events: list[dict[str, Any]], *, mode: str, interrupted: bool = False) -> str:
@@ -1628,25 +1632,84 @@ def _history_content(message: Message) -> str:
     return content
 
 
+async def shutdown_background() -> None:
+    """Let quick metadata work settle; cancellation still finalizes its usage."""
+    tasks = list(_background)
+    if not tasks:
+        return
+    _, pending = await asyncio.wait(tasks, timeout=5)
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def _finish_background(llm: Any, user_id: int, conversation_id: str, customer_id: str | None,
+                             message: str, answer: str, *, recipe_id: str | None = None,
+                             source_message_id: int | None = None, source_turn_id: str | None = None,
+                             assistant_message_id: int | None = None,
+                             memory_candidate: bool | None = None,
+                             additional_memory_sources: list[dict[str, Any]] | None = None) -> None:
+    started_at = time.monotonic()
+    work = [_maybe_title(conversation_id, llm, message, answer)]
+    memory_sources = []
+    if memory_candidate is not False:
+        memory_sources.append((source_message_id, message))
+    else:
+        record_event("memory.skipped", "sheetmate.services.conversations.chat._finish_background",
+                     {"reason": "intent_has_no_lasting_information", "source_message_id": source_message_id})
+    # A steering message may add lasting rules after the initial intent call.
+    # Keep its own provenance; that earlier false hint cannot suppress it.
+    seen = {source_message_id}
+    for source in additional_memory_sources or []:
+        identifier, content = source.get("message_id"), source.get("content")
+        if isinstance(identifier, int) and identifier not in seen and isinstance(content, str) and content.strip():
+            memory_sources.append((identifier, content))
+            seen.add(identifier)
+    for identifier, content in memory_sources:
+        work.append(_learn_memories(llm, user_id, conversation_id, customer_id, content, answer,
+                    recipe_id=recipe_id, source_message_id=identifier, source_turn_id=source_turn_id,
+                    assistant_message_id=assistant_message_id, persist_usage=False))
+    try:
+        results = await asyncio.gather(*work, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                record_event("chat.background.error", "sheetmate.services.conversations.chat._finish_background", error_data(result))
+    finally:
+        _persist_llm_usage(conversation_id, assistant_message_id, llm, pending=False)
+        record_event("chat.background.done", "sheetmate.services.conversations.chat._finish_background",
+                     {"elapsed_seconds": round(time.monotonic() - started_at, 3), "source_message_id": source_message_id})
+
+
 async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str) -> str | None:
+    if conversation_id in _titles_inflight:
+        return None
     with session_scope() as db:
         conv = db.get(Conversation, conversation_id)
         if conv is None or conv.title not in {"新对话", ""}:
             return None
+    _titles_inflight.add(conversation_id)
+    started_at = time.monotonic()
     try:
-        title = await asyncio.wait_for(make_title(llm, message, answer), timeout=15)
-    except (asyncio.TimeoutError, Exception):
-        title = fallback_title(message)
-    with session_scope() as db:
-        result = db.execute(update(Conversation).where(
-            Conversation.id == conversation_id, Conversation.title.in_(["新对话", ""]),
-        ).values(title=title))
-        return title if result.rowcount == 1 else None
+        with trace_phase("background_title"):
+            try:
+                title = await asyncio.wait_for(make_title(llm, message, answer), timeout=60)
+            except Exception:
+                title = fallback_title(message)
+            with session_scope() as db:
+                result = db.execute(update(Conversation).where(
+                    Conversation.id == conversation_id, Conversation.title.in_(["新对话", ""]),
+                ).values(title=title))
+                return title if result.rowcount == 1 else None
+    finally:
+        _titles_inflight.discard(conversation_id)
+        record_event("chat.title.done", "sheetmate.services.conversations.chat._maybe_title",
+                     {"elapsed_seconds": round(time.monotonic() - started_at, 3)})
 
 
 async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer_id: str | None, message: str, answer: str,
                           *, recipe_id: str | None = None, source_message_id: int | None = None,
-                          source_turn_id: str | None = None, assistant_message_id: int | None = None) -> None:
+                          source_turn_id: str | None = None, assistant_message_id: int | None = None,
+                          persist_usage: bool = True) -> None:
     with trace_phase("background_memory"):
         try:
             with session_scope() as db:
@@ -1677,12 +1740,13 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
             }
             items = await asyncio.wait_for(extract_memories(
                 llm, message, answer, existing=existing[:12], target_scope=target_scope,
-            ), timeout=30)
+            ), timeout=120)
         except Exception as exc:
             record_event("memory.error", "sheetmate.services.conversations.chat._learn_memories", error_data(exc))
             return
         finally:
-            _persist_llm_usage(conversation_id, assistant_message_id, llm, pending=False)
+            if persist_usage:
+                _persist_llm_usage(conversation_id, assistant_message_id, llm, pending=False)
     if not items:
         return
     with session_scope() as db:

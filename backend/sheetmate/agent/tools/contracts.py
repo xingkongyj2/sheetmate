@@ -94,6 +94,7 @@ class AgentContext:
     task_state_block: str = ""  # 服务层生成的结构化当前任务状态摘要
     task_state: dict[str, Any] = field(default_factory=dict)
     enabled_tool_groups: set[str] = field(default_factory=set)
+    requested_tool_groups: tuple[str, ...] = ()  # 复用本轮意图判断的语义提示，运行时仍可按需加载。
     evidence_store: dict[str, dict[str, Any]] = field(default_factory=dict)
     parallel_read_only: bool = False  # Internal: publish only this read's target-table probe cache.
 

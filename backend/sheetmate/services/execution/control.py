@@ -206,6 +206,7 @@ class ExecutionControl:
             checkpoint["context"] = {
                 "mode": self.ctx.mode, "tool_group": self.ctx.tool_group,
                 "enabled_tool_groups": sorted(self.ctx.enabled_tool_groups),
+                "requested_tool_groups": list(self.ctx.requested_tool_groups),
                 "save_recipe_requested": self.ctx.save_recipe_requested,
                 "replace_file_ids": list(self.ctx.replace_file_ids),
                 "evidence_store": self.ctx.evidence_store,
@@ -334,6 +335,7 @@ class ExecutionControl:
             if name in data:
                 setattr(ctx, name, data[name])
         ctx.enabled_tool_groups = set(data.get("enabled_tool_groups", []))
+        ctx.requested_tool_groups = tuple(data.get("requested_tool_groups", []))
         ctx.replace_file_ids = tuple(data.get("replace_file_ids", []))
         ctx.evidence_store.update(data.get("evidence_store", {}))
         ctx.host.save_recipe_requested = ctx.save_recipe_requested

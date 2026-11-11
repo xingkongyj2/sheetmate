@@ -47,8 +47,10 @@ async def lifespan(_: FastAPI):
     from sheetmate.services.conversations.service import conversation_workspaces
     from sheetmate.services.workflows.runs import run_workspaces
     from sheetmate.services.execution.jobs import jobs
+    from sheetmate.services.conversations.chat import shutdown_background
 
     await jobs.shutdown()
+    await shutdown_background()
     conversation_workspaces.close_all()
     run_workspaces.close_all()
 

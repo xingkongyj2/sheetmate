@@ -306,14 +306,11 @@ class AgentExecutor:
         if ctx.table_filter is not None or ctx.tool_group not in {None, "core"}:
             return
         ctx.tool_group = "core"
-        if ctx.mode == "create" or re.search(r"新建|创建|排版|格式|建表", message):
+        ctx.enabled_tool_groups.update(ctx.requested_tool_groups)
+        if ctx.mode == "create":
             ctx.enabled_tool_groups.add("workbook")
-        if ctx.mode == "modify" or ctx.save_recipe_requested or re.search(r"流程|配方|recipe", message, re.I):
+        if ctx.mode == "modify" or ctx.save_recipe_requested:
             ctx.enabled_tool_groups.add("workflow")
-        if re.search(r"脚本|python|pandas", message, re.I):
-            ctx.enabled_tool_groups.add("python")
-        if re.search(r"匹配|关联|合并|拼接|去重|清洗|透视|分组|汇总|lookup|join|pivot", message, re.I):
-            ctx.enabled_tool_groups.add("formulas")
 
     # ------------------------------------------------------------------
     # 入口
@@ -671,8 +668,7 @@ class AgentExecutor:
                 return
             budget_exhausted = recovery.exhausted or budget.exhausted(self.max_tool_calls, ctx.branch_id)
             available = [tool for name, tool in tool_map.items()
-                         if (name != RECONSIDER_TOOL or recovery.pending or recovery.results)
-                         and (not recovery.must_switch or name == RECONSIDER_TOOL or name in _DIAGNOSTIC_TOOLS)]
+                         if not recovery.must_switch or name == RECONSIDER_TOOL or name in _DIAGNOSTIC_TOOLS]
             try:
                 definitions = [tool.definition() for tool in available] or None
             except ToolSchemaError as exc:

@@ -540,6 +540,7 @@ export type LLMProviderId = 'deepseek' | 'qwen' | 'custom'
 
 export interface LLMCapabilities {
   structured_output: 'auto' | 'json_schema' | 'json_object' | 'prompt'
+  thinking_protocol: 'auto' | 'deepseek' | 'qwen' | 'none'
 }
 
 export interface LLMRuntimePolicy {
@@ -593,6 +594,7 @@ export interface LLMProviderConfig extends LLMAdvancedConfig {
   base_url: string
   models: string[]
   thinking_models?: string[]
+  thinking_model_aliases?: string[]
   configured: boolean
   api_key: string
   model: string

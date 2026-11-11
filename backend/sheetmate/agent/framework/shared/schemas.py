@@ -27,6 +27,9 @@ INTENT_SCHEMA = {
         "replace_file_ids": {"type": "array", "items": _NONEMPTY_TEXT, "uniqueItems": True, "maxItems": 20},
         "save_recipe": {"type": "boolean"},
         "task_relation": {"type": "string", "enum": ["new", "continue"]},
+        "tool_groups": {"type": "array", "items": {"type": "string", "enum": ["workbook", "workflow", "python", "formulas"]},
+                        "uniqueItems": True, "maxItems": 4},
+        "memory_candidate": {"type": ["boolean", "null"]},
     },
     "required": ["mode"],
     "allOf": [{

@@ -92,7 +92,20 @@ onMounted(loadConfig)
 
 function isThinkingSupported(provider: LLMProviderConfig) {
   const draft = drafts[provider.id]
-  return !!draft && (provider.id === 'qwen' || !!provider.thinking_models?.includes(draft.model))
+  if (!draft || draft.capabilities.thinking_protocol === 'none') return false
+  if (draft.capabilities.thinking_protocol !== 'auto') return true
+  const url = draft.base_url.trim().replace(/\/+$/, '')
+  if (draft.model === provider.model && url === provider.base_url.replace(/\/+$/, '') &&
+    provider.capabilities.thinking_protocol === 'auto') return provider.thinking_supported
+  if (['https://api.deepseek.com', 'https://api.deepseek.com/v1'].includes(url)) {
+    const known = config.value?.providers.find((item) => item.id === 'deepseek')
+    return [...(known?.thinking_models ?? []), ...(known?.thinking_model_aliases ?? [])].includes(draft.model)
+  }
+  const knownQwen = config.value?.providers.find((item) => item.id === 'qwen')
+  return ['https://dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+    'https://dashscope-us.aliyuncs.com/compatible-mode/v1'].includes(url) &&
+    (!!knownQwen?.thinking_models?.includes(draft.model) || /^(qwen-plus|qwen-flash)(-|$)/.test(draft.model))
 }
 
 function isComplete(provider: LLMProviderConfig) {
@@ -147,8 +160,6 @@ function resetWaitingAndRetries(id: LLMProviderId) {
 }
 
 function onModelChanged(provider: LLMProviderConfig) {
-  const draft = drafts[provider.id]
-  if (draft && !isThinkingSupported(provider)) draft.thinking_enabled = false
   resetTestResult(provider.id)
 }
 
@@ -164,7 +175,7 @@ async function save(provider: LLMProviderConfig) {
       api_key: draft.api_key,
       base_url: draft.base_url,
       model: draft.model,
-      thinking_enabled: isThinkingSupported(provider) && draft.thinking_enabled,
+      thinking_enabled: draft.thinking_enabled,
       timeout: draft.timeout,
       max_tokens: draft.max_tokens,
       capabilities: { ...draft.capabilities },
@@ -193,7 +204,7 @@ async function test(provider: LLMProviderConfig) {
       api_key: draft.api_key,
       base_url: draft.base_url,
       model: draft.model,
-      thinking_enabled: isThinkingSupported(provider) && draft.thinking_enabled,
+      thinking_enabled: draft.thinking_enabled,
       timeout: draft.timeout,
       max_tokens: draft.max_tokens,
       capabilities: { ...draft.capabilities },
@@ -371,6 +382,17 @@ async function test(provider: LLMProviderConfig) {
                     <option value="json_object">优先 JSON 模式</option>
                     <option value="prompt">仅提示词</option>
                   </select>
+                </label>
+                <label class="block">
+                  <span class="mb-1.5 block text-xs font-medium text-mute">思考参数协议</span>
+                  <select v-model="drafts[provider.id]!.capabilities.thinking_protocol" class="field"
+                    :disabled="anyBusy" @change="resetTestResult(provider.id)">
+                    <option value="auto">自动识别</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="qwen">千问</option>
+                    <option value="none">不自动发送思考参数</option>
+                  </select>
+                  <span class="mt-1.5 block text-xs leading-relaxed text-mute">自动识别仅适用于已知官方模型或已有手工参数；中转服务和模型别名可按服务文档指定协议。辅助判断默认关闭思考。</span>
                 </label>
                 <div class="grid gap-4 sm:grid-cols-2">
                   <label class="block">

@@ -73,8 +73,8 @@ from sheetmate.agent.tools.contracts import AgentContext
 log = logging.getLogger(__name__)
 
 MAX_STEP_FIXES = 3  # 每一步核对不通过时最多补做的次数
-CHECK_TIMEOUT = 60.0  # 步骤核对、回答核对各自最多等多久；超时就放弃这次核对，不能拖住整个回答
-CHECK_MAX_TOKENS = 2000  # 核对的输出很小，给个小上限，免得模型空转到默认的 8192 才停
+CHECK_TIMEOUT = 60.0  # 核对的最低等待窗口；实际等待由 aux_json 结合全局模型超时确定
+CHECK_MAX_TOKENS = 4096  # 为核对时的推理和完整结构化结果预留余量
 THINKING_TOOL_BUDGET = 1000  # 计划各步、补做和自检共用（普通模式是 800）
 _DIGEST_RESULT = 700  # 送去核对的单个工具结果长度上限
 _AUDIT_RESULTS = 20  # 回答核对最多参考最近多少个工具结果

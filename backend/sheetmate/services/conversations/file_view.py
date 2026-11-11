@@ -79,7 +79,7 @@ async def file_view_answer(llm: Any, message: str, selection: FileSelection, fil
     }
     try:
         reply = await llm.chat([{"role": "system", "content": FILE_VIEW_REPLY_PROMPT},
-                               {"role": "user", "content": json.dumps(context, ensure_ascii=False)}], max_tokens=300)
+                               {"role": "user", "content": json.dumps(context, ensure_ascii=False)}], max_tokens=2048)
         answer = (reply.content or "").strip()
     except LLMError:
         if not files:

@@ -15,6 +15,73 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
 
+def synthetic_verified_repair() -> dict:
+    """Explicit synthetic evidence; never represent an unverified insight as useful recall."""
+    return {"kind": "verified_repair", "verified": True, "failure_kind": "type_mismatch",
+            "execution_id": "synthetic_execution", "failed_evidence_id": "ev_synthetic_failed",
+            "repaired_evidence_id": "ev_synthetic_repaired", "verification": "completion_check"}
+
+
+def table_observation_eval(ctx) -> tuple[dict[str, bool], dict]:
+    """Exercise complete small results and stable continuations without a model."""
+    import pandas as pd
+
+    from sheetmate.agent.tools.analysis.builtin import _tool_preview, _tool_run_sql
+    from sheetmate.agent.tools.presentation import OBSERVATION_MAX_CHARS
+
+    checks: dict[str, bool] = {}
+    measurements: dict = {"max_chars": OBSERVATION_MAX_CHARS, "small_results": {}}
+    sizes = []
+    for count in (21, 25):
+        source = f"observation_source_{count}"
+        result_name = f"observation_result_{count}"
+        values = [[index, f"第{index}条原文：" + "保留完整单元格" * 10] for index in range(count)]
+        ctx.ws.put_dataframe(source, pd.DataFrame(values, columns=["编号", "说明"]))
+        output = _tool_run_sql({"sql": f'SELECT * FROM "{source}"', "result_name": result_name}, ctx)
+        observation = json.loads(output.text)
+        sizes.append(len(output.text))
+        checks[f"tool_observation_{count}_rows_complete"] = (
+            observation["complete"] is True
+            and observation["returned_rows"] == observation["total_rows"] == count
+            and observation["rows"] == values
+            and observation["next_call"] is None)
+        measurements["small_results"][str(count)] = {
+            "returned_rows": observation["returned_rows"], "characters": len(output.text),
+            "complete": observation["complete"]}
+
+    values = [[index, f"条目{index}"] for index in range(237)]
+    table = "observation_paged"
+    ctx.ws.put_dataframe(table, pd.DataFrame(values, columns=["编号", "说明"]))
+    args = {"table": table, "offset": 0, "limit": 17}
+    revision = ctx.ws.require(table).revision
+    collected, pages, pinned = [], 0, True
+    first_continuation = None
+    while args and pages < 32:
+        output = _tool_preview(args, ctx)
+        observation = json.loads(output.text)
+        sizes.append(len(output.text))
+        pages += 1
+        collected.extend(observation["rows"])
+        next_call = observation["next_call"]
+        if next_call:
+            pinned = pinned and next_call["args"]["expected_revision"] == revision
+            first_continuation = first_continuation or next_call["args"]
+        args = next_call["args"] if next_call else None
+    checks["tool_observation_pagination_exact"] = args is None and collected == values
+    checks["tool_observation_pagination_revision_pinned"] = pinned and first_continuation is not None
+    checks["tool_observation_char_budget"] = all(size <= OBSERVATION_MAX_CHARS for size in sizes)
+    ctx.ws.put_dataframe(table, pd.DataFrame({"编号": ["replacement"]}))
+    try:
+        _tool_preview(first_continuation, ctx)
+        checks["tool_observation_revision_drift_rejected"] = False
+    except ValueError as error:
+        checks["tool_observation_revision_drift_rejected"] = (
+            "表版本已变化" in str(error) and '"offset":0' in str(error))
+    measurements["pagination"] = {"total_rows": len(values), "reconstructed_rows": len(collected),
+                                  "pages": pages, "page_limit": 17, "largest_observation_chars": max(sizes)}
+    return checks, measurements
+
+
 def context_memory_eval(ctx, registry) -> tuple[dict[str, bool], dict]:
     """Measure source-to-prompt projections without models or external I/O."""
     from copy import deepcopy
@@ -59,15 +126,19 @@ def context_memory_eval(ctx, registry) -> tuple[dict[str, bool], dict]:
     checks: dict[str, bool] = {}
     memories = [memory(i, f"回答使用中文，近期偏好编号{i}", key=f"偏好{i}", category="preferences")
                 for i in range(1, 21)]
-    relevant = memory(30, "运单号匹配前去掉两端空格", key="运单号", category="history_insights")
+    relevant = memory(30, "运单号匹配前去掉两端空格", key="运单号", category="history_insights",
+                      execution_evidence=synthetic_verified_repair())
+    unverified = memory(33, "运单号匹配前去掉两端空格，尚未核验", key="运单号", category="history_insights")
     required = memory(31, "金额不得四舍五入", source="human")
     unrelated = memory(32, "发票每月五号开具", key="开票")
-    memories.extend([unrelated, relevant, required])
+    memories.extend([unrelated, relevant, required, unverified])
     memory_source = deepcopy(memories)
     recall = retrieve_memories(memories, "核对运单号", limit=2, max_chars=1600)
     selected_ids = {item["id"] for item in recall["items"]}
     checks["context_memory_relevant_recall"] = 30 in selected_ids and 32 not in selected_ids
     checks["context_memory_human_rule_retained"] = 31 in selected_ids
+    unverified_recall = retrieve_memories([unverified], "核对运单号", limit=10)
+    checks["context_memory_unverified_insight_excluded"] = not unverified_recall["items"]
     checks["context_memory_sources_and_method_explicit"] = (
         "source_message_id=101" in format_memories(recall["items"])
         and recall["metadata"]["embedding"] is False
@@ -238,7 +309,8 @@ def main() -> int:
                                                                        params={"column": "金额"})])
         checks["zero_variance_outlier"] = validate_run(recipe, {}, {"结果": pd.DataFrame({"金额": [1000000]})},
                                                        [{"结果.金额.sum": 100}] * 3)["status"] == "fail"
-        insight = dict(category="history_insights", key="运单号", value="核对空格", source="ai")
+        insight = dict(category="history_insights", key="运单号", value="核对空格", source="ai",
+                       execution_evidence=synthetic_verified_repair())
         standing = [dict(category="domain_knowledge", key=f"规则{i}", value="一般背景", source="ai") for i in range(30)]
         checks["relevant_memory"] = insight in select_relevant([*standing, insight], "检查运单号")
         try:
@@ -268,6 +340,9 @@ def main() -> int:
             checks["bounded_fact_projection"] = len(memory) <= 8000 and measurements["stored_distribution_rows"] == 5000
             context_checks, projections = context_memory_eval(ctx, registry)
             checks.update(context_checks)
+            observation_checks, observation_measurements = table_observation_eval(ctx)
+            checks.update(observation_checks)
+            measurements["table_observations"] = observation_measurements
         finally:
             ws.close()
     result = {"kind": "synthetic_offline_acceptance", "api_calls": 0, "checks": checks,

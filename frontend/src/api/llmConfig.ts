@@ -29,15 +29,22 @@ function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
     throw new Error(VERSION_ERROR)
   }
   const protocol = capabilities.structured_output === undefined ? 'auto' : capabilities.structured_output
+  const thinkingProtocol = capabilities.thinking_protocol === undefined ? 'auto' : capabilities.thinking_protocol
   const compatibility = policy.compatibility_mode === undefined ? 'relaxed' : policy.compatibility_mode
   if (compatibility !== 'relaxed' && compatibility !== 'strict') throw new Error(VERSION_ERROR)
   if (typeof protocol !== 'string' || !['auto', 'json_schema', 'json_object', 'prompt'].includes(protocol)) {
     throw new Error(VERSION_ERROR)
   }
+  if (typeof thinkingProtocol !== 'string' || !['auto', 'deepseek', 'qwen', 'none'].includes(thinkingProtocol)) {
+    throw new Error(VERSION_ERROR)
+  }
   return {
     timeout: boundedNumber(value.timeout, 1800, 5, 3600),
     max_tokens: boundedNumber(value.max_tokens, 8192, 1, 131072, true),
-    capabilities: { structured_output: protocol as LLMCapabilities['structured_output'] },
+    capabilities: {
+      structured_output: protocol as LLMCapabilities['structured_output'],
+      thinking_protocol: thinkingProtocol as LLMCapabilities['thinking_protocol'],
+    },
     runtime_policy: {
       compatibility_mode: 'relaxed',
       stream_recovery_retries: boundedNumber(policy.stream_recovery_retries, 5, 0, 10, true),
@@ -82,7 +89,8 @@ export function parseLLMConfig(value: unknown): LLMConfig {
       (provider.enabled !== undefined && typeof provider.enabled !== 'boolean') ||
       typeof provider.thinking_supported !== 'boolean' || typeof provider.thinking_enabled !== 'boolean' ||
       !isStringArray(provider.models) ||
-      (provider.thinking_models !== undefined && !isStringArray(provider.thinking_models))) {
+      (provider.thinking_models !== undefined && !isStringArray(provider.thinking_models)) ||
+      (provider.thinking_model_aliases !== undefined && !isStringArray(provider.thinking_model_aliases))) {
       throw new Error(VERSION_ERROR)
     }
     ids.add(provider.id)

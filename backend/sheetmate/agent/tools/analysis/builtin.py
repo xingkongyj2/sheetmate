@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 import pandas as pd
 from sheetmate.agent.tools.sql_scope import checked_sql_tables
@@ -13,8 +14,11 @@ from sheetmate.agent.tools.presentation import (
     _clip,
     _result_name,
     _table_detail,
+    OBSERVATION_MAX_ROWS,
     ephemeral_payload,
     public_detail_section,
+    render_query_observation,
+    render_table_observation,
     table_payload,
 )
 
@@ -67,14 +71,17 @@ def _tool_column_stats(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
 def _tool_preview(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     table = str(args.get("table", ""))
     _assert_table_scope(ctx, [table])
-    offset, limit = int(args.get("offset") or 0), min(int(args.get("limit") or 20), 100)
-    page = ctx.ws.page(table, offset, limit)
-    df = pd.DataFrame(page["rows"], columns=[c["name"] for c in page["columns"]])
-    return ToolResult(_clip(f"「{table}」第 {offset + 1}~{offset + len(df)} 行（共 {page['total']} 行）：\n{frame_to_text(df, limit=limit)}"),
-                      summary=f"查看「{table}」{len(df)} 行",
+    offset, limit = args.get("offset", 0), args.get("limit", OBSERVATION_MAX_ROWS)
+    text = render_table_observation(ctx.ws, table, offset=offset, limit=limit,
+                                    expected_revision=args.get("expected_revision"), text_offset=args.get("text_offset", 0))
+    observation = json.loads(text)
+    count = observation["returned_rows"]
+    fragment = observation["encoding"] == "json_fragment"
+    return ToolResult(text, summary=f"查看「{table}」数据片段" if fragment else f"查看「{table}」{count} 行",
                       public_details=[public_detail_section("查看对象", [_table_detail(ctx.ws.require(table))]),
-                                      public_detail_section("读取范围", [f"第 {offset + 1}～{offset + len(df)} 行，共读取 {len(df)} 行。" if len(df) else f"从第 {offset + 1} 行开始读取，未读到记录。"]),
-                                      public_detail_section("读取字段", [column["name"] for column in page["columns"]])])
+                                      public_detail_section("读取范围", ["当前行过长，已按文本分页读取。" if fragment else
+                                          f"第 {offset + 1}～{offset + count} 行，共读取 {count} 行。" if count else
+                                          f"从第 {offset + 1} 行开始读取，未读到记录。"])])
 
 
 def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -92,23 +99,30 @@ def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         details.append(public_detail_section("执行内容", [args["description"]]))
     result_name = args.get("result_name")
     if result_name:
-        out = _result_name(ctx, result_name, "查询结果")
-        ctx.ws.create_table_as(
-            out, sql, label=str(result_name), source="computed", role="derived", created_by="run_sql",
-            description=str(args.get("description") or "SQL 查询结果"), step={"formula": "custom_sql", "params": {"sql": sql}},
-        )
-        if ctx.table_filter is not None:
-            ctx.table_filter.add(out)
-        df = ctx.ws.df(out, limit=10)
-        info = ctx.ws.require(out)
-        return ToolResult(_clip(f"已生成表「{out}」：{info.rows} 行 × {len(info.columns)} 列。前几行：\n{frame_to_text(df, limit=10)}"),
-                          summary=f"生成「{out}」{info.rows} 行", tables=[table_payload(ctx.ws, out)],
+        # Execute once, then use the stored row count and revision on all pages.
+        with ctx.ws.locked():
+            out = _result_name(ctx, result_name, "查询结果")
+            ctx.ws.create_table_as(
+                out, sql, label=str(result_name), source="computed", role="derived", created_by="run_sql",
+                description=str(args.get("description") or "SQL 查询结果"), step={"formula": "custom_sql", "params": {"sql": sql}},
+            )
+            if ctx.table_filter is not None:
+                ctx.table_filter.add(out)
+            info = ctx.ws.require(out)
+            text = render_table_observation(ctx.ws, out, expected_revision=info.revision)
+            payload = table_payload(ctx.ws, out)
+        return ToolResult(text, summary=f"生成「{out}」{info.rows} 行", tables=[payload],
                           public_details=[section for section in [*details,
                               public_detail_section("查询结果", [f"生成「{out}」：{info.rows} 行 × {len(info.columns)} 列。"]),
                               public_detail_section("结果字段", info.column_names)] if section["items"]])
-    df = ctx.ws.query(sql, limit=500)
-    return ToolResult(_clip(f"查询结果（{len(df)} 行{'，最多显示 500 行' if len(df) == 500 else ''}）：\n{frame_to_text(df, limit=40)}"),
-                      summary=f"查询返回 {len(df)} 行", tables=[ephemeral_payload("查询结果", df)],
+    # One lookahead row distinguishes a known total from a bounded query. Do
+    # not materialize unnamed reads or report the read cap as a true total.
+    limit = 500
+    df = ctx.ws.query(sql, limit=limit + 1)
+    text = render_query_observation(df, sql=sql, result_name=_result_name(ctx, None, "查询结果"), row_limit=limit)
+    count = str(len(df)) if len(df) <= limit else f"至少 {len(df)}"
+    return ToolResult(text, summary=f"查询返回 {count} 行",
+                      tables=[ephemeral_payload("查询结果", df)] if len(df) <= limit else [],
                       public_details=[section for section in [*details,
-                          public_detail_section("查询结果", [f"读取 {len(df)} 行结果" + ("（达到 500 行显示上限）。" if len(df) == 500 else "。")]),
+                          public_detail_section("查询结果", [f"查询得到 {count} 行；需要完整续读时提供结果名保存查询。"]),
                           public_detail_section("结果字段", [str(column) for column in df.columns])] if section["items"]])
