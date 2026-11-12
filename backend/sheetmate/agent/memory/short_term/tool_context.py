@@ -12,13 +12,17 @@ from dataclasses import dataclass
 from typing import Any
 
 from sheetmate.agent.llm.budget import request_size
-from sheetmate.agent.tools.results import result_reference
+from sheetmate.agent.tools.results import _preview_value, result_reference
 
 _EVIDENCE = re.compile(r"^\[evidence_id=(ev_[a-zA-Z0-9_]+)\]\n")
 _RECEIPT = re.compile(
     r"^\[execution_receipt status=(success|failed) executed=(true|false) reused=(true|false)\]\n"
 )
 _RECENT_TOOL_RESULTS = 4
+_PROGRESS_REQUEST_CHARS = 1200
+_PROGRESS_OBSERVATION_CHARS = 2000
+_PROGRESS_SAMPLE_ROWS = 4
+_PROGRESS_SAMPLE_COLUMNS = 8
 
 # This is a soft projection target, independent of hard request admission.
 DEFAULT_PROJECTION_CHARS = 80_000
@@ -132,6 +136,125 @@ def _execution_status(content: str) -> str:
     return "执行成功；任务验收另行核对" if status == "success" else "执行失败"
 
 
+def _encoded_chars(value: Any) -> int:
+    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+
+
+def _text_excerpt(text: str, *, budget: int) -> Any:
+    if _encoded_chars(text) <= budget:
+        return text
+    count = min(160, len(text) // 2)
+    while True:
+        value = {"head": text[:count], "tail": text[-count:] if count else "",
+                 "omitted_chars": len(text) - count * 2}
+        if _encoded_chars(value) <= budget or not count:
+            return value
+        count //= 2
+
+
+def _selected_fields(source: dict[str, Any], keys: tuple[str, ...], *, budget: int) -> dict[str, Any]:
+    """Keep bounded actual fields, marking omissions rather than guessing them."""
+    selected: dict[str, Any] = {}
+    for key in keys:
+        if key not in source:
+            continue
+        value = _preview_value(source[key], chars=160, items=8)
+        if _encoded_chars({**selected, key: value}) <= budget - 100:
+            selected[key] = value
+    omitted = len(source) - len(selected)
+    if omitted:
+        selected["omitted_fields"] = omitted
+    return selected
+
+
+def _request_progress(call: dict[str, Any]) -> dict[str, Any]:
+    raw = call["function"].get("arguments", "")
+    try:
+        args = json.loads(raw)
+    except (ValueError, TypeError, RecursionError):
+        args = None
+    if not isinstance(args, dict):
+        return {"status": "参数结构未知，完整参数须回查", "excerpt": _text_excerpt(str(raw), budget=400)}
+    result = _selected_fields(args, (
+        "result_name", "description", "table", "tables", "column", "columns", "input_tables",
+        "input_files", "source_table", "lookup_table", "left", "right", "group_by",
+        "expected_revision", "offset", "limit", "text_offset", "file_id", "filename",
+    ), budget=_PROGRESS_REQUEST_CHARS - 450)
+    sql = args.get("sql")
+    if isinstance(sql, str):
+        # Long CTEs put their actual filter near the end. Preserve both ends,
+        # without presenting a shortened statement as executable SQL. Named
+        # work already has a purpose; its short tail identifies the filter
+        # without retaining the same large CTE in every progress record.
+        if args.get("result_name") or args.get("description"):
+            result["sql_excerpt"] = (sql if len(sql) <= 120 else {
+                "tail": sql[-120:], "omitted_chars": len(sql) - 120,
+            })
+            if _encoded_chars(result) > _PROGRESS_REQUEST_CHARS:
+                result["sql_excerpt"] = _text_excerpt(sql, budget=_PROGRESS_REQUEST_CHARS - _encoded_chars(
+                    {key: value for key, value in result.items() if key != "sql_excerpt"}) - 40)
+        else:
+            result["sql_excerpt"] = _text_excerpt(sql, budget=_PROGRESS_REQUEST_CHARS - _encoded_chars(result) - 40)
+    return result
+
+
+def _observation_progress(content: str) -> dict[str, Any]:
+    reference = _EVIDENCE.match(content)
+    body = content[reference.end():] if reference else content
+    receipt = _RECEIPT.match(body)
+    if receipt:
+        body = body[receipt.end():]
+    try:
+        observed = json.loads(body)
+    except (ValueError, TypeError, RecursionError):
+        observed = None
+    if not isinstance(observed, dict):
+        return {"status": "结果结构未知，不能从片段推断行数或完成情况",
+                "excerpt": _text_excerpt(body, budget=500)}
+    result = _selected_fields(observed, (
+        "table", "revision", "total_rows", "total_rows_known", "complete", "completeness_scope",
+        "encoding", "offset", "returned_rows", "observed_rows", "page_complete", "full_data",
+        "read_quality", "sanitized_fields",
+    ), budget=800)
+    columns = observed.get("columns")
+    rows = observed.get("rows")
+    if not isinstance(columns, list) or not isinstance(rows, list):
+        result["status"] = "未提供完整行列观察，精确结构与结果须回查"
+        result["excerpt"] = _text_excerpt(body, budget=500)
+        return result
+    original_columns = columns[:_PROGRESS_SAMPLE_COLUMNS]
+    shown_columns = []
+    for column in original_columns:
+        candidate = [*shown_columns, _preview_value(column, chars=80, items=2)]
+        if _encoded_chars({**result, "columns": candidate}) > _PROGRESS_OBSERVATION_CHARS - 300:
+            break
+        shown_columns = candidate
+    original_columns = columns[:len(shown_columns)]
+    result.update(columns=shown_columns, omitted_columns=max(0, len(columns) - len(shown_columns)))
+    projected_cells = shown_columns != original_columns
+    samples = []
+    for row in rows[:_PROGRESS_SAMPLE_ROWS]:
+        if isinstance(row, list):
+            cells = row[:len(original_columns)]
+        elif isinstance(row, dict) and all(isinstance(column, str) for column in original_columns):
+            cells = [row.get(column) for column in original_columns]
+        else:
+            break
+        shown = [_preview_value(cell, chars=100, items=2) for cell in cells]
+        candidate = {**result, "rows_sample": [*samples, shown]}
+        if _encoded_chars(candidate) > _PROGRESS_OBSERVATION_CHARS - 180:
+            break
+        projected_cells = projected_cells or shown != cells
+        samples.append(shown)
+    result.update(rows_sample=samples, omitted_observed_rows=max(0, len(rows) - len(samples)),
+                  projected_cells=projected_cells)
+    result["sample_only"] = (observed.get("complete") is not True or projected_cells
+                             or len(samples) != len(rows) or bool(result["omitted_columns"]))
+    # `complete` belongs to the source observation; a bounded sample must not
+    # silently turn that flag into a claim that all rows are present here.
+    return result
+
+
 def _progress_message(assistant: dict[str, Any], exchange: _Exchange) -> dict[str, Any]:
     replies = {item["tool_call_id"]: item for item in exchange.replies}
     lines = ["【旧工具交互进度：完整参数及结果已留存】"]
@@ -141,18 +264,19 @@ def _progress_message(assistant: dict[str, Any], exchange: _Exchange) -> dict[st
         content = replies[call["id"]]["content"]
         reference = _EVIDENCE.match(content)
         record = {"tool": call["function"]["name"], "call_id": call["id"],
-                  "evidence_id": reference.group(1), "state": _execution_status(content)}
+                  "evidence_id": reference.group(1), "state": _execution_status(content),
+                  "request": _request_progress(call), "observation": _observation_progress(content)}
         output_id = result_reference(content)
         if output_id:
             record["tool_result_id"] = output_id
         lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
     lines.append(
-        "需要旧 SQL、脚本参数或精确结果时，按 evidence_id 调用 inspect_execution_evidence："
-        "section='args' 回查参数，section='text' 回查结果，section='facts' 回查状态与源表版本；"
-        "按 offset/limit 分页。参数若以 script_id 引用代码，先从结果取得 run_id，"
-        "再调用 inspect_python_script(run_id) 查看原代码。"
-        "不能从省略内容推断数值、业务规则或任务已完成。"
+        "以上为实际参数与结果的有界索引。complete 描述原观察；sample_only=true 的 rows_sample 仅是样本。"
+        "完整参数/结果/源版本与读取质量按 evidence_id 调用 inspect_execution_evidence，"
+        "分别用 section='args'、section='text'、section='facts'，按 offset/limit 分页；不能从省略内容推断任务完成。"
     )
+    if any(call["function"]["name"] in {"run_python_script", "inspect_python_script"} for call in exchange.calls):
+        lines.append("参数若引用 script_id，先查结果取得 run_id，再用 inspect_python_script(run_id) 回查代码。")
     message = {"role": "assistant", "content": "\n".join(lines)}
     if "reasoning_content" in assistant:
         message["reasoning_content"] = ""

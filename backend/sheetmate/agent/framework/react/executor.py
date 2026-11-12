@@ -30,6 +30,8 @@ from sheetmate.agent.framework.react.completion import (
     text_content,
 )
 from sheetmate.agent.llm.content import model_history, user_content
+from sheetmate.agent.framework.react.progress import ProgressReview, review_progress
+from sheetmate.agent.framework.react.read_reuse import read_key, reusable_read
 from sheetmate.agent.memory.short_term.context import ContextBlock, assemble_context, stage_history
 from sheetmate.agent.framework.shared.evidence import snapshot_inputs, tool_evidence
 from sheetmate.agent.llm.client import LLMError, parse_json, translate_error
@@ -546,6 +548,9 @@ class AgentExecutor:
         finish_reason: str | None = None
         stream_id = uuid4().hex
         no_progress = False
+        progress_pending = False
+        compose_only = False
+        progress_review: dict[str, Any] = {}
         pending_response: dict[str, Any] | None = None
         saved = runtime.state.get("loop", {}) if runtime else {}
         restored = saved.get("original_scope", saved.get("scope")) == original_scope and saved.get("stop_scope") == stop_scope
@@ -580,6 +585,9 @@ class AgentExecutor:
                                   (_SCRIPT_EXTRA_ITERATIONS if script_budget_added else 0))
             fallback_suggested, protocol_pending = saved.get("fallback_suggested", False), saved.get("protocol_pending", False)
             completion_retries, no_progress = saved.get("completion_retries", 0), saved.get("no_progress", False)
+            progress_pending = bool(saved.get("progress_pending", False))
+            compose_only = bool(saved.get("compose_only", False))
+            progress_review = saved.get("progress_review", {})
             recovery_finish_prompts = int(saved.get("recovery_finish_prompts", 0))
             failures = {(row[0], row[1]): row[2] for row in saved.get("failures", [])}
             reflected_failures = {tuple(row) for row in saved.get("reflected_failures", [])}
@@ -608,6 +616,8 @@ class AgentExecutor:
                 "fallback_suggested": fallback_suggested, "protocol_pending": protocol_pending,
                 "completion_retries": completion_retries, "recovery_finish_prompts": recovery_finish_prompts,
                 "no_progress": no_progress,
+                "progress_pending": progress_pending, "compose_only": compose_only,
+                "progress_review": progress_review,
                 "failures": [[*key, count] for key, count in failures.items()],
                 "reflected_failures": [list(key) for key in sorted(reflected_failures)],
                 "pending_reflections": list(pending_reflections),
@@ -618,6 +628,7 @@ class AgentExecutor:
 
         async def consume(abandon: dict[str, Any] | None = None, completed: int = 0) -> bool:
             nonlocal scope, pending_response, applied_revision, no_progress, iteration_limit, protocol_pending
+            nonlocal compose_only, progress_pending, progress_review
             if runtime is None:
                 return False
             if parallel_batch:
@@ -638,6 +649,7 @@ class AgentExecutor:
                 msgs.extend({"role": "user", "content": item["content"]} for item in fresh)
             applied_revision = runtime.revision
             no_progress = False
+            compose_only, progress_pending, progress_review = False, False, {}
             read_progress.observe(None)
             protocol_pending = False
             # New inbound work has its own bounded decision window. The
@@ -677,6 +689,35 @@ class AgentExecutor:
                     transcript.extend(msgs[start:])
                 yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
                 return
+            if progress_pending and pending_response is None and not parallel_batch:
+                # Successful repetition is a decision problem, not a failed
+                # tool. Review remaining goals even if the model never stops
+                # requesting tools. Ignore reuse receipts in the review key.
+                results = budget.evidence(ctx.branch_id)
+                eligible = budget.eligible_evidence(ctx.branch_id, original_scope) if stop_scope == "step" else None
+                review_key = hashlib.sha256(json.dumps({
+                    "scope": scope, "revision": applied_revision,
+                    "evidence": [(identifier, bool(item.get("invalid"))) for identifier, item in results.items()
+                                 if (item.get("evidence") or {}).get("executed") is True
+                                 and (eligible is None or identifier in eligible)],
+                }, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+                yield {"type": "activity", "text": "已有查询结果，正在核对剩余分析目标"}
+                if progress_review.get("key") == review_key:
+                    review = ProgressReview(**progress_review["decision"])
+                else:
+                    review = await review_progress(
+                        self.llm, msgs, scope=scope, results=results, eligible_evidence_ids=eligible,
+                        require_workflow_revision=bool(ctx.recipe_edit and ctx.mode == "modify" and stop_scope != "step"),
+                    )
+                    progress_review = {"key": review_key, "decision": asdict(review)}
+                record_event("agent.progress_review", "sheetmate.agent.framework.react.executor.AgentExecutor.agent_stream",
+                             {**asdict(review), "scope": scope, "iteration": iteration}, stream_id=stream_id)
+                msgs.append({"role": "user", "content": review.guidance()})
+                compose_only = review.verified and review.ready_to_answer
+                progress_pending = False
+                snapshot_loop()
+                if runtime:
+                    await runtime.checkpoint()
             budget_exhausted = recovery.exhausted or budget.exhausted(self.max_tool_calls, ctx.branch_id)
             available = [tool for name, tool in tool_map.items()
                          if not recovery.must_switch or name == RECONSIDER_TOOL or name in _DIAGNOSTIC_TOOLS]
@@ -733,7 +774,8 @@ class AgentExecutor:
                 async def response_stream():
                     if resumed_response:
                         return
-                    async for item in self.llm.stream_chat(msgs, tools=definitions, tool_choice="none" if final_round else None):
+                    async for item in self.llm.stream_chat(msgs, tools=definitions,
+                                                          tool_choice="none" if final_round or compose_only else None):
                         yield item
 
                 if resumed_response:
@@ -849,7 +891,7 @@ class AgentExecutor:
                 snapshot_loop(response={"display": display, "calls": calls} if calls else None)
                 await runtime.checkpoint()
             id_errors = _unique_call_ids(calls, msgs)
-            forbidden_calls = bool(calls) and (not definitions or final_round)
+            forbidden_calls = bool(calls) and (not definitions or final_round or compose_only)
             if not calls:
                 if protocol_pending:
                     # 参数纠错之后仍没有真实调用，不能把自由文本当作完成依据。
@@ -887,6 +929,19 @@ class AgentExecutor:
                     yield {**check.event(), "call_id": check_id}
                     if not check.completed:
                         if check.verified and check.can_continue and not final_round and completion_retries < MAX_COMPLETION_RETRIES:
+                            # Progress review permits drafting an answer; only
+                            # completion verification can approve it. Missing
+                            # evidence reopens tools for the required work.
+                            compose_only = False
+                            if progress_review.get("key") and check.remaining:
+                                # Final verification supersedes a prior
+                                # readiness judgment until new evidence arrives.
+                                progress_review["decision"] = asdict(ProgressReview(
+                                    reason=check.reason, remaining=check.remaining, verified=True,
+                                    evidence_ids=check.evidence_ids,
+                                ))
+                            else:
+                                progress_review = {}
                             completion_retries += 1
                             if display:
                                 msgs.append(reply)
@@ -1016,7 +1071,10 @@ class AgentExecutor:
                         yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
                         return
                     break
-                if not in_parallel and (no_progress or budget.exhausted(self.max_tool_calls, ctx.branch_id) or recovery.exhausted):
+                # Finish novel work in the accepted response before deciding
+                # whether its observations made progress. Reused reads remain
+                # side-effect free even when one response repeats them often.
+                if not in_parallel and (budget.exhausted(self.max_tool_calls, ctx.branch_id) or recovery.exhausted):
                     assistant["tool_calls"] = calls[:call_index]
                     break
                 if not in_parallel:
@@ -1104,6 +1162,8 @@ class AgentExecutor:
                 args = _parse_args(call["function"]["arguments"])
                 tool = tool_map.get(name)
                 sources = parallel_batch["sources"][call["id"]] if in_parallel else snapshot_inputs(ctx, name, args)
+                query_key = read_key(ctx, name, args, sources)
+                previous_read = reusable_read(ctx, budget.results, query_key, scope=original_scope) if query_key else None
                 cached_result = await runtime.started(call["id"], name, args or {}) if runtime and not in_parallel else None
                 visible_events: list[dict[str, Any]] = list(prefetched["events"]) if prefetched else []
                 debug_params: Any = args if args is not None else call["function"]["arguments"]
@@ -1130,6 +1190,7 @@ class AgentExecutor:
                 script_key = None
                 attempt = None
                 repeated_script = False
+                repeated_read = False
                 method_blocked = False
                 if prefetched is not None:
                     result = ToolResult(**prefetched["result"])
@@ -1137,6 +1198,17 @@ class AgentExecutor:
                 elif cached_result is not None:
                     result = ToolResult(**cached_result)
                     executed = True
+                elif previous_read is not None:
+                    original_id, original_result = previous_read
+                    repeated_read = True
+                    progress_pending = True
+                    result = ToolResult(
+                        f"当前输入版本的此项查询已经成功完成，本次未重新执行。原始执行依据 evidence_id={original_id}。\n"
+                        "相同查询不会增加信息；0 行也是有效结果。请依据现有证据核对用户目标，只补尚缺的目标。\n"
+                        "原始工具结果：\n" + original_result["result"],
+                        summary="复用已完成查询，核对剩余目标", public_summary="已读取已有查询结果",
+                        public_text="正在根据已有结果核对剩余分析目标。",
+                    )
                 elif tool is None:
                     result = ToolResult(f"没有工具 `{name}`。可用工具：{', '.join(tool_map)}", ok=False)
                 elif args is None:
@@ -1191,7 +1263,7 @@ class AgentExecutor:
                     tool_map.update({item.name: item for item in self.registry.for_context(ctx)})
                 if not executed:
                     _record_unexecuted_tool(
-                        call, result, status="reused" if repeated_script else "blocked" if method_blocked else "rejected",
+                        call, result, status="reused" if repeated_script or repeated_read else "blocked" if method_blocked else "rejected",
                         arguments=args, duration_ms=int((time.perf_counter() - started) * 1000),
                     )
                 if script_key and not repeated_script:
@@ -1220,8 +1292,10 @@ class AgentExecutor:
                     python=name in {_SCRIPT_TOOL, "inspect_python_script"},
                 )
                 evidence = tool_evidence(ctx, name, args, result, call_id=call["id"], sources=sources,
-                                         executed=executed, reused=repeated_script)
-                if repeated_script and attempt is not None and attempt.evidence_id:
+                                         executed=executed, reused=repeated_script or repeated_read)
+                if repeated_read:
+                    evidence["reused_from"] = previous_read[0]
+                elif repeated_script and attempt is not None and attempt.evidence_id:
                     evidence["reused_from"] = attempt.evidence_id
                 elif executed and script_key and attempt is not None:
                     attempt.evidence_id = evidence["id"]
@@ -1243,6 +1317,9 @@ class AgentExecutor:
                                          f"reused={str(evidence['reused']).lower()}]\n{result.text}")})
                 budget.results[evidence["id"]] = {"tool": name, "ok": result.ok, "branch_id": ctx.branch_id, "scope": original_scope,
                                               "call_id": call["id"], "evidence": evidence,
+                                              "read_key": query_key if executed and result.ok and (
+                                                  not (args or {}).get("result_name") or evidence["artifacts"]
+                                              ) else None,
                                               "result": externalize_script_text(result.text, python=name == _SCRIPT_TOOL)}
                 for invalid_id in recovery.invalid_results:
                     for evidence_id, item in budget.results.items():
@@ -1251,12 +1328,15 @@ class AgentExecutor:
                 end_turn = end_turn or result.end_turn
                 if name != RECONSIDER_TOOL and not method_blocked:
                     recovery.observe(name, result, call_id=call["id"], diagnostic=name in _DIAGNOSTIC_TOOLS,
-                                     reused=repeated_script, evidence_id=evidence["id"], result_events=original_events)
+                                     reused=repeated_script or repeated_read, evidence_id=evidence["id"], result_events=original_events)
                 if executed:
                     if name != RECONSIDER_TOOL:
                         recovery_finish_prompts = 0
                     observation = _read_observation_key(name, args, sources, ToolResult(**safe_payload))
+                    budget.results[evidence["id"]]["observation_key"] = observation
                     no_progress = read_progress.observe(observation)
+                elif repeated_read:
+                    no_progress = read_progress.observe(previous_read[1].get("observation_key"))
                 explored += name in _EXPLORE_TOOLS
                 built = built or name in _RECIPE_TOOLS
                 if name == _SCRIPT_TOOL and tool is not None:
