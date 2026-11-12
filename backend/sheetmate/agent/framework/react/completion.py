@@ -13,6 +13,8 @@ from sheetmate.agent.framework.shared.evidence import evidence_projection
 
 COMPLETION_TIMEOUT = 30.0
 MAX_COMPLETION_RETRIES = 12
+# After this many fact-conflict rounds, ask for a verbatim-only answer.
+CONFLICT_SIMPLIFY_AFTER = 3
 _SCHEMA = {
     "type": "object",
     "properties": {
@@ -47,6 +49,9 @@ _SYSTEM = """你是 SheetMate 的任务完成核对助手。执行助手的模�
 - 还要核对 candidate_answer 的事实：数字、比例、分组和“所有、其余、只有、均、没有”等全称判断必须与实际结果一致；材料中有一个反例就不能通过。不能只检查目标是否提到。
 - 存在实质事实冲突时列入 contradictions，每项写原断言 claim、实际成功证据 evidence_ids 和具体纠正 correction；必须 completed=false。已有证据足以修正文案时 can_continue=true，只修正结论，不要求重复计算或再加一个核对环节。
 - 班次、状态、缩写、代码等业务含义只有用户规则或实际资料明确定义才可解释；未定义时保留原值和不确定性，不能把相近文字猜成同一种状态。
+- correction 和 claim 涉及的行、类别、数字必须能在 actual_results 的结果正文里逐字找到；找不到的行或类别不得写进 correction，更不能要求回答补列材料中不存在的行。
+- previous_conflicts 是此前轮次你给出的冲突意见。先逐条对照 actual_results 复核：若某条与实际结果不符，以实际结果为准，不得为保持一致而重复它，也不得无依据地反向推翻已被证据证实的修正。
+- 只有数字、范围或“所有/均/只有/没有”等全称判断与结果直接矛盾时才列入 contradictions。归类口径、合计方式、措辞和“几乎/大致”类概括不算冲突；回答没有断言的内容不要要求补充。
 - evidence_ids 只能引用材料中成功且实际执行过的调用编号；completed=true 时 remaining 必须为空。
 - execution 包含唯一证据编号、源表版本、结果行数与交付引用。full_data=false 只能支持读取风险或局部诊断，不能支持全表计算、完整匹配或交付完成；null 表示未确认输入完整性。新旧源表版本的结果不能混作同一口径。
 - requires_execution 表示当前目标是否需要实际读取、计算、匹配、修改或交付。为 true 时，完成必须引用覆盖该目标的成功调用编号，不能留空。纯解释和结构设计才可为 false。
@@ -231,7 +236,8 @@ async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: 
                            scope: str, results: dict[str, dict[str, Any]],
                            eligible_evidence_ids: set[str] | None = None,
                            require_full_data: bool = False,
-                           require_workflow_revision: bool = False) -> CompletionCheck:
+                           require_workflow_revision: bool = False,
+                           previous_conflicts: list[dict[str, Any]] | None = None) -> CompletionCheck:
     """核对失败也不能偷偷标成功；保留未确认状态和具体原因。"""
     # Explicit promises without an outcome cannot become success even if a weak
     # verifier repeats the executing model's mistake. Instructions such as
@@ -253,7 +259,10 @@ async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: 
     payload = {"scope": scope[:6000], "requests_and_step_context": requests[-5:],
                "candidate_answer": candidate[:8000], **_completion_material(eligible),
                "candidate_answer_truncated": len(candidate) > 8000,
-               "require_full_data": require_full_data}
+               "require_full_data": require_full_data,
+               "previous_conflicts": [{"claim": str(item.get("claim", ""))[:300],
+                                       "correction": str(item.get("correction", ""))[:500]}
+                                      for item in (previous_conflicts or [])[-6:]]}
     started = time.monotonic()
     response = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=_SYSTEM,
                               schema=_SCHEMA, schema_name="task_completion", timeout=COMPLETION_TIMEOUT,
@@ -307,14 +316,21 @@ async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: 
                            requires_full_data=requires_full_data)
 
 
-def continuation(check: CompletionCheck) -> str:
+def continuation(check: CompletionCheck, conflict_rounds: int = 0) -> str:
     if check.contradictions:
         conflicts = "\n".join(f"- 原断言：{item['claim']}；实际依据：{', '.join(item['evidence_ids'])}；"
                               f"应修正为：{item['correction']}" for item in check.contradictions)
-        return ("（系统完成核对）回答存在已由实际结果证实的事实冲突，不能按原文结束。\n"
+        text = ("（系统完成核对）回答存在已由实际结果证实的事实冲突，不能按原文结束。\n"
                 f"{conflicts}\n"
                 "请依据这些已有证据修正数字、范围或表述后给出完整回答。已完成的计算不要重复执行；"
                 "只有纠正仍缺实际依据时才回查相关结果。未定义的业务代码保持原值并说明不确定性。")
+        if conflict_rounds >= CONFLICT_SIMPLIFY_AFTER:
+            # Repeated rewrites keep exposing new conflicts in derived detail.
+            # Shrinking the answer to verbatim tool results is what converges.
+            text += (f"\n已连续 {conflict_rounds} 次因事实冲突被退回。这次请大幅精简：只保留工具结果中原样出现的数字和名称，"
+                     "删除自行归并的类别数、合计口径、“几乎/大致/同一模板”等概括，以及所有“全部/均/没有”类全称判断；"
+                     "核对时只回查对应结果原文，不要再引入新的归类或推导。")
+        return text
     goals = "；".join(check.remaining) or check.reason
     return ("（系统完成核对）刚才只是进度说明或任务尚有未完成目标，不能据此结束。"
             f"尚需完成：{goals}。依据真实工具结果继续执行并验证，只补做剩余部分。"

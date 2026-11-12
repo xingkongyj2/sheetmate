@@ -544,6 +544,8 @@ class AgentExecutor:
         stream_retry_limit = getattr(policy, "stream_recovery_retries", 5)
         protocol_pending = False
         completion_retries = 0
+        conflict_history: list[dict[str, Any]] = []
+        conflict_rounds = 0
         recovery_finish_prompts = 0
         finish_reason: str | None = None
         stream_id = uuid4().hex
@@ -585,6 +587,8 @@ class AgentExecutor:
                                   (_SCRIPT_EXTRA_ITERATIONS if script_budget_added else 0))
             fallback_suggested, protocol_pending = saved.get("fallback_suggested", False), saved.get("protocol_pending", False)
             completion_retries, no_progress = saved.get("completion_retries", 0), saved.get("no_progress", False)
+            conflict_history = list(saved.get("conflict_history", []))
+            conflict_rounds = int(saved.get("conflict_rounds", 0))
             progress_pending = bool(saved.get("progress_pending", False))
             compose_only = bool(saved.get("compose_only", False))
             progress_review = saved.get("progress_review", {})
@@ -615,6 +619,7 @@ class AgentExecutor:
                 "explored": explored, "built": built, "nudged": nudged, "script_budget_added": script_budget_added,
                 "fallback_suggested": fallback_suggested, "protocol_pending": protocol_pending,
                 "completion_retries": completion_retries, "recovery_finish_prompts": recovery_finish_prompts,
+                "conflict_history": conflict_history[-12:], "conflict_rounds": conflict_rounds,
                 "no_progress": no_progress,
                 "progress_pending": progress_pending, "compose_only": compose_only,
                 "progress_review": progress_review,
@@ -925,6 +930,7 @@ class AgentExecutor:
                         self.llm, msgs, display, scope=scope, results=budget.evidence(ctx.branch_id),
                         eligible_evidence_ids=budget.eligible_evidence(ctx.branch_id, original_scope) if stop_scope == "step" else None,
                         require_workflow_revision=bool(ctx.recipe_edit and ctx.mode == "modify" and stop_scope != "step"),
+                        previous_conflicts=conflict_history,
                     )
                     yield {**check.event(), "call_id": check_id}
                     if not check.completed:
@@ -943,13 +949,18 @@ class AgentExecutor:
                             else:
                                 progress_review = {}
                             completion_retries += 1
+                            if check.contradictions:
+                                conflict_rounds += 1
+                                conflict_history.extend({"claim": item["claim"], "correction": item["correction"]}
+                                                        for item in check.contradictions)
+                                del conflict_history[:-12]
                             if display:
                                 msgs.append(reply)
                             # A rejected candidate is internal context, not a
                             # public progress note. Notes are rendered as text
                             # and would expose every draft alongside the answer.
                             yield {"type": "activity", "text": "核对发现需要修正，正在继续处理"}
-                            msgs.append({"role": "user", "content": continuation(check)})
+                            msgs.append({"role": "user", "content": continuation(check, conflict_rounds)})
                             continue
                         code = limit_code or ("premature_stop" if check.verified else "completion_unverified")
                         summary = limit_summary or check.reason
