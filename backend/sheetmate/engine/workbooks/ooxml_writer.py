@@ -15,15 +15,17 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from bisect import bisect_left
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+from openpyxl.utils.cell import absolute_coordinate, get_column_letter, quote_sheetname, range_boundaries
 
 from sheetmate.engine.ooxml import OoxmlEditor, OoxmlUnsupported
-from sheetmate.engine.ooxml.xmlutil import check_text
-from sheetmate.engine.workbooks.verify import values_equal
+from sheetmate.engine.ooxml.package import WORKBOOK
+from sheetmate.engine.ooxml.xmlutil import check_text, escape, parse_attrs, unescape
 from sheetmate.engine.workbooks.writer import _excel_value
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,7 @@ def _apply(editor: OoxmlEditor, plan: Any, original: Any) -> None:
     sheet = editor.sheet(template.sheet)
     if added and sheet.has_tables():
         raise OoxmlUnsupported("工作表含表格对象，右侧追加列需要同步调整表格范围")
+    original_filter = _auto_filter_ref(sheet.xml.tail) if added else None
 
     kept = sorted(set(source_rows))
     present = set(source_rows)
@@ -106,7 +109,8 @@ def _apply(editor: OoxmlEditor, plan: Any, original: Any) -> None:
     for index, k in enumerate(source_rows):
         for offset, column in enumerate(template.col_index):
             new, old = _excel_value(after[index, offset]), _excel_value(before[k, offset])
-            if _kind(new) == _kind(old) and values_equal(new, old):
+            # 验收时的近似比较不能用来决定是否写入：大金额的小幅修改也必须保留。
+            if _kind(new) == _kind(old) and new == old:
                 continue
             edits[(final[index], column + 1)] = _normalise(new)
     if edits:
@@ -121,6 +125,87 @@ def _apply(editor: OoxmlEditor, plan: Any, original: Any) -> None:
         body = {(row, start + m): _normalise(_excel_value(after[index, len(base) + m]))
                 for index, row in enumerate(final) for m in range(len(added))}
         sheet.set_values(body, style_from={col: donor for col, donor in donors.items() if donor is not None})
+        if original_filter is not None:
+            _extend_auto_filter(sheet, template, start - 1, start + len(added) - 1, final, original_filter)
+
+
+def _auto_filter_ref(tail: str) -> str | None:
+    matches = list(re.finditer(r"<autoFilter\b([^>]*?)/?>", tail))
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise OoxmlUnsupported("工作表有多个筛选区域，无法安全扩展新增列")
+    reference = parse_attrs(matches[0].group(1)).get("ref")
+    if not reference:
+        raise OoxmlUnsupported("筛选区域缺少范围，无法安全扩展新增列")
+    return unescape(reference)
+
+
+def _filter_bounds(reference: str) -> tuple[int, int, int, int]:
+    try:
+        bounds = range_boundaries(reference)
+    except ValueError as exc:
+        raise OoxmlUnsupported("筛选或排序范围无法解析，无法安全扩展新增列") from exc
+    if any(value is None for value in bounds):
+        raise OoxmlUnsupported("筛选或排序范围不是普通单元格区域，无法安全扩展新增列")
+    return bounds
+
+
+def _extend_auto_filter(sheet: Any, template: Any, old_right: int, new_right: int,
+                        rows: list[int], original_ref: str) -> None:
+    """只扩展完整覆盖原记录列的普通筛选，保留筛选条件、排序键及其余 XML。"""
+    current_ref = _auto_filter_ref(sheet.xml.tail)
+    if current_ref is None:
+        raise OoxmlUnsupported("原筛选区域在编辑后消失，无法安全扩展新增列")
+    left, top, right, bottom = _filter_bounds(current_ref)
+    if (top != template.header_row or right != old_right or not template.col_index
+            or left > min(template.col_index) + 1 or max(template.col_index) + 1 > right
+            or any(row <= top or row > bottom for row in rows)):
+        raise OoxmlUnsupported("筛选区域没有完整覆盖原表，无法安全扩展新增列")
+    expanded = f"{get_column_letter(left)}{top}:{get_column_letter(new_right)}{bottom}"
+
+    def extend_sort(match: re.Match[str]) -> str:
+        attrs = parse_attrs(match.group(1))
+        reference = attrs.get("ref")
+        if attrs.get("columnSort") in {"1", "true"} or reference is None:
+            raise OoxmlUnsupported("列排序或缺少范围的排序状态无法安全扩展新增列")
+        sort_left, sort_top, sort_right, sort_bottom = _filter_bounds(unescape(reference))
+        if (sort_left != left or sort_right != right or sort_top not in {top, top + 1}
+                or sort_bottom != bottom):
+            raise OoxmlUnsupported("排序区域没有完整覆盖原表，无法安全扩展新增列")
+        replacement = f"{get_column_letter(left)}{sort_top}:{get_column_letter(new_right)}{bottom}"
+        return match.group(0).replace(f'ref="{reference}"', f'ref="{replacement}"', 1)
+
+    tail = re.sub(r"<sortState\b([^>]*?)/?>", extend_sort, sheet.xml.tail)
+    tail = re.sub(r'(<autoFilter\b[^>]*?\bref=")[^"]*(")',
+                  lambda match: f"{match.group(1)}{expanded}{match.group(2)}", tail, count=1)
+
+    # 行映射在 save 时统一传播；这里保留名称原有行号，只先扩大列边界。
+    package = sheet.editor.package
+    workbook = package.read_text(WORKBOOK)
+    sheet_index = str(sheet.editor.sheet_names().index(sheet.name))
+    original_bounds = _filter_bounds(original_ref)
+
+    def extend_name(match: re.Match[str]) -> str:
+        attrs = parse_attrs(match.group(1))
+        if attrs.get("name") != "_xlnm._FilterDatabase" or attrs.get("localSheetId") != sheet_index:
+            return match.group(0)
+        formula = unescape(match.group(2))
+        qualified = re.fullmatch(r"(?:'((?:[^']|'')+)'|([^!]+))!(.+)", formula)
+        if (qualified is None or (qualified.group(1) or qualified.group(2)).replace("''", "'").casefold()
+                != sheet.name.casefold() or _filter_bounds(qualified.group(3)) != original_bounds):
+            raise OoxmlUnsupported("筛选定义名称与筛选范围不一致，无法安全扩展新增列")
+        old_left, old_top, _, old_bottom = original_bounds
+        reference = absolute_coordinate(
+            f"{get_column_letter(old_left)}{old_top}:{get_column_letter(new_right)}{old_bottom}")
+        updated = escape(f"{quote_sheetname(sheet.name)}!{reference}")
+        return f"<definedName{match.group(1)}>{updated}</definedName>"
+
+    updated = re.sub(r"<definedName\b([^>]*)>(.*?)</definedName>", extend_name, workbook, flags=re.S)
+    if updated != workbook:
+        package.write(WORKBOOK, updated)
+    sheet.xml.tail = tail
+    sheet.dirty = True
 
 
 def _style_donor(sheet: Any, template: Any, frame: Any, position: int, sample_row: int | None) -> int | None:

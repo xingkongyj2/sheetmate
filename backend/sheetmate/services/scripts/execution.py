@@ -93,6 +93,7 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
             outcome = execute_script(code, tables, source_files, Path(folder), cancel_event=cancel_event)
             report.update(ok=outcome.ok, status=outcome.status, error=outcome.error, stdout=outcome.stdout,
                           stderr=outcome.stderr, checks=outcome.checks, result=outcome.result)
+            report["warnings"].extend(outcome.input_notes)
             if cancel_event.is_set():
                 report.update(ok=False, status="cancelled", error="用户已停止脚本")
             if report["ok"]:

@@ -26,6 +26,8 @@ import openpyxl
 import pandas as pd
 
 from sheetmate.core.config.settings import BACKEND_DIR
+from sheetmate.engine.workbooks.reader import ReadError
+from sheetmate.engine.workbooks.xls_convert import LIMITATIONS, convert_xls_to_xlsx
 
 MAX_SCRIPT_BYTES = 100_000
 MAX_FILES = 20
@@ -52,6 +54,7 @@ class ScriptResult:
     result_tables: dict[str, pd.DataFrame] = field(default_factory=dict)
     display_tables: list[str] = field(default_factory=list)
     output_files: list[Path] = field(default_factory=list)
+    input_notes: list[str] = field(default_factory=list)  # 输入文件的自动处理说明（如 .xls 已转换为 .xlsx）
     checks: list[dict[str, Any]] = field(default_factory=list)
     result: dict[str, Any] = field(default_factory=dict)
     duration_ms: int = 0
@@ -314,7 +317,19 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
                 if source.suffix.lower() not in _SUFFIXES | {".xls"} or input_bytes > MAX_TOTAL_BYTES:
                     raise ValueError("脚本输入文件必须是 Excel / CSV，累计不能超过 100 MB")
                 filename = f"input_{index}{source.suffix.lower()}"
-                shutil.copyfile(source, root / "inputs" / filename)
+                if source.suffix.lower() == ".xls":
+                    # 旧版 .xls 无法被 openpyxl 读写：在受信任的主进程里转换成保留样式的 .xlsx 副本再交给脚本，
+                    # 模型不必（也不应）用 xlrd 手写重建。原件不被修改。
+                    filename = f"input_{index}.xlsx"
+                    try:
+                        conversion = convert_xls_to_xlsx(source, root / "inputs" / filename)
+                    except ReadError as exc:
+                        raise ValueError(f"输入文件「{alias}」无法使用：{exc}") from exc
+                    outcome.input_notes.append(
+                        f"输入文件「{alias}」是旧版 .xls，已自动转换为同内容的 .xlsx，files['{alias}'] 指向这个 .xlsx 副本，"
+                        f"直接用 openpyxl 读写即可，结果请保存为 .xlsx。{LIMITATIONS}" + "".join(f" {item}" for item in conversion.warnings))
+                else:
+                    shutil.copyfile(source, root / "inputs" / filename)
                 aliases[alias] = filename
             manifest = {"tables": prepared, "files": aliases, "timeout_seconds": timeout_seconds}
             (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, allow_nan=False), encoding="utf-8")

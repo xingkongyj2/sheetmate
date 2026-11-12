@@ -14,10 +14,11 @@ from sheetmate.engine.ooxml.xmlutil import escape, unescape
 from sheetmate.engine.workbooks.row_references import shift_range_ref
 
 # 条件格式 / 数据验证里的公式：相对引用是相对于范围左上角（锚点）存放的。
-# anchored(text, 旧锚点行, 新锚点行) → 新公式文本。
-AnchoredFormula = Callable[[str, int, int], str]
+# anchored(text, 旧锚点行, 新锚点行, 原范围) → 新公式文本。
+AnchoredFormula = Callable[[str, int, int, str], str]
 _CELL = re.compile(r"^\$?([A-Za-z]{1,3})\$?(\d+)$")
 _ROWS = re.compile(r"^\$?(\d+):\$?(\d+)$")
+_ATTRIBUTE = re.compile(r'''([\w:.-]+)(\s*=\s*)(["'])(.*?)\3''', re.S)
 
 
 # --------------------------------------------------------------------------- 删除 / 插入
@@ -34,6 +35,7 @@ def rewrite_tail(tail: str, rowmap, anchored: AnchoredFormula) -> str:
     tail = _data_validations(tail, rowmap, anchored)
     tail = _ref_attribute(tail, "autoFilter", "ref", rowmap, required=True)
     tail = _ref_attribute(tail, "sortState", "ref", rowmap, required=True)
+    tail = _ref_attribute(tail, "sortCondition", "ref", rowmap, required=True)
     tail = _self_closing(tail, "hyperlink", "ref", rowmap, container="hyperlinks")
     tail = _self_closing(tail, "ignoredError", "sqref", rowmap, container="ignoredErrors")
     tail = _self_closing(tail, "protectedRange", "sqref", rowmap, container="protectedRanges")
@@ -88,7 +90,8 @@ def _conditional_formatting(tail: str, rowmap, anchored: AnchoredFormula) -> str
         if not shifted:
             return ""
         old_top, new_top = _anchor_rows(sqref.group(1), rowmap)
-        inner = _formulas(match.group(2), ("formula",), lambda text: anchored(text, old_top, new_top))
+        inner = _formulas(match.group(2), ("formula",),
+                          lambda text: anchored(text, old_top, new_top, unescape(sqref.group(1))))
         attrs = match.group(1).replace(f'sqref="{sqref.group(1)}"', f'sqref="{shifted}"', 1)
         return f"<conditionalFormatting{attrs}>{inner}</conditionalFormatting>"
 
@@ -104,7 +107,8 @@ def _data_validations(tail: str, rowmap, anchored: AnchoredFormula) -> str:
         if not shifted:
             return ""
         old_top, new_top = _anchor_rows(sqref.group(1), rowmap)
-        inner = _formulas(match.group(2) or "", ("formula1", "formula2"), lambda text: anchored(text, old_top, new_top))
+        inner = _formulas(match.group(2) or "", ("formula1", "formula2"),
+                          lambda text: anchored(text, old_top, new_top, unescape(sqref.group(1))))
         attrs = match.group(1).replace(f'sqref="{sqref.group(1)}"', f'sqref="{shifted}"', 1)
         return f"<dataValidation{attrs}>{inner}</dataValidation>"
 
@@ -121,7 +125,37 @@ def _data_validations(tail: str, rowmap, anchored: AnchoredFormula) -> str:
 
 def _formulas(xml: str, tags: tuple[str, ...], adjust: Callable[[str], str]) -> str:
     pattern = r"<(%s)>(.*?)</\1>" % "|".join(tags)
-    return re.sub(pattern, lambda m: f"<{m.group(1)}>{escape(adjust(unescape(m.group(2))))}</{m.group(1)}>", xml, flags=re.S)
+
+    def replace(match: re.Match[str]) -> str:
+        old = unescape(match.group(2))
+        new = adjust(old)
+        return match.group(0) if new == old else f"<{match.group(1)}>{escape(new)}</{match.group(1)}>"
+
+    return re.sub(pattern, replace, xml, flags=re.S)
+
+
+def rewrite_rule_formulas(xml: str, adjust: Callable[[str, str], str]) -> str:
+    """按规则的原始 sqref 同步条件格式 / 验证公式；未变化的规则保留原文。
+
+    adjust(text, sqref) 接收解码后的公式与应用范围，可据范围判断多行相对引用是否仍能安全表达。
+    """
+    def block(match: re.Match[str]) -> str:
+        sqref = next((found.group(4) for found in _ATTRIBUTE.finditer(match.group(2))
+                      if found.group(1) == "sqref"), None)
+        if not sqref or not sqref.strip():
+            raise OoxmlUnsupported("条件格式 / 验证规则缺少应用范围 sqref")
+        inner = match.group(3)
+        if inner is None:
+            return match.group(0)
+        tags = ("formula",) if match.group(1) == "conditionalFormatting" else ("formula1", "formula2")
+        updated = _formulas(inner, tags, lambda text: adjust(text, unescape(sqref)))
+        if updated == inner:
+            return match.group(0)
+        start, end = match.start(3) - match.start(), match.end(3) - match.start()
+        return match.group(0)[:start] + updated + match.group(0)[end:]
+
+    pattern = r'''<(conditionalFormatting|dataValidation)\b((?:[^"'<>]|"[^"]*"|'[^']*')*?)(?:/>|>(.*?)</\1>)'''
+    return re.sub(pattern, block, xml, flags=re.S)
 
 
 def _ref_attribute(tail: str, tag: str, attr: str, rowmap, *, required: bool) -> str:
@@ -148,6 +182,34 @@ def _self_closing(tail: str, tag: str, attr: str, rowmap, *, container: str) -> 
 
     tail = re.sub(r"<%s\b[^>]*?/>" % tag, replace, tail)
     return re.sub(r"<%s\b[^>]*>\s*</%s>" % (container, container), "", tail)
+
+
+def rewrite_hyperlink_targets(xml: str, adjust: Callable[[str], str]) -> str:
+    """同步内部超链接的目标；链接所在单元格的 ref 由行位置改写单独处理。
+
+    adjust 接收解码后的 location（可为本表地址、跨表地址或定义名称），负责应用所有行映射，
+    并在目标被删除等无法安全同步的情形下拒绝。带关系 ID 的外部链接原样保留，
+    因为其 location 指向外部文件中的地址或书签。
+    """
+    def hyperlink(match: re.Match[str]) -> str:
+        if any(found.group(1) == "r:id" for found in _ATTRIBUTE.finditer(match.group(0))):
+            return match.group(0)
+
+        def target(found: re.Match[str]) -> str:
+            if found.group(1) != "location":
+                return found.group(0)
+            old = unescape(found.group(4))
+            new = adjust(old)
+            if new == old:
+                return found.group(0)
+            quote = found.group(3)
+            escaped = escape(new).replace(quote, "&quot;" if quote == '"' else "&apos;")
+            return f"{found.group(1)}{found.group(2)}{quote}{escaped}{quote}"
+
+        return _ATTRIBUTE.sub(target, match.group(0))
+
+    # 引号内允许 >；先匹配完整属性，避免把 tooltip 等属性值里的 location 字样当成目标。
+    return re.sub(r'''<hyperlink\b(?:[^"'<>]|"[^"]*"|'[^']*')*>''', hyperlink, xml, flags=re.S)
 
 
 def _row_breaks(tail: str, rowmap) -> str:
@@ -195,7 +257,7 @@ def rewrite_tail_for_permutation(tail: str, moved: dict[int, int], first: int, l
         items = []
         for item in re.finditer(r'<mergeCell\b[^>]*?\bref="([^"]+)"[^>]*/>', match.group(2)):
             rows = _area_rows(item.group(1))
-            if rows is None or rows[1] < first or rows[0] > last or (rows[0] <= first and rows[1] >= last):
+            if rows is None or rows[1] < first or rows[0] > last:
                 items.append(f'<mergeCell ref="{item.group(1)}"/>')
             elif rows[0] == rows[1]:
                 items.append(f'<mergeCell ref="{_remap_row_in_ref(item.group(1), moved)}"/>')
@@ -208,6 +270,7 @@ def rewrite_tail_for_permutation(tail: str, moved: dict[int, int], first: int, l
                           (r'<dataValidation\b[^>]*?\bsqref="([^"]*)"', "数据验证"),
                           (r'<autoFilter\b[^>]*?\bref="([^"]*)"', "自动筛选"),
                           (r'<sortState\b[^>]*?\bref="([^"]*)"', "排序状态"),
+                          (r'<sortCondition\b[^>]*?\bref="([^"]*)"', "排序条件"),
                           (r'<ignoredError\b[^>]*?\bsqref="([^"]*)"', "忽略错误"),
                           (r'<protectedRange\b[^>]*?\bsqref="([^"]*)"', "保护区域")):
         for found in re.finditer(pattern, tail):

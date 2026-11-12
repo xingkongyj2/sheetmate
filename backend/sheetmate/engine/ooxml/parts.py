@@ -6,17 +6,22 @@
 from __future__ import annotations
 
 import re
+from xml.etree import ElementTree
 
 from sheetmate.engine.ooxml.errors import OoxmlUnsupported
-from sheetmate.engine.ooxml.package import CONTENT_TYPES, WORKBOOK, WORKBOOK_RELS, OoxmlPackage
+from sheetmate.engine.ooxml.package import CONTENT_TYPES, MAIN_NS, WORKBOOK, WORKBOOK_RELS, OoxmlPackage
 from sheetmate.engine.ooxml.ranges import _area_rows
-from sheetmate.engine.ooxml.xmlutil import escape, unescape
+from sheetmate.engine.ooxml.xmlutil import escape, parse_attrs, render_attrs, unescape
 from sheetmate.engine.workbooks.row_references import adjust_formula, shift_range_ref
 
 _DRAWING_ROW = re.compile(r"<(?:\w+:)?row>(\d+)</(?:\w+:)?row>")  # 0 起
 _CALC_PR = re.compile(r"<calcPr\b([^>]*?)(/?)>")
 _AFTER_CALC = ("oleSize", "customWorkbookViews", "pivotCaches", "smartTagPr", "smartTagTypes", "webPublishing",
                "fileRecoveryPr", "webPublishObjects", "extLst")
+_NAMED_SOURCE_RANGE = re.compile(
+    r"(?:(?:'(?P<quoted>(?:[^']|'')+)'|(?P<plain>[^'!\[\]:]+))!)?"
+    r"\$?[A-Za-z]{1,3}\$?\d+(?::\$?[A-Za-z]{1,3}\$?\d+)?"
+)
 
 
 # --------------------------------------------------------------------------- 位置保护
@@ -63,9 +68,50 @@ def _reject_if_reaches(rows: list[int], first_changed: int, what: str) -> None:
 def guard_pivot_sources(package: OoxmlPackage, sheet_name: str) -> None:
     for name in package.names():
         if name.startswith("xl/pivotCache/pivotCacheDefinition") and name.endswith(".xml"):
-            for source in re.findall(r'<worksheetSource\b[^>]*?\bsheet="([^"]*)"', package.read_text(name)):
-                if unescape(source).casefold() == sheet_name.casefold():
+            root = ElementTree.fromstring(package.read(name))
+            for source in root.iter(f"{MAIN_NS}worksheetSource"):
+                source_sheet = source.get("sheet", "")
+                if source_sheet.casefold() == sheet_name.casefold():
                     raise OoxmlUnsupported("有透视表以本工作表为数据源，行结构变化后需要刷新透视表缓存")
+                if source_name := source.get("name"):
+                    sheets = _named_pivot_source_sheets(package, source_name, source_sheet)
+                    if sheets is None:
+                        raise OoxmlUnsupported("透视表使用无法定位工作表的命名数据源，行结构变化后无法保证缓存正确")
+                    if sheet_name.casefold() in {sheet.casefold() for sheet in sheets}:
+                        raise OoxmlUnsupported("有透视表以本工作表为命名数据源，行结构变化后需要刷新透视表缓存")
+
+
+def _named_pivot_source_sheets(package: OoxmlPackage, name: str, scope: str) -> set[str] | None:
+    """定位表格或普通区域名称；动态公式、别名等无法证明归属的名称返回 None。"""
+    sheet_parts = package.sheet_parts()
+    sheets = list(sheet_parts)
+    owners = set()
+    for sheet, part in sheet_parts.items():
+        for table in package.related(part, "table"):
+            root = ElementTree.fromstring(package.read(table))
+            if name.casefold() in {root.get("name", "").casefold(), root.get("displayName", "").casefold()}:
+                owners.add(sheet)
+    if owners:
+        return owners
+
+    workbook = ElementTree.fromstring(package.read(WORKBOOK))
+    definitions = [item for item in workbook.iter(f"{MAIN_NS}definedName")
+                   if item.get("name", "").casefold() == name.casefold()]
+    scope_index = next((str(index) for index, sheet in enumerate(sheets) if sheet.casefold() == scope.casefold()), None)
+    scoped = [item for item in definitions if scope_index is not None and item.get("localSheetId") == scope_index]
+    definitions = scoped or [item for item in definitions if item.get("localSheetId") is None]
+    if len(definitions) != 1:
+        return None
+    definition = definitions[0]
+    reference = (definition.text or "").strip().removeprefix("=")
+    match = _NAMED_SOURCE_RANGE.fullmatch(reference)
+    if match is None:
+        return None
+    target = (match.group("quoted") or match.group("plain") or "").replace("''", "'")
+    if not target and definition.get("localSheetId") == scope_index:
+        target = scope
+    owner = next((sheet for sheet in sheets if sheet.casefold() == target.casefold()), None)
+    return {owner} if owner is not None else None
 
 
 # --------------------------------------------------------------------------- 表格对象
@@ -101,6 +147,7 @@ def rewrite_tables(package: OoxmlPackage, sheet_part: str, rowmap) -> None:
         text = re.sub(r'(<table\b[^>]*?\bref=")([^"]*)(")', shift_ref, text, count=1)
         text = re.sub(r'(<autoFilter\b[^>]*?\bref=")([^"]*)(")', shift_ref, text)
         text = re.sub(r'(<sortState\b[^>]*?\bref=")([^"]*)(")', shift_ref, text)
+        text = re.sub(r'(<sortCondition\b[^>]*?\bref=")([^"]*)(")', shift_ref, text)
         package.write(table, text)
 
 
@@ -137,8 +184,6 @@ def rewrite_chart_references(package: OoxmlPackage, maps: dict[str, list]) -> No
         if not (name.startswith("xl/charts/") and name.endswith(".xml") and "/_rels/" not in name):
             continue
         xml = package.read_text(name)
-        if not any(sheet.casefold() in xml.casefold() for sheet in maps):
-            continue
 
         def replace(match: re.Match[str]) -> str:
             body = unescape(match.group(2))
@@ -158,8 +203,8 @@ def adjust_text(text: str, current_sheet: str, maps: dict[str, list]) -> str:
 def _adjust_for_all(text: str, current_sheet: str, maps: dict[str, list]) -> str:
     folded = text.casefold()
     for target, rowmaps in maps.items():
-        mentions = target.casefold() in folded
-        if not mentions and target != current_sheet:
+        mentions = target.casefold() in folded or target.replace("'", "''").casefold() in folded
+        if not mentions and target.casefold() != current_sheet.casefold():
             continue
         for rowmap in rowmaps:
             try:
@@ -193,9 +238,11 @@ def force_full_calc(package: OoxmlPackage) -> bool:
     xml = package.read_text(WORKBOOK)
     existing = _CALC_PR.search(xml)
     if existing:
-        if "fullCalcOnLoad" in existing.group(1):
+        attrs = parse_attrs(existing.group(1))
+        if attrs.get("fullCalcOnLoad") in {"1", "true"}:
             return False
-        updated = xml.replace(existing.group(0), f'<calcPr{existing.group(1)} fullCalcOnLoad="1"{existing.group(2)}>', 1)
+        attrs["fullCalcOnLoad"] = "1"
+        updated = xml.replace(existing.group(0), f'<calcPr{render_attrs(attrs)}{existing.group(2)}>', 1)
     else:
         tag = '<calcPr fullCalcOnLoad="1"/>'
         anchor = re.search(r"<(?:\w+:)?(?:%s)\b" % "|".join(_AFTER_CALC), xml)

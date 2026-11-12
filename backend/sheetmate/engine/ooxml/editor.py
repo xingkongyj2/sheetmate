@@ -13,7 +13,7 @@
 from __future__ import annotations
 
 import re
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import TracebackType
@@ -29,7 +29,9 @@ from sheetmate.engine.ooxml import parts
 from sheetmate.engine.ooxml.errors import OoxmlUnsupported
 from sheetmate.engine.ooxml.package import OoxmlPackage
 from sheetmate.engine.ooxml.styles import NumberFormats
-from sheetmate.engine.ooxml.ranges import rewrite_tail, rewrite_tail_for_permutation
+from sheetmate.engine.ooxml.ranges import (
+    rewrite_hyperlink_targets, rewrite_rule_formulas, rewrite_tail, rewrite_tail_for_permutation,
+)
 from sheetmate.engine.ooxml.sheetxml import F_ELEMENT, Cell, Row, SheetXml, cell_xml, rewrite_f_elements
 from sheetmate.engine.ooxml.xmlutil import escape, parse_attrs, render_attrs, unescape
 from sheetmate.engine.workbooks.row_references import DeletedRows, InsertedRows, adjust_formula
@@ -46,6 +48,14 @@ class _SortedDeletedRows(DeletedRows):
 
     def map_row(self, row: int) -> int:
         return row - bisect_left(self._sorted, row)
+
+    def map_range(self, first: int, last: int) -> list[int]:
+        before = bisect_left(self._sorted, first)
+        through = bisect_right(self._sorted, last)
+        if through - before == last - first + 1:
+            return []
+        # 删除的端点也落在首个 / 最后一个保留行的新位置，无需逐行寻找保留行。
+        return [first - before, last - through]
 
 
 @dataclass
@@ -120,15 +130,10 @@ class OoxmlEditor:
         return report
 
     def _propagate(self) -> None:
-        """某个工作表的行变化 → 其他工作表里引用它的公式、条件格式 / 数据验证公式。"""
+        """同步其他工作表的公式，以及所有工作表内的超链接目标。"""
         for sheet_name, part in self._parts.items():
             maps = {target: rowmaps for target, rowmaps in self._maps.items() if target != sheet_name}
-            if not maps:
-                continue
             xml = self.package.read_text(part)
-            folded = xml.casefold()
-            if not any(target.casefold() in folded for target in maps):
-                continue
 
             def adjust_cell_formula(text: str, attrs: dict[str, str]) -> str | None:
                 new = parts.adjust_text(text, sheet_name, maps)
@@ -136,11 +141,13 @@ class OoxmlEditor:
                     raise OoxmlUnsupported(f"「{sheet_name}」里引用了被修改行的共享 / 数组公式，无法安全同步")
                 return new
 
-            updated, _ = rewrite_f_elements(xml, adjust_cell_formula)
-            updated = re.sub(
-                r"<(formula|formula1|formula2)>(.*?)</\1>",
-                lambda m: f"<{m.group(1)}>{escape(parts.adjust_text(unescape(m.group(2)), sheet_name, maps))}</{m.group(1)}>",
-                updated, flags=re.S)
+            updated = xml
+            if maps:
+                updated, _ = rewrite_f_elements(updated, adjust_cell_formula)
+                updated = rewrite_rule_formulas(
+                    updated, lambda text, sqref: _adjust_cross_sheet_rule(text, sheet_name, maps, sqref))
+            updated = rewrite_hyperlink_targets(
+                updated, lambda text: parts.adjust_text(text, sheet_name, self._maps))
             if updated != xml:
                 self.package.write(part, updated)
 
@@ -238,7 +245,7 @@ class SheetEditor:
             kept.append(row)
         self.xml.rows = kept
         self.xml.reindex()
-        self._after_row_map(rowmap, min(deleted))
+        self._after_row_map(rowmap)
 
     # ---- 结构：插入 ----
     def insert_rows(self, at: int, count: int = 1, *, style_from: int | None = None, extend_end: bool = False) -> None:
@@ -258,7 +265,7 @@ class SheetEditor:
             self.xml.rows.append(Row(at + offset, attrs, cells))
         self.xml.rows.sort(key=lambda row: row.number)
         self.xml.reindex()
-        self._after_row_map(rowmap, at)
+        self._after_row_map(rowmap)
 
     # ---- 结构：重排（排序） ----
     def reorder_rows(self, first: int, order: list[int]) -> None:
@@ -295,15 +302,15 @@ class SheetEditor:
             raise OoxmlUnsupported("工作表含数组 / 数据表公式，行结构变化后无法安全同步")
         self._unshare_formulas()
 
-    def _after_row_map(self, rowmap, first_changed: int) -> None:
+    def _after_row_map(self, rowmap) -> None:
         def adjust(text: str) -> str:
             try:
                 return adjust_formula(text, self.name, {self.name: rowmap})
             except ValueError as exc:
                 raise OoxmlUnsupported(f"公式 {text[:60]!r} 无法随行变化同步：{exc}") from exc
 
-        def anchored(text: str, old_top: int, new_top: int) -> str:
-            return _move_anchored_formula(text, self.name, old_top, new_top, first_changed)
+        def anchored(text: str, old_top: int, new_top: int, sqref: str) -> str:
+            return _move_anchored_formula(text, self.name, old_top, new_top, rowmap, sqref)
 
         self.xml.rewrite_formulas(lambda text, attrs: adjust(text))
         self.xml.tail = rewrite_tail(self.xml.tail, rowmap, anchored)
@@ -359,23 +366,76 @@ class SheetEditor:
             row.touch()
 
 
-def _move_anchored_formula(text: str, sheet: str, old_top: int, new_top: int, first_changed: int) -> str:
-    """条件格式 / 数据验证的公式：相对引用跟着范围锚点平移；绝对行引用只有在改动区域之上才保持不变。"""
-    if re.search(r"(?:'%s'|%s)!" % (re.escape(sheet.replace("'", "''")), re.escape(sheet)), text):
-        raise OoxmlUnsupported("条件格式 / 验证公式显式引用了本工作表，无法按锚点同步")
+def _adjust_cross_sheet_rule(text: str, sheet: str, maps: dict[str, list], sqref: str) -> str:
+    """跨表相对行引用在多行规则中可能需要逐行拆分，无法安全表示时拒绝。"""
+    from sheetmate.engine.ooxml.ranges import _area_rows
+    from sheetmate.engine.workbooks.row_references import _parse_reference
+
+    areas = [_area_rows(area) for area in sqref.split()]
+    multirow = not areas or any(area is None or area != areas[0] or area[0] != area[1] for area in areas)
+    if multirow:
+        try:
+            changed = {name.casefold() for name in maps}
+            for token in Tokenizer("=" + text).items:
+                if token.type != "OPERAND" or token.subtype != "RANGE":
+                    continue
+                reference = _parse_reference(token.value)
+                if reference is None or (reference.sheet or sheet).casefold() not in changed:
+                    continue
+                if any(re.fullmatch(r"(?:\$?[A-Za-z]{1,3})?\d+", endpoint)
+                       for endpoint in reference.body.split(":")):
+                    raise OoxmlUnsupported("多行条件格式 / 验证公式相对引用了被修改的工作表，无法安全同步")
+        except OoxmlUnsupported:
+            raise
+        except (TokenizerError, ValueError) as exc:
+            raise OoxmlUnsupported(f"条件格式 / 验证公式 {text[:60]!r} 无法解析：{exc}") from exc
+    return parts.adjust_text(text, sheet, maps)
+
+
+def _move_anchored_formula(text: str, sheet: str, old_top: int, new_top: int, rowmap: Any, sqref: str) -> str:
+    """先找到仍保留的规则锚点，再按实际行映射改写它引用的单元格。
+
+    多行规则的本行引用始终随所在行移动；其他相对行引用可能在删行点两侧需要不同的公式，
+    无法由一条规则表示，保守退回常规流程。单行规则及绝对引用可以直接同步。
+    """
+    from sheetmate.engine.ooxml.ranges import _area_rows
+    from sheetmate.engine.workbooks.row_references import _parse_reference
+
     try:
         tokens = Tokenizer("=" + text).items
     except TokenizerError as exc:
         raise OoxmlUnsupported(f"无法解析公式 {text[:60]!r}：{exc}") from exc
-    for token in tokens:
-        if token.type == "OPERAND" and token.subtype == "RANGE" and "!" not in token.value:
-            for part in token.value.split(":"):
-                found = re.fullmatch(r"\$?[A-Za-z]{1,3}\$(\d+)|\$(\d+)", part)
-                if found and int(found.group(1) or found.group(2)) >= first_changed:
-                    raise OoxmlUnsupported(f"条件格式 / 验证公式含绝对行引用 {part}，位于被修改的行或其下方")
-    if old_top == new_top:
-        return text
-    return Translator("=" + text, origin=f"A{old_top}").translate_formula(f"A{new_top}")[1:]
+    areas = [_area_rows(area) for area in sqref.split()]
+    multirow = any(area is None or area != (old_top, old_top) for area in areas)
+    try:
+        if multirow:
+            for token in tokens:
+                if token.type != "OPERAND" or token.subtype != "RANGE":
+                    continue
+                reference = _parse_reference(token.value)
+                if reference is None:
+                    continue
+                local = (reference.sheet or sheet).casefold() == sheet.casefold()
+                for endpoint in reference.body.split(":"):
+                    found = re.fullmatch(r"(?:\$?[A-Za-z]{1,3})?(\$?)(\d+)", endpoint)
+                    if found and not found.group(1) and (not local or int(found.group(2)) != old_top):
+                        raise OoxmlUnsupported("多行条件格式 / 验证公式引用了其他行，无法保证行变化后的相对关系")
+        source_top = old_top
+        while source_top in rowmap:
+            source_top += 1
+        # 原锚点被删除时，先求出第一个保留行原本使用的公式；不能拿已删除行的引用直接映射。
+        if source_top != old_top:
+            text = Translator("=" + text, origin=f"A{old_top}").translate_formula(f"A{source_top}")[1:]
+        updated = adjust_formula(text, sheet, {sheet: rowmap})
+        mapped_top = rowmap.map_row(source_top)
+        if multirow and mapped_top != new_top:
+            # 整列规则也覆盖新插入的首行，范围锚点可能不等于原首行移动后的位置。
+            updated = Translator("=" + updated, origin=f"A{mapped_top}").translate_formula(f"A{new_top}")[1:]
+        return updated
+    except OoxmlUnsupported:
+        raise
+    except ValueError as exc:
+        raise OoxmlUnsupported(f"条件格式 / 验证公式 {text[:60]!r} 无法随行变化同步：{exc}") from exc
 
 
 def _require_row_local(text: str, own_row: int) -> None:
