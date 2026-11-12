@@ -188,7 +188,7 @@ class RecipePipeline:
         recipe.metadata["verification"] = _verification_brief(verification)
         recipe.metadata["last_run"] = {"run_id": report["run_id"], "status": report["status"]}
         saved = None
-        if save_recipe and ok:
+        if save_recipe is True and ok:
             # 用户要求保存时直接保存正式流程，比对结果独立记录。
             saved = self.host.save_recipe(recipe, verification=None if revising else verification, run_report=report)
             recipe.version = saved.get("version", recipe.version)

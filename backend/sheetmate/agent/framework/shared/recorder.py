@@ -14,6 +14,7 @@ class WorkflowRecorder:
     def __init__(self, request_text: str):
         self.request_text = request_text
         self.started = time.perf_counter()
+        self.started_at = int(time.time() * 1000)
         self.steps: list[dict[str, Any]] = []
         self.protocol_errors: list[dict[str, Any]] = []
         self._open: dict[str, dict[str, Any]] = {}
@@ -140,7 +141,7 @@ class WorkflowRecorder:
                 "stops": deepcopy(self.stops), "active_call": deepcopy(self.active_call),
                 "active_calls": deepcopy(list(self._active_calls.values())),
                 "pending_steps": [{"tool": step["tool"], "label": step["label"]} for step in self._open.values()],
-                "duration_ms": int((time.perf_counter() - self.started) * 1000)}
+                "started_at": self.started_at, "duration_ms": int((time.perf_counter() - self.started) * 1000)}
 
     def tool_sequence(self) -> str:
         return " → ".join(s["tool"] for s in self.steps)

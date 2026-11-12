@@ -93,6 +93,7 @@ export interface RecipeProgress {
   recipeId?: string
   recipeName?: string
   recipeVersion?: number
+  recipePersisted?: boolean
   deleted?: boolean
   steps: StepState[]
   details?: RecipeProcessDetail[]
@@ -176,6 +177,9 @@ export interface UiMessage {
   content: string
   meta: Record<string, unknown>
   streaming: boolean
+  /** 本轮回复的本地起止时间；最终耗时优先使用服务端统计。 */
+  replyStartedAt?: number
+  replyFinishedAt?: number
   /** 恢复快照后递增：已收到的文字立即显示，随后新增文字继续流式展示。 */
   replayRevision?: number
   timeline: TimelineItem[]
@@ -207,7 +211,8 @@ let seq = 0
 export const uid = (prefix = 'k') => `${prefix}_${Date.now().toString(36)}_${(seq++).toString(36)}`
 
 export function newAssistant(): UiMessage {
-  return { key: uid('m'), role: 'assistant', content: '', meta: {}, streaming: true, timeline: [], artifacts: [], blocks: [] }
+  return { key: uid('m'), role: 'assistant', content: '', meta: {}, streaming: true,
+    replyStartedAt: Date.now(), timeline: [], artifacts: [], blocks: [] }
 }
 
 export function newUser(content: string, meta: Record<string, unknown> = {}): UiMessage {
@@ -265,6 +270,8 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.thinking = e.message
       return true
     case 'recipe_generated':
+      p.recipePersisted = false
+      p.saved = undefined
       p.recipe = recipeSnapshot(e.recipe)
       p.recipeId = e.recipe?.id
       p.flow = e.flow
@@ -279,6 +286,8 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.recipeId = e.recipe?.id ?? e.recipe_id ?? p.recipeId
       p.recipeName = e.recipe?.name ?? p.recipeName
       p.recipeVersion = e.recipe?.version
+      p.recipePersisted = e.recipe_persisted === true
+      p.saved = undefined
       p.round = e.round ?? p.round
       p.inputs = []
       p.validation = undefined
@@ -321,6 +330,10 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       return true
     }
     case 'recipe_repair': {
+      if (e.status === 'retry') {
+        p.recipePersisted = false
+        p.saved = undefined
+      }
       const s = stepOf(p, e.step_id)
       const planned = p.recipe?.steps.find((item) => item.id === e.step_id)
       if (planned && e.status === 'retry') {
@@ -358,6 +371,10 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.validation = e.report
       return true
     case 'recipe_run_done':
+      if (typeof e.recipe_persisted === 'boolean') {
+        p.recipePersisted = e.recipe_persisted
+        if (!e.recipe_persisted) p.saved = undefined
+      }
       p.runStatus = e.status
       p.runSummary = e.summary
       p.escalation = e.report?.escalation
@@ -381,7 +398,10 @@ function mergeRecipeEvent(p: RecipeProgress, e: AgentEvent): boolean {
       p.saved = e.type === 'recipe_saved'
         ? { recipe_id: e.recipe_id, version: e.version, name: e.name, verification: e.verification, flow: e.flow }
         : undefined
-      if (e.type === 'recipe_saved') p.deleted = false
+      if (e.type === 'recipe_saved') {
+        p.deleted = false
+        p.recipePersisted = true
+      }
       p.recipeId = e.recipe_id ?? p.recipeId
       if (e.flow) p.flow = e.flow
       if (e.selected_run) {
@@ -459,6 +479,8 @@ function restoreStreamSnapshot(msg: UiMessage, events: AgentEvent[]): void {
   restored.key = msg.key
   restored.id = msg.id
   restored.createdAt = msg.createdAt
+  restored.replyStartedAt = msg.replyStartedAt
+  restored.replyFinishedAt = msg.replyFinishedAt
   restored.meta = { ...msg.meta }
   const savedExecution = readExecutionState(msg.meta.execution)
   restored.execution = { status: 'running', code: 'running', summary: '正在处理',
@@ -905,6 +927,9 @@ function activePlan(msg: UiMessage) {
 }
 
 export function finishMessage(msg: UiMessage): void {
+  if (msg.streaming && msg.role === 'assistant' && msg.replyStartedAt !== undefined && msg.replyFinishedAt === undefined) {
+    msg.replyFinishedAt = Date.now()
+  }
   msg.streaming = false
   msg.activity = ''
   if (msg.execution?.status === 'running') {
@@ -958,6 +983,11 @@ export function fromStored(stored: StoredMessage, options: { streaming?: boolean
     key: `db_${stored.id}`, id: stored.id, role: stored.role, content: '', meta: { ...stored.meta }, streaming: options.streaming === true,
     timeline: [], artifacts: [], blocks: stored.role === 'assistant' ? newAssistant().blocks : [], createdAt: stored.created_at,
   }
+  if (stored.role === 'assistant' && options.streaming) {
+    const startedAt = typeof storedExecution?.started_at === 'number' && Number.isFinite(storedExecution.started_at)
+      ? storedExecution.started_at : Date.parse(stored.created_at)
+    msg.replyStartedAt = Number.isFinite(startedAt) ? startedAt : Date.now()
+  }
   if (stored.role === 'assistant') {
     for (const e of stored.events ?? []) applyEvent(msg, e)
     // 元数据保存的是最终总体状态，优先于回放中的单项结束记录。
@@ -1006,6 +1036,10 @@ export function restoreConversationMessages(stored: StoredMessage[], job?: { id:
   const history = requestIndex >= 0 ? stored.slice(0, requestIndex + 1) : stored.filter((item) => item !== checkpoint)
   const messages = fromStoredMessages(history)
   const assistant = checkpoint ? fromStored(checkpoint, { streaming: true }) : newAssistant()
+  if (!checkpoint && requestIndex >= 0) {
+    const startedAt = Date.parse(stored[requestIndex]!.created_at)
+    if (Number.isFinite(startedAt)) assistant.replyStartedAt = startedAt
+  }
   for (const event of checkpoint?.events ?? []) {
     if (event.type === 'delivery_manifest') applyDeliveryManifest(messages, event)
   }

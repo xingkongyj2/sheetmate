@@ -63,8 +63,8 @@ function publicToolDetail(value: unknown, maxLength = 600): string {
   if (typeof value !== 'string') return ''
   // Engine names in a declared explanation are vocabulary, not executable code.
   // Translate them before sanitizing so a useful change is not removed as an internal ID.
-  const text = value.replace(/\bbuild_recipe\b/g, '生成处理流程')
-    .replace(/\brevise_recipe\b/g, '修订处理流程').replace(/\brun_recipe\b/g, '执行已有流程')
+  const text = value.replace(/\bbuild_recipe\b/g, '处理表格')
+    .replace(/\brevise_recipe\b/g, '调整处理步骤').replace(/\brun_recipe\b/g, '执行已有流程')
     .replace(/\brun_python_script\b/g, '脚本处理').replace(/\binput_files\b/g, '输入文件绑定')
     .replace(/\binput_tables\b/g, '输入表').replace(/\bfile_id\b(?!\s*[=:])/g, '文件标识')
     .replace(/\bOUTPUT_DIR\b/g, '结果目录').replace(/\bdeliver_files\b/g, '交付文件清单')
@@ -366,7 +366,13 @@ function toolDetails(item: ToolItem): string[] {
 }
 
 export function toolPresentation(item: ToolItem): { label: string; summary: string; details: string[]; sections: ToolDetailSection[] } {
-  const label = userFacingText(item.label, '处理数据', 80)
+  // Older conversations stored engine-oriented labels for ordinary one-off edits.
+  const actionLabel = item.tool === 'build_recipe'
+    ? item.label?.replace(/^生成(?:处理)?流程/, '处理表格') || '处理表格'
+    : item.tool === 'revise_recipe'
+      ? item.label?.replace(/^修订(?:处理)?流程/, '调整处理步骤') || '调整处理步骤'
+      : item.label
+  const label = userFacingText(actionLabel, '处理数据', 80)
     .replace(/^SQL\s*查询/i, '查询数据')
     .replace(/^长转宽（拆成列）/, '按类别展开数据')
     .replace(/^宽转长/, '整理为逐项明细')

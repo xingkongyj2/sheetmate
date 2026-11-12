@@ -305,13 +305,23 @@ class ExecutionControl:
                     self.ctx.task_state = _hydrate_task(db, conv.id, conv.task_state)
             for event in events:
                 await self.job.emit(event)
-        if events and self.ctx is not None and getattr(self.ctx, "execution_action", None) == "process":
+        if events and self.ctx is not None:
             from sheetmate.agent.framework.shared.persistence import infer_recipe_persistence
             original = self.request.get("message", "")
             requirements = original + "\n\n用户执行中更正（后面的要求优先）：\n" + "\n".join(
                 item["content"] for item in messages)
-            allowed = await infer_recipe_persistence(self.llm, requirements, [], recipe_edit=self.ctx.recipe_edit)
+            allowed = await infer_recipe_persistence(self.llm, requirements, [], recipe_edit=self.ctx.recipe_edit,
+                                                      task_state=self.ctx.task_state)
+            if getattr(self.ctx, "execution_action", None) != "process":
+                # Conversational/file-view steering may revoke an existing
+                # grant, but cannot introduce a new persistence side effect.
+                allowed = allowed and self.ctx.task_state.get("save_recipe_requested") is True
             self.ctx.save_recipe_requested = self.ctx.host.save_recipe_requested = allowed
+            self.ctx.task_state["save_recipe_requested"] = allowed
+            with session_scope() as db:
+                conv = db.get(Conversation, self.job.key)
+                if conv is not None:
+                    conv.task_state = {**(conv.task_state or {}), "save_recipe_requested": allowed}
         return messages
 
     async def seal_if_idle(self) -> bool:
@@ -341,6 +351,7 @@ class ExecutionControl:
         ctx.recipe_edit = dict(data.get("recipe_edit", {}))
         ctx.host.recipe_edit = dict(ctx.recipe_edit)
         ctx.evidence_store.update(data.get("evidence_store", {}))
+        ctx.save_recipe_requested = ctx.save_recipe_requested is True
         ctx.host.save_recipe_requested = ctx.save_recipe_requested
         ctx.host.saved_recipes = list(data.get("saved_recipes", []))
         ctx.host.deleted_recipes = list(data.get("deleted_recipes", []))

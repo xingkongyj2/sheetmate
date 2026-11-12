@@ -25,6 +25,7 @@ import { auditLine } from '@/composables/thinkingPresentation'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
 import { useProgressiveReply } from '@/composables/useProgressiveReply'
+import { useReplyTimer } from '@/composables/useReplyTimer'
 
 import RecipeStageDetails from './RecipeStageDetails.vue'
 import RecipeViewCard from './RecipeViewCard.vue'
@@ -34,6 +35,7 @@ import ExecutionStatusNotice from './ExecutionStatusNotice.vue'
 const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; conversationId?: string | null; mascot?: string | null; answersDisabled?: boolean; answersClosed?: boolean }>()
 const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo]; refresh: [] }>()
 const toast = useToast()
+const { label: replyTime } = useReplyTimer(() => props.message)
 const openingFile = ref<string | null>(null)
 
 async function previewFile(fileId: string) {
@@ -162,6 +164,7 @@ onBeforeUnmount(() => {
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
     <div class="assistant-content w-full min-w-0 space-y-3">
+      <p v-if="replyTime" class="text-xs leading-5 text-faint tabular-nums" data-testid="reply-timer">{{ replyTime }}</p>
       <!-- 按发生顺序只合并相邻同类步骤，正文保持原位。 -->
       <template v-for="(group, index) in displayGroups" :key="group.key">
         <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :class="{ 'assistant-stage--before-process': isFollowedByProcess(index) }" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">

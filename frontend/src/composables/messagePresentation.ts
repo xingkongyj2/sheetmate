@@ -81,8 +81,8 @@ function recipeResultSummary(progress: RecipeProgress): string {
   if (failure) return failure.summary
   if (progress.status !== 'done') return '尚未记录到这次处理的完成结果。'
   if (progress.validation?.status === 'fail' || (progress.verify?.status === 'fail' && !progress.verify.informational)) return '处理已结束，但结果未通过校验，需要核对。'
-  if (progress.runStatus === 'warning' || progress.validation?.status === 'warn' || (progress.verify?.status === 'warn' && !progress.verify.informational)) return '流程已执行完成，仍有待核对项。'
-  return userFacingSummary(progress.runSummary, '该次流程已执行完成。')
+  if (progress.runStatus === 'warning' || progress.validation?.status === 'warn' || (progress.verify?.status === 'warn' && !progress.verify.informational)) return '本次处理已完成，仍有待核对项。'
+  return userFacingSummary(progress.runSummary, '本次处理已完成。')
 }
 
 export function recipeOutcomeSummary(message: UiMessage): string {
@@ -103,7 +103,7 @@ export function recipeOutcomeSummary(message: UiMessage): string {
     const summary = completed.length ? `${count}最后一次修改仍未完成。` : `本轮尝试了 ${attempts.length} 次，暂未完成修改。`
     return `${summary}\n\n${failure.summary}${failure.nextStep}\n\n${delivery}`
   }
-  const summary = failures.length ? `${count}最后一次流程已执行结束。` : `本轮的 ${attempts.length} 次流程已执行结束。`
+  const summary = failures.length ? `${count}最后一次处理已结束。` : `本轮的 ${attempts.length} 次处理已结束。`
   return `${summary}\n\n${recipeResultSummary(last.progress)}\n\n${delivery}`
 }
 
@@ -174,7 +174,7 @@ export function messageMarkdown(message: UiMessage, stages?: { title: string; su
       version: delivery.saved?.version || delivery.recipeVersion || 1,
       deleted: delivery.deleted, flow: progressFlow(delivery),
     })]
-    if (artifact.kind === 'recipe' && (artifact.progress.file || artifact.progress.saved)) return []
+    if (artifact.kind === 'recipe' && (artifact.progress.file || artifact.progress.files?.length || artifact.progress.saved)) return []
     const attempt = !stages && artifact.kind === 'recipe' ? attemptsByKey.get(artifact.key) : undefined
     if (attempt) {
       const failure = recipeFailure(attempt.progress)

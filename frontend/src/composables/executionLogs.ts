@@ -38,13 +38,13 @@ const EVENT_LABELS: Record<string, string> = {
   reflect_start: '自检开始', reflect_done: '自检结束', think_start: '思考模式开始', plan_review: '计划审查', step_check: '步骤核对',
   audit_start: '回答核对开始', audit_done: '回答核对结果', agent_pool_start: '并行任务开始',
   agent_start: '专员开始', agent_done: '专员结束', aggregate_start: '汇总开始',
-  recipe_learn_start: '生成流程', recipe_evidence: '流程输入比对', recipe_generated: '流程已生成',
-  recipe_run_start: '流程运行开始', recipe_input: '流程输入', recipe_step_start: '流程步骤开始',
-  recipe_step_done: '流程步骤结束', recipe_step_error: '流程步骤错误', recipe_repair: '流程自动修复',
-  recipe_output: '流程输出', recipe_validation: '运行校验', recipe_run_done: '流程运行结束',
-  recipe_verify: '结果比对', recipe_refine: '调整流程', recipe_diff: '流程差异',
-  recipe_completed: '流程处理完成', recipe_saved: '流程已保存', recipe_deleted: '流程已删除',
-  recipe_failed: '流程执行失败', recipe_view: '查看流程', recipes_changed: '流程列表已更新',
+  recipe_learn_start: '规划处理步骤', recipe_evidence: '输入比对', recipe_generated: '处理步骤已就绪',
+  recipe_run_start: '表格处理开始', recipe_input: '处理输入', recipe_step_start: '处理步骤开始',
+  recipe_step_done: '处理步骤结束', recipe_step_error: '处理步骤错误', recipe_repair: '自动修复处理步骤',
+  recipe_output: '处理输出', recipe_validation: '运行校验', recipe_run_done: '表格处理结束',
+  recipe_verify: '结果比对', recipe_refine: '调整处理步骤', recipe_diff: '处理步骤差异',
+  recipe_completed: '处理完成', recipe_saved: '流程已保存', recipe_deleted: '流程已删除',
+  recipe_failed: '处理失败', recipe_view: '查看流程', recipes_changed: '流程列表已更新',
 }
 
 export function formatLogValue(value: unknown): string {

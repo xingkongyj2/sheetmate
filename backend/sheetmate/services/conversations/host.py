@@ -451,6 +451,17 @@ class ConversationHost:
             assert_pending_base(pending, recipe)
         return pending if pending is not None and pending.version >= recipe.version else recipe
 
+    def is_recipe_persisted(self, recipe: Recipe) -> bool:
+        """A run snapshot or a matching version number alone is not a saved definition."""
+        with session_scope() as db:
+            record = db.scalars(select(RecipeRecord).where(
+                RecipeRecord.recipe_id == recipe.id, RecipeRecord.version == recipe.version,
+            )).first()
+            if record is None or (record.conversation_id != self.conversation_id and
+                                  not (self.customer_id and record.customer_id == self.customer_id)):
+                return False
+            return recipe_service._definition(recipe_service.record_to_recipe(record)) == recipe_service._definition(recipe)
+
     def recipe_saved_version(self, recipe_id: str) -> int:
         if self.recipe_edit.get("recipe_id") == recipe_id:
             return self.recipe_edit["saved_version"]
@@ -534,7 +545,7 @@ class ConversationHost:
             raise
 
     def _store_recipe(self, recipe: Recipe, *, note: str = "") -> dict[str, Any]:
-        if not self.save_recipe_requested:
+        if self.save_recipe_requested is not True:
             raise ServiceError("用户没有要求保存重复流程，本次只执行处理。")
         if self.recipe_edit and recipe.id != self.recipe_edit["recipe_id"]:
             raise ServiceError("本次对话选中了其他流程，只能保存所选流程的修订。")

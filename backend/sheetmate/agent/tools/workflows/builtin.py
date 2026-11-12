@@ -96,10 +96,10 @@ def _copy_results(ctx: AgentContext, outputs: dict[str, pd.DataFrame], recipe: R
 
 def _recipe_result_text(result: dict[str, Any]) -> str:
     if not result:
-        return "流程没有完成。"
+        return "本次处理没有完成。"
     recipe: Recipe = result["recipe"]
     if result.get("error"):
-        return f"流程生成失败：{result['error']}"
+        return f"处理步骤生成失败：{result['error']}"
     lines = [f"本次处理「{recipe.name}」（recipe_id={recipe.id}）：执行状态 {_status_label(result['report']['status'])}。"]
     lines.append("已按用户要求保存为重复流程。" if result.get("saved") else "内部状态：本次没有保存或更新重复流程。无需向用户说明默认行为，也不要主动询问是否保存。")
     report_error = str(result.get("report", {}).get("error") or "").strip()
@@ -209,8 +209,8 @@ def _finish_recipe_tool(ctx: AgentContext, result: dict[str, Any]) -> ToolResult
                 prune(recipe.id, retained)
     ok = bool(result.get("ok"))
     recipe = result.get("recipe")
-    summary = (f"流程「{recipe.name}」v{recipe.version}：{_status_label(result['report']['status'])}" if recipe and result.get("report")
-               else result.get("error", "流程未完成"))
+    summary = (f"处理「{recipe.name}」：{_status_label(result['report']['status'])}" if recipe and result.get("report")
+               else result.get("error", "处理未完成"))
     return ToolResult(_clip(_recipe_result_text(result) + _result_tables_hint(tables)), ok=ok, summary=summary, tables=tables)
 
 
@@ -291,6 +291,8 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
     recipe = ctx.host.get_recipe(recipe_id)
     if recipe is None:
         raise ValueError(f"没有找到流程 {recipe_id}")
+    persisted = getattr(ctx.host, "is_recipe_persisted", None)
+    recipe_persisted = bool(persisted(recipe)) if persisted is not None else False
     activate = getattr(ctx.host, "activate_recipe", None)
     if activate is not None:
         activate(recipe)
@@ -314,6 +316,10 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
                                      sheet=info.sheet, file_id=info.file_id, header=info.header,
                                      path=ctx.host.original_file_path(info.file_id) if info.file_id else None)
     async for event in runner.run(sources, output_path=handle.output_path, history=host.history_metrics(recipe.id)):
+        if event.get("type") == "recipe_run_start":
+            event = {**event, "recipe_persisted": recipe_persisted}
+        elif event.get("type") == "recipe_run_done":
+            event = {**event, "recipe_persisted": recipe_persisted and not runner.recipe_changed}
         yield event
     handle.output_path = runner.output_path or handle.output_path
     file_info = host.finish_run(handle, runner.recipe, runner.report)
@@ -322,11 +328,11 @@ async def _stream_run_recipe(args: dict[str, Any], ctx: AgentContext) -> AsyncIt
         for item in file_info.get("files", [file_info]):
             yield {"type": "file", **item}
     note = ""
-    if runner.recipe_changed and ctx.save_recipe_requested and runner.report["status"] in {"success", "warning"}:
+    if runner.recipe_changed and ctx.save_recipe_requested is True and runner.report["status"] in {"success", "warning"}:
         saved = ctx.host.store_recipe(runner.recipe, note="执行时自动修复")
         yield {"type": "recipe_saved", **saved, "flow": runner.recipe.flow()}
         note = f"执行中自动修复了第 {runner.report['repaired_steps']} 步，已保存为 v{saved['version']}。"
-    elif runner.recipe_changed and ctx.save_recipe_requested:
+    elif runner.recipe_changed and ctx.save_recipe_requested is True:
         note = "本次执行未通过，尚未保存修复后的流程。"
     ok = runner.report["status"] not in {"failed", "escalated"}
     # 只是运行校验没通过时，结果表也放回工作区，方便和用户一起核对差在哪里
@@ -360,7 +366,7 @@ def _recipe_for_saved_outputs(ctx: AgentContext, targets: list[str]) -> Recipe |
 
 
 def _tool_save_as_recipe(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
-    if not ctx.save_recipe_requested:
+    if ctx.save_recipe_requested is not True:
         raise ValueError("用户没有要求保存重复流程；只完成本次处理，不要主动保存或追问保存。")
     targets = [str(t) for t in (args.get("output_tables") or [])]
     if targets:

@@ -69,7 +69,6 @@ def test_ambiguous_input_uses_conversation_without_task_artifacts(client, fake_l
         pytest.fail("普通对话不应进入任务执行或流程保存判断")
 
     monkeypatch.setattr(llm, "stream_chat", capture_tools)
-    monkeypatch.setattr(chat_service, "infer_recipe_persistence", unexpected)
     monkeypatch.setattr(chat_service, "analysis_workspace", unexpected)
     monkeypatch.setattr(chat_service, "should_activate", unexpected)
     events = _chat(client, conversation, message)

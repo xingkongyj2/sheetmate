@@ -32,7 +32,7 @@ from sheetmate.agent.llm.client import (
 from sheetmate.agent.memory.long_term.extraction import extract_memories
 from sheetmate.agent.framework.react.multi_agent import execute_multi, should_activate
 from sheetmate.agent.framework.planning.planner import check_clarification
-from sheetmate.agent.framework.shared.persistence import infer_recipe_persistence
+from sheetmate.agent.framework.shared.persistence import recipe_persistence_allowed
 from sheetmate.agent.framework.shared.recorder import WorkflowRecorder
 from sheetmate.agent.memory.short_term.summarization import (
     HISTORY_TOKEN_BUDGET,
@@ -744,6 +744,13 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             break
         record_event("chat.intent.result", "sheetmate.agent.framework.shared.intent.infer_request", intent)
         ctx.mode = intent.mode
+        if intent.save_recipe_cancelled:
+            ctx.save_recipe_requested = host.save_recipe_requested = False
+            # Keep the user's cancellation with the task's source messages so
+            # a later continuation/steer cannot revive an earlier save request.
+            ctx.task_state = _advance_conversation_task(
+                conversation_id, message_id, relation="continue", save_recipe=False,
+            )
         ctx.requested_tool_groups = tuple(intent.tool_groups)
         ctx.execution_action = intent.action
         host.defer_delivery = intent.action == "process"
@@ -772,8 +779,11 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
             await job.emit({"type": "done"})
             return
         if intent.action == "process":
-            ctx.save_recipe_requested = (ctx.save_recipe_requested if saved_intent else intent.save_recipe if intent.save_recipe is not None
-                                         else await infer_recipe_persistence(llm, effective_request, history, recipe_edit=ctx.recipe_edit))
+            ctx.save_recipe_requested = recipe_persistence_allowed(
+                ctx.save_recipe_requested if saved_intent else intent.save_recipe,
+                cancelled=intent.save_recipe_cancelled, relation=intent.task_relation,
+                task_state=ctx.task_state,
+            )
             host.save_recipe_requested = ctx.save_recipe_requested
             if not saved_intent:
                 ctx.task_state = _advance_conversation_task(

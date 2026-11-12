@@ -8,8 +8,13 @@ function recipeId(progress: RecipeProgress): string | undefined {
   return progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id
 }
 
+/** A run mode or recipe ID does not prove that its processing definition was explicitly saved. */
+export function isWorkflowArtifact(progress: RecipeProgress): boolean {
+  return !!progress.saved || progress.recipePersisted === true
+}
+
 function hasExecution(progress: RecipeProgress): boolean {
-  return !!(progress.runId || progress.steps.length || progress.inputs.length || progress.file)
+  return !!(progress.runId || progress.steps.length || progress.inputs.length || progress.file || progress.files?.length)
 }
 
 function filesOf(progress: RecipeProgress) {
@@ -42,16 +47,24 @@ function mergeDelivery(previous: RecipeDelivery, current: RecipeDelivery): Recip
 /** Deliver each workflow once; execution/save cards contain the same graph as a read-only view. */
 export function recipeDeliveries(message: Pick<UiMessage, 'artifacts'>): { deliveries: RecipeDelivery[]; views: RecipeView[] } {
   const deliveries = new Map<string, RecipeDelivery>()
+  const executions = new Map<string, RecipeDelivery>()
   const views = new Map<string, RecipeView>()
   for (const artifact of message.artifacts) {
     if (artifact.kind === 'recipe_view') {
       const previous = views.get(artifact.view.recipe_id)
       if (!previous || artifact.view.version >= previous.view.version) views.set(artifact.view.recipe_id, artifact)
-    } else if (artifact.kind === 'recipe' && (progressDeliveryFiles(artifact.progress).length || artifact.progress.saved)) {
+    } else if (artifact.kind === 'recipe') {
       const id = recipeId(artifact.progress)
       const key = id ? `recipe:${id}` : artifact.progress.file ? `file:${artifact.progress.file.file_id}` : artifact.key
-      const previous = deliveries.get(key)
+      if (!isWorkflowArtifact(artifact.progress)) {
+        // Retain execution context for a later explicit save without publishing its internal graph.
+        if (hasExecution(artifact.progress)) executions.set(key, artifact)
+        continue
+      }
+      if (!progressDeliveryFiles(artifact.progress).length && !artifact.progress.saved) continue
+      const previous = executions.get(key) ?? deliveries.get(key)
       deliveries.set(key, previous ? mergeDelivery(previous, artifact) : artifact)
+      executions.delete(key)
     }
   }
 

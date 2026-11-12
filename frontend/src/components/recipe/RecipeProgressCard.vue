@@ -16,6 +16,7 @@ import type { RecipeProgress } from '@/composables/chatModel'
 import { progressDeliveryFiles } from '@/composables/deliveryFiles'
 import { recipeFailure } from '@/composables/messagePresentation'
 import { progressFlow } from '@/composables/recipeFlow'
+import { isWorkflowArtifact } from '@/composables/recipeDeliveries'
 import { userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
 
@@ -50,6 +51,7 @@ const STATUS_LABEL: Record<string, string> = {
 }
 
 const flow = computed(() => {
+  if (!isWorkflowArtifact(props.progress)) return null
   if (!props.progress.flow && !props.progress.saved?.flow && !props.progress.steps.length) return null
   return progressFlow(props.progress)
 })
@@ -103,7 +105,7 @@ const busyText = computed(() => {
       </div>
 
       <!-- 结束：一句话小结 -->
-      <p v-else-if="progress.runSummary && !failure" class="text-[13px] leading-relaxed text-mute">{{ userFacingText(progress.runSummary, '流程已执行结束，请查看处理结果。', 600) }}</p>
+      <p v-else-if="progress.runSummary && !failure" class="text-[13px] leading-relaxed text-mute">{{ userFacingText(progress.runSummary, '处理已结束，请查看结果。', 600) }}</p>
 
       <!-- 需要确认的问题 -->
       <div v-if="progress.questions?.length" class="rounded-xl bg-fun-yellow/15 px-3 py-2.5 text-[13px]">
@@ -122,7 +124,7 @@ const busyText = computed(() => {
         </div>
       </div>
 
-      <!-- 流程始终可见，保存后的历史快照也可以查看每个步骤。 -->
+      <!-- 明确保存或重复执行已有流程时展示流程图。 -->
       <RecipeFlow v-if="flow" :flow="flow" :states="progress.steps" toolbar-placement="card" :context="{
         title: progress.saved?.name || progress.recipeName,
         recipeId: progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id,

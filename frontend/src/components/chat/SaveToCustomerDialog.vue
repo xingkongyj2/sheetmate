@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 把临时对话保存到客户：选已有客户，或者新建一个客户。会话里的文件、流程、记忆会一起归到客户名下。 */
+/** 把临时对话保存到客户：选已有客户，或者新建一个客户。已有文件、已保存流程和记忆一起归到客户名下。 */
 import { Check, LoaderCircle } from '@lucide/vue'
 import { ref } from 'vue'
 
@@ -30,7 +30,7 @@ async function save() {
       : { customer_id: chosen.value ?? undefined }
     const result = await conversationApi.bind(props.conversationId, payload)
     await Promise.all([store.refreshCustomers(), store.refreshConversations()])
-    toast.success('已保存到客户，文件、流程和记忆都归到了客户名下')
+    toast.success('已保存到客户，文件、已保存流程和记忆都归到了客户名下')
     emit('saved', result.customer_id)
   } catch (err) {
     toast.error(errorText(err))
@@ -42,7 +42,7 @@ async function save() {
 
 <template>
   <BaseModal title="保存到客户" width="max-w-lg" @close="emit('close')">
-    <p class="mb-4 text-sm text-mute">保存后，这次对话上传的文件、生成的处理流程、记下的规则都会归到客户名下，以后这个客户的对话都能用上。</p>
+    <p class="mb-4 text-sm text-mute">保存后，这次对话上传的文件、已保存的流程、记下的规则都会归到客户名下，以后这个客户的对话都能用上。</p>
     <div class="mb-4 flex rounded-full bg-paper p-1 text-sm">
       <button class="flex-1 rounded-full py-1.5" :class="tab === 'existing' ? 'bg-white font-medium shadow-sm' : 'text-mute'" @click="tab = 'existing'">已有客户</button>
       <button class="flex-1 rounded-full py-1.5" :class="tab === 'new' ? 'bg-white font-medium shadow-sm' : 'text-mute'" @click="tab = 'new'">新建客户</button>

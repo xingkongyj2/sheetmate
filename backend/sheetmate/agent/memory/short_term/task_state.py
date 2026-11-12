@@ -25,6 +25,7 @@ def advance_task(state: dict[str, Any] | None, message_id: int, *, relation: str
         "current_message_id": message_id,
         "file_ids": list(dict.fromkeys([*([] if relation == "new" else previous.get("file_ids") or []), *(file_ids or [])])),
         "status": "running",
+        "save_recipe_requested": relation != "new" and previous.get("save_recipe_requested") is True,
         "evidence_ids": [] if relation == "new" else list(previous.get("evidence_ids") or []),
         "unresolved": [] if relation == "new" else list(previous.get("unresolved") or []),
     }

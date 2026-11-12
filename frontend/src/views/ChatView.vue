@@ -537,6 +537,10 @@ async function resume() {
       messages.value.push(assistant)
     }
     assistant.streaming = true
+    assistant.replyStartedAt = Date.now()
+    assistant.replyFinishedAt = undefined
+    assistant.execution = { ...assistant.execution, status: 'running', started_at: assistant.replyStartedAt, duration_ms: undefined }
+    assistant.meta.execution = { ...assistant.execution }
     assistant.error = undefined
     selectedKey.value = assistant.key
     scrollToBottom(true)

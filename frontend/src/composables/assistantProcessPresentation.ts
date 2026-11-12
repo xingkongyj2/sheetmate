@@ -22,7 +22,7 @@ const RECIPE_TOOLS = new Set(['build_recipe', 'revise_recipe', 'run_recipe'])
 const GENERIC_TITLES = new Set(['处理过程', '理解需求'])
 const TOOL_LABELS: Record<string, string> = {
   table_info: '查看结构', preview_table: '查看数据', column_stats: '描述统计', value_counts: '取值分布',
-  build_recipe: '生成处理流程', revise_recipe: '修订处理流程', run_recipe: '执行已有流程',
+  build_recipe: '处理表格', revise_recipe: '调整处理步骤', run_recipe: '执行已有流程',
   list_files: '查看文件', show_files: '展示文件', load_file: '加载文件', run_sql: '查询数据',
   run_python_script: '处理表格', reconsider_approach: '调整处理方法', export_excel: '导出 Excel',
   create_workbook: '新建 Excel', get_recipe: '查看流程', list_recipes: '查看已保存流程',

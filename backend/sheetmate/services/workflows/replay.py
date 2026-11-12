@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy import select
+
 from sheetmate.agent.llm.client import LLMError, get_llm
 from sheetmate.agent.tools.workflows.repair import LLMStepRepairer
 from sheetmate.core.config.settings import settings
 from sheetmate.db.session import session_scope
-from sheetmate.db.models import Conversation, FileRecord, User
+from sheetmate.db.models import Conversation, FileRecord, RecipeRecord, User
 from sheetmate.recipe.execution.runner import InputSource, RecipeRunner, has_reviewable_output
 from sheetmate.recipe.learning.matcher import Candidate, match_inputs
 from sheetmate.recipe.definition.schema import Recipe
@@ -140,6 +142,10 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
                               field_mapping_authoritative=bool(recipe.customer_id),
                               max_repair=settings.repair_max_attempts, run_id=run_id)
         async for event in runner.run(sources, output_path=out_path, history=history):
+            if event.get("type") == "recipe_run_start":
+                event = {**event, "recipe_persisted": True}
+            elif event.get("type") == "recipe_run_done":
+                event = {**event, "recipe_persisted": not runner.recipe_changed}
             await job.emit(event)
         await _finish(job, user.id, runner, runner.output_path or out_path, note="执行时自动修复", save_recipe=save_recipe)
 
@@ -188,6 +194,12 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
         step = recipe.step(step_id)
         recipe.steps = [s.model_copy(update={"params": params}) if s.id == step_id else s for s in recipe.steps]
         edited = step.params != params
+    with session_scope() as db:
+        saved = db.scalars(select(RecipeRecord).where(
+            RecipeRecord.recipe_id == recipe.id, RecipeRecord.version == recipe.version,
+        )).first()
+        recipe_persisted = saved is not None and (
+            recipe_service._definition(recipe_service.record_to_recipe(saved)) == recipe_service._definition(recipe))
 
     async def work(job: Job) -> None:
         original_ws = run_service.run_workspaces.get(run_id)
@@ -201,6 +213,10 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
         runner.restore_sources(kept_inputs, lambda fid: _file_path(fid, user))
         runner.restore_artifacts(kept_artifacts)
         async for event in runner.run(None, start_step=step_id, output_path=out_path):
+            if event.get("type") == "recipe_run_start":
+                event = {**event, "recipe_persisted": recipe_persisted}
+            elif event.get("type") == "recipe_run_done":
+                event = {**event, "recipe_persisted": recipe_persisted and not runner.recipe_changed}
             await job.emit(event)
         if edited and runner.report["status"] not in {"failed", "escalated"}:
             runner.recipe_changed = True
@@ -218,7 +234,7 @@ async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, 
         run = run_service.get_run(db, report["run_id"])
         runner.recipe.metadata["last_run"] = {"run_id": run.id, "status": report.get("status")}
         saved = None
-        if save_recipe and runner.recipe_changed and report["status"] in {"success", "warning"} and not (run.validation or {}).get("recipe_deleted"):
+        if save_recipe is True and runner.recipe_changed and report["status"] in {"success", "warning"} and not (run.validation or {}).get("recipe_deleted"):
             runner.recipe.metadata["version_note"] = note
             saved = recipe_service.recipe_brief(recipe_service.save_recipe(db, runner.recipe))
             report["recipe_version"] = saved["version"]

@@ -1,6 +1,7 @@
 import type { FileInfo, TableBrief } from '@/api/types'
 import type { FileArtifact, TableArtifact, UiMessage } from './chatModel'
 import { isDeliveredFile, progressDeliveryFiles } from './deliveryFiles'
+import { recipeDeliveries } from './recipeDeliveries'
 
 export interface FilePresentationContext {
   tables?: TableBrief[]
@@ -69,7 +70,8 @@ function fileFromTable(table: TableArtifact, context: FilePresentationContext): 
 
 /** Explicit deliveries take precedence; reading a source file can also offer that original directly. */
 export function standaloneFiles(message: UiMessage, context: FilePresentationContext = {}): FileArtifact[] {
-  const recipeIds = new Set(message.artifacts.flatMap((artifact) => artifact.kind === 'recipe' ? progressDeliveryFiles(artifact.progress).map((file) => file.file_id) : []))
+  const recipeIds = new Set(recipeDeliveries(message).deliveries.flatMap((artifact) =>
+    progressDeliveryFiles(artifact.progress).map((file) => file.file_id)))
   const explicit = deliveredFiles(message)
   const hasFileEvents = message.artifacts.some((artifact) => artifact.kind === 'file' || artifact.kind === 'recipe' &&
     !!(artifact.progress.file || artifact.progress.files?.length))

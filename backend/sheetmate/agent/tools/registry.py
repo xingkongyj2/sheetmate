@@ -124,17 +124,17 @@ def _static_tools() -> list[Tool]:
                    "filename": {**_STR, "description": "文件名（不含扩展名）"}}, ["sheets"]),
              analyze, run=_tool_export_excel, label=lambda a: f"导出 Excel · {a.get('filename', '')}"),
         Tool("build_recipe",
-             "［数据修改优先］生成并执行一个可重复执行的处理流程（Recipe）：比对输入和人工结果（如有），优先使用公式或 SQL，仅为它们不好做或超出范围的部分加入 Python，可混合步骤，由相应引擎执行、"
-             "出错自动修复、校验并验证能否复现人工结果，最后输出 Excel。默认只完成本次处理；仅当用户明确要求长期重复执行时才保存流程。",
+             "［数据修改优先］规划并执行本次表格处理步骤：比对输入和人工结果（如有），优先使用公式或 SQL，仅为它们不好做或超出范围的部分加入 Python，可混合步骤，由相应引擎执行、"
+             "出错自动修复、校验并验证能否复现人工结果，最后输出 Excel。调用本工具不代表保存流程；仅当用户明确要求保存或保留本套规则供以后复用时才持久化。",
              _obj({"requirement": {**_STR, "description": "清楚的处理说明：要做哪些处理、业务规则、输出什么（相当于 SheetAgent 的 process.md）"},
                    "input_tables": {**_STR_LIST, "description": "原始上传的输入表名；不填自动使用。辅助分析结果用于完善 requirement，不代替原始输入"},
                    "input_files": {"type": "object", "additionalProperties": {"type": "string"}, "description": "可选：{完整文件输入别名: file_id}，用于 Python 排版或读取原始工作簿；与 input_tables 可同时提供"},
                    "expected_tables": {**_STR_LIST, "description": "人工做好的期望结果表（如有）；不填会自动使用标记为期望结果的表"},
-                   "recipe_name": {**_STR, "description": "可选：流程名"}}, ["requirement"]),
-             modify, stream=_stream_build_recipe, label=lambda a: "生成处理流程"),
+                   "recipe_name": {**_STR, "description": "可选：本次处理名称，不构成保存授权"}}, ["requirement"]),
+             modify, stream=_stream_build_recipe, label=lambda a: "处理表格"),
         Tool("revise_recipe", "通过对话修改流程的输入、输出或指定步骤，并从输入开始重新执行完整流程、适配上下游依赖和验证。"
              "输入新增/删除/替换用 input_changes；单步修改用 step_ids；输出表增删改可提供完整 output_sheets。"
-             "删除流程中的输入/输出仅修改流程定义，不删除用户原文件。保存授权由本轮用户意图决定。",
+             "删除流程中的输入/输出仅修改本次处理定义，不删除用户原文件。仅在用户明确要求保存或长期更新规则时持久化，选中或修改流程本身不构成保存授权。",
              _obj({"instruction": {**_STR, "description": "修改要求"},
                    "recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
                    "base_version": {"type": "integer", "minimum": 1, "description": "所修改流程的当前版本，选中流程时必须与选择版本相同；版本已更新时先刷新"},

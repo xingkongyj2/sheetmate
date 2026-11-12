@@ -341,7 +341,7 @@ def test_modify_mode_builds_verified_recipe(client, samples, fake_llm):
                 {"text": "## ✅ 操作结果\n- 已生成流程"}],
         json_handlers=[("Recipe 生成器", _llm_recipe())],
     )
-    events = _chat(client, conv, "按人工结果的样子整理账单，以后每月都要做")
+    events = _chat(client, conv, "按人工结果的样子整理账单，保存为以后每月重复执行的流程")
     types = [e["type"] for e in events]
     for t in ("recipe_evidence", "recipe_generated", "recipe_step_done", "recipe_verify", "recipe_saved", "file"):
         assert t in types, t

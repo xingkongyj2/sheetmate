@@ -504,6 +504,9 @@ export type ExecutionStatus = 'running' | 'completed' | 'incomplete' | 'waiting'
 /** 整次任务的状态；与一次模型调用或单个步骤结束分开保存。 */
 export interface ExecutionState {
   status: ExecutionStatus
+  /** 当前回复开始时的 Unix 时间戳（毫秒）；继续任务时重新开始。 */
+  started_at?: number
+  duration_ms?: number
   code?: string
   summary?: string
   finish_reason?: string | null
@@ -536,6 +539,8 @@ export interface ExecutionEvent extends AgentEvent, ExecutionState {
 }
 
 export interface AgentEvent {
+  /** Whether the exact recipe definition used for this run was explicitly saved. */
+  recipe_persisted?: boolean
   type: string
   details?: PublicOperationDetail[]
   [key: string]: any // eslint-disable-line @typescript-eslint/no-explicit-any

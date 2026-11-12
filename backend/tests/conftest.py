@@ -103,7 +103,7 @@ class FakeLLM:
         if "重复流程删除授权判断助手" in blob:
             return {"delete_recipe_ids": self.delete_recipe_ids}
         if "处理意图判断助手" in blob:
-            return {"mode": self.intent_mode}
+            return {"mode": self.intent_mode, "save_recipe": self.save_recipe_requested}
         if "长期记住" in blob:
             return {"items": []}
         return {}
