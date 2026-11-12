@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as dt
 import difflib
+import re
 import warnings
 from bisect import bisect_left
 from collections import Counter
@@ -437,6 +438,7 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed:
             "本次行列重排会影响原表的公式、合并结构或其他格式，暂不能安全保留；已停止输出，原文件未改动"
         )
 
+    footer = _capture_footer(ws, original)  # 重建会删掉表头以下所有行，合计行先记下来，数据写完后放回去
     # 1. 数据区里的合并单元格先拆掉（否则删行会留下残骸），然后整块删除
     for rng in list(ws.merged_cells.ranges):
         if rng.min_row >= first_data or (relaxed and rng.max_row >= first_data):
@@ -461,10 +463,118 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed:
         if height:
             ws.row_dimensions[excel_row].height = height
 
+    if footer is not None:
+        _restore_footer(ws, footer, mapping, len(df), first_data, notices)
+
     if relaxed:
         _resize_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
     else:
         _fix_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
+
+
+# ---------------------------------------------------------------------------
+# 重建数据区时保留页脚合计行
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Footer:
+    cells: list[tuple[int, int, Any, str, Any, Any]]  # (原行号, 原列号, 值, 数据类型, 样式, 批注)
+    heights: dict[int, float | None]
+    merges: list[tuple[int, int, int, int]]  # min_row, min_col, max_row, max_col（只含整块落在页脚行内的）
+    first_row: int
+    old_first_data: int
+    old_last_data: int  # 原数据区最后一行（Excel 行号）
+    old_rows: int
+
+
+def _capture_footer(ws: Worksheet, original: SheetData) -> _Footer | None:
+    footer_index = original.header.footer_rows or []
+    data_index = original.header.row_index or []
+    if not footer_index:
+        return None
+    rows = {index + 1 for index in footer_index}
+    cells = [(row, column, cell.value, cell.data_type, copy(cell._style), copy(cell.comment) if cell.comment else None)
+             for (row, column), cell in ws._cells.items() if row in rows and not isinstance(cell, MergedCell)]
+    merges = [(m.min_row, m.min_col, m.max_row, m.max_col) for m in ws.merged_cells.ranges
+              if m.min_row >= min(rows) and m.max_row <= max(rows)]
+    heights = {row: ws.row_dimensions[row].height if row in ws.row_dimensions else None for row in rows}
+    last_data = data_index[-1] + 1 if data_index else min(rows) - 1
+    first_data = data_index[0] + 1 if data_index else min(rows)
+    return _Footer(cells, heights, merges, min(rows), first_data, last_data, len(data_index))
+
+
+def _remap_columns(formula: str, columns: dict[int, int]) -> str | None:
+    """按“原列号 → 新列号”改写公式里本表的列引用；有引用落在已不存在的列上时返回 None（不猜）。"""
+    from openpyxl.formula import Tokenizer
+    from openpyxl.utils import column_index_from_string
+
+    part = re.compile(r"^(\$?)([A-Za-z]{1,3})(\$?\d*)$")
+
+    def convert(text: str) -> str | None:
+        match = part.match(text)
+        if not match:
+            return None
+        new = columns.get(column_index_from_string(match.group(2).upper()))
+        return None if new is None else f"{match.group(1)}{get_column_letter(new)}{match.group(3)}"
+
+    try:
+        tokens = Tokenizer(formula if formula.startswith("=") else "=" + formula).items
+    except Exception:
+        return None
+    pieces: list[str] = []
+    for token in tokens:
+        if token.type == "OPERAND" and token.subtype == "RANGE" and "!" not in token.value:
+            converted = [convert(item) for item in token.value.split(":")]
+            if any(item is None for item in converted):
+                return None
+            pieces.append(":".join(converted))  # type: ignore[arg-type]
+        else:
+            pieces.append(token.value)
+    return "=" + "".join(pieces)
+
+
+def _restore_footer(ws: Worksheet, footer: _Footer, mapping: list[int | None], new_rows: int, first_data: int,
+                    notices: list[str]) -> None:
+    """把页脚放回数据区下面：列位置跟着列映射走，公式的列引用随之改写，行范围随数据行的增减扩缩。"""
+    columns = {source: index + 1 for index, source in enumerate(mapping) if source is not None}
+    last_new = first_data + new_rows - 1
+    gap = footer.first_row - footer.old_last_data - 1
+    base = last_new + 1 + gap
+    row_map: Any = None
+    if new_rows > footer.old_rows:
+        row_map = InsertedRows(footer.old_last_data + 1, new_rows - footer.old_rows, True)
+    elif new_rows < footer.old_rows:
+        row_map = as_row_map(set(range(first_data + new_rows, footer.old_last_data + 1)))
+    for row, column, value, kind, style, comment in footer.cells:
+        target_column = columns.get(column)
+        if target_column is None:
+            continue  # 这一列已经不在结果里了
+        cell = ws.cell(base + (row - footer.first_row), target_column)
+        cell._style = style
+        if kind == "f" and isinstance(value, str):
+            remapped = _remap_columns(value, columns)
+            if remapped is None:
+                notices.append(f"合计行里的公式 {value} 引用了已经不在结果里的列，请核对。")
+                remapped = value
+            elif row_map is not None:
+                try:
+                    remapped = adjust_formula(remapped, ws.title, {ws.title: row_map})
+                except ValueError:
+                    notices.append(f"合计行里的公式 {value} 的范围未能随数据行自动调整，请核对。")
+            cell.value = remapped
+        else:
+            cell.value = value
+        if comment is not None:
+            cell.comment = comment
+    for row, height in footer.heights.items():
+        if height:
+            ws.row_dimensions[base + (row - footer.first_row)].height = height
+    for min_row, min_col, max_row, max_col in footer.merges:
+        new_min, new_max = columns.get(min_col), columns.get(max_col)
+        if new_min is not None and new_max is not None and new_min <= new_max:
+            offset = base - footer.first_row
+            ws.merge_cells(start_row=min_row + offset, start_column=new_min, end_row=max_row + offset, end_column=new_max)
 
 
 # ---------------------------------------------------------------------------

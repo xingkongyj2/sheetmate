@@ -692,7 +692,9 @@ RECIPE_LEARN_PROMPT = """## 处理说明（用户的需求）
   · row_count_ratio：{{"input": "输入表名", "min_ratio": 0.3, "max_ratio": 1.5, "sheet": "输出sheet名"}}
   · sum_preservation：{{"column": "输出列名", "input": "输入表名", "input_column": "输入列名", "input_filter": "可选：和筛选步骤相同的条件，例如 \"状态\" = '已完成'", "tolerance": 0.001, "sheet": "输出sheet名"}}
     （流程里有筛选步骤时，输出合计只对应筛选后的数据，必须写 input_filter，否则合计一定对不上；
-      两个输出 sheet 之间对账时，input 写另一个输出 sheet 的名字，例如汇总表的合计 = 明细表的合计）
+      两个输出 sheet 之间对账时，input 写另一个输出 sheet 的名字，例如汇总表的合计 = 明细表的合计；
+      用户要求修改、重算或新增某列的数值（改金额、改单价、调整数量、追加记录）时，那一列的合计本来就会变，
+      不要对它写 sum_preservation，否则正确的修改会被判成“合计对不上”。没有改动的数值列才适合做合计对账）
   · no_nulls / unique_check / column_exists：{{"columns": ["列名"], "sheet": "输出sheet名"}}
   · type_check：{{"columns": {{"列名": "numeric|text|datetime"}}, "sheet": "输出sheet名"}}
   sheet 写输出 sheet 名（不写表示检查所有输出 sheet）；列名必须是那个 sheet 里真实存在的列
