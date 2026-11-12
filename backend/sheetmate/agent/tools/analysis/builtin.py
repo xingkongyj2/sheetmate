@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 import pandas as pd
+from sheetmate.agent.tools.analysis.sql_reuse import empty_query_key, reusable_empty_query
 from sheetmate.agent.tools.sql_scope import checked_sql_tables
 from sheetmate.engine.formulas.lineage import compile_sql_row_lineage, create_table_with_optional_lineage
 from sheetmate.engine.tables.analysis import column_stats, table_info, table_info_text, value_counts
@@ -102,20 +103,37 @@ def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     if result_name:
         # Execute once, then use the stored row count and revision on all pages.
         with ctx.ws.locked():
-            out = _result_name(ctx, result_name, "查询结果")
-            lineage = compile_sql_row_lineage(ctx.ws, sql, references[0]) if len(set(references)) == 1 else None
-            create_table_with_optional_lineage(
-                ctx.ws, out, sql, lineage, label=str(result_name), source="computed", role="derived", created_by="run_sql",
-                description=str(args.get("description") or "SQL 查询结果"), step={"formula": "custom_sql", "params": {"sql": sql}},
-            )
+            key = empty_query_key(ctx.ws, sql)
+            info = reusable_empty_query(ctx, key)
+            reused = info is not None
+            if info is None:
+                out = _result_name(ctx, result_name, "查询结果")
+                lineage = compile_sql_row_lineage(ctx.ws, sql, references[0]) if len(set(references)) == 1 else None
+                info = create_table_with_optional_lineage(
+                    ctx.ws, out, sql, lineage, label=str(result_name), source="computed", role="derived", created_by="run_sql",
+                    description=str(args.get("description") or "SQL 查询结果"), step={"formula": "custom_sql", "params": {"sql": sql}},
+                )
+                if key is not None and info.rows == 0:
+                    info = ctx.ws.update_meta(out, step={**info.step, "empty_query_snapshot": {
+                        "key": key, "revision": info.revision,
+                    }})
+            out = info.name
             if ctx.table_filter is not None:
                 ctx.table_filter.add(out)
-            info = ctx.ws.require(out)
             text = render_table_observation(ctx.ws, out, expected_revision=info.revision)
+            if info.rows == 0:
+                observation = json.loads(text)
+                observation["query_note"] = (
+                    "当前输入版本按此条件筛选得到 0 行，这是有效的查询结果。"
+                    "无需重复执行相同查询；如仍有待确认的目标，请检查尚未核对的条件或原始取值，"
+                    "否则依据已有结果说明未发现匹配记录。"
+                )
+                text = json.dumps(observation, ensure_ascii=False, separators=(",", ":"))
             payload = table_payload(ctx.ws, out)
-        return ToolResult(text, summary=f"生成「{out}」{info.rows} 行", tables=[payload],
+        action = "复用" if reused else "生成"
+        return ToolResult(text, summary=f"{action}「{out}」{info.rows} 行", tables=[payload],
                           public_details=[section for section in [*details,
-                              public_detail_section("查询结果", [f"生成「{out}」：{info.rows} 行 × {len(info.columns)} 列。"]),
+                              public_detail_section("查询结果", [f"{action}「{out}」：{info.rows} 行 × {len(info.columns)} 列。"]),
                               public_detail_section("结果字段", info.column_names)] if section["items"]])
     # One lookahead row distinguishes a known total from a bounded query. Do
     # not materialize unnamed reads or report the read cap as a true total.

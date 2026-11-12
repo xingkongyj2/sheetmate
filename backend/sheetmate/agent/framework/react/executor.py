@@ -83,7 +83,8 @@ _TOOL_MARKER = "<｜tool▁call▁begin｜>"
 _TOOL_RE = re.compile(r"<｜tool[\s\S]*?(?:<｜tool▁calls?▁end｜>|$)")
 _EXPLORE_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "list_files", "get_recipe"}
 _READ_OBSERVATION_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql"}
-_MAX_IDENTICAL_OBSERVATIONS = 20
+_MAX_IDENTICAL_OBSERVATIONS = 4
+_OBSERVATION_HISTORY_LIMIT = 32
 _RECOVERABLE_MODEL_ERRORS = frozenset({
     "stream_incomplete", "empty_response", "tool_protocol", "connection_error", "timeout", "stream_idle_timeout",
 })
@@ -139,9 +140,19 @@ class _ScriptAttempt:
 class _ReadProgress:
     key: str | None = None
     repetitions: int = 0
+    recent: list[str] = field(default_factory=list)
 
     def observe(self, key: str | None) -> bool:
-        self.repetitions = self.repetitions + 1 if key and key == self.key else int(key is not None)
+        if key is None:
+            self.recent.clear()
+            self.repetitions = 0
+        else:
+            # Alternating two already observed queries is also a stalled loop.
+            repeated = key == self.key or key in self.recent
+            self.repetitions = self.repetitions + 1 if repeated else 0
+            self.recent = [item for item in self.recent if item != key]
+            self.recent.append(key)
+            self.recent = self.recent[-_OBSERVATION_HISTORY_LIMIT:]
         self.key = key
         return self.repetitions >= _MAX_IDENTICAL_OBSERVATIONS
 
@@ -627,7 +638,7 @@ class AgentExecutor:
                 msgs.extend({"role": "user", "content": item["content"]} for item in fresh)
             applied_revision = runtime.revision
             no_progress = False
-            read_progress.key, read_progress.repetitions = None, 0
+            read_progress.observe(None)
             protocol_pending = False
             # New inbound work has its own bounded decision window. The
             # shared tool/model/token/time budgets remain spent across it.
@@ -690,7 +701,7 @@ class AgentExecutor:
                              "max_iterations": "本轮执行轮数已达到上限，任务尚未确认全部完成。"}.get(limit_code, "")
             if final_round:
                 if no_progress:
-                    msgs.append({"role": "user", "content": f"对相同版本输入已连续读取{_MAX_IDENTICAL_OBSERVATIONS}次并得到相同结果，本轮停止重复操作。请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。"})
+                    msgs.append({"role": "user", "content": f"对相同版本输入已连续{_MAX_IDENTICAL_OBSERVATIONS}次重复读取已有结果，本轮停止重复操作。0 行是有效查询结果，不需要反复重查。请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。"})
                 if budget_exhausted:
                     msgs.append({"role": "user", "content": RECOVERY_BUDGET_MESSAGE})
                 msgs.append({"role": "user", "content": FINAL_ROUND_MESSAGE})
@@ -1244,7 +1255,7 @@ class AgentExecutor:
                 if executed:
                     if name != RECONSIDER_TOOL:
                         recovery_finish_prompts = 0
-                    observation = _read_observation_key(name, args, sources, result)
+                    observation = _read_observation_key(name, args, sources, ToolResult(**safe_payload))
                     no_progress = read_progress.observe(observation)
                 explored += name in _EXPLORE_TOOLS
                 built = built or name in _RECIPE_TOOLS
@@ -1365,12 +1376,23 @@ def _unique_call_ids(calls: list[dict[str, Any]], messages: list[dict[str, Any]]
 
 def _read_observation_key(name: str, args: dict[str, Any] | None, sources: list[dict[str, Any]],
                           result: ToolResult) -> str | None:
-    """Convergence is limited to successful, versioned reads, never writes."""
+    """Recognize repeated observations even when SELECT creates a named snapshot."""
     if name not in _READ_OBSERVATION_TOOLS or not result.ok or not sources:
         return None
-    if name == "run_sql" and (args or {}).get("result_name"):
-        return None  # A named query materializes a new table, so it is a write.
-    value = {"tool": name, "args": args, "sources": sources, "result": result.text}
+    observation: Any = result.text
+    if name == "run_sql":
+        try:
+            observation = json.loads(result.text)
+        except (ValueError, TypeError):
+            return None  # Projected receipts cannot prove equal query results.
+        if not isinstance(observation, dict) or observation.get("encoding") not in {"rows", "json_fragment"}:
+            return None
+        # Result names/revisions/cursors change on materialization. Actual
+        # data, completeness and the pre-execution input versions must agree.
+        observation = {key: value for key, value in observation.items()
+                       if key not in {"table", "revision", "next_call", "next_action", "completeness_scope"}}
+        args = {"sql": (args or {}).get("sql")}
+    value = {"tool": name, "args": args, "sources": sources, "result": observation}
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
 
 

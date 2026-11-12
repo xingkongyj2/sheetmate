@@ -21,7 +21,7 @@ from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import Session
 
 from sheetmate.core.security.payload import _FORBIDDEN_KEYS, _FORBIDDEN_SUFFIXES
-from sheetmate.db.models import AgentExecution, AgentToolReceipt, Conversation, Message, User, now
+from sheetmate.db.models import AgentExecution, AgentToolOutput, AgentToolReceipt, Conversation, Message, User, now
 from sheetmate.core.errors import Conflict, Forbidden, NotFound, ServiceError
 
 
@@ -31,6 +31,7 @@ RECOVERABLE_STATUSES = frozenset({"running", "interrupted", "paused"})
 TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "expired", "blocked"})
 STATUSES = RECOVERABLE_STATUSES | TERMINAL_STATUSES
 MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
+_UI_EVENT_TOOL = "__checkpoint_ui_event__"
 _SECRET_VALUE = re.compile(
     r"(?:-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----|"
     r"\bBearer\s+[a-zA-Z0-9._~+/=-]{12,}|"
@@ -63,7 +64,7 @@ def fingerprint(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
-def _payload(value: Any, *, limit: int = MAX_CHECKPOINT_BYTES) -> dict[str, Any]:
+def _payload(value: Any, *, limit: int | None = MAX_CHECKPOINT_BYTES) -> dict[str, Any]:
     """Reject forbidden durable data, without rewriting authoritative evidence.
 
     Ordinary business contacts, identifiers, SQL and script code are preserved.
@@ -111,11 +112,67 @@ def _payload(value: Any, *, limit: int = MAX_CHECKPOINT_BYTES) -> dict[str, Any]
 
     walk(value)
     encoded = _canonical(value)
-    if len(encoded.encode("utf-8")) > limit:
+    if limit is not None and len(encoded.encode("utf-8")) > limit:
         raise ServiceError("执行检查点过大，请保存结果引用而非完整数据。")
     # Copy at the boundary so later in-memory mutation cannot rewrite the
     # checkpoint without passing through version checks again.
     return json.loads(encoded)
+
+
+def _externalize_ui_events(db: Session, execution: AgentExecution, checkpoint: dict[str, Any]) -> None:
+    """Store each immutable UI event once, rather than copying the transcript.
+
+    These records share the checkpoint transaction and conversation lifetime.
+    Content identities let repeated snapshots reuse all already saved events,
+    including when a new control instance resumes an older execution.
+    """
+    from sheetmate.services.execution.tool_results import save_tool_result
+
+    ui = checkpoint.get("ui")
+    events = ui.get("stored") if isinstance(ui, dict) else None
+    if not isinstance(events, list) or not events:
+        return
+    pending = {"ui:" + fingerprint(event): event for event in events
+               if isinstance(event, dict) and event.get("type") != "checkpoint_ui_event"}
+    if not pending:
+        return
+    # Read only small identities, never materialize saved event payloads merely
+    # to make another checkpoint. One query also avoids one insert per old event.
+    references = dict(db.execute(select(AgentToolOutput.call_id, AgentToolOutput.id).where(
+        AgentToolOutput.execution_id == execution.id, AgentToolOutput.tool_name == _UI_EVENT_TOOL)).all())
+    for call_id, event in pending.items():
+        if call_id not in references:
+            saved = save_tool_result(db, user_id=execution.user_id, conversation_id=execution.conversation_id,
+                execution_id=execution.id, tool_name=_UI_EVENT_TOOL, call_id=call_id, payload={"events": [event]})
+            references[call_id] = saved["result_id"]
+    ui["stored"] = [{"type": "checkpoint_ui_event", "result_id": references["ui:" + fingerprint(event)]}
+                    if isinstance(event, dict) and event.get("type") != "checkpoint_ui_event" else event
+                    for event in events]
+
+
+def restore_checkpoint_ui(db: Session, execution: AgentExecution) -> dict[str, Any]:
+    """Hydrate UI locators under the same live scope checks as tool outputs."""
+    from sheetmate.services.execution.tool_results import resolve_tool_result_events
+
+    checkpoint = _payload(execution.checkpoint)
+    ui = checkpoint.get("ui")
+    events = ui.get("stored") if isinstance(ui, dict) else None
+    if not isinstance(events, list):
+        return checkpoint
+    restored = []
+    for event in events:
+        if not isinstance(event, dict) or event.get("type") != "checkpoint_ui_event":
+            restored.append(event)
+            continue
+        recovered = resolve_tool_result_events(db, user_id=execution.user_id,
+            conversation_id=execution.conversation_id, result_id=event.get("result_id"))
+        output = db.get(AgentToolOutput, event.get("result_id"))
+        if (output is None or output.execution_id != execution.id or output.tool_name != _UI_EVENT_TOOL
+                or len(recovered) != 1):
+            raise ServiceError("执行界面事件记录无效，无法恢复。")
+        restored.extend(recovered)
+    ui["stored"] = restored
+    return checkpoint
 
 
 def validate_inputs(saved: dict[str, Any], current: dict[str, Any]) -> None:
@@ -266,7 +323,11 @@ def save_checkpoint(
     execution = get_execution(db, execution_id, user_id=user_id)
     if assistant_message_id is not None:
         _message(db, assistant_message_id, execution.conversation_id, "assistant")
-    values: dict[str, Any] = {"checkpoint": _payload(checkpoint), "status": status}
+    # Validate the full snapshot before moving data out of its bounded envelope;
+    # locators must not become a way around the durable-data safeguards.
+    safe_checkpoint = _payload(checkpoint, limit=None)
+    _externalize_ui_events(db, execution, safe_checkpoint)
+    values: dict[str, Any] = {"checkpoint": _payload(safe_checkpoint), "status": status}
     if assistant_message_id is not None:
         values["assistant_message_id"] = assistant_message_id
     return _cas(db, execution, execution.version if expected_version is None else expected_version, values)

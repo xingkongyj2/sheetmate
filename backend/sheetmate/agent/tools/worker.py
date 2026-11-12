@@ -99,6 +99,14 @@ def _snapshot_request(name: str, args: dict[str, Any], ctx: Any) -> dict[str, An
             # Names reserve all existing results without transferring their
             # data. The child must choose the same unique name as the parent.
             reserved_names = [info.name for info in ctx.ws.list_tables()]
+            if name == "run_sql" and args.get("result_name"):
+                from sheetmate.agent.tools.analysis.sql_reuse import empty_query_key, reusable_empty_query
+
+                cached = reusable_empty_query(ctx, empty_query_key(ctx.ws, args["sql"]))
+                if cached is not None and cached.name not in dependencies:
+                    # At most one empty frame crosses the worker boundary, so
+                    # a repeated query can reuse its receipt in the child too.
+                    dependencies = [*dependencies, cached.name]
             state = [{"meta": ctx.ws.require(table).to_dict(), "frame": ctx.ws.df(table)}
                      for table in dependencies]
     return {"name": name, "args": args, "state": state, "mode": ctx.mode,

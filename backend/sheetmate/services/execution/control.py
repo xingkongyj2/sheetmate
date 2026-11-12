@@ -183,7 +183,7 @@ class ExecutionControl:
         with session_scope() as db:
             execution = state_store.get_execution(db, job.execution_id, user_id=user_id)
             self.version = execution.version
-            self.checkpoint = deepcopy(execution.checkpoint)
+            self.checkpoint = state_store.restore_checkpoint_ui(db, execution)
             self.request = deepcopy(execution.request)
             self.assistant_message_id = execution_assistant_id(db, execution)
             if self.assistant_message_id is not None:
@@ -196,10 +196,12 @@ class ExecutionControl:
         self._recipe_binding_starts: dict[str, dict[str, str | None]] = {}
 
     def snapshot(self, runtime_state: dict[str, Any] | None = None) -> dict[str, Any]:
-        from sheetmate.agent.memory.short_term.runtime import durable_value
+        from sheetmate.agent.memory.short_term.runtime import compact_runtime_state, durable_value
         checkpoint = deepcopy(self.checkpoint)
         if runtime_state is not None:
             checkpoint["runtime"] = deepcopy(runtime_state)
+        if isinstance(checkpoint.get("runtime"), dict):
+            checkpoint["runtime"] = compact_runtime_state(checkpoint["runtime"])
         if callable(self.ui_snapshot):
             checkpoint["ui"] = self.ui_snapshot()
         if self.ctx is not None:
@@ -366,7 +368,9 @@ class ExecutionControl:
                 # The process can disappear inside a provider call, after its
                 # last checkpoint and before its internal reservation flushes.
                 from sheetmate.agent.llm.budget import request_size
-                messages = ((self.checkpoint.get("runtime") or {}).get("loop") or {}).get("messages", [])
+                from sheetmate.agent.memory.short_term.runtime import restore_runtime_state
+                runtime = restore_runtime_state(self.checkpoint.get("runtime") or {})
+                messages = (runtime.get("loop") or {}).get("messages", [])
                 _, prompt = request_size({"messages": messages})
                 budget.calls = before + 1
                 budget.prompt_tokens += prompt

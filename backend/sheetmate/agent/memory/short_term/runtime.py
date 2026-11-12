@@ -19,7 +19,7 @@ class AgentRuntime:
         start_tool: Callable[[str, str, dict[str, Any]], Awaitable[dict[str, Any] | None]],
         finish_tool: Callable[[str, dict[str, Any], dict[str, Any]], Awaitable[None]],
     ):
-        self.state = copy.deepcopy(state or {})
+        self.state = restore_runtime_state(state or {})
         self._save, self._poll = save, poll
         self._start_tool, self._finish_tool = start_tool, finish_tool
 
@@ -70,13 +70,40 @@ class AgentRuntime:
         return fresh
 
     async def checkpoint(self) -> None:
-        await self._save(copy.deepcopy(self.state))
+        await self._save(compact_runtime_state(self.state))
 
     async def started(self, call_id: str, name: str, args: dict[str, Any]) -> dict[str, Any] | None:
         return await self._start_tool(call_id, name, args)
 
     async def finished(self, call_id: str, result: dict[str, Any]) -> None:
-        await self._finish_tool(call_id, result, copy.deepcopy(self.state))
+        await self._finish_tool(call_id, result, compact_runtime_state(self.state))
+
+
+def compact_runtime_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Store shared loop snapshots once without dropping recovery information."""
+    result = durable_value(state)
+    loop = result.get("loop")
+    if isinstance(loop, dict):
+        shared = dict(loop.get("_shared_state") or {})
+        for nested, root in (("messages", "conversation"), ("budget", "budget")):
+            if nested in loop and root in result and loop[nested] == result[root]:
+                loop.pop(nested)
+                shared[nested] = root
+        if shared:
+            loop["_shared_state"] = shared
+    return result
+
+
+def restore_runtime_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Expand compact snapshots; older checkpoints already contain both copies."""
+    result = copy.deepcopy(state)
+    loop = result.get("loop")
+    if isinstance(loop, dict):
+        shared = loop.pop("_shared_state", {})
+        for nested, root in (("messages", "conversation"), ("budget", "budget")):
+            if shared.get(nested) == root and nested not in loop and root in result:
+                loop[nested] = copy.deepcopy(result[root])
+    return result
 
 
 def durable_value(value: Any) -> Any:
