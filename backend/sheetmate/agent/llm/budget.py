@@ -18,7 +18,8 @@ def request_size(kwargs: dict[str, Any]) -> tuple[int, int]:
     def text_only(value: Any) -> Any:
         nonlocal images
         if isinstance(value, dict):
-            if value.get("type") in {"image_url", "input_image"}:
+            # JSON Schema 里的 "type" 可以是列表（如 ["string", "null"]），列表不可哈希，不能直接做集合成员判断。
+            if isinstance(value.get("type"), str) and value["type"] in {"image_url", "input_image"}:
                 images += 1
                 return {"type": "image", "detail": (value.get("image_url") or {}).get("detail", "auto") if isinstance(value.get("image_url"), dict) else "auto"}
             return {key: text_only(item) for key, item in value.items()}
@@ -46,7 +47,7 @@ def context_profile(kwargs: dict[str, Any]) -> dict[str, Any]:
         def omit_image_bytes(item: Any) -> Any:
             nonlocal images
             if isinstance(item, dict):
-                if item.get("type") in {"image_url", "input_image"}:
+                if isinstance(item.get("type"), str) and item["type"] in {"image_url", "input_image"}:
                     images += 1
                     detail = (item.get("image_url") or {}).get("detail", "auto") \
                         if isinstance(item.get("image_url"), dict) else "auto"

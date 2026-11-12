@@ -209,10 +209,11 @@ def save_upload(
 
 
 def register_output(db: Session, *, path: Path, filename: str, customer_id: str | None, conversation_id: str | None,
-                    run_id: str | None, user_id: int | None, delivery_status: str = "final") -> FileRecord:
-    """登记系统生成的结果文件。"""
+                    run_id: str | None, user_id: int | None, delivery_status: str = "final",
+                    sheets: list[SheetData] | None = None) -> FileRecord:
+    """登记系统生成的结果文件。sheets 为调用方刚读取的同一文件内容时可避免重复解析。"""
     try:
-        profile = profile_file(path)
+        profile = profile_file(path, sheets=sheets)
     except ReadError:
         profile = {}
     profile["original_filename"] = filename
@@ -233,12 +234,12 @@ def register_output(db: Session, *, path: Path, filename: str, customer_id: str 
     return record
 
 
-def profile_file(path: Path) -> dict[str, Any]:
-    """文件画像（不含数据预览，预览按需读取）。"""
+def profile_file(path: Path, *, sheets: list[SheetData] | None = None) -> dict[str, Any]:
+    """文件画像（不含数据预览，预览按需读取）。sheets 为已读取的同一文件内容时不再重复解析。"""
     if path.suffix.lower() in IMAGE_SUFFIXES:
         return {**image_profile(path), FILE_VERSION_KEY: file_version(path)}
     try:
-        sheets = _read_file_copy(path)
+        sheets = sheets if sheets is not None else _read_file_copy(path)
     except ReadError as exc:
         # 空白或只含样式的合法工作簿仍能交给脚本处理，损坏文件不能借此绕过校验。
         if path.suffix.lower() not in {".xlsx", ".xlsm"} or "没有可读取的数据" not in str(exc):
@@ -260,6 +261,11 @@ def profile_file(path: Path) -> dict[str, Any]:
 def _read_file_copy(path: Path) -> list[SheetData]:
     with temporary_file_copies() as files:
         return read_workbook(files.file_copy(path))
+
+
+def read_file_sheets(path: Path) -> list[SheetData]:
+    """读取文件所有工作表（基于独立副本）。同一文件的登记与载入应共用这一次读取。"""
+    return _read_file_copy(path)
 
 
 def file_dict(record: FileRecord) -> dict[str, Any]:
@@ -678,7 +684,8 @@ def table_base_name(filename: str) -> str:
     return stem or Path(filename).stem
 
 
-def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None = None) -> list[TableInfo]:
+def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None = None,
+                        sheets: list[SheetData] | None = None) -> list[TableInfo]:
     """把文件的每个 sheet 存成工作区里的一张表。期望结果文件的表名用「期望_sheet名」。"""
     source = Path(record.stored_path)
     profile = dict(getattr(record, "profile", None) or {})
@@ -687,7 +694,8 @@ def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None 
     original_bytes = path is None or content_digest(path) == version["sha256"]
     if profile.get("file_only") and same_version and original_bytes:
         return []
-    sheets = read_workbook(path) if path is not None else _read_file_copy(source)
+    if sheets is None:  # 调用方刚读取过同一份内容（例如新建文件登记后立即载入）时直接复用
+        sheets = read_workbook(path) if path is not None else _read_file_copy(source)
     if original_bytes:
         if not same_version:
             # 旧画像没有可验证的版本，或原件已更新：仅对本次实际读取的数据重新画像。

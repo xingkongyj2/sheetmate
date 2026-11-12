@@ -17,6 +17,7 @@ from sheetmate.db.models import Conversation, Customer, FileRecord, FileRecipe, 
 from sheetmate.engine.workbooks.copies import FileCopies
 from sheetmate.engine.workbooks.reader import ReadError
 from sheetmate.engine.workbooks.builder import write_created_workbook
+from sheetmate.engine.workbooks.verify import verify_created_workbook
 from sheetmate.engine.tables.workspace import TableInfo, Workspace
 from sheetmate.recipe.learning.matcher import Candidate, match_inputs
 from sheetmate.recipe.definition.compiler import FileDependency, compile_from_workspace, with_workbook_export
@@ -314,7 +315,8 @@ class ConversationHost:
         request = dict(spec)
         base_id = request.pop("base_file_id", None)
         saved = self.created_workbook_spec(str(base_id)) if base_id is not None else None
-        prepared = prepare_workbook_spec(self.ws, request, base=saved["spec"] if saved else None)
+        prepare_notes: list[str] = []
+        prepared = prepare_workbook_spec(self.ws, request, base=saved["spec"] if saved else None, notes=prepare_notes)
         name = file_service.safe_filename(filename)
         if not name.lower().endswith(".xlsx"):
             name += ".xlsx"
@@ -328,12 +330,20 @@ class ConversationHost:
                 path = run_service.output_path(run, name)
                 written = write_created_workbook(path, prepared)
                 written_output = True
+                mismatches = verify_created_workbook(path, prepared)  # 回读实际文件，与声明逐项比对
+                if mismatches:
+                    raise ValueError("生成的文件与声明不一致，已放弃交付：" + "；".join(mismatches))
+                try:  # 登记画像和载入工作区共用这一次解析；空白工作簿读不出数据时各自按原逻辑处理
+                    parsed = file_service.read_file_sheets(path)
+                except ReadError:
+                    parsed = None
                 record = file_service.register_output(db, path=path, filename=name, customer_id=self.customer_id,
                                                       conversation_id=self.conversation_id, run_id=run.id, user_id=self.user_id,
-                                                      delivery_status="candidate" if self.defer_delivery else "final")
-                warnings: list[str] = []
+                                                      delivery_status="candidate" if self.defer_delivery else "final",
+                                                      sheets=parsed)
+                warnings: list[str] = list(prepare_notes)
                 try:
-                    tables = file_service.load_into_workspace(self.ws, record)
+                    tables = file_service.load_into_workspace(self.ws, record, sheets=parsed)
                     for table in tables:
                         self.ws.update_meta(table.name, created_by="create_workbook")
                 except ReadError:

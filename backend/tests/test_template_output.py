@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+from copy import copy
 from zipfile import ZipFile
 
 import openpyxl
@@ -109,8 +110,11 @@ def test_in_place_edit_keeps_original_look(tmp_path):
     assert ws.max_row == 2 + 4 and ws["A3"].value == "A001" and ws["A4"].value == "A003"
     assert ws["D3"].number_format == "#,##0.00" and ws["E3"].number_format == "yyyy/mm/dd"
     assert ws["D3"].value == 100.5 and ws["D4"].value == 1200.25
-    # 斑马纹照原样交替
-    assert ws["A3"].fill.fgColor.rgb != ZEBRA_FILL and ws["A4"].fill.fgColor.rgb == ZEBRA_FILL and ws["A5"].fill.fgColor.rgb != ZEBRA_FILL
+    # 静态底色跟随原始记录，不能为了交替色覆盖一条记录原本的格式。
+    original_book = openpyxl.load_workbook(src)
+    original = original_book["订单"]
+    assert [copy(ws.cell(row, 1).fill) for row in range(3, 7)] == [copy(original.cell(row, 1).fill) for row in (3, 5, 6, 7)]
+    original_book.close()
     # 新增列：表头样式照左边的列，数据照同类型（数字）的列
     assert ws["F2"].value == "含税金额" and ws["F2"].fill.fgColor.rgb == HEADER_FILL and ws["F2"].font.bold
     assert ws["F3"].value == 106.53 and ws["F3"].number_format == "#,##0.00"

@@ -91,7 +91,7 @@ def durable_value(value: Any) -> Any:
     def project(item: Any) -> Any:
         nonlocal images
         if isinstance(item, dict):
-            if item.get("type") in {"image_url", "input_image"}:
+            if isinstance(item.get("type"), str) and item["type"] in {"image_url", "input_image"}:
                 index, images = images, images + 1
                 return {"_runtime_image": index, "_runtime_image_digest": _image_digest(item)}
             return {str(key): project(child) for key, child in item.items()
@@ -112,7 +112,7 @@ def runtime_images(ctx: Any) -> list[dict[str, Any]]:
 
 
 def restore_messages(messages: list[dict[str, Any]], image_parts: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    images = [part for part in image_parts if part.get("type") in {"image_url", "input_image"}]
+    images = [part for part in image_parts if isinstance(part.get("type"), str) and part["type"] in {"image_url", "input_image"}]
     by_digest = {_image_digest(part): part for part in images}
 
     def restore(item: Any) -> Any:

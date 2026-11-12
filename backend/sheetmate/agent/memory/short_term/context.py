@@ -239,7 +239,7 @@ def _history_tokens(history: list[dict[str, Any]]) -> int:
 
 def _image_count(item: dict[str, Any]) -> int:
     return sum(1 for part in item.get("image_parts") or [] if isinstance(part, dict)
-               and part.get("type") in {"image_url", "input_image"})
+               and isinstance(part.get("type"), str) and part["type"] in {"image_url", "input_image"})
 
 
 def _text_part_tokens(item: dict[str, Any]) -> int:

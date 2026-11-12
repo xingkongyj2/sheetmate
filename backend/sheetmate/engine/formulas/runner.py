@@ -12,6 +12,7 @@ from typing import Any
 
 from sheetmate.engine.tables.analysis import _require_complete_data
 from sheetmate.engine.formulas import FormulaLibrary
+from sheetmate.engine.formulas.lineage import compile_row_lineage, create_table_with_optional_lineage
 from sheetmate.engine.tables.sql import frame_rows
 from sheetmate.engine.tables.workspace import TableInfo, Workspace
 
@@ -75,15 +76,17 @@ def apply_formula(
         for source in dict.fromkeys(plan.inputs):
             _require_complete_data(ws.require(source))
         rows_in = {t: ws.row_count(t) for t in dict.fromkeys(plan.inputs)}
-        info: TableInfo = ws.create_table_as(
-            output,
-            plan.sql,
+        meta = dict(
             label=label or output,
             source="computed",
             created_by=created_by or formula_id,
             description=description or resolved.describe(normalized),
         )
+        lineage = compile_row_lineage(resolved, normalized, plan, ws)
+        info = create_table_with_optional_lineage(ws, output, plan.sql, lineage, **meta)
     warnings = list(plan.warnings)
+    if lineage is not None and not lineage.optional and info.row_lineage is None:
+        warnings.append("该结果未保留可验证的原始行对应关系，不能按原始行继承样式。")
     metrics = dict(plan.notes.get("metrics", {}))
     if plan.post is not None:
         extra = plan.post(ws, output) or {}

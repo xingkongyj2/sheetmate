@@ -96,19 +96,36 @@ def read_workbook(
     path: str | Path,
     header_hints: dict[str, dict[str, Any]] | None = None,
     include_hidden: bool = False,
+    *,
+    raw_cache: dict[Path, list[_RawSheet]] | None = None,
+    sheet_names: set[str] | frozenset[str] | None = None,
 ) -> list[SheetData]:
-    """读取文件里的所有工作表。header_hints: {sheet 名: HeaderInfo 字典}，重复执行时沿用表头位置。"""
+    """读取文件里的所有工作表。header_hints: {sheet 名: HeaderInfo 字典}，重复执行时沿用表头位置。
+
+    sheet_names 给出时只解析这些工作表（跳过其余表的表头探测和类型推断）；原始网格由 raw_cache 共享。
+    """
     path = Path(path)
-    raws = _load_raw_sheets(path)
+    if raw_cache is None:
+        raws = _load_raw_sheets(path)
+    else:
+        key = path.resolve()
+        if key not in raw_cache:
+            raw_cache[key] = _load_raw_sheets(path)
+        raws = raw_cache[key]
     sheets: list[SheetData] = []
     for raw in raws:
         if raw.hidden and not include_hidden:
+            continue
+        if sheet_names is not None and raw.name not in sheet_names:
             continue
         hint = HeaderInfo.from_dict((header_hints or {}).get(raw.name))
         sheet = _raw_to_sheet(raw, hint)
         if sheet is not None:
             sheets.append(sheet)
     if not sheets:
+        if sheet_names is not None:
+            names = "、".join(raw.name for raw in raws)
+            raise ReadError(f"文件「{path.name}」里没有可读取的工作表 {'、'.join(sorted(sheet_names))}，现有：{names}")
         raise ReadError(f"文件「{path.name}」里没有可读取的数据")
     return sheets
 

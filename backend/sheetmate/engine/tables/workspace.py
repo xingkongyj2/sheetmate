@@ -19,7 +19,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import duckdb
 import pandas as pd
@@ -72,6 +72,9 @@ class TableInfo:
     revision: str = ""
     probe_memory: dict[str, Any] = field(default_factory=dict)
     read_quality: dict[str, Any] = field(default_factory=dict)  # 原件读取风险，不能把缺公式缓存误当正常空值
+    # {source: 读取批次 UUID, rows: 原始数据行的零基位置}；rows 恰为 0..n-1 时存紧凑形式 {source, identity: n}，
+    # 避免大表的元数据每次读写都要处理 n 个整数。读取请一律经 validated_row_lineage() 展开。
+    row_lineage: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -84,6 +87,26 @@ class TableInfo:
     @property
     def column_names(self) -> list[str]:
         return [c["name"] for c in self.columns]
+
+
+def validated_row_lineage(info: TableInfo) -> dict[str, Any] | None:
+    """只接受与 df 行序一致的一对一原始行映射；旧表或不完整映射不可推断。"""
+    lineage = info.row_lineage
+    if not isinstance(lineage, dict) or not isinstance(lineage.get("source"), str):
+        return None
+    try:
+        UUID(lineage["source"])
+    except ValueError:
+        return None
+    rows = lineage.get("rows")
+    if rows is None and type(lineage.get("identity")) is int and lineage["identity"] >= 0:
+        rows = list(range(lineage["identity"]))
+    if (not isinstance(rows, list) or len(rows) != info.rows
+            or any(type(row) is not int or row < 0 for row in rows)
+            or len(set(rows)) != len(rows)
+            or any(column.casefold() == "rowid" for column in info.column_names)):
+        return None
+    return {"source": lineage["source"], "rows": list(rows)}
 
 
 class Workspace:
@@ -168,6 +191,7 @@ class Workspace:
                     raise WorkspaceError("工具运行期间结果表名称已被占用，本次计算未发布，请重新计算。")
             self._run("BEGIN TRANSACTION")
             try:
+                data_changed = False
                 for item in state:
                     info = TableInfo.from_dict(item["meta"])
                     existing = current.get(info.name)
@@ -177,11 +201,14 @@ class Workspace:
                             meta.pop(key, None)
                         self.put_dataframe(info.name, item["frame"], **meta)
                         self._save_info(info)
-                    elif existing.probe_memory != info.probe_memory:
+                        data_changed = True
+                    elif existing.to_dict() != info.to_dict():
+                        # 同一数据版本只更新元数据（探测记忆、行来源等），不读取 frame。
                         self._save_info(info)
                 self._run("COMMIT")
-                self._query_cache.clear()
-                self._query_cache_bytes = 0
+                if data_changed:
+                    self._query_cache.clear()
+                    self._query_cache_bytes = 0
             except BaseException:
                 self._run("ROLLBACK")
                 raise
@@ -240,13 +267,62 @@ class Workspace:
             self._run(f"CREATE OR REPLACE TABLE {quote_ident(name)} AS {select_sql}")
             return self._register(name, **meta)
 
+    def create_table_as_with_lineage(
+        self, name: str, select_sql: str, *, lineage_source: str, lineage_column: str, **meta: Any,
+    ) -> TableInfo:
+        """用同一次 CTAS 保存数据和原始行标识，随后原子地移除内部列并登记映射。
+
+        select_sql 必须由受支持的内置公式生成，内部列是输入表的物理 rowid。
+        不能另跑一次筛选来获取标识：随机条件、易变表达式可能得到不同的一批行。
+        """
+        with self._lock:
+            source = self.require(lineage_source)
+            lineage = validated_row_lineage(source)
+            if lineage is None:
+                raise WorkspaceError("输入表缺少有效的原始行对应关系，无法传递行样式。")
+            self._run("BEGIN TRANSACTION")
+            try:
+                # 在同名覆盖前读取物理行号；DELETE 过的表的 rowid 不一定连续。
+                source_ids = self._run(f"SELECT rowid FROM {quote_ident(lineage_source)} ORDER BY rowid")
+                if len(source_ids) != len(lineage["rows"]):
+                    raise WorkspaceError("输入表行数与原始行对应关系不一致。")
+                source_rows = dict(zip((row[0] for row in source_ids), lineage["rows"]))
+                self._run(f"CREATE OR REPLACE TABLE {quote_ident(name)} AS {select_sql}")
+                columns = [column["name"] for column in self.columns(name)]
+                if lineage_column not in columns:
+                    raise WorkspaceError("计算结果缺少内部原始行标识。")
+                output_lineage = None
+                if not any(column.casefold() == "rowid" for column in columns):
+                    selected = self._run(
+                        f"SELECT {quote_ident(lineage_column)} FROM {quote_ident(name)} ORDER BY rowid"
+                    )
+                    if any(type(row[0]) is not int or row[0] not in source_rows for row in selected):
+                        raise WorkspaceError("计算结果的原始行标识无效。")
+                    mapped = [source_rows[row[0]] for row in selected]
+                    # UNNEST 等表达式可以把一行展开成多行，此时不能用于一对一模板回写。
+                    if len(set(mapped)) == len(mapped):
+                        output_lineage = {"source": lineage["source"], "rows": mapped}
+                self._run(f"ALTER TABLE {quote_ident(name)} DROP COLUMN {quote_ident(lineage_column)}")
+                meta["row_lineage"] = output_lineage
+                info = self._register(name, **meta)
+                self._run("COMMIT")
+                return info
+            except BaseException:
+                try:
+                    self._run("ROLLBACK")
+                except WorkspaceError:
+                    # 内部引擎故障可能已重建连接，不以二次回滚错误掩盖原始异常。
+                    pass
+                raise
+
     def copy_table(self, source: str, target: str, **meta: Any) -> TableInfo:
         """复制一张表（用于把会话里的表带进运行工作区等场景）。"""
         from sheetmate.engine.tables.memory import copy_table_memory
 
         with self._lock:
             source_info = self.require(source)
-            self.create_table_as(target, f"SELECT * FROM {quote_ident(source)}", **meta)
+            meta["row_lineage"] = validated_row_lineage(source_info)
+            self.create_table_as(target, f"SELECT * FROM {quote_ident(source)} ORDER BY rowid", **meta)
             copy_table_memory(source_info, self, target)
             return self.require(target)
 
@@ -408,9 +484,13 @@ class Workspace:
         return info
 
     def _save_info(self, info: TableInfo) -> None:
+        payload = info.to_dict()
+        lineage = payload.get("row_lineage")
+        if isinstance(lineage, dict) and isinstance(lineage.get("rows"), list) and lineage["rows"] == list(range(len(lineage["rows"]))):
+            payload["row_lineage"] = {"source": lineage.get("source"), "identity": len(lineage["rows"])}
         self._run(
             f"INSERT OR REPLACE INTO {_CATALOG} VALUES (?, ?)",
-            [info.name, json.dumps(info.to_dict(), ensure_ascii=False, default=str)],
+            [info.name, json.dumps(payload, ensure_ascii=False, default=str)],
         )
 
 

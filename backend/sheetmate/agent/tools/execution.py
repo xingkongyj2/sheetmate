@@ -80,7 +80,7 @@ class _CallCapability:
 
 async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     """Bound the waiter while retaining ownership of every real live worker."""
-    from sheetmate.agent.tools.worker import DataWorkerCancelled, run_data_tool
+    from sheetmate.agent.tools.worker import DataWorkerCancelled, run_data_tool, runs_in_process
     from sheetmate.core.config.model_policy import LLMRuntimePolicy
 
     policy = getattr(getattr(ctx.llm, "cfg", None), "runtime_policy", None) or LLMRuntimePolicy()
@@ -101,6 +101,8 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
         host.ws = ws
     worker_ctx = replace(ctx, ws=ws, host=_CallCapability(host, cancelled) if host is not None else None)
     invocation_context = contextvars.copy_context()
+    # 小表上的纯读取工具不值得起子进程；其余可杀死的数据工具仍在隔离子进程里运行。
+    use_worker = tool.process_safe and not runs_in_process(tool.name, args, worker_ctx)
 
     def publish_host() -> None:
         if host is None or not hasattr(host, "__dict__"):
@@ -138,7 +140,7 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
         try:
             # The cooperative tracer handles Python work; native pure data
             # computations run in a separate, killable process instead.
-            if not tool.process_safe:
+            if not use_worker:
                 # Restrict cancellation checks to the tool and domain code.
                 # Raising inside SQLAlchemy/SQLite/threading cleanup would
                 # interrupt the very rollback/release paths we must preserve.
@@ -156,7 +158,7 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
                     return None
 
                 sys.settrace(domain_trace)
-            result = (run_data_tool(tool.name, args, worker_ctx, cancelled) if tool.process_safe
+            result = (run_data_tool(tool.name, args, worker_ctx, cancelled) if use_worker
                       else tool.run(args, worker_ctx))
             if cancelled.is_set():
                 raise _ToolCancelled()

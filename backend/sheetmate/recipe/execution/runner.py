@@ -23,6 +23,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import Any, Protocol
+from uuid import uuid4
 
 import pandas as pd
 
@@ -40,7 +41,7 @@ from sheetmate.engine.workbooks.template_writer import (
     TemplateSource,
     write_like_original,
 )
-from sheetmate.engine.tables.workspace import Workspace
+from sheetmate.engine.tables.workspace import Workspace, validated_row_lineage
 from sheetmate.engine.workbooks.writer import SheetSpec, write_excel
 from sheetmate.recipe.definition.schema import (
     OutputSheet,
@@ -53,7 +54,25 @@ from sheetmate.recipe.definition.schema import (
     step_table_refs,
 )
 from sheetmate.recipe.definition.templating import plan_outputs
-from sheetmate.recipe.validation.rules import validate_run
+from sheetmate.engine.workbooks.verify import file_is_openable, verify_template_output
+from sheetmate.recipe.validation.rules import summarize_checks, validate_run
+
+
+def _same_records(frame: pd.DataFrame, original: pd.DataFrame) -> bool:
+    """两份数据逐行逐列完全一致（列名按位置对齐，不比较 dtype）。任何比较异常都视为不一致，不能因此中断运行。"""
+    try:
+        left = frame.reset_index(drop=True)
+        right = original.set_axis(frame.columns, axis=1).reset_index(drop=True)
+        if left.equals(right):  # 向量化的快速路径；dtype 不同时会返回 False，再做宽松比较
+            return True
+        pd.testing.assert_frame_equal(left, right, check_dtype=False, check_exact=True)
+        return True
+    except Exception:
+        return False
+
+
+# 步骤过程文件按 XLSX 保存的单元格上限；超过则存 CSV，避免每一步都为大表付出秒级的序列化开销。
+INTERMEDIATE_XLSX_MAX_CELLS = 60_000
 
 
 class RecipeInputError(ValueError):
@@ -252,6 +271,9 @@ class RecipeRunner:
                 if self.output_path is not None:
                     yield {"type": "recipe_output", "path": str(self.output_path), "sheets": written}
                 validation = await self._in_worker(self._validate_outputs, outputs, history)
+                verification = self.report.pop("output_verification", [])
+                if verification:  # 回读实际生成的文件得到的核对结果，与业务校验一起汇总，失败不能当成通过
+                    validation = self._validation_summary([*validation["checks"], *verification])
                 if contract_checks:
                     validation = self._validation_summary([*validation["checks"], *contract_checks])
                     self.report["output_contract_failed"] = True
@@ -389,6 +411,10 @@ class RecipeRunner:
             header_rows=sheet.header.header_rows, col_index=list(col_index), columns=columns,
             dtypes={c: dtype_label(df[orig]) for c, orig in zip(columns, df.columns)}, file_id=src.file_id,
         )
+        # 现成 DataFrame 可能已经重排或改值，只有实际数据与原件逐行一致才能播种身份。
+        if tpl.usable() and df.shape == sheet.df.shape and _same_records(df, sheet.df):
+            tpl.lineage_id = uuid4().hex
+            self.ws.update_meta(inp.alias, row_lineage={"source": tpl.lineage_id, "identity": len(df)})
         self.sources[inp.alias] = tpl
         return tpl
 
@@ -652,12 +678,17 @@ class RecipeRunner:
         for index, table in enumerate(tables):
             path = directory / f"step_{step.id}_{index}.xlsx"
             frame = self.ws.df(table)
-            try:
-                write_excel(path, [SheetSpec(name=table, df=frame)])
-            except Exception:
-                path.unlink(missing_ok=True)
+            if frame.size > INTERMEDIATE_XLSX_MAX_CELLS:
+                # 写 XLSX 比计算本身慢一到两个数量级；大结果的过程文件直接存 CSV（同样可查看、下载）。
                 path = path.with_suffix(".csv")
                 frame.to_csv(path, index=False, encoding="utf-8-sig")
+            else:
+                try:
+                    write_excel(path, [SheetSpec(name=table, df=frame)])
+                except Exception:
+                    path.unlink(missing_ok=True)
+                    path = path.with_suffix(".csv")
+                    frame.to_csv(path, index=False, encoding="utf-8-sig")
             snapshots.append({"step_id": step.id, "step_name": step.name, "table": table,
                               "name": f"{step.id:02d}_{step.name}_{table}{path.suffix}", "path": str(path.resolve()),
                               "intermediate": True})
@@ -838,6 +869,8 @@ class RecipeRunner:
         checks.append({"rule_id": "auto_files_exist", "rule_type": "files_exist", "description": "脚本交付文件完整",
                        "status": "pass" if valid else "fail", "severity": "error", "actual": len(paths),
                        "message": "" if valid else "部分脚本交付文件不存在或为空"})
+        if valid:  # 脚本直接生成的 Excel 文件也要能被重新打开，与其他交付路径同一标准
+            checks.extend(file_is_openable(path) for path in paths)
         for step in self.report["steps"]:
             for index, item in enumerate(step.get("checks", [])):
                 checks.append({"rule_id": f"script_{step['step_id']}_{index}", "rule_type": "script_check",
@@ -882,16 +915,7 @@ class RecipeRunner:
 
     @staticmethod
     def _validation_summary(checks: list[dict[str, Any]]) -> dict[str, Any]:
-        passed = sum(item["status"] == "pass" for item in checks)
-        warnings = sum(item["status"] == "warn" for item in checks)
-        failures = sum(item["status"] == "fail" for item in checks)
-        not_evaluated = sum(item["status"] == "not_evaluated" for item in checks)
-        status = "fail" if failures else "warn" if warnings else "not_evaluated" if not_evaluated else "pass"
-        summary = f"{failures} 项校验未通过，{warnings} 项警告" if failures else (
-            f"校验通过，有 {warnings} 项警告" if warnings else (
-                f"有 {not_evaluated} 项校验未执行" if not_evaluated else f"全部 {passed} 项校验通过"))
-        return {"status": status, "summary": summary, "passed": passed, "warnings": warnings,
-                "failures": failures, "not_evaluated": not_evaluated, "checks": checks}
+        return summarize_checks(checks)
 
     def _record_checkpoint(self, checkpoint: dict[str, Any], validation: dict[str, Any]) -> bool:
         after_step = checkpoint["after_step"]
@@ -1078,6 +1102,16 @@ class RecipeRunner:
             finally:
                 self.sources = sources
 
+    @staticmethod
+    def _verify_written(path: Path, plans: list[Any], written: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """回读写出的文件并与计划比对。验收器自身出错只记为未核对的提示，不能因此让一次正确的输出失败。"""
+        try:
+            return verify_template_output(path, plans, written)
+        except Exception as exc:
+            return [{"rule_id": "verify_output", "rule_type": "output_verify", "description": "回读核对输出文件",
+                     "status": "warn", "severity": "warning", "expected": None, "actual": None,
+                     "message": f"没有完成回读核对：{exc}"}]
+
     def _check_output_path(self, path: Path) -> None:
         if path.resolve() in self._input_paths or (
             path.exists() and any(source.exists() and path.samefile(source) for source in self._input_paths)
@@ -1090,13 +1124,20 @@ class RecipeRunner:
         if not outputs:
             raise ValueError("没有可以输出的结果：所有步骤都失败了，或 output_spec 指向的表不存在")
         if self.sources:
-            plans = plan_outputs(self.recipe, self.library, self.sources, outputs)
+            output_tables = {spec.name: spec.source for spec in self.recipe.output_spec}
+            if not self.recipe.output_spec and self.recipe.steps:
+                names = step_output_tables(self.recipe.ordered_steps()[-1])
+                output_tables = {"结果" if len(names) == 1 else name: name for name in names}
+            lineages = {name: validated_row_lineage(self.ws.require(table)) for name, table in output_tables.items()
+                        if name in outputs and self.ws.exists(table)}
+            plans = plan_outputs(self.recipe, self.library, self.sources, outputs, row_lineages=lineages)
             base = next((plan.template for plan in plans if plan.template and plan.template.usable()), None)
             if base is not None:
                 path = path.with_suffix(base.path.suffix.lower())
             self._check_output_path(path)
             written = write_like_original(path, plans)
             if written is not None:
+                self.report["output_verification"] = self._verify_written(path, plans, written)
                 self.report["output_warnings"] = list(dict.fromkeys(
                     notice for sheet in written for notice in sheet.get("warnings", [])))
                 self.report["output_style"] = "best_effort" if self.report["output_warnings"] else "original"

@@ -197,10 +197,10 @@ def test_validation_rule_param_aliases_and_bad_rules():
     checks = {c["rule_id"]: c for c in report["checks"]}
     first, wrong_col, nulls, wrong_sheet = (checks[r.id] for r in rules)
     assert first["status"] == "pass"  # 别名生效，且浮点误差不算差异
-    assert wrong_col["status"] == "warn" and "规则写错了" in wrong_col["message"]
+    assert wrong_col["status"] == "not_evaluated" and "规则写错了" in wrong_col["message"]
     assert nulls["status"] == "pass"  # column 自动转成 columns
-    assert wrong_sheet["status"] == "warn" and "没有 sheet" in wrong_sheet["message"]
-    assert report["status"] == "warn"  # 写错的规则只警告，不让整次运行失败
+    assert wrong_sheet["status"] == "not_evaluated" and "没有 sheet" in wrong_sheet["message"]
+    assert report["status"] == "not_evaluated"  # 必需校验没有执行，不能声称已通过
 
 
 def test_sum_preservation_with_input_filter():
@@ -219,7 +219,8 @@ def test_sum_preservation_with_input_filter():
     checks = {c["rule_id"]: c for c in report["checks"]}
     assert checks[good.id]["status"] == "pass"
     assert checks[naive.id]["status"] == "fail"  # 不带条件：114.5 vs 15.5，确实对不上
-    assert checks[bad.id]["status"] == "warn" and "规则写错了" in checks[bad.id]["message"]
+    assert checks[bad.id]["status"] == "not_evaluated" and "规则写错了" in checks[bad.id]["message"]
+    assert report["status"] == "fail"  # 真正对账失败仍优先保留，未执行项不能掩盖它
 
 
 def test_sum_preservation_between_output_sheets():

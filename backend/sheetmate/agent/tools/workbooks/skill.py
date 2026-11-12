@@ -8,10 +8,12 @@ import re
 from copy import deepcopy
 from typing import Any
 
+import pandas as pd
 from openpyxl.utils.cell import coordinate_to_tuple
 
 from sheetmate.engine.workbooks.builder import (
     MAX_COLUMNS,
+    MAX_EXACT_INTEGER,
     MAX_GRID_CELLS,
     MAX_ROWS,
     MAX_SHEETS,
@@ -51,7 +53,10 @@ def creation_parameters() -> dict[str, Any]:
         "cells": {"type": "object", "additionalProperties": cell_schema,
                   "description": "可选：按坐标填入或更新单元格，例如 {\"A1\":\"新标题\"}；null 清空。基于旧文件更新时可避免重抄网格。"},
     })
-    sheet_schema["properties"]["styles"]["description"] += " 基于旧文件时追加到已有样式后应用；其他提供的字段替换同名字段，未提供的保留。"
+    sheet_schema["properties"]["styles"]["description"] += " 基于旧文件时追加到已有样式后应用，完全相同的规则仅保留最后一次；未指定的样式属性保留。"
+    for field in ("column_widths", "row_heights"):
+        sheet_schema["properties"][field]["description"] += " 基于旧文件时按键更新，未指定的列或行保留原设置。"
+    sheet_schema["properties"]["rows"]["description"] += " 编号、账号等用字符串；超过 15 位的整数会拒绝写入，以免丢失精度。基于旧文件时，提供 rows 会替换原网格，局部更新请用 cells。"
     return schema
 
 
@@ -76,14 +81,41 @@ def _inherit_layout(base: dict[str, Any], changes: dict[str, Any]) -> dict[str, 
             result["sheets"].append(deepcopy(patch))
         else:
             inherited_styles = target.get("styles", [])
+            dimensions = {field: {**target.get(field, {}), **patch[field]}
+                          for field in ("column_widths", "row_heights")
+                          if isinstance(target.get(field, {}), dict) and isinstance(patch.get(field), dict)}
             target.update(deepcopy(patch))
+            target.update(dimensions)
             if isinstance(patch.get("styles"), list):
                 target["styles"] = inherited_styles + deepcopy(patch["styles"])
     return result
 
 
-def prepare_workbook_spec(ws: Workspace, raw: dict[str, Any], *, base: dict[str, Any] | None = None) -> WorkbookSpec:
-    """可选地填入工作区真实数据，再使用与引擎相同的布局校验。"""
+def _oversized_integer_columns(df: Any) -> list[str]:
+    """含超过 Excel 15 位精度的整数的列。整列转文本，才能保证同一列的编号写法一致。"""
+    import numpy as np
+
+    names: list[str] = []
+    for column in df.columns:
+        values = df[column]
+        if values.dtype.kind in "iu":
+            big = len(values) > 0 and bool((values.abs() > MAX_EXACT_INTEGER).any())
+        elif values.dtype == object:
+            big = any(isinstance(v, (int, np.integer)) and not isinstance(v, (bool, np.bool_)) and abs(int(v)) > MAX_EXACT_INTEGER
+                      for v in values)
+        else:
+            big = False
+        if big:
+            names.append(str(column))
+    return names
+
+
+def prepare_workbook_spec(ws: Workspace, raw: dict[str, Any], *, base: dict[str, Any] | None = None,
+                          notes: list[str] | None = None) -> WorkbookSpec:
+    """可选地填入工作区真实数据，再使用与引擎相同的布局校验。
+
+    notes 收集自动处理的说明（例如超 15 位的整数编号列转成文本），由调用方并入回执。
+    """
     data = _inherit_layout(base, raw) if base is not None else deepcopy(raw)
     sheets = data.get("sheets")
     if not isinstance(sheets, list):
@@ -145,6 +177,14 @@ def prepare_workbook_spec(ws: Workspace, raw: dict[str, Any], *, base: dict[str,
         if grid_cells > MAX_GRID_CELLS:
             raise ValueError(f"新建工作簿数据网格不能超过 {MAX_GRID_CELLS} 个单元格")
         df = ws.df(table)
+        text_columns = _oversized_integer_columns(df)
+        if text_columns:
+            # 超过 15 位的整数写成数字会被 Excel 截断，编号类数据按文本保存才不会丢精度。
+            df = df.astype({name: object for name in text_columns})
+            for name in text_columns:
+                df[name] = [None if pd.isna(value) else str(int(value)) for value in df[name]]
+            if notes is not None:
+                notes.append(f"「{table}」的 {'、'.join(f'「{name}」' for name in text_columns)} 含超过 15 位的整数，已按文本写入以免 Excel 丢失精度。")
         rows = ([info.column_names] if headers else []) + [[_export_cell(value) for value in row]
                                                          for row in df.itertuples(index=False, name=None)]
         for row_offset, row in enumerate(rows, start=top - 1):
@@ -224,8 +264,8 @@ def workbook_creation_tool():
     return Tool("create_workbook",
                 "根据用户文字、口述转写或已读取资料从零创建带格式的 Excel，无需上传模板。"
                 "rows 是含标题/表头的完整网格；支持多 sheet、合并、边框、底色、数字格式、行高列宽、冻结、筛选。"
-                "公式使用明确对象 {formula:'=SUM(C3:C8)'}，普通字符串始终是文本。可用 table 引用工作区真实数据。"
-                "使用 base_file_id 复制本技能已创建的布局，sheets 按 name 更新；cells 可局部更新标题等内容，styles 叠加，其他未指定项保留。"
+                "公式使用明确对象 {formula:'=SUM(C3:C8)'}，只检查表达式结构，需表格软件重算；普通字符串始终是文本，超过15位的整数编号应传字符串。可用 table 引用工作区真实数据。"
+                "使用 base_file_id 复制本技能已创建的布局，sheets 按 name 更新；cells 局部更新内容，列宽和行高按键更新，styles 叠加并去掉重复规则，未指定项保留。"
                 "未知的真实数据留空；仅在用户要求示例/模拟时编写并注明模拟数据。成功返回可下载文件及可继续处理的表。",
                 creation_parameters(), frozenset({"analyze", "modify", "create"}), run=run,
                 label=lambda args: f"新建 Excel · {args.get('filename') or '新建表格'}")

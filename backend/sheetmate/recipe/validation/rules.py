@@ -3,7 +3,7 @@
 1. 自动检查（每次都跑）：输出不为空、该有的 sheet 都有、没有整列为空、数字没有被存成文本
 2. Recipe 自带规则：row_count_ratio / sum_preservation / no_nulls / type_check / unique_check /
    column_exists / historical_range
-不通过的规则：severity=error 记为 fail，其余记为 warn。
+不通过的规则：severity=error 记为 fail，其余记为 warn；无法执行的规则记为 not_evaluated。
 """
 
 from __future__ import annotations
@@ -29,18 +29,27 @@ def validate_run(
             continue
         try:
             checks.append(_run_rule(rule, inputs, outputs, history or []))
-        except Exception as exc:  # 规则本身写错了，不应该让整次运行失败
-            checks.append(_check(rule, "warn", message=f"校验规则执行出错：{exc}"))
+        except Exception as exc:
+            # Keep the report available, but an unexecuted rule cannot count as
+            # a successful check merely because the other checks passed.
+            checks.append(_unexecuted(rule, message=f"校验规则执行出错：{exc}；这条规则没有完成"))
+    return summarize_checks(checks)
+
+
+def summarize_checks(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    """汇总同一组实际校验结果，警告不能掩盖未执行的校验。"""
     passed = sum(1 for c in checks if c["status"] == "pass")
     warnings = sum(1 for c in checks if c["status"] == "warn")
     failures = sum(1 for c in checks if c["status"] == "fail")
     not_evaluated = sum(1 for c in checks if c["status"] == "not_evaluated")
     if failures:
         status, summary = "fail", f"{failures} 项校验未通过，{warnings} 项警告"
-    elif warnings:
-        status, summary = "warn", f"校验通过，有 {warnings} 项警告"
     elif not_evaluated:
         status, summary = "not_evaluated", f"有 {not_evaluated} 项校验未执行，结果不能视为完整通过"
+        if warnings:
+            summary += f"，另有 {warnings} 项警告"
+    elif warnings:
+        status, summary = "warn", f"校验完成，有 {warnings} 项警告"
     else:
         status, summary = "pass", f"全部 {passed} 项校验通过"
     return {"status": status, "summary": summary, "passed": passed, "warnings": warnings,
@@ -129,6 +138,13 @@ def _check(rule: ValidationRule, status: str, expected: Any = None, actual: Any 
     }
 
 
+def _unexecuted(rule: ValidationRule, *, message: str) -> dict[str, Any]:
+    """规则本身写错或无法执行。必需规则（severity=error）记为未执行并阻断；可选规则只提示，不拖垮整次运行。"""
+    if rule.severity == "error":
+        return _check(rule, "not_evaluated", message=message)
+    return _check(rule, "warn", message=f"（可选规则未执行）{message}")
+
+
 # 规则参数的常见别名（模型写规则时参数名并不统一，例如 output_column / input_table），统一成标准名再执行
 _PARAM_ALIASES = {
     "column": ("column", "output_column", "col", "field", "target_column", "column_name"),
@@ -170,12 +186,14 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
     rule = rule.model_copy(update={"params": normalize_rule_params(rule.type, rule.params)})
     p = rule.params
     if p.get("sheet") and p["sheet"] not in outputs:
-        return _check(rule, "warn", message=f"规则写错了：输出里没有 sheet「{p['sheet']}」（现有 {list(outputs)}），这条规则没有执行")
+        return _unexecuted(rule, message=f"规则写错了：输出里没有 sheet「{p['sheet']}」（现有 {list(outputs)}），这条规则没有执行")
     sheets = _target_sheets(rule, outputs)
     if not sheets:
-        return _check(rule, "not_evaluated", message="没有可校验的输出工作表，这条规则没有执行")
+        return _unexecuted(rule, message="没有可校验的输出工作表，这条规则没有执行")
     if rule.type == "row_count_ratio":
-        vs = p.get("vs") or p.get("input")
+        vs = p.get("input")
+        if vs and vs not in inputs:
+            return _unexecuted(rule, message=f"规则写错了：输入里没有表「{vs}」，这条规则没有执行")
         in_rows = len(inputs[vs]) if vs in inputs else sum(len(df) for df in inputs.values())
         out_rows = sum(len(df) for df in sheets.values())
         ratio = out_rows / in_rows if in_rows else 0.0
@@ -187,6 +205,8 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
         col = str(p.get("column") or "")
         in_col = str(p.get("input_column") or col)
         tolerance = float(p.get("tolerance", 0.01))
+        if p.get("input") and p["input"] not in inputs and p["input"] not in outputs:
+            return _unexecuted(rule, message=f"规则写错了：找不到对账来源表「{p['input']}」，这条规则没有执行")
         if p.get("input") in outputs and p.get("input") not in inputs:
             # 输出之间对账（例如 汇总表的合计 = 明细表的合计）：对比的「输入」是另一个输出 sheet
             in_frames = [outputs[p["input"]]]
@@ -196,15 +216,15 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
         in_hits = [df for df in in_frames if in_col in df.columns]
         # 列名对不上时不能把合计当成 0 去比，那会误报「合计对不上」：明确告诉是规则本身写错了
         if not col or not out_frames:
-            return _check(rule, "warn", message=f"规则写错了：输出里找不到列「{col or '（没写）'}」，这条规则没有执行")
+            return _unexecuted(rule, message=f"规则写错了：输出里找不到列「{col or '（没写）'}」，这条规则没有执行")
         if not in_hits:
-            return _check(rule, "warn", message=f"规则写错了：输入里找不到列「{in_col}」，这条规则没有执行")
+            return _unexecuted(rule, message=f"规则写错了：输入里找不到列「{in_col}」，这条规则没有执行")
         condition = str(p.get("input_filter") or p.get("filter") or "").strip()
         if condition:
             try:
                 in_sum = _filtered_sum(in_hits, in_col, condition)
             except Exception as exc:  # 条件写错了
-                return _check(rule, "warn", message=f"规则写错了：input_filter「{condition}」无法执行（{exc}），这条规则没有执行")
+                return _unexecuted(rule, message=f"规则写错了：input_filter「{condition}」无法执行（{exc}），这条规则没有执行")
         else:
             in_sum = sum(float(pd.to_numeric(df[in_col], errors="coerce").sum()) for df in in_hits)
         out_sum = sum(float(pd.to_numeric(df[col], errors="coerce").sum()) for df in out_frames)
@@ -217,7 +237,7 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
                       f"输入「{in_col}」合计 {in_sum:,.2f}，输出「{col}」合计 {out_sum:,.2f}，误差 {diff:.4%}",
                       "" if ok else f"合计对不上：输入 {in_sum:,.2f}，输出 {out_sum:,.2f}")
     if rule.type in {"no_nulls", "unique_check", "column_exists"} and not p.get("columns"):
-        return _check(rule, "not_evaluated", message="规则写错了：没有写要检查哪些列（columns），这条规则没有执行")
+        return _unexecuted(rule, message="规则写错了：没有写要检查哪些列（columns），这条规则没有执行")
     if rule.type == "no_nulls":
         cols = p.get("columns", [])
         missing = [f"{s}.{c}" for s, df in sheets.items() for c in cols if c not in df.columns]
@@ -248,7 +268,7 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
     if rule.type == "type_check":
         wanted = p.get("columns", {})
         if not wanted:
-            return _check(rule, "not_evaluated", message="规则写错了：没有写要检查哪些列（columns），这条规则没有执行")
+            return _unexecuted(rule, message="规则写错了：没有写要检查哪些列（columns），这条规则没有执行")
         bad = []
         missing = []
         for s, df in sheets.items():
@@ -264,7 +284,7 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
         return _check(rule, "fail" if bad else "pass", str(wanted), "；".join(bad) or "类型正确", "；".join(bad))
     if rule.type == "historical_range":
         return _historical(rule, sheets, history)
-    return _check(rule, "not_evaluated", message=f"未知的校验类型：{rule.type}")
+    return _unexecuted(rule, message=f"未知的校验类型：{rule.type}")
 
 
 def _filtered_sum(frames: list[pd.DataFrame], column: str, condition: str) -> float:

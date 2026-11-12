@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pandas as pd
 
 from sheetmate.engine.formulas import FormulaLibrary
@@ -38,6 +40,8 @@ def plan_outputs(
     library: FormulaLibrary,
     sources: dict[str, TemplateSource],
     outputs: dict[str, pd.DataFrame],
+    *,
+    row_lineages: dict[str, dict[str, Any] | None] | None = None,
 ) -> list[OutputPlan]:
     """按上面的规则排出每个输出 sheet 的写法。outputs 的 key 是输出 sheet 名，顺序和 output_spec 一致。"""
     primary = primary_inputs(recipe, library)
@@ -72,7 +76,10 @@ def plan_outputs(
     for i, (name, df, src) in enumerate(candidates):
         spec = spec_by_name.get(name)
         if i in edit_indices and src is not None:
-            plans.append(OutputPlan(name=src.sheet if keep_original_name else name, df=df, template=src, edit=True))
+            lineage = (row_lineages or {}).get(name) or {}
+            rows = lineage.get("rows") if src.lineage_id and lineage.get("source") == src.lineage_id else None
+            plans.append(OutputPlan(name=src.sheet if keep_original_name else name, df=df, template=src, edit=True,
+                                    source_rows=rows))
             continue
         split = spec.split_by if spec else None
         if split and split in df.columns:

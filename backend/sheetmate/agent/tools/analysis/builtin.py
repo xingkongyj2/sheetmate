@@ -6,6 +6,7 @@ import json
 from typing import Any
 import pandas as pd
 from sheetmate.agent.tools.sql_scope import checked_sql_tables
+from sheetmate.engine.formulas.lineage import compile_sql_row_lineage, create_table_with_optional_lineage
 from sheetmate.engine.tables.analysis import column_stats, table_info, table_info_text, value_counts
 from sheetmate.engine.tables.sql import assert_single_select, frame_to_text
 from sheetmate.agent.tools.contracts import AgentContext, ToolResult
@@ -102,8 +103,9 @@ def _tool_run_sql(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         # Execute once, then use the stored row count and revision on all pages.
         with ctx.ws.locked():
             out = _result_name(ctx, result_name, "查询结果")
-            ctx.ws.create_table_as(
-                out, sql, label=str(result_name), source="computed", role="derived", created_by="run_sql",
+            lineage = compile_sql_row_lineage(ctx.ws, sql, references[0]) if len(set(references)) == 1 else None
+            create_table_with_optional_lineage(
+                ctx.ws, out, sql, lineage, label=str(result_name), source="computed", role="derived", created_by="run_sql",
                 description=str(args.get("description") or "SQL 查询结果"), step={"formula": "custom_sql", "params": {"sql": sql}},
             )
             if ctx.table_filter is not None:

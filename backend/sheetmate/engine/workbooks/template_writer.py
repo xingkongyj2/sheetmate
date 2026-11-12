@@ -4,7 +4,8 @@
 而是把原始文件复制一份，然后：
 
 - 标题行、合并单元格、表头样式、列宽、隐藏列、冻结窗格、数字格式、斑马纹……都沿用原文件
-- 被处理的那张 sheet：表头以下的数据区整体换成结果（行数变多变少都行），每一行沿用原来数据行的样式
+- 可定位原始记录时，值、样式、批注、链接和行属性随记录移动；静态底色不会重新交替套用
+- 不能逐行定位或改变列结构时，沿用模板重建并按保真检查报告可能的格式变化
 - 新增的列：表头和数据样式照着相邻列（或同类型的列）来；删掉的列直接去掉；列顺序变了就跟着变
 - 结果里多出来的 sheet（例如汇总表）：追加到这份副本里，表头和数据样式照着原表
 - 原文件里没被动过的 sheet 原样保留
@@ -30,6 +31,7 @@ import pandas as pd
 from openpyxl.cell.cell import MergedCell
 from openpyxl.formatting.formatting import ConditionalFormattingList
 from openpyxl.formula.translate import Translator
+from openpyxl.styles import PatternFill
 from openpyxl.styles.cell_style import StyleArray
 from openpyxl.utils import coordinate_to_tuple, get_column_letter
 from openpyxl.worksheet.cell_range import CellRange, MultiCellRange
@@ -37,7 +39,7 @@ from openpyxl.worksheet.table import TableColumn
 from openpyxl.worksheet.worksheet import Worksheet
 
 from sheetmate.engine.workbooks.profile import dtype_label
-from sheetmate.engine.workbooks.reader import read_sheet
+from sheetmate.engine.workbooks.reader import ReadError, SheetData, read_workbook
 from sheetmate.engine.workbooks.row_references import adjust_formula, shift_range_ref
 from sheetmate.engine.workbooks.writer import _display_width, _excel_value, safe_sheet_name
 
@@ -61,6 +63,7 @@ class TemplateSource:
     columns: list[str]  # DataFrame 每一列的名字（字段映射之后）
     dtypes: dict[str, str] = field(default_factory=dict)  # 列名 → text / integer / float / datetime / boolean
     file_id: str | None = None
+    lineage_id: str = ""  # 本次读取的原始行身份；跨步骤/断点恢复时保持不变
 
     def usable(self) -> bool:
         return (
@@ -74,6 +77,7 @@ class TemplateSource:
         return {
             "file_id": self.file_id, "sheet": self.sheet, "header_row": self.header_row, "header_rows": self.header_rows,
             "col_index": self.col_index, "columns": self.columns, "dtypes": self.dtypes,
+            "lineage_id": self.lineage_id,
         }
 
     @classmethod
@@ -81,7 +85,7 @@ class TemplateSource:
         return cls(
             alias=alias, path=path, sheet=data["sheet"], header_row=int(data["header_row"]),
             header_rows=int(data.get("header_rows", 1)), col_index=list(data["col_index"]), columns=list(data["columns"]),
-            dtypes=dict(data.get("dtypes", {})), file_id=data.get("file_id"),
+            dtypes=dict(data.get("dtypes", {})), file_id=data.get("file_id"), lineage_id=data.get("lineage_id", ""),
         )
 
 
@@ -93,6 +97,38 @@ class OutputPlan:
     df: pd.DataFrame
     template: TemplateSource | None = None
     edit: bool = False
+    source_rows: list[int] | None = None  # 每个结果行对应的原始数据行序号（0 起）
+
+
+class _OriginalReadCache:
+    """One source scan per file, with separate views for each header hint."""
+
+    def __init__(self, sources: list[TemplateSource] | None = None):
+        self.raws: dict[Path, list[Any]] = {}
+        self.sheets: dict[tuple[Path, str, int, int], SheetData] = {}
+        self.hints: dict[Path, dict[str, dict[str, int]]] = {}
+        for source in sources or []:
+            self.hints.setdefault(source.path.resolve(), {})[source.sheet] = {
+                "header_row": source.header_row, "header_rows": source.header_rows,
+            }
+
+    def read(self, source: TemplateSource) -> SheetData:
+        path = source.path.resolve()
+        key = path, source.sheet, source.header_row, source.header_rows
+        if key not in self.sheets:
+            hints = {**self.hints.get(path, {}), source.sheet: {
+                "header_row": source.header_row, "header_rows": source.header_rows,
+            }}
+            sheets = read_workbook(path, header_hints=hints, include_hidden=True, raw_cache=self.raws,
+                                   sheet_names=frozenset(hints))
+            for sheet in sheets:
+                hint = hints.get(sheet.name)
+                if hint is not None:
+                    self.sheets[path, sheet.name, hint["header_row"], hint["header_rows"]] = sheet
+            if key not in self.sheets:
+                names = "、".join(raw.name for raw in self.raws.get(path, [])) or "、".join(sheet.name for sheet in sheets)
+                raise ReadError(f"文件「{path.name}」里没有工作表「{source.sheet}」，现有：{names}")
+        return self.sheets[key]
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +217,7 @@ def write_like_original(path: Path, plans: list[OutputPlan]) -> list[dict[str, A
     if tpl.path.suffix.lower() == ".xlsm" and path.suffix.lower() != ".xlsm":
         raise TemplatePreservationError("含宏工作簿必须另存为 .xlsm，不能丢弃宏后输出 .xlsx")
     notices: list[str] = []
+    read_cache = _OriginalReadCache([plan.template for plan in plans if plan.template])
     try:
         _check_package(tpl.path)
     except TemplatePreservationError:
@@ -190,7 +227,8 @@ def write_like_original(path: Path, plans: list[OutputPlan]) -> list[dict[str, A
             warnings.simplefilter("always", UserWarning)
             workbook = openpyxl.load_workbook(tpl.path, keep_vba=tpl.path.suffix.lower() == ".xlsm", rich_text=True)
             try:
-                written = _write_workbook(workbook, path, plans, tpl, relaxed=relaxed, notices=notices)
+                written = _write_workbook(workbook, path, plans, tpl, relaxed=relaxed, notices=notices,
+                                          read_cache=read_cache)
             except TemplatePreservationError:
                 if relaxed:
                     raise
@@ -221,8 +259,11 @@ def _check_package(path: Path) -> None:
 
 
 def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputPlan], base: TemplateSource,
-                    *, relaxed: bool = False, notices: list[str] | None = None) -> list[dict[str, Any]]:
+                    *, relaxed: bool = False, notices: list[str] | None = None,
+                    read_cache: _OriginalReadCache | None = None) -> list[dict[str, Any]]:
     notices = notices if notices is not None else []
+    read_cache = read_cache if read_cache is not None else _OriginalReadCache(
+        [base, *(plan.template for plan in plans if plan.template)])
     snapshots: dict[str, _Snapshot] = {}
     for source in [base, *(plan.template for plan in plans if plan.template)]:
         if source.path != base.path:
@@ -243,7 +284,8 @@ def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputP
             title = _unique_title(plan.name, used - {sheet.title}) if plan.name != sheet.title else sheet.title
             if title != sheet.title and _has_formulas(workbook) and not relaxed:
                 raise TemplatePreservationError("重命名工作表可能破坏现有公式引用，请保留原工作表名称")
-            _rewrite_sheet(sheet, snap, plan.df, relaxed=relaxed, notices=notices)
+            _rewrite_sheet(sheet, snap, plan.df, relaxed=relaxed, notices=notices, read_cache=read_cache,
+                           source_rows=plan.source_rows)
             used.discard(sheet.title)
             used.add(title)
             sheet.title = title
@@ -288,7 +330,8 @@ def _column_map(snap: _Snapshot, df: pd.DataFrame) -> list[int | None]:
 
 
 def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed: bool = False,
-                   notices: list[str] | None = None) -> None:
+                   notices: list[str] | None = None, read_cache: _OriginalReadCache | None = None,
+                   source_rows: list[int] | None = None) -> None:
     notices = notices if notices is not None else []
     tpl = snap.tpl
     mapping = _column_map(snap, df)
@@ -296,11 +339,27 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed:
     same_columns = columns == tpl.columns
     header_row, first_data = tpl.header_row, tpl.header_row + 1
 
-    original = read_sheet(tpl.path, tpl.sheet, header_hint={"header_row": tpl.header_row, "header_rows": tpl.header_rows})
+    original = (read_cache if read_cache is not None else _OriginalReadCache()).read(tpl)
     if len(original.df.columns) != len(tpl.columns) and not relaxed:
         raise TemplatePreservationError("原工作表列结构已变化，无法安全编辑")
+    compatible_columns = columns[:len(tpl.columns)] == tpl.columns and len(original.df.columns) == len(tpl.columns)
+    if source_rows is not None:
+        if (not isinstance(source_rows, list) or len(source_rows) != len(df)
+                or any(type(index) is not int or not 0 <= index < len(original.df) for index in source_rows)
+                or len(set(source_rows)) != len(source_rows)):
+            raise TemplatePreservationError("结果的原始行身份不完整或不唯一，无法安全保留逐行格式")
+        if compatible_columns:
+            _patch_identified_rows(ws, snap, df, original, source_rows, mapping, relaxed=relaxed, notices=notices)
+            return
+    elif compatible_columns:
+        # 兼容旧调用方：只在完整记录能唯一定位时识别重排，不能把等行数当作等行顺序。
+        matched = _match_unique_records(df.iloc[:, :len(tpl.columns)], original.df)
+        if matched is not None:
+            _patch_identified_rows(ws, snap, df, original, matched, mapping, relaxed=relaxed, notices=notices)
+            return
     if (columns[:len(tpl.columns)] == tpl.columns and len(df) == len(original.df)
             and len(original.df.columns) == len(tpl.columns)):
+        notices.append("未能验证结果与原始记录的逐行对应关系，已按现有行位置写入；涉及重排时，行级格式、批注和链接需核对。")
         _patch_cells(ws, snap, df, original.df, original.header.row_index or [], mapping, relaxed=relaxed)
         return
     if same_columns and len(df) < len(original.df):
@@ -314,7 +373,8 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed:
             matched = _match_edited_rows(df, original.df)
         if matched is not None:
             previous_rows = original.header.row_index or []
-            removed = sorted(previous_rows[index] + 1 for index in range(len(previous_rows)) if index not in set(matched))
+            retained = set(matched)
+            removed = sorted(previous_rows[index] + 1 for index in range(len(previous_rows)) if index not in retained)
             _delete_original_rows(ws, original, matched, relaxed=relaxed, notices=notices)
             remaining_rows = [previous_rows[index] - bisect_left(removed, previous_rows[index] + 1) for index in matched]
             _patch_cells(ws, snap, df, original.df.iloc[matched].reset_index(drop=True), remaining_rows, mapping,
@@ -358,6 +418,178 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed:
         _resize_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
     else:
         _fix_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
+
+
+def _match_unique_records(frame: pd.DataFrame, original: pd.DataFrame) -> list[int] | None:
+    """旧调用方没有行身份时，只接受完整记录的唯一匹配。"""
+    if len(frame) == len(original) and len(frame) > 0:
+        # 向量化预判：大半数行仍在原位置，说明是就地改值而不是重排，不必逐格归一化整张表。
+        try:
+            right = original.set_axis(frame.columns, axis=1)
+            equal = frame.reset_index(drop=True).eq(right.reset_index(drop=True))
+            equal |= frame.reset_index(drop=True).isna() & right.reset_index(drop=True).isna()
+            in_place = equal.all(axis=1)
+            if bool(in_place.all()):
+                return list(range(len(frame)))
+            if float(in_place.mean()) >= 0.5:
+                return None
+        except Exception:  # 类型不可比较时回到逐行归一化路径
+            pass
+    source = [tuple(_excel_value(value) for value in record)
+              for record in original.itertuples(index=False, name=None)]
+    result = [tuple(_excel_value(value) for value in record)
+              for record in frame.itertuples(index=False, name=None)]
+    if source == result:
+        return list(range(len(source)))
+    try:
+        positions: dict[tuple, int] = {}
+        duplicates: set[tuple] = set()
+        for index, record in enumerate(source):
+            if record in positions:
+                duplicates.add(record)
+            positions[record] = index
+        if len(set(result)) != len(result) or any(record not in positions or record in duplicates for record in result):
+            return None
+        return [positions[record] for record in result]
+    except TypeError:  # 非标量值不能当作确定的记录键
+        return None
+
+
+def _patch_identified_rows(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: SheetData,
+                           matched: list[int], mapping: list[int | None], *, relaxed: bool,
+                           notices: list[str]) -> None:
+    previous_rows = original.header.row_index or []
+    if len(previous_rows) != len(original.df):
+        raise TemplatePreservationError("无法定位原表数据行，已停止输出以避免破坏排版")
+    retained = set(matched)
+    removed = sorted(row + 1 for index, row in enumerate(previous_rows) if index not in retained)
+    # 只有行被重新排序时才重排斑马纹（底色被搬乱）；纯筛选/删行沿用“静态底色跟随记录”的既有约定。
+    banding = _detect_banding(ws, [row + 1 for row in previous_rows]) if matched != sorted(matched) else None
+    _delete_original_rows(ws, original, sorted(matched), relaxed=relaxed, notices=notices)
+    remaining = [previous_rows[index] + 1 - bisect_left(removed, previous_rows[index] + 1) for index in matched]
+    destinations = sorted(remaining)
+    row_map = dict(zip(remaining, destinations))
+    if any(source != target for source, target in row_map.items()):
+        _permute_original_rows(ws, row_map, notices)
+    if banding:
+        _apply_banding(ws, banding, destinations, notices)
+    _patch_cells(ws, snap, frame, original.df.iloc[matched].reset_index(drop=True),
+                 [row - 1 for row in destinations], mapping, relaxed=relaxed)
+
+
+def _fill_key(cell: Any) -> tuple | None:
+    """单元格底色的可比较标识；无填充为 None。"""
+    fill = cell.fill
+    if fill is None or fill.fill_type in (None, "none"):
+        return None
+    color = fill.fgColor
+    return (fill.fill_type, color.type, color.rgb if color.type == "rgb" else color.theme if color.type == "theme" else color.indexed,
+            round(float(color.tint or 0), 4))
+
+
+def _detect_banding(ws: Worksheet, rows: list[int]) -> dict[str, Any] | None:
+    """识别隔行斑马纹：数据行的底色整体在两种样式间交替。
+
+    斑马纹属于布局，排序/重排后应按位置重新交替；人工给个别记录涂的特殊底色属于记录，随记录移动。
+    返回 {"keys": {列: (甲色, 乙色)}, "fills": {(奇偶, 列): 底色对象}, "index": {行号: 位置序号}}，识别不出则为 None。
+    """
+    if len(rows) < 4:
+        return None
+    row_set = set(rows)
+    columns = sorted({column for (row, column) in ws._cells if row in row_set})
+    signatures = [tuple(_fill_key(ws._cells[row, column]) if (row, column) in ws._cells else None for column in columns)
+                  for row in rows]
+    counts: dict[tuple, int] = {}
+    for signature in signatures:
+        counts[signature] = counts.get(signature, 0) + 1
+    ranked = sorted(counts, key=counts.get, reverse=True)
+    if len(ranked) < 2 or counts[ranked[0]] + counts[ranked[1]] < 0.8 * len(rows):
+        return None
+    pair = (ranked[0], ranked[1])
+    # 每个奇偶位置上最常见的条纹样式；两个奇偶必须不同，才是交替而不是随机分布。
+    stripe: dict[int, tuple] = {}
+    for parity in (0, 1):
+        here = [signature for index, signature in enumerate(signatures) if index % 2 == parity and signature in pair]
+        if not here:
+            return None
+        stripe[parity] = max(set(here), key=here.count)
+    if stripe[0] == stripe[1]:
+        return None
+    # 绝大多数行都符合"按奇偶位置交替"；个别特殊标记行（红底等）不破坏判断。
+    if sum(signature == stripe[index % 2] for index, signature in enumerate(signatures)) < 0.8 * len(rows):
+        return None
+    fills: dict[tuple[int, int], Any] = {}
+    for parity in (0, 1):
+        for index, signature in enumerate(signatures):
+            if index % 2 != parity or signature != stripe[parity]:
+                continue
+            for column in columns:
+                cell = ws._cells.get((rows[index], column))
+                fills.setdefault((parity, column), copy(cell.fill) if cell is not None else PatternFill())
+    keys = {column: (stripe[0][position], stripe[1][position]) for position, column in enumerate(columns)}
+    return {"keys": keys, "fills": fills}
+
+
+def _apply_banding(ws: Worksheet, banding: dict[str, Any], destinations: list[int], notices: list[str]) -> None:
+    """按最终的数据行顺序重新交替斑马纹；不属于两种条纹的特殊底色保持跟随记录。"""
+    position = {row: index for index, row in enumerate(destinations)}
+    restored = 0
+    for (row, column), cell in ws._cells.items():
+        index = position.get(row)
+        if index is None or isinstance(cell, MergedCell) or (index % 2, column) not in banding["fills"]:
+            continue
+        if _fill_key(cell) in banding["keys"].get(column, ()):
+            cell.fill = copy(banding["fills"][index % 2, column])
+            restored += 1
+    if restored:
+        notices.append("检测到隔行斑马纹，已按最终的行顺序重新交替；记录自带的特殊底色仍随记录移动。")
+
+
+def _permute_original_rows(ws: Worksheet, row_map: dict[int, int], notices: list[str]) -> None:
+    """按经过验证的行身份移动原单元格；值、样式、批注、链接及行属性一起移动。"""
+    merged_ranges: list[str] = []
+    for merged in ws.merged_cells.ranges:
+        mapped = [row_map.get(row, row) for row in range(merged.min_row, merged.max_row + 1)]
+        if mapped != list(range(mapped[0], mapped[0] + len(mapped))):
+            raise TemplatePreservationError(f"排序会拆散纵向合并单元格 {merged}，无法安全保留原结构")
+        updated = CellRange(str(merged))
+        updated.min_row, updated.max_row = mapped[0], mapped[-1]
+        merged_ranges.append(str(updated))
+    formulas: dict[tuple[int, int], str] = {}
+    for (row, column), cell in ws._cells.items():
+        target = row_map.get(row, row)
+        if target == row or cell.data_type != "f":
+            continue
+        if not isinstance(cell.value, str):
+            raise TemplatePreservationError("暂不能安全排序含数组公式或数据表公式的记录")
+        try:
+            formulas[row, column] = Translator(cell.value, origin=cell.coordinate).translate_formula(
+                f"{get_column_letter(column)}{target}")
+        except Exception as exc:
+            raise TemplatePreservationError(f"无法安全移动公式 {cell.coordinate}：{exc}") from exc
+    if any(cell.data_type == "f" for sheet in ws.parent for cell in sheet._cells.values()):
+        notices.append("排序已平移记录内公式的相对引用；其他单元格的公式仍按原坐标引用，请核对跨记录或跨表计算。")
+    if ws.conditional_formatting or ws.data_validations.count:
+        notices.append("排序保留了条件格式和数据验证的原作用范围；仅针对个别记录的规则需核对。")
+    if any(sheet._charts or sheet._pivots for sheet in ws.parent) or ws._images:
+        notices.append("排序保留了图表、图片及透视对象的原锚点和引用范围，请核对其与记录的对应关系。")
+    cells = {}
+    for (row, column), cell in ws._cells.items():
+        if (row, column) in formulas:
+            cell.value = formulas[row, column]
+        cell.row = row_map.get(row, row)
+        if not isinstance(cell, MergedCell) and cell.hyperlink:
+            cell.hyperlink.ref = cell.coordinate
+        cells[cell.row, column] = cell
+    ws._cells = cells
+    ws.merged_cells = MultiCellRange(merged_ranges)
+    dimensions = {index: copy(dimension) for index, dimension in ws.row_dimensions.items()}
+    ws.row_dimensions.clear()
+    for index, dimension in dimensions.items():
+        dimension.index = row_map.get(index, index)
+        ws.row_dimensions[dimension.index] = dimension
+    if formulas and ws.parent.calculation is not None:
+        ws.parent.calculation.fullCalcOnLoad = True
 
 
 def _match_original_rows(frame: pd.DataFrame, original: pd.DataFrame) -> list[int] | None:
@@ -660,14 +892,14 @@ def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: 
                     cell = ws.cell(merged_row, merged_column)
                     cell._style = copy(style)
                     cell.value = value
-    for row_index, excel_index in enumerate(rows):
+    for row_index, (excel_index, previous_record) in enumerate(zip(rows, original.itertuples(index=False, name=None))):
         for column_index, column in enumerate(positions):
             cell = ws.cell(row=excel_index + 1, column=column)
             value = values[(excel_index + 1, column)]
             if isinstance(cell, MergedCell):
                 continue
             if column_index < len(snap.tpl.columns):
-                previous = _excel_value(original.iloc[row_index, column_index])
+                previous = _excel_value(previous_record[column_index])
                 if value == previous:
                     continue
                 if cell.data_type == "f" and not relaxed:

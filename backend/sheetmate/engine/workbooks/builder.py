@@ -18,7 +18,9 @@ from typing import Any, Literal
 
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, PatternFill, Side
-from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.formula import Tokenizer
+from openpyxl.styles.cell_style import StyleArray
+from openpyxl.utils import FORMULAE, column_index_from_string, get_column_letter
 from openpyxl.workbook.properties import CalcProperties
 from pydantic import (
     BaseModel,
@@ -38,6 +40,7 @@ MAX_COLUMNS = 256
 MAX_GRID_CELLS = 250_000
 MAX_FORMAT_CELLS = 500_000
 MAX_RANGES = 500
+MAX_EXACT_INTEGER = 10**15 - 1
 _RANGE = re.compile(r"^\$?([A-Za-z]{1,3})\$?([1-9][0-9]*)(?::\$?([A-Za-z]{1,3})\$?([1-9][0-9]*))?$")
 _COLOR = re.compile(r"^[0-9a-fA-F]{6}(?:[0-9a-fA-F]{2})?$")
 _INVALID_TEXT = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f]")
@@ -75,8 +78,99 @@ class _Spec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+# 写入文件时必须带 _xlfn. 前缀的较新函数；不带前缀 Excel 会显示 #NAME?。
+_XLFN_FUNCTIONS = frozenset({
+    "AGGREGATE", "XOR", "IFNA", "TEXTJOIN", "CONCAT", "IFS", "SWITCH", "MAXIFS", "MINIFS", "XLOOKUP", "XMATCH",
+    "DAYS", "ISOWEEKNUM", "NUMBERVALUE", "TEXTBEFORE", "TEXTAFTER", "ISFORMULA", "FORMULATEXT", "SHEET", "SHEETS",
+    "BASE", "DECIMAL", "ARABIC", "UNICHAR", "UNICODE", "ENCODEURL", "CEILING.MATH", "FLOOR.MATH",
+    "CEILING.PRECISE", "FLOOR.PRECISE", "STDEV.S", "STDEV.P", "VAR.S", "VAR.P", "RANK.EQ", "RANK.AVG",
+    "PERCENTILE.INC", "PERCENTILE.EXC", "QUARTILE.INC", "QUARTILE.EXC", "MODE.SNGL", "COVARIANCE.P",
+    "COVARIANCE.S", "NORM.DIST", "NORM.INV", "NORM.S.DIST", "NORM.S.INV", "BINOM.DIST", "POISSON.DIST",
+    "EXPON.DIST", "T.DIST", "T.INV", "T.TEST", "CONFIDENCE.NORM", "CONFIDENCE.T",
+})
+# 这些函数写入文件后不能可靠计算：动态数组不会溢出、LET/LAMBDA 的变量需要特殊前缀。
+_UNSUPPORTED_FUNCTIONS = frozenset({
+    "FILTER", "UNIQUE", "SORT", "SORTBY", "SEQUENCE", "RANDARRAY", "TEXTSPLIT", "VSTACK", "HSTACK", "TOCOL", "TOROW",
+    "WRAPROWS", "WRAPCOLS", "TAKE", "DROP", "CHOOSECOLS", "CHOOSEROWS", "EXPAND", "GROUPBY", "PIVOTBY",
+    "LET", "LAMBDA", "MAP", "REDUCE", "SCAN", "BYROW", "BYCOL", "MAKEARRAY",
+})
+
+
+def _check_formula_functions(formula: str) -> None:
+    """函数名必须是 Excel 已知函数；写入后不能可靠计算的函数直接说明原因。"""
+    try:
+        items = Tokenizer(formula).items
+    except Exception:  # 结构问题由 _check_formula_structure 报告
+        return
+    for token in items:
+        if token.type != "FUNC" or token.subtype != "OPEN":
+            continue
+        name = token.value[:-1].strip()
+        upper = name.upper()
+        if upper.startswith("_XL"):
+            continue  # 调用方显式写了内部前缀，由其负责
+        if upper in _UNSUPPORTED_FUNCTIONS:
+            raise ValueError(
+                f"公式函数 {name} 写入文件后不能可靠计算（动态数组不会溢出，LET/LAMBDA 会显示 #NAME?）；"
+                "请先用工作区公式或 SQL 算好，再用 table 写入，或改用普通函数"
+            )
+        if upper not in FORMULAE and upper not in _XLFN_FUNCTIONS:
+            raise ValueError(f"公式里的函数 {name} 不是已知的 Excel 函数，请检查拼写")
+
+
+def with_excel_function_prefixes(formula: str) -> str:
+    """给较新的函数补 _xlfn. 前缀，其余内容原样保留。"""
+    if "(" not in formula:
+        return formula
+    try:
+        tokenizer = Tokenizer(formula)
+    except Exception:
+        return formula
+    changed = False
+    for token in tokenizer.items:
+        if token.type == "FUNC" and token.subtype == "OPEN":
+            name = token.value[:-1]
+            if name.strip().upper() in _XLFN_FUNCTIONS:
+                token.value = f"_xlfn.{name.strip().upper()}("
+                changed = True
+    return tokenizer.render() if changed else formula
+
+
+def _referenced_sheets(formula: str) -> list[str]:
+    """公式里按名字引用的工作表（忽略外部工作簿和三维引用）。"""
+    try:
+        items = Tokenizer(formula).items
+    except Exception:
+        return []
+    names: list[str] = []
+    for token in items:
+        if token.type != "OPERAND" or token.subtype != "RANGE" or "!" not in token.value:
+            continue
+        text = token.value
+        if text.startswith("'"):
+            position = 1
+            while position < len(text):
+                if text[position] == "'":
+                    if position + 1 < len(text) and text[position + 1] == "'":
+                        position += 2
+                        continue
+                    break
+                position += 1
+            if position + 1 >= len(text) or text[position + 1] != "!":
+                continue
+            name = text[1:position].replace("''", "'")
+        else:
+            name = text.split("!", 1)[0]
+            if ":" in name:
+                continue
+        if name.startswith("[") or name.startswith("#"):
+            continue
+        names.append(name)
+    return names
+
+
 class FormulaCell(_Spec):
-    formula: StrictStr = Field(description="明确的 Excel 公式，以 = 开头；由 Excel 打开时重算，服务端不计算公式。")
+    formula: StrictStr = Field(description="明确的 Excel 公式，以 = 开头；校验括号和运算符结构、函数名及被引用的工作表是否存在，不验证计算结果，由 Excel 打开时重算。较新的函数（如 XLOOKUP、IFS、TEXTJOIN）会自动补内部前缀；动态数组和 LET/LAMBDA 不支持。")
 
     @field_validator("formula")
     @classmethod
@@ -87,7 +181,120 @@ class FormulaCell(_Spec):
         # DDE 可以在客户端运行程序，不属于声明式计算公式。
         if "|" in value:
             raise ValueError("公式不支持 DDE 外部程序调用")
+        _check_formula_structure(value)
+        _check_formula_functions(value)
         return value
+
+
+def _check_formula_structure(formula: str) -> None:
+    """Conservatively check delimiters and missing operands, without evaluating Excel.
+
+    Reference names and function names remain opaque. In particular, omitted
+    function arguments, structured references, spill operators and LAMBDA calls
+    are allowed; this is not a claim that Excel can calculate the expression.
+    """
+    expression = formula[1:]
+    stack: list[tuple[str, str]] = []
+    expected_value, argument_start = True, True
+    index = 0
+
+    def quoted(start: int, quote: str) -> int:
+        position = start + 1
+        while position < len(expression):
+            if expression[position] == quote:
+                if position + 1 < len(expression) and expression[position + 1] == quote:
+                    position += 2
+                    continue
+                return position + 1
+            position += 1
+        raise ValueError("公式引号不配对")
+
+    def bracketed(start: int) -> int:
+        depth, position = 1, start + 1
+        while position < len(expression):
+            character = expression[position]
+            if character == "'" and position + 1 < len(expression):
+                # Excel escapes special structured-reference characters with '.
+                position += 2
+                continue
+            if character == "[":
+                depth += 1
+            elif character == "]":
+                depth -= 1
+                if depth == 0:
+                    return position + 1
+            position += 1
+        raise ValueError("公式方括号不配对")
+
+    while index < len(expression):
+        character = expression[index]
+        if character.isspace():
+            index += 1
+            continue
+        if character == '"':
+            index = quoted(index, character)
+            expected_value, argument_start = False, False
+            continue
+        if character in "({":
+            kind = "array" if character == "{" else "group" if expected_value else "function"
+            stack.append(("}" if character == "{" else ")", kind))
+            expected_value, argument_start = True, True
+            index += 1
+            continue
+        if character in ")}":
+            if not stack or stack[-1][0] != character:
+                raise ValueError("公式括号不配对")
+            _, kind = stack.pop()
+            if expected_value and not (kind == "function" and argument_start):
+                raise ValueError("公式缺少操作数")
+            expected_value, argument_start = False, False
+            index += 1
+            continue
+        if character in ",;":
+            omitted_argument = bool(stack and stack[-1][1] == "function")
+            if expected_value and not (omitted_argument and argument_start):
+                raise ValueError("公式缺少操作数")
+            expected_value, argument_start = True, omitted_argument
+            index += 1
+            continue
+        if character in "+-*/^&=<>:":
+            if expected_value and character not in "+-":
+                raise ValueError("公式运算符前缺少操作数")
+            expected_value, argument_start = True, False
+            if expression[index:index + 2] in {"<=", ">=", "<>"}:
+                index += 1
+            index += 1
+            continue
+        if character == "%" or character == "#" and not expected_value:
+            if expected_value:
+                raise ValueError("公式运算符前缺少操作数")
+            index += 1
+            continue
+        if character == "@" and expected_value:
+            argument_start = False
+            index += 1
+            continue
+        if character == "]":
+            raise ValueError("公式方括号不配对")
+        # Treat sheet names, cell references and function names as opaque atoms.
+        # Error literals such as #DIV/0! contain a slash, unlike ordinary atoms.
+        separators = "()+-*^&=<>:%,;{}" + ("" if character == "#" else "/")
+        while index < len(expression) and not expression[index].isspace() and expression[index] not in separators:
+            if expression[index] == "'":
+                index = quoted(index, "'")
+            elif expression[index] == "[":
+                index = bracketed(index)
+            elif expression[index] == "]":
+                raise ValueError("公式方括号不配对")
+            elif expression[index] == '"':
+                break
+            else:
+                index += 1
+        expected_value, argument_start = False, False
+    if stack:
+        raise ValueError("公式括号不配对")
+    if expected_value:
+        raise ValueError("公式末尾缺少操作数")
 
 
 def _parse_date(value: str) -> dt.date | dt.datetime:
@@ -114,6 +321,38 @@ class DateCell(_Spec):
 
 
 CellValue = StrictStr | StrictBool | StrictInt | StrictFloat | FormulaCell | DateCell | None
+
+
+def _style_attributes(style: Any) -> dict[str, Any]:
+    return style.model_dump(exclude={"range"}, exclude_none=True)
+
+
+def _overlap(left: tuple[int, int, int, int], right: tuple[int, int, int, int]) -> bool:
+    return not (left[2] < right[0] or right[2] < left[0] or left[3] < right[1] or right[3] < left[1])
+
+
+def _merge_same_range_styles(styles: list[Any]) -> list[Any]:
+    """反复修订会让同一范围的规则越积越多。后一条并入同范围的前一条，但只在不改变最终效果时：
+    中间没有与它范围重叠且设置了相同属性的规则（否则提前应用会让中间规则错误地覆盖它）。"""
+    merged: list[Any] = []
+    for style in styles:
+        attributes = _style_attributes(style)
+        target = None
+        for index in range(len(merged) - 1, -1, -1):
+            if merged[index].range == style.range:
+                target = index
+                break
+        if target is not None:
+            bounds = _bounds(style.range)
+            blocked = any(
+                _overlap(bounds, _bounds(later.range)) and set(_style_attributes(later)) & set(attributes)
+                for later in merged[target + 1:]
+            )
+            if not blocked:
+                merged[target] = merged[target].model_copy(update=attributes)
+                continue
+        merged.append(style)
+    return merged
 
 
 class RangeStyle(_Spec):
@@ -172,15 +411,35 @@ class CreatedSheet(_Spec):
     def validate_rows(cls, rows: list[list[CellValue]]) -> list[list[CellValue]]:
         if sum(len(row) for row in rows) > MAX_GRID_CELLS:
             raise ValueError(f"数据网格最多 {MAX_GRID_CELLS} 个单元格")
-        for row in rows:
+        for row_index, row in enumerate(rows, start=1):
             if len(row) > MAX_COLUMNS:
                 raise ValueError(f"每行最多 {MAX_COLUMNS} 列")
-            for value in row:
+            for column_index, value in enumerate(row, start=1):
                 if isinstance(value, str):
                     _check_text(value)
+                elif isinstance(value, int) and not isinstance(value, bool) and abs(value) > MAX_EXACT_INTEGER:
+                    coordinate = f"{get_column_letter(column_index)}{row_index}"
+                    raise ValueError(f"{coordinate} 的整数超过 Excel 可可靠保留的 15 位精度；编号、账号等请以字符串传入，不能作为数字写入后静默丢失精度")
                 elif isinstance(value, float) and not math.isfinite(value):
                     raise ValueError("数字必须为有限值，不能使用 NaN 或 Infinity")
         return rows
+
+    @field_validator("styles", mode="before")
+    @classmethod
+    def deduplicate_styles(cls, values: Any) -> Any:
+        if not isinstance(values, list):
+            return values
+        seen: set[tuple[tuple[str, Any], ...]] = set()
+        retained: list[RangeStyle] = []
+        # Keep the last identical rule: a later rule can intentionally restore a
+        # value changed by an intervening overlapping rule.
+        for value in reversed(values):
+            style = RangeStyle.model_validate(value)
+            key = tuple(style.model_dump(exclude_none=True).items())
+            if key not in seen:
+                seen.add(key)
+                retained.append(style)
+        return _merge_same_range_styles(list(reversed(retained)))
 
     @field_validator("merges")
     @classmethod
@@ -258,6 +517,18 @@ class WorkbookSpec(_Spec):
             raise ValueError(f"整个工作簿数据网格累计最多 {MAX_GRID_CELLS} 个单元格")
         if sum(sheet.format_cells for sheet in self.sheets) > MAX_FORMAT_CELLS:
             raise ValueError(f"整个工作簿格式区域累计不能超过 {MAX_FORMAT_CELLS} 个单元格")
+        existing = {sheet.name.casefold() for sheet in self.sheets}
+        for sheet in self.sheets:
+            for row_index, row in enumerate(sheet.rows, start=1):
+                for column_index, value in enumerate(row, start=1):
+                    if not isinstance(value, FormulaCell):
+                        continue
+                    for name in _referenced_sheets(value.formula):
+                        if name.casefold() not in existing:
+                            coordinate = f"{get_column_letter(column_index)}{row_index}"
+                            raise ValueError(
+                                f"「{sheet.name}」!{coordinate} 的公式引用了不存在的工作表「{name}」"
+                                f"（现有：{'、'.join(item.name for item in self.sheets)}）")
         return self
 
 
@@ -279,13 +550,33 @@ def workbook_tool_schema() -> dict[str, Any]:
     return expand(schema)
 
 
-def _apply_style(sheet: Any, style: RangeStyle) -> None:
+_StyleCache = dict[tuple[tuple[int, ...], tuple[tuple[str, Any], ...]], StyleArray]
+
+
+def _apply_style(sheet: Any, style: RangeStyle, cache: _StyleCache | None = None) -> None:
     left, top, right, bottom = _bounds(style.range)
+    attributes = tuple(style.model_dump(exclude={"range"}, exclude_none=True).items())
+    if not attributes:
+        return
+    if cache is None:
+        cache = {}
     font_attrs = {key: getattr(style, field) for key, field in {"bold": "bold", "italic": "italic", "size": "font_size", "color": "font_color"}.items()
                   if getattr(style, field) is not None}
     alignment_attrs = {field: getattr(style, field) for field in ("horizontal", "vertical", "wrap_text") if getattr(style, field) is not None}
+    fill = PatternFill("solid", fgColor=style.fill) if style.fill is not None else None
+    border = None
+    if style.border is not None:
+        side = Side(style=None if style.border == "none" else style.border, color="FFD1D5DB")
+        border = Border(left=side, right=side, top=side, bottom=side)
     for row in sheet.iter_rows(min_row=top, max_row=bottom, min_col=left, max_col=right):
         for cell in row:
+            cache_key = (tuple(cell._style) if cell._style is not None else (), attributes)
+            if cache_key in cache:
+                # StyleArray is mutable when a later rule sets one property.
+                cell._style = copy(cache[cache_key])
+                continue
+            if cell._style is not None:
+                cell._style = copy(cell._style)
             if font_attrs:
                 font = copy(cell.font)
                 for key, value in font_attrs.items():
@@ -296,13 +587,13 @@ def _apply_style(sheet: Any, style: RangeStyle) -> None:
                 for key, value in alignment_attrs.items():
                     setattr(alignment, key, value)
                 cell.alignment = alignment
-            if style.fill is not None:
-                cell.fill = PatternFill("solid", fgColor=style.fill)
-            if style.border is not None:
-                side = Side(style=None if style.border == "none" else style.border, color="FFD1D5DB")
-                cell.border = Border(left=side, right=side, top=side, bottom=side)
+            if fill is not None:
+                cell.fill = fill
+            if border is not None:
+                cell.border = border
             if style.number_format is not None:
                 cell.number_format = style.number_format
+            cache[cache_key] = copy(cell._style)
 
 
 def write_created_workbook(path: Path, spec: WorkbookSpec | dict[str, Any]) -> list[dict[str, Any]]:
@@ -318,6 +609,8 @@ def write_created_workbook(path: Path, spec: WorkbookSpec | dict[str, Any]) -> l
     workbook.calculation = CalcProperties(calcId=0, fullCalcOnLoad=True, forceFullCalc=True, calcMode="auto")
     written = []
     temporary: Path | None = None
+    style_cache: _StyleCache = {}
+    default_alignment = Alignment(vertical="center")
     try:
         for item in validated.sheets:
             sheet = workbook.create_sheet(item.name)
@@ -329,7 +622,7 @@ def write_created_workbook(path: Path, spec: WorkbookSpec | dict[str, Any]) -> l
                         continue
                     cell = sheet.cell(row_index, column_index)
                     if isinstance(value, FormulaCell):
-                        cell.value = value.formula
+                        cell.value = with_excel_function_prefixes(value.formula)
                         formulas += 1
                     elif isinstance(value, DateCell):
                         cell.value = _parse_date(value.date)
@@ -338,7 +631,7 @@ def write_created_workbook(path: Path, spec: WorkbookSpec | dict[str, Any]) -> l
                         cell.value = value
                         if isinstance(value, str):
                             cell.data_type = "s"
-                    cell.alignment = Alignment(vertical="center")
+                    cell.alignment = default_alignment
                     if row_index <= 500:
                         text = value.date if isinstance(value, DateCell) else str(value) if not isinstance(value, FormulaCell) else ""
                         widths[column_index] = max(widths.get(column_index, 8), min(60, sum(2 if ord(c) > 0x2E7F else 1 for c in text[:80]) + 2))
@@ -349,7 +642,7 @@ def write_created_workbook(path: Path, spec: WorkbookSpec | dict[str, Any]) -> l
             for row, height in item.row_heights.items():
                 sheet.row_dimensions[int(row)].height = height
             for style in item.styles:
-                _apply_style(sheet, style)
+                _apply_style(sheet, style, style_cache)
             for area in item.merges:
                 sheet.merge_cells(area)
             if item.freeze_panes is not None:
