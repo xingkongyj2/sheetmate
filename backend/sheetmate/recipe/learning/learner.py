@@ -177,7 +177,13 @@ def inputs_text(ctx: LearnContext) -> str:
     for alias, df in ctx.input_frames.items():
         meta = ctx.input_meta.get(alias, InputMeta())
         label = f"{meta.filename} · {meta.sheet}" if meta.filename else ""
-        parts.append(frame_profile_text(alias, df, label))
+        text = frame_profile_text(alias, df, label)
+        footers = (meta.header or {}).get("footer_rows") or []
+        if footers:  # 页脚合计行不在表数据里；不说清楚，模型会自己再追加一行合计，导致合计翻倍
+            from sheetmate.engine.tables.memory import footer_notice
+
+            text += "\n说明：" + footer_notice([{"excel_row": int(row) + 1, "label": "合计"} for row in footers])
+        parts.append(text)
     for alias, meta in ctx.input_meta.items():
         if meta.kind == "file" and alias not in ctx.input_frames:
             parts.append(f"### 文件「{alias}」：{meta.filename or alias}（完整文件，可用于 Python input_files）")
@@ -344,7 +350,7 @@ def _dynamic_schema_outputs(steps: list[RecipeStep], library: FormulaLibrary) ->
     preserves_table_columns = {
         "drop_columns", "rename_columns", "filter_rows", "drop_duplicates", "sort_rows",
         "fill_null", "trim_text", "cast_columns", "compute_column", "map_values",
-        "split_column", "concat_columns", "add_serial", "lookup", "top_n", "append_total",
+        "split_column", "concat_columns", "add_serial", "lookup", "top_n", "append_total", "append_rows",
     }
     dynamic: set[str] = set()
     for step in sorted(steps, key=lambda item: item.id):

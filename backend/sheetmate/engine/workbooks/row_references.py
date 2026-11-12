@@ -18,6 +18,61 @@ _ROW = re.compile(r"(?P<first>\$?\d+)(?::(?P<last>\$?\d+))?$")
 _COL = re.compile(r"(?P<first>\$?[A-Za-z]{1,3})(?::(?P<last>\$?[A-Za-z]{1,3}))?$")
 
 
+class _DeletedRows:
+    """删行映射：被删的行不存在，其后的行整体上移。"""
+
+    def __init__(self, deleted: set[int]):
+        self.deleted = deleted
+
+    def __bool__(self) -> bool:
+        return bool(self.deleted)
+
+    def __contains__(self, row: int) -> bool:
+        return row in self.deleted
+
+    def map_row(self, row: int) -> int:
+        return row - _count_before(self.deleted, row)
+
+    def map_range(self, first: int, last: int) -> list[int]:
+        return _mapped_rows(first, last, self.deleted)
+
+
+DeletedRows = _DeletedRows
+
+
+class InsertedRows:
+    """插入行映射：从 at 行起（含）的行整体下移 count 行。
+
+    extend_end 为真时，恰好结束在 at-1 的区域引用（如 SUM(C3:C10) 且新行插在第 11 行）一起向下扩展，
+    让“在数据区末尾追加”的新行自动被合计公式、筛选范围、条件格式等覆盖；单个单元格引用不扩展。
+    """
+
+    def __init__(self, at: int, count: int, extend_end: bool = False):
+        self.at, self.count, self.extend_end = at, count, extend_end
+
+    def __bool__(self) -> bool:
+        return self.count > 0
+
+    def __contains__(self, row: int) -> bool:  # 插入不会让任何已有行消失
+        return False
+
+    def map_row(self, row: int) -> int:
+        return row + self.count if row >= self.at else row
+
+    def map_range(self, first: int, last: int) -> list[int]:
+        new_last = self.map_row(last)
+        if self.extend_end and last == self.at - 1 and first < self.at:
+            new_last = last + self.count
+        return [self.map_row(first), new_last]
+
+
+RowMap = _DeletedRows | InsertedRows
+
+
+def as_row_map(value: "set[int] | RowMap") -> RowMap:
+    return value if isinstance(value, (_DeletedRows, InsertedRows)) else _DeletedRows(value)
+
+
 @dataclass(frozen=True)
 class _Reference:
     prefix: str
@@ -25,7 +80,7 @@ class _Reference:
     sheet: str | None
 
 
-def adjust_formula(formula: str, current_sheet: str, deleted: dict[str, set[int]]) -> str:
+def adjust_formula(formula: str, current_sheet: str, deleted: "dict[str, set[int] | RowMap]") -> str:
     """Adjust ordinary A1 references in *formula* after deleting worksheet rows.
 
     A direct reference to a deleted cell, an all-deleted range, a 3-D reference,
@@ -53,7 +108,7 @@ def adjust_formula(formula: str, current_sheet: str, deleted: dict[str, set[int]
     return "=" + rendered if had_equals else rendered
 
 
-def shift_range_ref(reference: str, deleted: set[int]) -> str:
+def shift_range_ref(reference: str, deleted: "set[int] | RowMap") -> str:
     """Shift an A1 range after deleting rows.
 
     Multiple areas separated by whitespace are handled independently. If every
@@ -62,6 +117,7 @@ def shift_range_ref(reference: str, deleted: set[int]) -> str:
     """
     if not reference:
         return ""
+    deleted = as_row_map(deleted)
     areas = _split_areas(reference)
     shifted: list[str] = []
     for area in areas:
@@ -84,7 +140,8 @@ def _adjust_token(token: str, current_sheet: str, deleted: dict[str, set[int]]) 
     return shifted
 
 
-def _shift_area(area: str, deleted: set[int], *, reject_single: bool = False) -> str:
+def _shift_area(area: str, deleted: "set[int] | RowMap", *, reject_single: bool = False) -> str:
+    deleted = as_row_map(deleted)
     ref = _parse_reference(area)
     if ref is None:
         return area
@@ -97,7 +154,7 @@ def _shift_area(area: str, deleted: set[int], *, reject_single: bool = False) ->
         last = int((row_match.group("last") or row_match.group("first")).lstrip("$"))
         if last < first:
             raise ValueError(f"reversed row range {area!r} is unsupported")
-        mapped = _mapped_rows(first, last, deleted)
+        mapped = deleted.map_range(first, last)
         if not mapped:
             return ""
         first_text = _shift_number(row_match.group("first"), mapped[0])
@@ -115,7 +172,7 @@ def _shift_area(area: str, deleted: set[int], *, reject_single: bool = False) ->
             if not reject_single:
                 return ""
             raise ValueError(f"reference {area!r} points to a deleted cell")
-        return f"{ref.prefix}{match.group('col')}{_shift_number(match.group('row'), row - _count_before(deleted, row))}"
+        return f"{ref.prefix}{match.group('col')}{_shift_number(match.group('row'), deleted.map_row(row))}"
     if len(parts) != 2:
         raise ValueError(f"unsupported range reference {area!r}")
     start, end = (_CELL.fullmatch(part) for part in parts)
@@ -125,7 +182,7 @@ def _shift_area(area: str, deleted: set[int], *, reject_single: bool = False) ->
     end_row = int(end.group("row").lstrip("$"))
     if end_row < start_row:
         raise ValueError(f"reversed cell range {area!r} is unsupported")
-    mapped = _mapped_rows(start_row, end_row, deleted)
+    mapped = deleted.map_range(start_row, end_row)
     if not mapped:
         return ""
     return (

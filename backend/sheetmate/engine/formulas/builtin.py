@@ -839,6 +839,97 @@ def _build_append_total(p: dict[str, Any], ws: Workspace) -> FormulaPlan:
     return FormulaPlan(sql, [table])
 
 
+_MAX_APPEND_ROWS = 500
+_TRUE_WORDS = {"true", "1", "yes", "y", "是", "对"}
+_FALSE_WORDS = {"false", "0", "no", "n", "否", "不是"}
+
+
+def _append_value(value: Any, column: str, label: str) -> str:
+    """把用户给的一个值转成该列类型的 SQL 字面量；转不了就报具体是哪一列、什么值。"""
+    import datetime as dt
+    import re
+
+    duck = _duck_type(label)
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return f"CAST(NULL AS {duck})"
+    where = f"列「{column}」的值 {value!r}"
+    if label in {"integer", "float"}:
+        if isinstance(value, bool):
+            raise FormulaError(f"{where}不是数字")
+        if isinstance(value, str):
+            text = value.strip().replace(",", "").replace("，", "")
+            percent = text.endswith("%")
+            try:
+                number = float(text[:-1] if percent else text)
+            except ValueError:
+                raise FormulaError(f"{where}不是数字") from None
+            value = number / 100 if percent else number
+        if not isinstance(value, (int, float)) or value != value or value in (float("inf"), float("-inf")):
+            raise FormulaError(f"{where}不是有限的数字")
+        if label == "integer":
+            if float(value) != int(value):
+                raise FormulaError(f"{where}不是整数，该列是整数列")
+            return f"CAST({int(value)} AS BIGINT)"
+        return f"CAST({float(value)!r} AS DOUBLE)"
+    if label == "datetime":
+        text = str(value).strip() if not isinstance(value, (dt.date, dt.datetime)) else value.isoformat()
+        match = re.fullmatch(r"(\d{4})[年/.-](\d{1,2})[月/.-](\d{1,2})日?(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?", text)
+        if match:
+            year, month, day = (int(match.group(i)) for i in (1, 2, 3))
+            hour, minute, second = (int(match.group(i) or 0) for i in (4, 5, 6))
+            try:
+                moment = dt.datetime(year, month, day, hour, minute, second)
+            except ValueError:
+                raise FormulaError(f"{where}不是有效的日期") from None
+        else:
+            try:
+                moment = dt.datetime.fromisoformat(text.replace("T", " "))
+            except ValueError:
+                raise FormulaError(f"{where}无法识别为日期，请用 2026-11-09 或 2026-11-09 08:30 的写法") from None
+        return f"CAST({lit(moment.isoformat(sep=' '))} AS TIMESTAMP)"
+    if label == "boolean":
+        word = str(value).strip().lower()
+        if word in _TRUE_WORDS or word in _FALSE_WORDS:
+            return "TRUE" if word in _TRUE_WORDS else "FALSE"
+        raise FormulaError(f"{where}不是是/否")
+    if isinstance(value, float) and value == int(value):
+        value = int(value)
+    return lit(str(value))
+
+
+def _build_append_rows(p: dict[str, Any], ws: Workspace) -> FormulaPlan:
+    table = p["table"]
+    types = _types(ws, table)
+    columns = list(types)
+    records = p["rows"]
+    if not records:
+        raise FormulaError("rows 不能为空，至少给出一条要追加的记录")
+    if len(records) > _MAX_APPEND_ROWS:
+        raise FormulaError(f"一次最多追加 {_MAX_APPEND_ROWS} 行；更多的数据请先放进一张表，再用「合并多张表」")
+    selects = []
+    for index, record in enumerate(records):
+        if isinstance(record, dict):
+            unknown = [key for key in record if key not in types]
+            if unknown:
+                raise FormulaError(f"第 {index + 1} 条记录里没有这些列：{_names([str(u) for u in unknown])}；表「{table}」的列是：{_names(columns, 12)}")
+            values = [record.get(column) for column in columns]
+        elif isinstance(record, (list, tuple)):
+            if len(record) > len(columns):
+                raise FormulaError(f"第 {index + 1} 条记录有 {len(record)} 个值，但表「{table}」只有 {len(columns)} 列")
+            values = list(record) + [None] * (len(columns) - len(record))
+        else:
+            raise FormulaError(f"第 {index + 1} 条记录应该是 {{列名: 值}} 对象或按列顺序的数组")
+        cells = ", ".join(f"{_append_value(value, column, types[column])} AS {q(column)}" for value, column in zip(values, columns))
+        selects.append(f"SELECT {cells}, 1 AS __ord, {index} AS __rid")
+    sql = (
+        "SELECT * EXCLUDE (__ord, __rid) FROM ("
+        f"SELECT *, 0 AS __ord, rowid AS __rid FROM {q(table)} UNION ALL "
+        + " UNION ALL ".join(selects)
+        + ") ORDER BY __ord, __rid"
+    )
+    return FormulaPlan(sql, [table])
+
+
 def referenced_tables(ws: Workspace | None, sql: str) -> list[str]:
     """查询引用了哪些表（保留 ws 参数是为了兼容调用方）。"""
     return sql_table_refs(sql)
@@ -1094,6 +1185,16 @@ def _register() -> dict[str, BuiltinFormula]:
                    "group_by": {"type": "columns", "of": "table", "desc": "可选：每组各取前 N"}},
                   ["前几", "排名", "top"]),
             _build_top_n, _d("按「{by}」取前 {n} 行"),
+        ),
+        BuiltinFormula(
+            _spec("append_rows", "追加记录", "计算", "在表格最后追加几条新记录（原有记录和顺序不变）",
+                  {"table": _T,
+                   "rows": {"type": "list", "required": True,
+                            "desc": "要追加的记录：每条是 {列名: 值} 对象（没给的列留空），或按列顺序的数组。数字写数字，日期写 2026-11-09，百分比写小数或 \"10%\"",
+                            "schema": {"type": "array", "items": {"type": "object"}}}},
+                  ["追加", "新增记录", "加几行", "再加", "添加订单"],
+                  {"table": "订单", "rows": [{"订单号": "SO-009", "金额": 900, "日期": "2026-11-09"}]}),
+            _build_append_rows, lambda p: f"在最后追加 {len(p.get('rows') or [])} 条记录",
         ),
         BuiltinFormula(
             _spec("append_total", "添加合计行", "汇总统计", "在表格最后加一行合计",

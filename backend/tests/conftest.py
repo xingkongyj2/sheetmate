@@ -14,6 +14,7 @@ from typing import Any
 _DATA = Path(tempfile.mkdtemp(prefix="sheetmate_test_"))
 os.environ["SHEETMATE_DATA_DIR"] = str(_DATA)
 os.environ["SEED_DEMO"] = "1"
+os.environ.setdefault("OOXML_EDIT", "auto")  # 不受开发者本机配置影响；可在命令行用 OOXML_EDIT=always|off 做对照回归
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest  # noqa: E402

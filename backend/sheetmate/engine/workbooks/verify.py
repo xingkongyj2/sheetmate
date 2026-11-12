@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import math
+import random
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,9 @@ from sheetmate.engine.workbooks.reader import ReadError, read_workbook
 from sheetmate.engine.workbooks.writer import _excel_value
 
 MAX_VERIFY_CELLS = 200_000
+MAX_SAMPLED_CELLS = 3_000_000  # 超过逐格核对上限、但还能承受一次回读时，改为抽样核对
+SAMPLE_EDGE_ROWS = 25
+SAMPLE_RANDOM_ROWS = 200
 MAX_REPORTED = 5
 _EXCEL_SUFFIXES = {".xlsx", ".xlsm"}
 
@@ -44,6 +48,15 @@ def values_equal(expected: Any, actual: Any) -> bool:
     if isinstance(expected, dt.date):
         return actual == expected or (isinstance(actual, dt.datetime) and actual == dt.datetime.combine(expected, dt.time()))
     return str(expected) == str(actual)
+
+
+def _sample_offsets(count: int) -> list[int]:
+    """首尾各若干行加固定种子的随机行：结果可复现，覆盖写入最容易出错的边界。"""
+    if count <= SAMPLE_EDGE_ROWS * 2 + SAMPLE_RANDOM_ROWS:
+        return list(range(count))
+    chosen = set(range(SAMPLE_EDGE_ROWS)) | set(range(count - SAMPLE_EDGE_ROWS, count))
+    chosen.update(random.Random(count).sample(range(count), SAMPLE_RANDOM_ROWS))
+    return sorted(chosen)
 
 
 def _describe(mismatches: list[str], total: int) -> str:
@@ -72,27 +85,31 @@ def verify_template_output(path: Path, plans: list[Any], written: list[dict[str,
     checks: list[dict[str, Any]] = []
     try:
         touched = {item["sheet"] for item in written}
+        raw_cache: dict[Path, list[Any]] = {}  # 多个工作表共享同一次文件解析，而不是每个工作表各读一遍
         for plan, info in zip(plans, written):
-            checks.append(_verify_sheet(path, workbook, plan, info["sheet"]))
+            checks.append(_verify_sheet(path, workbook, plan, info["sheet"], raw_cache))
         checks.append(_verify_protected_sheets(workbook, plans, touched))
     finally:
         workbook.close()
     return [item for item in checks if item is not None]
 
 
-def _verify_sheet(path: Path, workbook: openpyxl.Workbook, plan: Any, title: str) -> dict[str, Any]:
+def _verify_sheet(path: Path, workbook: openpyxl.Workbook, plan: Any, title: str,
+                  raw_cache: dict[Path, list[Any]] | None = None) -> dict[str, Any]:
     rule, description = f"verify_sheet_{title}", f"「{title}」的数据与计划一致"
     frame: pd.DataFrame = plan.df
     if title not in workbook.sheetnames:
         return _check(rule, description, "fail", f"输出文件里没有工作表「{title}」")
     ws = workbook[title]
-    if frame.size > MAX_VERIFY_CELLS:
+    sampled = frame.size > MAX_VERIFY_CELLS
+    if frame.size > MAX_SAMPLED_CELLS:
         return _check(rule, description, "warn", f"「{title}」数据量较大（{frame.size} 个单元格），只确认了文件可打开，没有逐格核对")
     hints = None
     if plan.edit and plan.template is not None:
         hints = {title: {"header_row": plan.template.header_row, "header_rows": plan.template.header_rows}}
     try:
-        sheet = next(item for item in read_workbook(path, header_hints=hints, include_hidden=True, sheet_names=frozenset({title}))
+        sheet = next(item for item in read_workbook(path, header_hints=hints, include_hidden=True, sheet_names=frozenset({title}),
+                                      raw_cache=raw_cache)
                      if item.name == title)
     except (ReadError, StopIteration) as exc:
         return _check(rule, description, "fail", f"无法按表头读回「{title}」：{exc}")
@@ -105,15 +122,21 @@ def _verify_sheet(path: Path, workbook: openpyxl.Workbook, plan: Any, title: str
             name not in known and name != actual for name, actual in zip(expected_columns, actual_columns)):
         return _check(rule, description, "fail", f"「{title}」的列与计划不一致：应为 {expected_columns}，实际 {actual_columns}",
                       actual=actual_columns)
-    if len(sheet.df) != len(frame):
+    rows, columns = list(sheet.header.row_index or []), sheet.header.col_index or []
+    footers = list(sheet.header.footer_rows or [])
+    if len(rows) != len(frame) and len(rows) + len(footers) == len(frame):
+        # 计划末尾的“合计”行写出后，读取层会把它归为页脚而不是记录；它仍是计划里的一行，按位置一起核对。
+        rows += footers
+    elif len(sheet.df) != len(frame):
         return _check(rule, description, "fail", f"「{title}」应有 {len(frame)} 行数据，实际读回 {len(sheet.df)} 行", actual=len(sheet.df))
-    rows, columns = sheet.header.row_index or [], sheet.header.col_index or []
     if len(rows) != len(frame) or len(columns) != len(expected_columns):
         return _check(rule, description, "warn", f"「{title}」无法定位数据单元格，没有逐格核对")
     mismatches: list[str] = []
     total = 0
+    check_offsets = _sample_offsets(len(rows)) if sampled else range(len(rows))
     values = frame.to_numpy(dtype=object)
-    for row_offset, excel_row in enumerate(rows):
+    for row_offset in check_offsets:
+        excel_row = rows[row_offset]
         for column_offset, excel_column in enumerate(columns):
             cell = ws.cell(excel_row + 1, excel_column + 1)
             if isinstance(cell, MergedCell) or cell.data_type == "f":
@@ -123,7 +146,12 @@ def _verify_sheet(path: Path, workbook: openpyxl.Workbook, plan: Any, title: str
                 if len(mismatches) < MAX_REPORTED:
                     mismatches.append(f"{cell.coordinate} 应为 {_excel_value(values[row_offset, column_offset])!r}，实际 {cell.value!r}")
     if total:
-        return _check(rule, description, "fail", f"「{title}」有 {total} 个单元格与计划不一致：{_describe(mismatches, total)}", actual=total)
+        scope = f"抽样的 {len(check_offsets)} 行里" if sampled else ""
+        return _check(rule, description, "fail", f"「{title}」{scope}有 {total} 个单元格与计划不一致：{_describe(mismatches, total)}", actual=total)
+    if sampled:
+        # 抽样一致只能说明没发现问题，不冒充逐格通过。
+        return _check(rule, description, "warn",
+                      f"「{title}」数据量较大（{frame.size} 个单元格），已核对列、行数并抽样核对 {len(check_offsets)} 行，没有逐格核对")
     return _check(rule, description, "pass")
 
 
@@ -132,6 +160,8 @@ def _verify_protected_sheets(workbook: openpyxl.Workbook, plans: list[Any], touc
     templates = {plan.template.path for plan in plans if plan.template is not None}
     if len(templates) != 1:
         return None
+    if all(name in touched for name in workbook.sheetnames):
+        return None  # 所有工作表都在计划内，没有“未涉及的工作表”需要核对，也就不必再加载一遍原文件
     source_path = next(iter(templates))
     rule, description = "verify_protected_sheets", "未涉及的工作表保持原样"
     try:

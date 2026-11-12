@@ -19,6 +19,14 @@ _ROW_FORMULAS = frozenset({
 })
 
 
+# 结果行与左表行一一对应、顺序不变的"保左表行"公式：每个结果行只来自左表的一行。
+# lookup 把匹配表折叠成每个键一行，结果行数恒等于左表；join_tables 仅在 left/inner 时才可能保持左表行
+# （right/full 会出现没有左表来源的行），右表键重复造成的一对多由建表时的唯一性检查拦下，不会误传身份。
+_LEFT_ROW_FORMULAS = {"lookup": "table", "join_tables": "left"}
+_LEFT_JOIN_KINDS = frozenset({"left", "inner"})
+_LOOKUP_SELECT = "SELECT l.*, "
+
+
 @dataclass(frozen=True)
 class LineagePlan:
     sql: str
@@ -93,11 +101,52 @@ def compile_sql_row_lineage(ws: Workspace, sql: str, source: str) -> LineagePlan
         return None
 
 
+def _compile_left_row_lineage(fid: str, params: dict[str, Any], plan: FormulaPlan, ws: Workspace) -> LineagePlan | None:
+    """lookup / join_tables：在最外层 SELECT 里带上左表（别名 l）的物理 rowid。"""
+    source = params.get(_LEFT_ROW_FORMULAS[fid])
+    if not isinstance(source, str):
+        return None
+    if fid == "join_tables" and str(params.get("how", "left")).lower() not in _LEFT_JOIN_KINDS:
+        return None
+    try:
+        source_info = ws.require(source)
+    except WorkspaceError:
+        return None
+    if validated_row_lineage(source_info) is None:
+        return None
+    names = {name.casefold() for name in source_info.column_names}
+    for table in dict.fromkeys(plan.inputs):
+        try:
+            names.update(name.casefold() for name in ws.require(table).column_names)
+        except WorkspaceError:
+            return None
+    if "rowid" in names:
+        return None  # 业务列叫 rowid 会遮住伪列，不能声称行身份可信
+    base = f"__sm_row_lineage_{uuid4().hex}"
+    column, suffix = base, 0
+    while column.casefold() in names or column.casefold() in plan.sql.casefold():
+        suffix += 1
+        column = f"{base}_{suffix}"
+    marker = f"l.rowid AS {quote_ident(column)}, "
+    if fid == "lookup":
+        # lookup 的 CTE 里没有同样的写法，最外层 SELECT 是唯一一处 "SELECT l.*, "。
+        if plan.sql.count(_LOOKUP_SELECT) != 1:
+            return None
+        sql = plan.sql.replace(_LOOKUP_SELECT, f"SELECT {marker}l.*, ", 1)
+    else:
+        if not plan.sql.startswith("SELECT "):
+            return None
+        sql = f"SELECT {marker}{plan.sql[len('SELECT '):]}"
+    return LineagePlan(sql, source, column)
+
+
 def compile_row_lineage(
     resolved: ResolvedFormula, params: dict[str, Any], plan: FormulaPlan, ws: Workspace,
 ) -> LineagePlan | None:
     """只有真实内置实现且来源可验证时才增加内部行号，不以结果行数猜测身份。"""
     fid = resolved.spec.id
+    if fid in _LEFT_ROW_FORMULAS and resolved.builtin is BUILTIN_FORMULAS.get(fid):
+        return _compile_left_row_lineage(fid, params, plan, ws)
     if fid == "custom_sql" and resolved.builtin is BUILTIN_FORMULAS.get(fid):
         inputs = list(dict.fromkeys(plan.inputs))
         return compile_sql_row_lineage(ws, plan.sql, inputs[0]) if len(inputs) == 1 else None

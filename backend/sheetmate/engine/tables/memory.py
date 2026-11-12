@@ -24,6 +24,13 @@ MAX_TABLES_CONTEXT_CHARS = 24_000
 OBSERVATION_PREVIEW_ROWS = 10
 
 
+def footer_notice(footers: list[dict[str, Any]]) -> str:
+    """表尾合计行不在数据里。告诉模型它们会被保留，免得又追加一行合计、或把合计当成记录统计。"""
+    where = "、".join(f"第 {item.get('excel_row')} 行「{item.get('label')}」" for item in footers[:3])
+    return (f"数据区下方有合计行（{where}），它不是记录，不在表数据里；改写原表时会原样保留，"
+            "合计公式的范围会随新增、删除的行自动调整。不要再追加合计行，也不要把它当成数据统计。")
+
+
 def _context_projection(text: str, max_chars: int, *, message: str = "") -> str:
     """Bound only the model-facing projection; stored facts remain untouched."""
     if len(text) <= max_chars:
@@ -191,6 +198,8 @@ def format_table_memory(info: TableInfo, *, heading: str | None = None,
             lines.append("警告：存在 Excel 错误单元格，错误不是正常业务值；先处理或说明错误后再计算。")
         if quality.get("header_confidence") == "low":
             lines.append("警告：表头识别置信度低，先核对原工作表区域，不能仅依据本画像确认业务字段。")
+        if quality.get("footer_rows"):
+            lines.append("说明：" + footer_notice(quality["footer_rows"]))
     if info.header:
         header = info.header
         row_index = header.get("row_index") or []

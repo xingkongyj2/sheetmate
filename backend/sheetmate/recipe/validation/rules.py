@@ -22,13 +22,14 @@ def validate_run(
     outputs: dict[str, pd.DataFrame],
     history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    checks = _auto_checks(recipe, outputs)
+    checks = _auto_checks(recipe, outputs, inputs)
+    appended = _appended_sums(recipe)
     for rule in recipe.validation_rules:
         if rule.requires_history and not history:
             checks.append(_check(rule, "not_evaluated", message="需要历史运行数据，暂时跳过"))
             continue
         try:
-            checks.append(_run_rule(rule, inputs, outputs, history or []))
+            checks.append(_run_rule(rule, inputs, outputs, history or [], appended))
         except Exception as exc:
             # Keep the report available, but an unexecuted rule cannot count as
             # a successful check merely because the other checks passed.
@@ -72,7 +73,8 @@ def output_metrics(outputs: dict[str, pd.DataFrame]) -> dict[str, float]:
 # ---------------------------------------------------------------------------
 
 
-def _auto_checks(recipe: Recipe, outputs: dict[str, pd.DataFrame]) -> list[dict[str, Any]]:
+def _auto_checks(recipe: Recipe, outputs: dict[str, pd.DataFrame],
+                 inputs: dict[str, pd.DataFrame] | None = None) -> list[dict[str, Any]]:
     checks: list[dict[str, Any]] = []
     total_rows = sum(len(df) for df in outputs.values())
     checks.append(
@@ -94,7 +96,12 @@ def _auto_checks(recipe: Recipe, outputs: dict[str, pd.DataFrame]) -> list[dict[
             }
         )
     for sheet, df in outputs.items():
-        empty_cols = [str(c) for c in df.columns if len(df) and df[c].isna().all()]
+        # 输入里本来就整列为空的列（比如一直没人填的备注）不算问题；只有输入有数据、输出却变空才值得提醒，
+        # 否则这条噪音警告会让人（和模型）误以为结果出了毛病。
+        empty_in_input = {str(c) for frame in (inputs or {}).values() for c in frame.columns if len(frame) and frame[c].isna().all()}
+        has_data_in_input = {str(c) for frame in (inputs or {}).values() for c in frame.columns if frame[c].notna().any()}
+        empty_cols = [str(c) for c in df.columns if len(df) and df[c].isna().all()
+                      and not (str(c) in empty_in_input and str(c) not in has_data_in_input)]
         if empty_cols:
             checks.append(
                 {
@@ -182,7 +189,39 @@ def _target_sheets(rule: ValidationRule, outputs: dict[str, pd.DataFrame]) -> di
     return outputs
 
 
-def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: dict[str, pd.DataFrame], history: list[dict[str, Any]]) -> dict[str, Any]:
+def _appended_sums(recipe: Recipe) -> dict[str, float]:
+    """流程里用 append_rows 追加的记录，按列名累计的数值合计。追加记录本来就会让输出合计大于输入合计，
+    “合计保持不变”的对账必须把它们算进期望值，否则正确的追加会被判成合计对不上。只统计 {列名: 值} 形式的记录。"""
+    totals: dict[str, float] = {}
+    for step in recipe.steps:
+        if not step.enabled or step.formula != "append_rows":
+            continue
+        for record in step.params.get("rows") or []:
+            if not isinstance(record, dict):
+                continue
+            for column, value in record.items():
+                number = _number_of(value)
+                if number is not None:
+                    totals[str(column)] = totals.get(str(column), 0.0) + number
+    return totals
+
+
+def _number_of(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if value == value else None
+    if isinstance(value, str):
+        text = value.strip().replace(",", "").replace("，", "")
+        try:
+            return float(text[:-1]) / 100 if text.endswith("%") else float(text)
+        except ValueError:
+            return None
+    return None
+
+
+def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: dict[str, pd.DataFrame], history: list[dict[str, Any]],
+              appended: dict[str, float] | None = None) -> dict[str, Any]:
     rule = rule.model_copy(update={"params": normalize_rule_params(rule.type, rule.params)})
     p = rule.params
     if p.get("sheet") and p["sheet"] not in outputs:
@@ -227,6 +266,8 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
                 return _unexecuted(rule, message=f"规则写错了：input_filter「{condition}」无法执行（{exc}），这条规则没有执行")
         else:
             in_sum = sum(float(pd.to_numeric(df[in_col], errors="coerce").sum()) for df in in_hits)
+        extra = (appended or {}).get(in_col, 0.0) if not condition else 0.0
+        in_sum += extra
         out_sum = sum(float(pd.to_numeric(df[col], errors="coerce").sum()) for df in out_frames)
         if abs(out_sum - in_sum) < 0.005:  # 金额到分一致即可（浮点累加误差不算差异）
             diff = 0.0
@@ -234,7 +275,8 @@ def _run_rule(rule: ValidationRule, inputs: dict[str, pd.DataFrame], outputs: di
             diff = abs(out_sum - in_sum) / abs(in_sum) if in_sum else float("inf")
         ok = diff <= tolerance
         return _check(rule, "pass" if ok else "fail", f"合计误差 ≤ {tolerance:.2%}",
-                      f"输入「{in_col}」合计 {in_sum:,.2f}，输出「{col}」合计 {out_sum:,.2f}，误差 {diff:.4%}",
+                      f"输入「{in_col}」合计 {in_sum:,.2f}" + (f"（含追加记录 {extra:,.2f}）" if extra else "")
+                      + f"，输出「{col}」合计 {out_sum:,.2f}，误差 {diff:.4%}",
                       "" if ok else f"合计对不上：输入 {in_sum:,.2f}，输出 {out_sum:,.2f}")
     if rule.type in {"no_nulls", "unique_check", "column_exists"} and not p.get("columns"):
         return _unexecuted(rule, message="规则写错了：没有写要检查哪些列（columns），这条规则没有执行")

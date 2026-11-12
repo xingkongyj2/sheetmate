@@ -19,6 +19,7 @@ import csv
 import datetime as dt
 import math
 import re
+import zipfile
 from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -29,6 +30,7 @@ import pandas as pd
 
 SUPPORTED_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".csv"}
 _MAX_ROWS = 200_000
+_FOOTER_TAIL_ROWS = 50
 _HEADER_SCAN_ROWS = 30
 _EXCEL_ERRORS = {"#N/A", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#NULL!", "#SPILL!", "#CALC!"}
 _NUMERIC_RE = re.compile(r"^[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?$")
@@ -49,6 +51,9 @@ class HeaderInfo:
     # DataFrame 的每一列在原 sheet 里的列位置（0 起）。输出时「复制原文件改写」要靠它找到每一列原来的样式
     col_index: list[int] | None = None
     row_index: list[int] | None = None
+    # 数据区下方的合计/总计/小计行（0 起的行号）。它们不是记录，不进入 DataFrame，避免被当成数据重复统计；
+    # 改写原表时随数据区一起移动，合计公式的范围会随增删行自动调整。
+    footer_rows: list[int] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -63,6 +68,7 @@ class HeaderInfo:
             title=str(data.get("title", "")),
             col_index=data.get("col_index"),
             row_index=data.get("row_index"),
+            footer_rows=data.get("footer_rows"),
         )
 
 
@@ -194,8 +200,69 @@ def _load_raw_sheets(path: Path) -> list[_RawSheet]:
         raise ReadError(f"读取「{path.name}」失败：{exc}") from exc
 
 
+def _contains_formulas(path: Path) -> bool:
+    """扫描工作表 XML 里有没有公式元素 <f>。只读 zip 流，比再解析一遍所有单元格快两个数量级；拿不准时按“有公式”处理。"""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for name in archive.namelist():
+                if not (name.startswith("xl/worksheets/") and name.endswith(".xml")):
+                    continue
+                tail = b""
+                with archive.open(name) as stream:
+                    while chunk := stream.read(1 << 20):
+                        window = tail + chunk
+                        if b"<f>" in window or b"<f " in window or b"<f/>" in window:
+                            return True
+                        tail = window[-3:]
+        return False
+    except Exception:
+        return True
+
+
+def _load_xlsx_without_formulas(path: Path) -> list[_RawSheet]:
+    """没有任何公式的文件：值只解析一遍，错误值直接在读到的数据里找。"""
+    with closing(openpyxl.load_workbook(path, data_only=True)) as workbook:
+        raws: list[_RawSheet] = []
+        for ws in workbook.worksheets:
+            max_row = min(ws.max_row or 0, _MAX_ROWS)
+            max_col = ws.max_column or 0
+            grid = [list(row) for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)]
+            error_cells: list[str] = []
+            error_columns: set[int] = set()
+            for row_idx, row in enumerate(grid, start=1):
+                for col_idx, cached in enumerate(row, start=1):
+                    if isinstance(cached, str) and cached in _EXCEL_ERRORS:
+                        error_columns.add(col_idx - 1)
+                        if len(error_cells) < 20:
+                            error_cells.append(f"{openpyxl.utils.get_column_letter(col_idx)}{row_idx}")
+            merged_rows: set[int] = set()
+            for rng in ws.merged_cells.ranges:
+                if rng.min_row > max_row:
+                    continue
+                origin = grid[rng.min_row - 1][rng.min_col - 1]
+                if rng.max_col > rng.min_col:
+                    merged_rows.update(range(rng.min_row - 1, min(rng.max_row, max_row)))
+                for r in range(rng.min_row - 1, min(rng.max_row, max_row)):
+                    for c in range(rng.min_col - 1, min(rng.max_col, max_col)):
+                        grid[r][c] = origin
+            raws.append(_RawSheet(
+                ws.title, grid, merged_rows, hidden=ws.sheet_state != "visible",
+                quality={
+                    "physical_rows": int(ws.max_row or 0), "read_rows": int(max_row),
+                    "truncated": bool((ws.max_row or 0) > _MAX_ROWS), "formula_cells": 0,
+                    "missing_formula_cache": 0, "missing_formula_cache_columns": [], "formula_examples": [],
+                    "_missing_by_column": {}, "_missing_tail": {},
+                    "formula_error_cells": [], "formula_error_columns": [],
+                    "error_cells": error_cells, "error_columns": sorted(error_columns),
+                },
+            ))
+        return raws
+
+
 def _load_xlsx(path: Path) -> list[_RawSheet]:
     """读取缓存值并同时检查公式/错误/截断状态，不把质量问题静默成普通空值。"""
+    if not _contains_formulas(path):
+        return _load_xlsx_without_formulas(path)
     with closing(openpyxl.load_workbook(path, data_only=True)) as workbook, \
             closing(openpyxl.load_workbook(path, data_only=False, read_only=True)) as formula_book:
         raws: list[_RawSheet] = []
@@ -207,6 +274,8 @@ def _load_xlsx(path: Path) -> list[_RawSheet]:
             formula_cells = 0
             missing_formula_cache = 0
             missing_formula_cache_columns: set[int] = set()
+            missing_by_column: dict[int, int] = {}
+            missing_tail: dict[int, list[int]] = {}  # 只记最后几十行：页脚合计行在这里，读取时据此把它们剔除
             formula_error_cells: list[str] = []
             formula_error_columns: set[int] = set()
             error_cells: list[str] = []
@@ -225,6 +294,9 @@ def _load_xlsx(path: Path) -> list[_RawSheet]:
                         if cached is None:
                             missing_formula_cache += 1
                             missing_formula_cache_columns.add(col_idx - 1)
+                            missing_by_column[col_idx - 1] = missing_by_column.get(col_idx - 1, 0) + 1
+                            if row_idx > scan_rows - _FOOTER_TAIL_ROWS:
+                                missing_tail.setdefault(row_idx - 1, []).append(col_idx - 1)
                         elif isinstance(cached, str) and cached in _EXCEL_ERRORS:
                             formula_error_columns.add(col_idx - 1)
                             if len(formula_error_cells) < 20:
@@ -255,6 +327,7 @@ def _load_xlsx(path: Path) -> list[_RawSheet]:
                     "formula_cells": formula_cells,
                     "missing_formula_cache": missing_formula_cache,
                     "missing_formula_cache_columns": sorted(missing_formula_cache_columns),
+                    "_missing_by_column": missing_by_column, "_missing_tail": missing_tail,
                     "formula_examples": formula_examples,
                     "formula_error_cells": formula_error_cells,
                     "formula_error_columns": sorted(formula_error_columns),
@@ -274,9 +347,30 @@ def _load_xls(path: Path) -> list[_RawSheet]:
     ]
 
 
+def _csv_delimiter(path: Path, encoding: str) -> str | None:
+    with path.open("r", encoding=encoding, newline="") as stream:
+        sample = stream.read(64 * 1024)
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        return None
+
+
 def _load_csv(path: Path) -> list[_RawSheet]:
     last_error: Exception | None = None
     for encoding in ("utf-8-sig", "gb18030", "utf-16"):
+        try:
+            delimiter = _csv_delimiter(path, encoding)
+            if delimiter is not None:
+                try:  # 分隔符明确时用 C 引擎，比 python 引擎的自动嗅探快一到两个数量级；行字段数不一致时回退
+                    frame = pd.read_csv(path, header=None, dtype=str, keep_default_na=False, sep=delimiter, encoding=encoding)
+                    grid = [[None if _is_blank(v) else v for v in row] for row in frame.values.tolist()]
+                    return [_RawSheet(path.stem, grid, set(), quality={"physical_rows": int(len(grid)), "read_rows": int(len(grid)), "truncated": False})]
+                except (pd.errors.ParserError, ValueError):
+                    pass
+        except (UnicodeDecodeError, UnicodeError) as exc:
+            last_error = exc
+            continue
         try:
             frame = pd.read_csv(
                 path, header=None, dtype=str, keep_default_na=False, sep=None, engine="python", encoding=encoding
@@ -302,6 +396,9 @@ def _raw_to_sheet(raw: _RawSheet, hint: HeaderInfo | None) -> SheetData | None:
     header_idx, header_rows = _detect_header(grid, raw.merged_rows, hint)
     header_block = grid[header_idx - header_rows + 1 : header_idx + 1]
     row_index = [index for index in range(header_idx + 1, len(grid)) if any(not _is_blank(value) for value in grid[index])]
+    footer_rows = _detect_footer(grid, row_index)
+    if footer_rows:
+        row_index = row_index[:len(row_index) - len(footer_rows)]
     data_rows = [grid[index] for index in row_index]
     title = _title_text(grid[: header_idx - header_rows + 1])
 
@@ -321,8 +418,24 @@ def _raw_to_sheet(raw: _RawSheet, hint: HeaderInfo | None) -> SheetData | None:
     df = df.reset_index(drop=True)
 
     header = HeaderInfo(header_row=header_idx + 1, header_rows=header_rows, title=title, col_index=list(keep),
-                        row_index=row_index)
+                        row_index=row_index, footer_rows=footer_rows or None)
     quality = dict(raw.quality)
+    by_column = quality.pop("_missing_by_column", None)
+    tail = quality.pop("_missing_tail", None)
+    if footer_rows and by_column is not None and tail:
+        # 页脚合计行不是数据：它的公式没有缓存值（常见于本系统或 openpyxl 生成的文件），不能让整张表被判成“数据不可靠”。
+        remaining = dict(by_column)
+        removed = 0
+        for row in footer_rows:
+            for column in tail.get(row, []):
+                remaining[column] = remaining.get(column, 0) - 1
+                removed += 1
+        if removed:
+            quality["missing_formula_cache"] = max(0, int(quality.get("missing_formula_cache", 0)) - removed)
+            quality["missing_formula_cache_columns"] = sorted(column for column, count in remaining.items() if count > 0)
+            quality["footer_formula_cache_ignored"] = removed
+    if footer_rows:
+        quality["footer_rows"] = [{"excel_row": index + 1, "label": str(_non_empty(grid[index])[0])[:20]} for index in footer_rows]
     for issue in ("missing_formula_cache", "formula_error", "error"):
         if f"{issue}_columns" in quality:
             affected = set(quality[f"{issue}_columns"])
@@ -330,6 +443,20 @@ def _raw_to_sheet(raw: _RawSheet, hint: HeaderInfo | None) -> SheetData | None:
     quality["data_rows"] = int(len(df))
     quality["header_confidence"] = _header_confidence(grid, header_idx, header_rows)
     return SheetData(name=raw.name, df=df, header=header, hidden=raw.hidden, quality=quality)
+
+
+_FOOTER_LABEL = re.compile(r"^\s*(合\s*计|总\s*计|小\s*计|总\s*额|total|grand\s*total|sub\s*-?\s*total)\s*[:：]?\s*$", re.IGNORECASE)
+
+
+def _detect_footer(grid: list[list[Any]], row_index: list[int]) -> list[int]:
+    """数据区末尾连续的“合计/总计/小计”行（以该行最左边的非空文本为准）。至少保留一行数据。"""
+    footer: list[int] = []
+    for index in reversed(row_index[1:]):
+        cells = _non_empty(grid[index])
+        if not cells or not isinstance(cells[0], str) or not _FOOTER_LABEL.match(cells[0]):
+            break
+        footer.append(index)
+    return footer[::-1]
 
 
 def _header_confidence(grid: list[list[Any]], header_idx: int, header_rows: int) -> str:

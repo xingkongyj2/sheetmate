@@ -429,7 +429,8 @@ def test_macro_workbook_keeps_vba_and_xlsm_extension(tmp_path):
     assert source.read_bytes() == original_bytes
 
 
-def test_unsupported_workbook_content_reports_warning_without_blocking_copy(tmp_path):
+def test_unsupported_content_is_preserved_byte_for_byte_when_only_values_change(tmp_path, monkeypatch):
+    monkeypatch.setattr("sheetmate.engine.workbooks.template_writer._ooxml_mode", lambda: "auto")
     source = tmp_path / "原表.xlsx"
     _styled_workbook(source)
     with ZipFile(source, "a") as archive:
@@ -437,6 +438,57 @@ def test_unsupported_workbook_content_reports_warning_without_blocking_copy(tmp_
     original_bytes = source.read_bytes()
     output = tmp_path / "修改.xlsx"
     runner = _run(_amount_recipe(), source, output)
-    assert runner.report["status"] == "warning" and runner.report["output_warnings"]
-    assert output.exists() and openpyxl.load_workbook(output)["订单"]["D3"].value == 110.5
+    # 只改单元格值：直接补丁 XML，控件部件原样保留，不再需要"可能变化"的提示。
+    assert runner.report["status"] == "success" and not runner.report["output_warnings"], runner.report
+    with ZipFile(output) as result:
+        assert result.read("xl/ctrlProps/ctrlProp1.xml") == b"<control/>"
+    assert openpyxl.load_workbook(output)["订单"]["D3"].value == 110.5
     assert source.read_bytes() == original_bytes
+
+
+def _filter_recipe(with_summary: bool) -> Recipe:
+    steps = [{"id": 1, "name": "筛选", "formula": "filter_rows",
+              "params": {"table": "订单", "condition": "\"状态\" = '已完成'"}, "output": "已完成订单"}]
+    outputs = [{"name": "订单", "source": "已完成订单"}]
+    if with_summary:
+        steps.append({"id": 2, "name": "按客户汇总", "formula": "group_aggregate",
+                      "params": {"table": "已完成订单", "group_by": ["客户"],
+                                 "aggregations": [{"column": "金额", "func": "sum", "as": "金额合计"}]}, "output": "客户汇总"})
+        outputs.append({"name": "客户汇总", "source": "客户汇总"})
+    return Recipe(
+        name="订单整理",
+        inputs=[{"alias": "订单", "sheet": "订单", "expected_columns": ["订单号", "客户", "状态", "金额", "日期"],
+                 "required_columns": ["客户", "状态", "金额"], "header": {"header_row": 2, "header_rows": 1}}],
+        steps=steps, output_spec=outputs)
+
+
+def test_filtering_rows_keeps_unsupported_parts_through_ooxml_editing(tmp_path, monkeypatch):
+    monkeypatch.setattr("sheetmate.engine.workbooks.template_writer._ooxml_mode", lambda: "auto")
+    source = tmp_path / "原表.xlsx"
+    _styled_workbook(source)
+    with ZipFile(source, "a") as archive:
+        archive.writestr("xl/ctrlProps/ctrlProp1.xml", "<control/>")
+    original_bytes = source.read_bytes()
+    output = tmp_path / "修改.xlsx"
+    runner = _run(_filter_recipe(with_summary=False), source, output)
+    assert runner.report["status"] == "success" and not runner.report["output_warnings"], runner.report
+    with ZipFile(output) as result:
+        assert result.read("xl/ctrlProps/ctrlProp1.xml") == b"<control/>"  # 删行也不丢控件
+    sheet = openpyxl.load_workbook(output)["订单"]
+    statuses = [row[2] for row in sheet.iter_rows(min_row=3, values_only=True) if row[0]]
+    assert statuses and set(statuses) == {"已完成"}
+    assert source.read_bytes() == original_bytes
+
+
+def test_unsupported_workbook_content_reports_warning_when_a_summary_sheet_is_appended(tmp_path, monkeypatch):
+    monkeypatch.setattr("sheetmate.engine.workbooks.template_writer._ooxml_mode", lambda: "auto")
+    source = tmp_path / "原表.xlsx"
+    _styled_workbook(source)
+    with ZipFile(source, "a") as archive:
+        archive.writestr("xl/ctrlProps/ctrlProp1.xml", "<control/>")
+    original_bytes = source.read_bytes()
+    output = tmp_path / "修改.xlsx"
+    runner = _run(_filter_recipe(with_summary=True), source, output)
+    # 追加新工作表不在 OOXML 编辑的范围内：退回常规流程并如实提示这些对象可能变化。
+    assert runner.report["status"] == "warning" and runner.report["output_warnings"]
+    assert "客户汇总" in openpyxl.load_workbook(output).sheetnames and source.read_bytes() == original_bytes

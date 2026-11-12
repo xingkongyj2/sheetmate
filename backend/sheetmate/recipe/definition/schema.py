@@ -318,6 +318,24 @@ def step_output_tables(step: RecipeStep) -> list[str]:
     return outputs
 
 
+def fill_default_tables(recipe: "Recipe", library: Any, input_aliases: list[str]) -> list[str]:
+    """只有一个输入表时，缺少必填 table 参数的公式步骤默认接“上一步的输出”（第一步接那张输入表）。
+    多个输入表时来源有歧义，不猜。返回补全说明，方便记录。"""
+    if len(input_aliases) != 1:
+        return []
+    notes: list[str] = []
+    previous = input_aliases[0]
+    for step in sorted(recipe.steps, key=lambda item: item.id):
+        if step.kind == "formula" and library.has(step.formula):
+            declared = library.resolve(step.formula).spec.params.get("table")
+            if declared is not None and declared.type == "table" and declared.required \
+                    and not str(step.params.get("table") or "").strip():
+                step.params["table"] = previous
+                notes.append(f"第 {step.id} 步「{step.name}」未写 table，已默认使用「{previous}」")
+        previous = step.output or previous
+    return notes
+
+
 def check_recipe(recipe: Recipe, library: FormulaLibrary) -> list[str]:
     """返回问题列表（空列表表示通过）。只检查结构，列是否存在要到执行时由引擎检查。"""
     problems: list[str] = []
@@ -360,7 +378,8 @@ def check_recipe(recipe: Recipe, library: FormulaLibrary) -> list[str]:
             for ref in step_file_refs(step):
                 if ref not in file_inputs and not any(ref.startswith(f"{namespace}/") and len(ref) > len(namespace) + 1
                                                      for namespace in file_outputs):
-                    problems.append(f"{label}：引用的文件「{ref}」不存在（只能用输入文件或前面脚本的输出）")
+                    problems.append(f"{label}：引用的文件「{ref}」不存在（只能用输入文件或前面脚本的输出）。"
+                                    "如果这一步只是为了写出或另存工作簿，请直接删除这一步：系统会自动按原格式写出最终结果")
             mapping = step.params.get("output_tables", {})
             if not isinstance(mapping, dict) or any(not isinstance(k, str) or not k.strip() or not isinstance(v, str) or not v.strip()
                                                     for k, v in mapping.items()):

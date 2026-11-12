@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import runs as run_service
 from sheetmate.services.execution.workspace import AnalysisWorkspace
 from sheetmate.core.errors import Conflict, Forbidden, NotFound, ServiceError
+
+logger = logging.getLogger(__name__)
 
 
 class MemoryRememberResult(dict):
@@ -704,18 +707,23 @@ class ConversationHost:
                 if handle.output_path.exists() and str(handle.output_path) not in paths:
                     suffix = ("_结果" if report.get("status") in {"success", "warning"} else "_结果_未通过校验") + handle.output_path.suffix
                     artifacts.append({"path": str(handle.output_path), "name": f"{recipe.name}{suffix}"})
+                parsed: dict[str, list[Any]] = {}
                 delivered = run_service.register_delivery_files(db, run, artifacts, user_id=self.user_id,
-                    delivery_status="candidate" if self.defer_delivery else "final")
+                    delivery_status="candidate" if self.defer_delivery else "final", sheet_cache=parsed)
                 if delivered:
                     record = db.get(FileRecord, delivered[-1]["file_id"])
                 for artifact in artifacts:
                     path = Path(artifact["path"])
                     try:
-                        from sheetmate.engine.workbooks.reader import read_workbook
+                        sheets = parsed.get(str(path))
+                        if sheets is None:
+                            from sheetmate.engine.workbooks.reader import read_workbook
 
-                        metrics = run_service.metrics_of({s.name: s.df for s in read_workbook(path)})
+                            sheets = read_workbook(path)
+                        # 多文件交付时合并各文件的指标，而不是只保留最后一个文件的统计。
+                        metrics = {**(metrics or {}), **run_service.metrics_of({s.name: s.df for s in sheets})}
                     except Exception:
-                        pass
+                        logger.warning("无法统计交付文件 %s 的指标", path.name, exc_info=True)
             persisted_report = {**report, "files": delivered} if register_output else report
             run_service.finish_run(db, handle.run_id, persisted_report, verification=verification,
                                    output_file_id=record.id if record else None, diff=diff, outputs_metrics=metrics)

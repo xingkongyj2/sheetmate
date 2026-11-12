@@ -185,7 +185,7 @@ def clean_float(value: float, digits: int = 12) -> float:
 
 def to_jsonable(value: Any) -> Any:
     """把 DataFrame 里的单元格值转成 JSON 能表示的值。"""
-    if value is None:
+    if value is None or value is pd.NaT:  # NaT 本身是 datetime 的实例，不先排除会在 strftime 处崩溃
         return None
     if isinstance(value, (float, np.floating)):
         v = float(value)

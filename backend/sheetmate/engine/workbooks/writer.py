@@ -21,6 +21,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from sheetmate.engine.tables.sql import clean_float
+from sheetmate.engine.workbooks.atomic import atomic_path
 
 _HEADER_FONT = Font(bold=True, color="111111")
 _HEADER_FILL = PatternFill("solid", fgColor="F2F2F2")
@@ -51,7 +52,6 @@ def safe_sheet_name(name: str, used: set[str]) -> str:
 
 def write_excel(path: Path, sheets: list[SheetSpec]) -> list[dict[str, Any]]:
     """写出 Excel，返回每个 sheet 的名字和行数。"""
-    path.parent.mkdir(parents=True, exist_ok=True)
     workbook = Workbook(write_only=True)
     used: set[str] = set()
     written: list[dict[str, Any]] = []
@@ -62,7 +62,8 @@ def write_excel(path: Path, sheets: list[SheetSpec]) -> list[dict[str, Any]]:
     if not written:
         _write_sheet(workbook, "Sheet1", pd.DataFrame())
         written.append({"sheet": "Sheet1", "rows": 0, "columns": []})
-    workbook.save(path)
+    with atomic_path(path) as staging:
+        workbook.save(staging)
     return written
 
 

@@ -16,16 +16,19 @@
 from __future__ import annotations
 
 import datetime as dt
+import difflib
 import warnings
 from bisect import bisect_left
+from collections import Counter
 from copy import copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import Any
 from xml.etree import ElementTree
 from zipfile import ZipFile
 
+import numpy as np
 import openpyxl
 import pandas as pd
 from openpyxl.cell.cell import MergedCell
@@ -40,14 +43,17 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from sheetmate.engine.workbooks.profile import dtype_label
 from sheetmate.engine.workbooks.reader import ReadError, SheetData, read_workbook
-from sheetmate.engine.workbooks.row_references import adjust_formula, shift_range_ref
+from sheetmate.engine.workbooks.row_references import InsertedRows, adjust_formula, as_row_map, shift_range_ref
+from sheetmate.engine.workbooks.ooxml_writer import edit_with_ooxml
 from sheetmate.engine.workbooks.writer import _display_width, _excel_value, safe_sheet_name
 
 TEMPLATE_SUFFIXES = {".xlsx", ".xlsm"}
 
 
 class TemplatePreservationError(ValueError):
-    pass
+    """保真写回失败。sheet 为出问题的原工作表名（已知时）：只让这张表降级到兼容模式，其余表仍精确写回。"""
+
+    sheet: str | None = None
 
 
 @dataclass
@@ -154,6 +160,7 @@ class _Snapshot:
     row_heights: list[float | None]  # 和 data_styles 对应
     dims: dict[int, _Dim]
     max_col: int
+    col_formats: dict[int, str] = field(default_factory=dict)  # 工作表列号 → 数据行的数字格式（给新增列选格式用）
 
     @classmethod
     def capture(cls, ws: Worksheet, tpl: TemplateSource) -> _Snapshot:
@@ -174,8 +181,10 @@ class _Snapshot:
         # 两行样式完全一样就只用一套；不一样说明有斑马纹，交替使用
         if len(variants) == 2 and _same(variants[0], variants[1]):
             variants, heights = variants[:1], heights[:1]
+        col_formats = {c: ws.cell(row=first, column=c).number_format for c in range(1, max_col + 1)} \
+            if first <= (ws.max_row or 0) else {}
         return cls(tpl=tpl, header_value=header_value, header_style=header_style, data_styles=variants or [{}],
-                   row_heights=heights or [None], dims=_read_dims(ws), max_col=max_col)
+                   row_heights=heights or [None], dims=_read_dims(ws), max_col=max_col, col_formats=col_formats)
 
     def data_style(self, k: int, col: int | None) -> StyleArray | None:
         if col is None:
@@ -218,21 +227,38 @@ def write_like_original(path: Path, plans: list[OutputPlan]) -> list[dict[str, A
         raise TemplatePreservationError("含宏工作簿必须另存为 .xlsm，不能丢弃宏后输出 .xlsx")
     notices: list[str] = []
     read_cache = _OriginalReadCache([plan.template for plan in plans if plan.template])
+    lossy = False
     try:
         _check_package(tpl.path)
     except TemplatePreservationError:
+        lossy = True
+    mode = _ooxml_mode()
+    if mode != "off" and (lossy or mode == "always"):
+        # 直接编辑 XML：未改动的部件（切片器、控件、形状等）按字节原样保留，无需"可能变化"的提示。
+        edited = edit_with_ooxml(tpl.path, path, plans, read_cache.read)
+        if edited is not None:
+            return edited
+    if lossy:
         notices.append("工作簿包含当前编辑引擎不能完整保留的扩展对象，已在副本继续处理，这些对象可能变化。")
-    for relaxed in (False, True):
+    relaxed_sheets: set[str] = set()
+    relax_all = False
+    while True:  # 每次失败要么新增一张降级的工作表、要么整体降级，次数有限
         with warnings.catch_warnings(record=True) as observed:
             warnings.simplefilter("always", UserWarning)
             workbook = openpyxl.load_workbook(tpl.path, keep_vba=tpl.path.suffix.lower() == ".xlsm", rich_text=True)
             try:
-                written = _write_workbook(workbook, path, plans, tpl, relaxed=relaxed, notices=notices,
-                                          read_cache=read_cache)
-            except TemplatePreservationError:
-                if relaxed:
+                written = _write_workbook(workbook, path, plans, tpl, relaxed=relax_all, relaxed_sheets=relaxed_sheets,
+                                          notices=notices, read_cache=read_cache)
+            except TemplatePreservationError as exc:
+                if relax_all:
                     raise
-                notices.append("部分修改与原有模板结构不兼容，已重新加载干净副本并完成修改；受影响区域的格式或引用可能变化。")
+                if exc.sheet is not None and exc.sheet not in relaxed_sheets:
+                    relaxed_sheets.add(exc.sheet)
+                    notices.append(f"工作表「{exc.sheet}」的部分修改与原有模板结构不兼容，已重新加载干净副本并对该工作表"
+                                   "采用兼容方式完成修改；该工作表受影响区域的格式或引用可能变化，其余工作表不受影响。")
+                else:
+                    relax_all = True
+                    notices.append("部分修改与原有模板结构不兼容，已重新加载干净副本并完成修改；受影响区域的格式或引用可能变化。")
                 continue
             finally:
                 workbook.close()
@@ -242,7 +268,12 @@ def write_like_original(path: Path, plans: list[OutputPlan]) -> list[dict[str, A
             if notices and written:
                 written[0]["warnings"] = list(dict.fromkeys(notices))
             return written
-    return None
+
+
+def _ooxml_mode() -> str:
+    from sheetmate.core.config.settings import settings
+
+    return settings.ooxml_edit
 
 
 def _check_package(path: Path) -> None:
@@ -259,7 +290,8 @@ def _check_package(path: Path) -> None:
 
 
 def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputPlan], base: TemplateSource,
-                    *, relaxed: bool = False, notices: list[str] | None = None,
+                    *, relaxed: bool = False, relaxed_sheets: set[str] | frozenset[str] = frozenset(),
+                    notices: list[str] | None = None,
                     read_cache: _OriginalReadCache | None = None) -> list[dict[str, Any]]:
     notices = notices if notices is not None else []
     read_cache = read_cache if read_cache is not None else _OriginalReadCache(
@@ -282,10 +314,16 @@ def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputP
                 raise TemplatePreservationError("输出与原工作表的对应关系不明确，已停止输出以避免丢失格式")
             sheet = workbook[source.sheet]
             title = _unique_title(plan.name, used - {sheet.title}) if plan.name != sheet.title else sheet.title
-            if title != sheet.title and _has_formulas(workbook) and not relaxed:
-                raise TemplatePreservationError("重命名工作表可能破坏现有公式引用，请保留原工作表名称")
-            _rewrite_sheet(sheet, snap, plan.df, relaxed=relaxed, notices=notices, read_cache=read_cache,
-                           source_rows=plan.source_rows)
+            sheet_relaxed = relaxed or source.sheet in relaxed_sheets
+            try:
+                if title != sheet.title and _has_formulas(workbook) and not sheet_relaxed:
+                    raise TemplatePreservationError("重命名工作表可能破坏现有公式引用，请保留原工作表名称")
+                _rewrite_sheet(sheet, snap, plan.df, relaxed=sheet_relaxed, notices=notices, read_cache=read_cache,
+                               source_rows=plan.source_rows)
+            except TemplatePreservationError as exc:
+                if exc.sheet is None:
+                    exc.sheet = source.sheet
+                raise
             used.discard(sheet.title)
             used.add(title)
             sheet.title = title
@@ -306,7 +344,8 @@ def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputP
 
 
 def _has_formulas(workbook: openpyxl.Workbook) -> bool:
-    return any(cell.data_type == "f" for sheet in workbook for row in sheet for cell in row)
+    # 只看已存在的单元格；迭代 sheet 的行会为整个外框范围逐格创建空单元格，大表上又慢又吃内存。
+    return any(cell.data_type == "f" for sheet in workbook for cell in sheet._cells.values())
 
 
 def _info(title: str, df: pd.DataFrame) -> dict[str, Any]:
@@ -342,6 +381,9 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed:
     original = (read_cache if read_cache is not None else _OriginalReadCache()).read(tpl)
     if len(original.df.columns) != len(tpl.columns) and not relaxed:
         raise TemplatePreservationError("原工作表列结构已变化，无法安全编辑")
+    profile = _style_profile(ws, [row + 1 for row in (original.header.row_index or [])], snap.max_col)
+    if profile is not None:  # 用全部数据行的众数样式，而不是只看前两行
+        snap = replace(snap, data_styles=profile[0], row_heights=profile[1])
     compatible_columns = columns[:len(tpl.columns)] == tpl.columns and len(original.df.columns) == len(tpl.columns)
     if source_rows is not None:
         if (not isinstance(source_rows, list) or len(source_rows) != len(df)
@@ -356,6 +398,11 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed:
         matched = _match_unique_records(df.iloc[:, :len(tpl.columns)], original.df)
         if matched is not None:
             _patch_identified_rows(ws, snap, df, original, matched, mapping, relaxed=relaxed, notices=notices)
+            return
+    if source_rows is None and compatible_columns and original.header.row_index:
+        operations = _align_records(df, original.df, len(tpl.columns))
+        if operations is not None and not _is_positional(operations, len(original.df)):
+            _patch_aligned_rows(ws, snap, df, original, operations, mapping, relaxed=relaxed, notices=notices)
             return
     if (columns[:len(tpl.columns)] == tpl.columns and len(df) == len(original.df)
             and len(original.df.columns) == len(tpl.columns)):
@@ -418,6 +465,193 @@ def _rewrite_sheet(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, *, relaxed:
         _resize_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
     else:
         _fix_table_objects(ws, header_row, max(len(df.columns), 1), first_data + max(len(df) - 1, 0))
+
+
+# ---------------------------------------------------------------------------
+# 新增 / 删除 / 修改行：按记录对齐，只动该动的行
+# ---------------------------------------------------------------------------
+
+_MAX_ALIGN_ROWS = 30_000
+
+
+def _rows_equal_mask(frame: pd.DataFrame, original: pd.DataFrame) -> np.ndarray:
+    """逐行是否与原行完全一致（数值允许 1e-12 的相对误差，两边都是空值算相等）。两份数据行列数必须相同。"""
+    mask = np.ones(len(frame), dtype=bool)
+    for column in range(frame.shape[1]):
+        left, right = frame.iloc[:, column], original.iloc[:, column]
+        both_missing = left.isna().to_numpy() & right.isna().to_numpy()
+        try:
+            if (pd.api.types.is_numeric_dtype(left) and pd.api.types.is_numeric_dtype(right)
+                    and not pd.api.types.is_bool_dtype(left) and not pd.api.types.is_bool_dtype(right)):
+                same = np.isclose(left.to_numpy(dtype=float, na_value=np.nan), right.to_numpy(dtype=float, na_value=np.nan),
+                                  rtol=1e-12, atol=1e-12)
+            else:
+                same = np.asarray(left.astype(object).to_numpy() == right.astype(object).to_numpy(), dtype=bool)
+        except Exception:
+            same = np.zeros(len(left), dtype=bool)
+        mask &= same | both_missing
+    return mask
+
+
+def _align_records(frame: pd.DataFrame, original: pd.DataFrame, columns: int) -> list[tuple[str, int | None]] | None:
+    """把结果的每一行对应到原表：("keep", 原行) 没变、("edit", 原行) 改了内容、("new", None) 新增；
+    没出现在结果里的原行视为删除。对不上、拿不准时返回 None，由调用方走原有的保守路径。"""
+    result = frame.iloc[:, :columns].reset_index(drop=True)
+    source = original.set_axis(result.columns, axis=1).reset_index(drop=True)
+    total, previous = len(result), len(source)
+    common = min(total, previous)
+    if common:
+        mask = _rows_equal_mask(result.iloc[:common], source.iloc[:common])
+        if float(mask.mean()) >= 0.5:  # 大半行仍在原位：只是末尾追加/截断，其余按位置判断是否被改
+            return ([("keep" if same else "edit", index) for index, same in enumerate(mask)]
+                    + [("new", None)] * (total - common))
+    if max(total, previous) > _MAX_ALIGN_ROWS:
+        return None
+    try:
+        before = [tuple(_excel_value(value) for value in record) for record in source.itertuples(index=False, name=None)]
+        after = [tuple(_excel_value(value) for value in record) for record in result.itertuples(index=False, name=None)]
+        blocks = difflib.SequenceMatcher(None, before, after, autojunk=False).get_opcodes()
+    except TypeError:  # 含不可哈希的值，不能当作确定的记录键
+        return None
+    operations: list[tuple[str, int | None] | None] = [None] * total
+    kept = 0
+    for tag, start, stop, new_start, new_stop in blocks:
+        if tag == "equal":
+            for offset in range(new_stop - new_start):
+                operations[new_start + offset] = ("keep", start + offset)
+            kept += new_stop - new_start
+        elif tag in {"replace", "insert"}:
+            paired = min(stop - start, new_stop - new_start) if tag == "replace" else 0
+            for offset in range(new_stop - new_start):
+                operations[new_start + offset] = ("edit", start + offset) if offset < paired else ("new", None)
+    if kept < 0.3 * min(total, previous):  # 几乎没有行对得上：不是增删改，而是另一份数据
+        return None
+    return [item for item in operations if item is not None]
+
+
+def _is_positional(operations: list[tuple[str, int | None]], previous: int) -> bool:
+    return len(operations) == previous and all(kind != "new" and index == position
+                                               for position, (kind, index) in enumerate(operations))
+
+
+def _shift_cells_down(ws: Worksheet, mapping: InsertedRows) -> None:
+    """把 at 行及以下整体下移 count 行：单元格（含样式、批注、链接）、合并区域、行属性一起走。"""
+    for merged in ws.merged_cells.ranges:
+        if merged.min_row < mapping.at <= merged.max_row:
+            raise TemplatePreservationError(f"不能在纵向合并单元格 {merged} 中间插入新行，已停止输出，原文件未改动")
+    plain = InsertedRows(mapping.at, mapping.count, False)  # 合并区域不随“末尾追加”扩展
+    merged_ranges = [shift_range_ref(str(merged), plain) for merged in ws.merged_cells.ranges]
+    cells = {}
+    for (row, column), cell in ws._cells.items():
+        if row >= mapping.at:
+            cell.row = row + mapping.count
+            if not isinstance(cell, MergedCell) and cell.hyperlink:
+                cell.hyperlink.ref = cell.coordinate
+        cells[(cell.row, column)] = cell
+    ws._cells = cells
+    ws.merged_cells = MultiCellRange(merged_ranges)
+    dimensions = {index: copy(dimension) for index, dimension in ws.row_dimensions.items()}
+    ws.row_dimensions.clear()
+    for index, dimension in dimensions.items():
+        dimension.index = plain.map_row(index)
+        ws.row_dimensions[dimension.index] = dimension
+    ws._current_row = ws.max_row if ws._cells else 0
+
+
+def _insert_blank_rows(ws: Worksheet, at: int, count: int, *, extend_end: bool, relaxed: bool,
+                       notices: list[str]) -> None:
+    """在第 at 行前插入 count 个空行，并像 Excel 一样调整公式、筛选、条件格式、数据验证等引用。
+    extend_end 为真（在数据区末尾追加）时，恰好止于数据区末行的区域引用一并扩展，新行自动被合计覆盖。"""
+    if count <= 0:
+        return
+    if not relaxed and (any(sheet._charts or sheet._pivots for sheet in ws.parent) or ws._images):
+        raise TemplatePreservationError("原表包含暂不能随行安全移动的图表或透视对象，已停止输出，原文件未改动")
+    mapping = InsertedRows(at, count, extend_end)
+    try:
+        _adjust_workbook_formulas(ws.parent, {ws.title: mapping}, ws, set(), notices=notices if relaxed else None)
+        try:
+            _adjust_sheet_ranges(ws, mapping)
+        except ValueError as exc:
+            if not relaxed:
+                raise
+            notices.append(f"部分工作表范围无法自动调整，已继续修改副本：{exc}")
+    except ValueError as exc:
+        raise TemplatePreservationError(f"无法安全保留原表引用或结构：{exc}；已停止输出，原文件未改动") from exc
+    _shift_cells_down(ws, mapping)
+
+
+def _write_new_rows(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, rows: list[int], ordinals: list[int],
+                    mapping: list[int | None], positions: list[int]) -> None:
+    """把新增的记录写进已经腾出来的空行，样式取原表数据行的众数样式（斑马纹按位置交替）。"""
+    styles = _column_styles(snap, frame, mapping)
+    for excel_row, ordinal, record in zip(rows, ordinals, frame.itertuples(index=False, name=None)):
+        for column_index, column in enumerate(positions):
+            cell = ws.cell(row=excel_row, column=column)
+            if isinstance(cell, MergedCell):
+                continue
+            _put(cell, _excel_value(record[column_index]), styles[column_index][ordinal % len(snap.data_styles)])
+        height = snap.height(ordinal)
+        if height:
+            ws.row_dimensions[excel_row].height = height
+
+
+def _patch_aligned_rows(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: SheetData,
+                        operations: list[tuple[str, int | None]], mapping: list[int | None], *, relaxed: bool,
+                        notices: list[str]) -> None:
+    """新增、删除、修改任意组合：没变的行原样不动（格式、批注、链接、行高都在），
+    删掉的行按 Excel 的方式删除并调整引用，新增的行插在正确位置并沿用原表样式，改过的行只改变化的单元格。"""
+    previous_rows = original.header.row_index or []
+    if len(previous_rows) != len(original.df):
+        raise TemplatePreservationError("无法定位原表数据行，已停止输出以避免破坏排版")
+    retained = sorted(index for kind, index in operations if kind != "new" and index is not None)
+    kept = set(retained)
+    removed = sorted(row + 1 for position, row in enumerate(previous_rows) if position not in kept)
+    banding = _detect_banding(ws, [row + 1 for row in previous_rows]) if any(kind == "new" for kind, _ in operations) else None
+    positions = _column_positions(ws, snap, frame)  # 先算：插入/删除行不改变列，但必须在任何改动前确定新增列的位置
+    if removed:
+        _delete_original_rows(ws, original, retained, relaxed=relaxed, notices=notices)
+    after_delete = {index: previous_rows[index] + 1 - bisect_left(removed, previous_rows[index] + 1) for index in retained}
+    last_data = max(after_delete.values(), default=None)
+
+    groups: list[tuple[int, list[int], bool]] = []  # (插入位置, 结果行号列表, 是否在数据区末尾追加)
+    pending: list[int] = []
+    previous_row: int | None = None
+    for position, (kind, index) in enumerate(operations):
+        if kind == "new":
+            pending.append(position)
+            continue
+        row = after_delete[index]
+        if pending:
+            groups.append((row if previous_row is None else previous_row + 1, pending, False))
+            pending = []
+        previous_row = row
+    if pending:
+        at = snap.tpl.header_row + 1 if previous_row is None else previous_row + 1
+        groups.append((at, pending, previous_row is not None and previous_row == last_data))
+    for at, indices, extend_end in sorted(groups, key=lambda group: group[0], reverse=True):
+        _insert_blank_rows(ws, at, len(indices), extend_end=extend_end, relaxed=relaxed, notices=notices)
+
+    inserted = [(at, len(indices)) for at, indices, _ in groups]
+    final: dict[int, int] = {}
+    for position, (kind, index) in enumerate(operations):
+        if kind != "new":
+            row = after_delete[index]
+            final[position] = row + sum(count for at, count in inserted if at <= row)
+    for at, indices, _ in groups:
+        base = at + sum(count for other, count in inserted if other < at)
+        for offset, position in enumerate(indices):
+            final[position] = base + offset
+
+    kept_positions = [position for position, (kind, _) in enumerate(operations) if kind != "new"]
+    new_positions = [position for position, (kind, _) in enumerate(operations) if kind == "new"]
+    _patch_cells(ws, snap, frame.iloc[kept_positions].reset_index(drop=True),
+                 original.df.iloc[[operations[position][1] for position in kept_positions]].reset_index(drop=True),
+                 [final[position] - 1 for position in kept_positions], mapping, relaxed=relaxed, positions=positions)
+    if new_positions:
+        _write_new_rows(ws, snap, frame.iloc[new_positions].reset_index(drop=True), [final[position] for position in new_positions],
+                        new_positions, mapping, positions)
+    if banding:
+        _apply_banding(ws, banding, sorted(final.values()), [])  # 增删行时重排条纹是正常处理，不当作需要核对的提示
 
 
 def _match_unique_records(frame: pd.DataFrame, original: pd.DataFrame) -> list[int] | None:
@@ -787,7 +1021,7 @@ def _move_rule_origin(formula: str, references: MultiCellRange, deleted: set[int
     return formula
 
 
-def _adjust_sheet_ranges(ws: Worksheet, deleted: set[int]) -> None:
+def _adjust_sheet_ranges(ws: Worksheet, deleted: "set[int] | InsertedRows") -> None:
     if ws.auto_filter is not None and ws.auto_filter.ref:
         ws.auto_filter.ref = shift_range_ref(ws.auto_filter.ref, deleted) or None
     for owner in [ws.auto_filter, *(table.autoFilter for table in ws.tables.values() if table.autoFilter)]:
@@ -829,8 +1063,11 @@ def _adjust_sheet_ranges(ws: Worksheet, deleted: set[int]) -> None:
     if ws.print_title_rows:
         ws.print_title_rows = shift_range_ref(ws.print_title_rows, deleted) or None
     for page_break in ws.row_breaks.brk:
-        page_break.id -= sum(row <= page_break.id for row in deleted)
-    for view in ws.views.sheetView:
+        if isinstance(deleted, set):
+            page_break.id -= sum(row <= page_break.id for row in deleted)
+        else:
+            page_break.id = deleted.map_row(page_break.id)
+    for view in ([] if not isinstance(deleted, set) else ws.views.sheetView):
         if view.topLeftCell:
             view.topLeftCell = _shift_view_cell(view.topLeftCell, deleted)
         if view.pane:
@@ -867,13 +1104,22 @@ def _has_special_layout(ws: Worksheet, snap: _Snapshot, rows: list[int]) -> bool
     return False
 
 
-def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: pd.DataFrame,
-                 rows: list[int], mapping: list[int | None], *, relaxed: bool = False) -> None:
-    if len(rows) != len(frame):
-        raise TemplatePreservationError("无法定位原表数据行，已停止输出以避免破坏排版")
+def _column_positions(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame) -> list[int]:
+    """结果每一列在工作表里的列号：原有列沿用原位置，新增列接在最右边。"""
     positions = [index + 1 for index in snap.tpl.col_index]
     added = len(frame.columns) - len(positions)
     positions.extend(range(ws.max_column + 1, ws.max_column + 1 + added))
+    return positions
+
+
+def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: pd.DataFrame,
+                 rows: list[int], mapping: list[int | None], *, relaxed: bool = False,
+                 positions: list[int] | None = None) -> None:
+    if len(rows) != len(frame):
+        raise TemplatePreservationError("无法定位原表数据行，已停止输出以避免破坏排版")
+    if positions is None:
+        positions = _column_positions(ws, snap, frame)
+    added = len(frame.columns) - len(snap.tpl.col_index)
     styles = _column_styles(snap, frame, mapping)
     values = {(row + 1, positions[index]): _excel_value(value)
               for row, record in zip(rows, frame.itertuples(index=False, name=None)) for index, value in enumerate(record)}
@@ -892,6 +1138,8 @@ def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: 
                     cell = ws.cell(merged_row, merged_column)
                     cell._style = copy(style)
                     cell.value = value
+    existing_columns = positions[:len(snap.tpl.columns)]
+    row_fills = {row + 1: _row_fill_id(ws, row + 1, existing_columns) for row in rows} if added > 0 else {}
     for row_index, (excel_index, previous_record) in enumerate(zip(rows, original.itertuples(index=False, name=None))):
         for column_index, column in enumerate(positions):
             cell = ws.cell(row=excel_index + 1, column=column)
@@ -907,6 +1155,9 @@ def _patch_cells(ws: Worksheet, snap: _Snapshot, frame: pd.DataFrame, original: 
                 cell.value = value
             else:
                 _put(cell, value, styles[column_index][row_index % len(snap.data_styles)])
+                fill = row_fills.get(excel_index + 1)
+                if fill is not None:
+                    cell._style.fillId = fill
     for index in range(len(snap.tpl.columns), len(positions)):
         column = positions[index]
         left = ws.cell(row=snap.tpl.header_row, column=column - 1)
@@ -951,12 +1202,32 @@ def _rewrite_header(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, mapping: l
     return header_row, header_row + 1
 
 
+_PERCENT_HINTS = ("率", "占比", "比例", "比重", "百分", "%", "pct", "ratio", "rate", "percent")
+
+
+def _is_percent_like(series: pd.Series, name: str) -> bool:
+    """列名带比例含义且取值都在 [-1, 1]：这是以小数存放的百分比，应显示成 12.5% 而不是 0.125。"""
+    if dtype_label(series) not in {"float", "integer"} or not any(hint in name.lower() for hint in _PERCENT_HINTS):
+        return False
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    return bool(len(values)) and bool(values.between(-1, 1).all())
+
+
 def _column_styles(snap: _Snapshot, df: pd.DataFrame, mapping: list[int | None]) -> list[list[StyleArray | None]]:
-    """每一列、每套斑马纹样式。新增的列：优先用类型相同的原列的样式，没有就用左边的列。"""
+    """每一列、每套斑马纹样式。新增的列按语义找“样子最像”的原列借样式：
+    比例列借百分比格式的列，其他数值列借非百分比的同类型列，再没有就用左边的列。"""
     tpl = snap.tpl
     by_type: dict[str, int] = {}
+    plain_numeric: dict[str, int] = {}
+    percent_donor: int | None = None
     for name, idx in zip(tpl.columns, tpl.col_index):
-        by_type.setdefault(tpl.dtypes.get(name, ""), idx + 1)
+        kind = tpl.dtypes.get(name, "")
+        by_type.setdefault(kind, idx + 1)
+        is_percent = "%" in snap.col_formats.get(idx + 1, "")
+        if is_percent and percent_donor is None:
+            percent_donor = idx + 1
+        if not is_percent:
+            plain_numeric.setdefault(kind, idx + 1)
     result: list[list[StyleArray | None]] = []
     left: int | None = None  # 左边最近一个「原来就有的列」
     for j, sc in enumerate(mapping):
@@ -964,9 +1235,56 @@ def _column_styles(snap: _Snapshot, df: pd.DataFrame, mapping: list[int | None])
             source = sc
             left = sc
         else:
-            source = by_type.get(dtype_label(df.iloc[:, j])) or left
+            series = df.iloc[:, j]
+            kind = dtype_label(series)
+            if _is_percent_like(series, str(df.columns[j])) and percent_donor is not None:
+                source = percent_donor
+            elif kind in {"float", "integer"}:
+                source = plain_numeric.get(kind) or by_type.get(kind) or left
+            else:
+                source = by_type.get(kind) or left
         result.append([snap.data_style(k, source) for k in range(len(snap.data_styles))])
     return result
+
+
+def _style_profile(ws: Worksheet, rows: list[int], max_col: int) -> tuple[list[dict[int, StyleArray]], list[float | None]] | None:
+    """用全部数据行的“众数样式”代替只看前两行：个别特殊行（标红、加粗）不会被当成数据行的样子。
+    隔行斑马纹分奇偶两套；行高同样取众数。数据行太少时返回 None，沿用前两行样本。"""
+    if len(rows) < 3:
+        return None
+    indexed = list(enumerate(rows))
+    if len(indexed) > 4000:
+        indexed = indexed[:2000] + indexed[-2000:]
+    groups = 2 if _detect_banding(ws, rows) is not None else 1
+    variants: list[dict[int, StyleArray]] = []
+    heights: list[float | None] = []
+    for group in range(groups):
+        counters: dict[int, Counter] = {column: Counter() for column in range(1, max_col + 1)}
+        representative: dict[tuple[int, tuple], StyleArray] = {}
+        height_counter: Counter = Counter()
+        for index, row in indexed:
+            if groups == 2 and index % 2 != group:
+                continue
+            for column in range(1, max_col + 1):
+                cell = ws._cells.get((row, column))
+                style = cell._style if cell is not None and cell._style is not None else StyleArray()
+                key = tuple(style)
+                counters[column][key] += 1
+                representative.setdefault((column, key), style)
+            height_counter[ws.row_dimensions[row].height if row in ws.row_dimensions else None] += 1
+        if not height_counter:
+            return None
+        variants.append({column: copy(representative[column, counters[column].most_common(1)[0][0]])
+                         for column in counters})
+        heights.append(height_counter.most_common(1)[0][0])
+    return variants, heights
+
+
+def _row_fill_id(ws: Worksheet, row: int, columns: list[int]) -> int | None:
+    """这一行已有单元格的主导底色。新增列的单元格应与所在行同色（整行标红时新列也是红的）。"""
+    counter = Counter(ws._cells[row, column]._style.fillId for column in columns
+                      if (row, column) in ws._cells and ws._cells[row, column]._style is not None)
+    return counter.most_common(1)[0][0] if counter else None
 
 
 def _put(cell: Any, value: Any, style: StyleArray | None) -> None:
@@ -978,6 +1296,9 @@ def _put(cell: Any, value: Any, style: StyleArray | None) -> None:
         cell.number_format = "General"
     elif isinstance(value, (dt.datetime, dt.date)) and cell.number_format == "General":
         cell.number_format = "yyyy-mm-dd" if not isinstance(value, dt.datetime) or value.time() == dt.time() else "yyyy-mm-dd hh:mm:ss"
+    elif isinstance(value, dt.datetime) and value.time() != dt.time() and "h" not in cell.number_format.lower():
+        # 借来的是纯日期格式：带时分秒的值不能把时间藏起来
+        cell.number_format = "yyyy-mm-dd hh:mm:ss"
 
 
 def _apply_dims(ws: Worksheet, snap: _Snapshot, df: pd.DataFrame, mapping: list[int | None]) -> None:

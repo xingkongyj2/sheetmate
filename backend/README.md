@@ -63,6 +63,7 @@ sheetmate/
 ├── engine/                   可独立复用的确定性数据处理
 │   ├── tables/               DuckDB 工作区、SQL、分析、字段映射、探测缓存
 │   ├── workbooks/            读写、画像、保留格式、新建工作簿、图片、副本
+│   ├── ooxml/                直接编辑 xlsx 内部 XML：改值、删行、插行、排序，未改动部件按字节保留
 │   ├── formulas/             公式定义、内置算子、单步执行
 │   └── scripts/              代码存储、引用、隔离运行器、子进程
 ├── recipe/                   可重复执行的工作流能力
@@ -105,6 +106,7 @@ sheetmate/
 | 更换记忆持久化 | `services/memory/repository.py`、`db/` | 先过滤用户、客户、会话、流程作用域 |
 | 增加工具能力 | `agent/tools/<功能>/` | `Tool`、`ToolResult`、`ToolHost` |
 | 优化 Excel 处理 | `engine/workbooks/` | 读写结构、原件副本与输出结果 |
+| 优化 OOXML 结构编辑 | `engine/ooxml/`、`engine/workbooks/ooxml_writer.py` | 直接改 xlsx 内部 XML：改值、删行、插行、排序、右侧追加列；未改动部件按字节保留 |
 | 优化 SQL 与公式 | `engine/tables/`、`engine/formulas/` | 工作区、算子输入与执行结果 |
 | 优化脚本隔离 | `engine/scripts/` | 输入副本、取消、超时和显式输出 |
 | 修改流程执行与校验 | `recipe/execution/`、`recipe/validation/` | Recipe Schema、修复器协议 |

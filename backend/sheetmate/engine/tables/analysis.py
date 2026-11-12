@@ -85,6 +85,10 @@ def table_info_text(data: dict[str, Any]) -> str:
         lines.append(f"读取风险：{quality['missing_formula_cache']} 个公式缺计算缓存，不能当作正常空白或零。")
     if quality.get("formula_error_cells") or quality.get("error_cells"):
         lines.append("读取风险：存在 Excel 错误单元格，请核对原始公式或错误值后计算。")
+    if quality.get("footer_rows"):
+        from sheetmate.engine.tables.memory import footer_notice
+
+        lines.append("说明：" + footer_notice(quality["footer_rows"]))
     for col in data["columns"]:
         extra = ""
         if "sum" in col:

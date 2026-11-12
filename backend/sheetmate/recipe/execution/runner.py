@@ -42,6 +42,7 @@ from sheetmate.engine.workbooks.template_writer import (
     write_like_original,
 )
 from sheetmate.engine.tables.workspace import Workspace, validated_row_lineage
+from sheetmate.engine.workbooks.atomic import atomic_path
 from sheetmate.engine.workbooks.writer import SheetSpec, write_excel
 from sheetmate.recipe.definition.schema import (
     OutputSheet,
@@ -56,6 +57,11 @@ from sheetmate.recipe.definition.schema import (
 from sheetmate.recipe.definition.templating import plan_outputs
 from sheetmate.engine.workbooks.verify import file_is_openable, verify_template_output
 from sheetmate.recipe.validation.rules import summarize_checks, validate_run
+
+
+def _write_csv(path: Path, frame: pd.DataFrame) -> None:
+    with atomic_path(path) as staging:
+        frame.to_csv(staging, index=False, encoding="utf-8-sig")
 
 
 def _same_records(frame: pd.DataFrame, original: pd.DataFrame) -> bool:
@@ -681,14 +687,14 @@ class RecipeRunner:
             if frame.size > INTERMEDIATE_XLSX_MAX_CELLS:
                 # 写 XLSX 比计算本身慢一到两个数量级；大结果的过程文件直接存 CSV（同样可查看、下载）。
                 path = path.with_suffix(".csv")
-                frame.to_csv(path, index=False, encoding="utf-8-sig")
+                _write_csv(path, frame)
             else:
                 try:
                     write_excel(path, [SheetSpec(name=table, df=frame)])
                 except Exception:
                     path.unlink(missing_ok=True)
                     path = path.with_suffix(".csv")
-                    frame.to_csv(path, index=False, encoding="utf-8-sig")
+                    _write_csv(path, frame)
             snapshots.append({"step_id": step.id, "step_name": step.name, "table": table,
                               "name": f"{step.id:02d}_{step.name}_{table}{path.suffix}", "path": str(path.resolve()),
                               "intermediate": True})

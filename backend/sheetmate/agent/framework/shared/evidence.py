@@ -11,6 +11,9 @@ from sheetmate.engine.tables.sql import sql_table_refs
 from sheetmate.agent.tools.results import _preview_value, result_reference
 
 
+_WORKFLOW_TOOLS = frozenset({"build_recipe", "revise_recipe", "run_recipe"})
+
+
 def _source(info: Any) -> dict[str, Any]:
     quality = dict(getattr(info, "read_quality", None) or {})
     return {"table": info.name, "revision": info.revision, "rows": info.rows,
@@ -30,6 +33,15 @@ def snapshot_inputs(ctx: Any, tool: str, args: dict[str, Any] | None) -> list[di
         names.extend(sql_table_refs(args["sql"]))
     if tool == "run_python_script" and args.get("input_tables") is None:
         names.extend(table.name for table in ctx.visible_tables())
+    if tool in _WORKFLOW_TOOLS:
+        mapping = args.get("inputs") or args.get("input_mapping")
+        if isinstance(mapping, dict):
+            names.extend(value for value in mapping.values() if isinstance(value, str))
+        if not names:
+            # 流程类工具不写 input_tables 时默认处理所有上传的输入表；证据里也要记下它们的版本和完整性，
+            # 否则这类成功的修改永远是“完整性未确认”，完成核对会反复拒绝一个其实已经完成的任务。
+            names.extend(table.name for table in ctx.visible_tables()
+                         if getattr(table, "source", "") == "uploaded" and getattr(table, "role", "") == "input")
     result = []
     for name in dict.fromkeys(names):
         if ctx.table_filter is not None and name not in ctx.table_filter:

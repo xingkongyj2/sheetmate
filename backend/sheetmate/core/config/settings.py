@@ -75,6 +75,8 @@ class Settings:
     admin_password: str
     frontend_dist: Path
     cors_origins: list[str] = field(default_factory=list)
+    # OOXML 结构编辑：auto=原件含 openpyxl 会丢失的对象时启用；always=可行时一律启用；off=关闭
+    ooxml_edit: str = "auto"
 
     # ---- 派生路径：所有本地数据都在 data_dir 下 ----
     @property
@@ -117,6 +119,11 @@ class Settings:
             path.mkdir(parents=True, exist_ok=True)
 
 
+def _ooxml_edit_mode() -> str:
+    mode = _env("OOXML_EDIT", "auto").strip().lower()
+    return mode if mode in {"auto", "always", "off"} else "auto"
+
+
 def _load_settings() -> Settings:
     data_dir = Path(_env("SHEETMATE_DATA_DIR", str(BACKEND_DIR / "data"))).expanduser().resolve()
     origins = [o.strip() for o in _env("CORS_ORIGINS", "http://localhost:5173").split(",") if o.strip()]
@@ -133,6 +140,7 @@ def _load_settings() -> Settings:
         admin_password=_env("ADMIN_PASSWORD", "admin123"),
         frontend_dist=Path(_env("FRONTEND_DIST", str(PROJECT_DIR / "frontend" / "dist"))),
         cors_origins=origins,
+        ooxml_edit=_ooxml_edit_mode(),
     )
 
 

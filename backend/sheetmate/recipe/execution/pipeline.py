@@ -21,7 +21,7 @@ from sheetmate.engine.tables.workspace import Workspace
 from sheetmate.recipe.learning.differ import diff_tables, diff_view
 from sheetmate.recipe.execution.runner import InputSource, RecipeRunner, StepRepairer
 from sheetmate.recipe.learning.learner import LearnContext, RecipeLearner, revision_problems
-from sheetmate.recipe.definition.schema import Recipe, check_recipe
+from sheetmate.recipe.definition.schema import Recipe, check_recipe, fill_default_tables
 from sheetmate.recipe.validation.rules import validate_run
 from sheetmate.recipe.validation.comparison import verify_outputs
 
@@ -213,6 +213,7 @@ class RecipePipeline:
         }
 
     async def _ensure_structure(self, ctx: LearnContext, recipe: Recipe) -> Recipe | None:
+        fill_default_tables(recipe, self.library, list(ctx.input_frames))
         problems = check_recipe(recipe, self.library) + revision_problems(ctx, recipe)
         if problems:
             recipe = await self.learner.fix_structure(ctx, recipe, problems)

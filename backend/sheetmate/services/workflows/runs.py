@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import shutil
 from copy import deepcopy
 from datetime import datetime
 from pathlib import Path
@@ -19,6 +18,7 @@ from sqlalchemy.orm import Session, object_session
 from sheetmate.core.config.settings import settings
 from sheetmate.db.models import FileRecord, Run, new_id, now
 from sheetmate.engine.tables.workspace import WorkspaceManager
+from sheetmate.engine.workbooks.atomic import link_or_copy
 from sheetmate.engine.scripts.references import bind_script_references, externalize_script_references
 from sheetmate.recipe.validation.rules import output_metrics
 from sheetmate.core.errors import NotFound
@@ -51,8 +51,13 @@ def output_path(run: Run, filename: str) -> Path:
 
 
 def register_delivery_files(db: Session, run: Run, artifacts: list[dict[str, Any]], *, user_id: int | None,
-                            delivery_status: str = "final") -> list[dict[str, Any]]:
-    """把正式交付复制到独立输出件，保留内部文件供后续步骤或断点重跑使用。"""
+                            delivery_status: str = "final",
+                            sheet_cache: dict[str, list[Any]] | None = None) -> list[dict[str, Any]]:
+    """把正式交付复制到独立输出件，保留内部文件供后续步骤或断点重跑使用。
+
+    每个交付文件只解析一次：登记画像时读到的工作表交给调用方的 sheet_cache（键为源文件路径），
+    随后统计指标等需要内容的步骤直接复用，不必再整文件读取一遍。
+    """
     from sheetmate.services.files import service as file_service
 
     copied: list[Path] = []
@@ -66,12 +71,18 @@ def register_delivery_files(db: Session, run: Run, artifacts: list[dict[str, Any
             seen.add(source_path.resolve())
             name = file_service.safe_filename(artifact.get("name") or source_path.name)
             path = output_path(run, f"{uuid4().hex[:8]}_{name}")
-            with source_path.open("rb") as source, path.open("xb") as destination:
-                copied.append(path)
-                shutil.copyfileobj(source, destination)
+            copied.append(path)
+            link_or_copy(source_path, path)  # 写出路径均为原子替换，交付件与内部文件可共用同一份数据
+            sheets = None
+            try:
+                sheets = file_service.read_file_sheets(path)
+            except Exception:
+                sheets = None  # 读取失败（损坏、图片等非表格文件）交给登记按原有规则处理
             record = file_service.register_output(db, path=path, filename=name, customer_id=run.customer_id,
                                                   conversation_id=run.conversation_id, run_id=run.id, user_id=user_id,
-                                                  delivery_status=delivery_status)
+                                                  delivery_status=delivery_status, sheets=sheets)
+            if sheets is not None and sheet_cache is not None:
+                sheet_cache[str(source_path)] = sheets
             record.profile = {**(record.profile or {}), "source_path": str(source_path.resolve())}
             deliveries.append({**artifact, **file_service.file_dict(record)})
     except BaseException:
