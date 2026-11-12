@@ -27,7 +27,12 @@ import pandas as pd
 
 from sheetmate.core.config.settings import BACKEND_DIR
 from sheetmate.engine.workbooks.reader import ReadError
-from sheetmate.engine.workbooks.xls_convert import LIMITATIONS, convert_xls_to_xlsx
+from sheetmate.engine.workbooks.xls_convert import LIMITATIONS
+from sheetmate.engine.workbooks.xls_worker import (
+    XlsConversionCancelled,
+    XlsConversionTimeout,
+    convert_xls_in_worker,
+)
 
 MAX_SCRIPT_BYTES = 100_000
 MAX_FILES = 20
@@ -293,10 +298,18 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
             raise ValueError("Python 脚本不能为空，且不能超过 100 KB")
         if not 0 < timeout_seconds <= 120:
             raise ValueError("脚本运行时限必须大于 0 且不超过 120 秒")
+        deadline = started + timeout_seconds
+
+        def interrupted() -> bool:
+            if cancel_event is not None and cancel_event.is_set():
+                outcome.status, outcome.error = "cancelled", "脚本执行已停止"
+            elif time.monotonic() >= deadline:
+                outcome.status, outcome.error = "timeout", f"脚本超过 {timeout_seconds:g} 秒运行时限，请缩小数据范围或优化脚本"
+            return bool(outcome.error)
+
         if len(tables) > MAX_TABLES or len(files) > MAX_FILES:
             raise ValueError("脚本输入最多 20 张表和 20 个文件")
-        if cancel_event is not None and cancel_event.is_set():
-            outcome.status, outcome.error = "cancelled", "脚本执行已停止"
+        if interrupted():
             return outcome
         with TemporaryDirectory(prefix="sheetmate_script_") as directory:
             root = Path(directory).resolve()
@@ -308,30 +321,43 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
             prepared = {name: _frame_payload(frame) for name, frame in tables.items()}
             if sum(len(item["rows"]) * len(item["columns"]) for item in prepared.values()) > MAX_CELLS:
                 raise ValueError("脚本输入表累计超过 1000000 个单元格")
-            aliases, input_bytes = {}, 0
+            aliases, source_bytes, input_bytes = {}, 0, 0
             for index, (alias, source) in enumerate(files.items()):
+                if interrupted():
+                    return outcome
                 if not isinstance(alias, str) or not alias or len(alias) > 120:
                     raise ValueError("脚本输入文件别名不能为空，且最多 120 字符")
                 source = Path(source)
-                input_bytes += source.stat().st_size
-                if source.suffix.lower() not in _SUFFIXES | {".xls"} or input_bytes > MAX_TOTAL_BYTES:
+                source_bytes += source.stat().st_size
+                if source.suffix.lower() not in _SUFFIXES | {".xls"} or source_bytes > MAX_TOTAL_BYTES:
                     raise ValueError("脚本输入文件必须是 Excel / CSV，累计不能超过 100 MB")
                 filename = f"input_{index}{source.suffix.lower()}"
                 if source.suffix.lower() == ".xls":
-                    # 旧版 .xls 无法被 openpyxl 读写：在受信任的主进程里转换成保留样式的 .xlsx 副本再交给脚本，
-                    # 模型不必（也不应）用 xlrd 手写重建。原件不被修改。
+                    # 转换也在可终止的工作进程中执行，并与脚本共用时限；原件始终只读。
                     filename = f"input_{index}.xlsx"
                     try:
-                        conversion = convert_xls_to_xlsx(source, root / "inputs" / filename)
+                        conversion = convert_xls_in_worker(
+                            source, root / "inputs" / filename,
+                            timeout_seconds=max(0.001, deadline - time.monotonic()),
+                            cancel_event=cancel_event, max_cells=MAX_CELLS,
+                        )
+                    except (XlsConversionCancelled, XlsConversionTimeout):
+                        raise
                     except ReadError as exc:
                         raise ValueError(f"输入文件「{alias}」无法使用：{exc}") from exc
                     outcome.input_notes.append(
                         f"输入文件「{alias}」是旧版 .xls，已自动转换为同内容的 .xlsx，files['{alias}'] 指向这个 .xlsx 副本，"
-                        f"直接用 openpyxl 读写即可，结果请保存为 .xlsx。{LIMITATIONS}" + "".join(f" {item}" for item in conversion.warnings))
+                        f"用 openpyxl.load_workbook(..., rich_text=True) 保留富文本后修改，结果请保存为 .xlsx。{LIMITATIONS}"
+                        + "".join(f" {item}" for item in conversion.warnings))
                 else:
                     shutil.copyfile(source, root / "inputs" / filename)
+                input_bytes += (root / "inputs" / filename).stat().st_size
+                if input_bytes > MAX_TOTAL_BYTES:
+                    raise ValueError("脚本输入转换后的文件累计不能超过 100 MB，请分批处理")
                 aliases[alias] = filename
-            manifest = {"tables": prepared, "files": aliases, "timeout_seconds": timeout_seconds}
+            if interrupted():
+                return outcome
+            manifest = {"tables": prepared, "files": aliases, "timeout_seconds": deadline - time.monotonic()}
             (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, allow_nan=False), encoding="utf-8")
             command = _sandbox_command(root)
             environment = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"), "TMPDIR": str(root), "LANG": "en_US.UTF-8",
@@ -344,17 +370,14 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
                                    PATH=os.pathsep.join((str(Path(command[0]).parent), str(Path(windows) / "System32"))))
                 options = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
             stdout_path, stderr_path = root / "stdout.log", root / "stderr.log"
+            if interrupted():
+                return outcome
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
                 process = subprocess.Popen(command, cwd=root, env=environment, stdin=subprocess.DEVNULL,
                                            stdout=stdout, stderr=stderr, **options)
-                deadline = time.monotonic() + timeout_seconds
                 try:
                     while process.poll() is None:
-                        if cancel_event is not None and cancel_event.is_set():
-                            outcome.status, outcome.error = "cancelled", "脚本执行已停止"
-                            break
-                        if time.monotonic() >= deadline:
-                            outcome.status, outcome.error = "timeout", f"脚本超过 {timeout_seconds:g} 秒运行时限，请缩小数据范围或优化脚本"
+                        if interrupted():
                             break
                         if _regular_size(stdout_path) + _regular_size(stderr_path) > MAX_LOG_BYTES:
                             outcome.status, outcome.error = "output_limit", "脚本日志过多，请只打印摘要"
@@ -378,7 +401,7 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
             outcome.stderr = stderr_path.read_bytes()[:MAX_LOG_BYTES].decode("utf-8", errors="replace")
             for attribute in ("stdout", "stderr"):
                 setattr(outcome, attribute, getattr(outcome, attribute).replace(str(root), "<脚本临时目录>"))
-            if outcome.error:
+            if interrupted():
                 return outcome
             if _temporary_usage(root) > MAX_TOTAL_BYTES + input_bytes + MAX_RESPONSE_BYTES:
                 outcome.status, outcome.error = "output_limit", "脚本临时输出超过大小上限"
@@ -415,25 +438,38 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
                 raise ValueError("deliver_files 只能选择 OUTPUT_DIR 顶层文件，不能越界或引用子目录")
             outputs = [output_root / name for name in selected]
             for path in outputs:
+                if interrupted():
+                    return outcome
                 _validate_output(path)
+            if interrupted():
+                return outcome
             if sum(path.lstat().st_size for path in outputs) > MAX_TOTAL_BYTES:
                 raise ValueError("脚本输出文件数量或大小超过上限")
             output_dir = Path(output_dir)
             if outputs:
                 output_dir.mkdir(parents=True, exist_ok=True)
             for path in outputs:
+                if interrupted():
+                    return outcome
                 destination = output_dir / path.name
                 # xb 保证只新建，不覆盖同目录已有结果或原件。
                 with destination.open("xb") as target, path.open("rb") as source:
                     copied.append(destination)
                     shutil.copyfileobj(source, target)
+                if interrupted():
+                    return outcome
             outcome.ok, outcome.status = True, "success"
             outcome.result_tables, outcome.output_files, outcome.result = frames, copied, result
             outcome.display_tables = display_tables
+    except XlsConversionCancelled:
+        outcome.status, outcome.error = "cancelled", "脚本执行已停止"
+    except XlsConversionTimeout:
+        outcome.status, outcome.error = "timeout", f"脚本超过 {timeout_seconds:g} 秒运行时限，请缩小数据范围或优化脚本"
     except Exception as exc:
         outcome.error = str(exc) or type(exc).__name__
-        for path in copied:
-            path.unlink(missing_ok=True)
     finally:
+        if not outcome.ok:
+            for path in copied:
+                path.unlink(missing_ok=True)
         outcome.duration_ms = int((time.monotonic() - started) * 1000)
     return outcome

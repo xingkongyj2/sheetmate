@@ -791,7 +791,7 @@ class RecipeRunner:
                 rows_out=len(primary_frame) if primary_frame is not None else 0,
                 columns_out=[str(c) for c in primary_frame.columns] if primary_frame is not None else [],
                 description=step.description, notes={"output_tables": list(outputs), "file_only": not outputs},
-                duration_ms=result.duration_ms, preview=preview,
+                warnings=list(result.input_notes), duration_ms=result.duration_ms, preview=preview,
             )
         except BaseException:
             self._discard_python(step.id)
@@ -856,6 +856,7 @@ class RecipeRunner:
         if result is None:
             return reference
         return {**reference, "stdout": result.stdout, "stderr": result.stderr, "checks": result.checks, "result": result.result,
+                "input_notes": list(result.input_notes),
                 "output_files": [dict(item) for item in self.report["artifacts"] if item["step_id"] == step.id]}
 
     def _validate_outputs(self, outputs: dict[str, pd.DataFrame], history: list[dict[str, Any]] | None) -> dict[str, Any]:

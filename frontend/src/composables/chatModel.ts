@@ -183,6 +183,8 @@ export interface UiMessage {
   blocks?: AssistantBlock[]
   /** 开发者日志保留诊断事件；主聊天仍使用 timeline / artifacts 的用户视图。 */
   events?: AgentEvent[]
+  /** 兼容旧事件：未通过完成检查后紧接的 note 是内部候选，不能作为正文展示。 */
+  pendingCompletionDraft?: boolean
   /** Terminal selection survives later file events and stored-event replay. */
   deliveryStatuses?: Record<string, FileDeliveryStatus>
   /** 此刻在做什么；整轮执行中的通用回复提示由消息组件兜底。 */
@@ -441,10 +443,14 @@ export function applyEvent(msg: UiMessage, e: AgentEvent): void {
     if (Array.isArray(e.events)) restoreStreamSnapshot(msg, e.events)
     return
   }
+  const previous = msg.events?.at(-1)
+  const suppressCompletionDraft = e.type === 'note' && msg.pendingCompletionDraft === true &&
+    previous?.type === 'completion_check' && previous.agent_id === e.agent_id && previous.step_num === e.step_num
+  msg.pendingCompletionDraft = e.type === 'completion_check' && e.status === 'incomplete' && e.can_continue === true
   const timelineStart = msg.timeline.length
   const artifactStart = msg.artifacts.length
-  mergeEvent(msg, e)
-  appendBlocks(msg, e, timelineStart, artifactStart)
+  mergeEvent(msg, e, suppressCompletionDraft)
+  appendBlocks(msg, e, timelineStart, artifactStart, suppressCompletionDraft)
 }
 
 /** 一次恢复到服务端快照的完整状态；随后只追加快照边界之后的新事件。 */
@@ -468,11 +474,12 @@ function restoreStreamSnapshot(msg: UiMessage, events: AgentEvent[]): void {
     checklist: restored.checklist,
     audit: restored.audit,
     error: restored.error,
+    pendingCompletionDraft: restored.pendingCompletionDraft,
     replayRevision: (msg.replayRevision ?? 0) + 1,
   })
 }
 
-function mergeEvent(msg: UiMessage, e: AgentEvent): void {
+function mergeEvent(msg: UiMessage, e: AgentEvent, suppressCompletionDraft = false): void {
   // 文本增量、模型思考和临时的活动提示不属于执行诊断，避免日志里堆积流式碎片。
   if (e.type !== 'text_chunk' && e.type !== 'thinking' && e.type !== 'activity') (msg.events ??= []).push({ ...e })
   // 模型开始调用仍属于刚声明的活动；阶段结束或有新内容时才清空具体提示。
@@ -553,7 +560,7 @@ function mergeEvent(msg: UiMessage, e: AgentEvent): void {
       msg.content += e.content
       break
     case 'note':
-      if (e.retracted) break
+      if (e.retracted || suppressCompletionDraft) break
       if (typeof e.content === 'string' && e.content.trim()) {
         msg.timeline.push({ kind: 'note', key: uid('t'), text: e.content.trim(), step: e.step_num ?? activePlan(msg)?.num })
       }
@@ -777,7 +784,7 @@ function appendText(msg: UiMessage, text: string, source: 'note' | 'reply', clos
 }
 
 /** Render anchors are created once at arrival time; later events only extend the active block. */
-function appendBlocks(msg: UiMessage, e: AgentEvent, timelineStart: number, artifactStart: number) {
+function appendBlocks(msg: UiMessage, e: AgentEvent, timelineStart: number, artifactStart: number, suppressCompletionDraft = false) {
   if (e.type === 'text_chunk') {
     appendText(msg, e.content, 'reply', false)
     return
@@ -792,7 +799,7 @@ function appendBlocks(msg: UiMessage, e: AgentEvent, timelineStart: number, arti
     return
   }
   if (e.type === 'note') {
-    if (e.retracted) return
+    if (e.retracted || suppressCompletionDraft) return
     const last = msg.blocks?.at(-1)
     // Older servers may have streamed a paragraph before marking it as a note.
     // Keep that paragraph at its original anchor instead of moving or retyping it.

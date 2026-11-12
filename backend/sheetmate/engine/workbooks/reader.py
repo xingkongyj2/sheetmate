@@ -23,6 +23,7 @@ import zipfile
 from contextlib import closing
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import openpyxl
@@ -32,7 +33,6 @@ SUPPORTED_SUFFIXES = {".xlsx", ".xlsm", ".xls", ".csv"}
 _MAX_ROWS = 200_000
 _FOOTER_TAIL_ROWS = 50
 _HEADER_SCAN_ROWS = 30
-_EXCEL_ERRORS = {"#N/A", "#DIV/0!", "#VALUE!", "#REF!", "#NAME?", "#NUM!", "#NULL!", "#SPILL!", "#CALC!"}
 _NUMERIC_RE = re.compile(r"^[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?%?$")
 _CJK = "一-鿿"
 
@@ -226,15 +226,16 @@ def _load_xlsx_without_formulas(path: Path) -> list[_RawSheet]:
         for ws in workbook.worksheets:
             max_row = min(ws.max_row or 0, _MAX_ROWS)
             max_col = ws.max_column or 0
-            grid = [list(row) for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)]
+            grid: list[list[Any]] = []
             error_cells: list[str] = []
             error_columns: set[int] = set()
-            for row_idx, row in enumerate(grid, start=1):
-                for col_idx, cached in enumerate(row, start=1):
-                    if isinstance(cached, str) and cached in _EXCEL_ERRORS:
-                        error_columns.add(col_idx - 1)
+            for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col):
+                grid.append([None if cell.data_type == "e" else cell.value for cell in row])
+                for cell in row:
+                    if cell.data_type == "e":
+                        error_columns.add(cell.column - 1)
                         if len(error_cells) < 20:
-                            error_cells.append(f"{openpyxl.utils.get_column_letter(col_idx)}{row_idx}")
+                            error_cells.append(cell.coordinate)
             merged_rows: set[int] = set()
             for rng in ws.merged_cells.ranges:
                 if rng.min_row > max_row:
@@ -269,7 +270,8 @@ def _load_xlsx(path: Path) -> list[_RawSheet]:
         for ws in workbook.worksheets:
             max_row = min(ws.max_row or 0, _MAX_ROWS)
             max_col = ws.max_column or 0
-            grid = [list(row) for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col, values_only=True)]
+            grid = [[None if cell.data_type == "e" else cell.value for cell in row]
+                    for row in ws.iter_rows(min_row=1, max_row=max_row, max_col=max_col)]
             formula_ws = formula_book[ws.title]
             formula_cells = 0
             missing_formula_cache = 0
@@ -284,8 +286,9 @@ def _load_xlsx(path: Path) -> list[_RawSheet]:
             scan_rows = min(ws.max_row or 0, _MAX_ROWS)
             for row_idx, row in enumerate(formula_ws.iter_rows(min_row=1, max_row=scan_rows, max_col=max_col), start=1):
                 for col_idx, formula_cell in enumerate(row, start=1):
-                    cached = ws.cell(row_idx, col_idx).value
-                    if formula_cell.data_type == "f" or (isinstance(formula_cell.value, str) and formula_cell.value.startswith("=")):
+                    cached_cell = ws.cell(row_idx, col_idx)
+                    cached = cached_cell.value
+                    if formula_cell.data_type == "f":
                         formula_cells += 1
                         if len(formula_examples) < 20:
                             formula = str(getattr(formula_cell.value, "text", None) or formula_cell.value)
@@ -297,11 +300,11 @@ def _load_xlsx(path: Path) -> list[_RawSheet]:
                             missing_by_column[col_idx - 1] = missing_by_column.get(col_idx - 1, 0) + 1
                             if row_idx > scan_rows - _FOOTER_TAIL_ROWS:
                                 missing_tail.setdefault(row_idx - 1, []).append(col_idx - 1)
-                        elif isinstance(cached, str) and cached in _EXCEL_ERRORS:
+                        elif cached_cell.data_type == "e":
                             formula_error_columns.add(col_idx - 1)
                             if len(formula_error_cells) < 20:
                                 formula_error_cells.append(ws.cell(row_idx, col_idx).coordinate)
-                    elif isinstance(cached, str) and cached in _EXCEL_ERRORS:
+                    elif cached_cell.data_type == "e":
                         error_columns.add(col_idx - 1)
                         if len(error_cells) < 20:
                             error_cells.append(ws.cell(row_idx, col_idx).coordinate)
@@ -339,12 +342,14 @@ def _load_xlsx(path: Path) -> list[_RawSheet]:
 
 
 def _load_xls(path: Path) -> list[_RawSheet]:
-    frames = pd.read_excel(path, sheet_name=None, header=None, engine="xlrd", dtype=object)
-    return [
-        _RawSheet(str(name), [[None if _is_blank(v) else v for v in row] for row in frame.values.tolist()], set(),
-                   quality={"physical_rows": int(len(frame)), "read_rows": int(len(frame)), "truncated": False})
-        for name, frame in frames.items()
-    ]
+    # 与脚本 files 使用同一转换结果语义：合并单元格补值、隐藏工作表、日期与错误值一致。
+    # converter 使用本模块的 ReadError，因此在入口完成初始化后再导入。
+    from sheetmate.engine.workbooks.xls_worker import convert_xls_in_worker
+
+    with TemporaryDirectory(prefix="sheetmate_xls_read_") as directory:
+        converted = Path(directory) / "input.xlsx"
+        convert_xls_in_worker(path, converted)
+        return _load_xlsx(converted)
 
 
 def _csv_delimiter(path: Path, encoding: str) -> str | None:
@@ -638,7 +643,7 @@ def _to_text(value: Any) -> str:
 def _clean_cell(value: Any) -> Any:
     if isinstance(value, str):
         text = value.strip()
-        if not text or text in _EXCEL_ERRORS:
+        if not text:
             return None
         return text
     if isinstance(value, float) and math.isnan(value):

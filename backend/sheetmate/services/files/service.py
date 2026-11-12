@@ -9,6 +9,7 @@ import logging
 import re
 import uuid
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import openpyxl
@@ -242,12 +243,20 @@ def profile_file(path: Path, *, sheets: list[SheetData] | None = None) -> dict[s
         sheets = sheets if sheets is not None else _read_file_copy(path)
     except ReadError as exc:
         # 空白或只含样式的合法工作簿仍能交给脚本处理，损坏文件不能借此绕过校验。
-        if path.suffix.lower() not in {".xlsx", ".xlsm"} or "没有可读取的数据" not in str(exc):
+        if path.suffix.lower() not in {".xlsx", ".xlsm", ".xls"} or "没有可读取的数据" not in str(exc):
             raise
         try:
             with temporary_file_copies() as copies:
-                workbook = openpyxl.load_workbook(copies.file_copy(path), read_only=True, data_only=False)
-                workbook.close()
+                original = copies.file_copy(path)
+                with TemporaryDirectory(prefix="sheetmate_xls_profile_") as directory:
+                    if original.suffix.lower() == ".xls":
+                        from sheetmate.engine.workbooks.xls_worker import convert_xls_in_worker
+
+                        converted = Path(directory) / "input.xlsx"
+                        convert_xls_in_worker(original, converted)
+                        original = converted
+                    workbook = openpyxl.load_workbook(original, read_only=True, data_only=False)
+                    workbook.close()
         except Exception as invalid:
             raise exc from invalid
         return {"sheets": [], "file_only": True, FILE_VERSION_KEY: file_version(path)}

@@ -135,7 +135,7 @@ def python_script_tools():
              "OUTPUT_DIR 是运行目录，写入文件不会自动交付。deliver_files 默认[]，只有明确列入的最终文件才提供下载，例如 deliver_files=[OUTPUT_DIR / '武汉行程.xlsx']；probe.xlsx 等测试文件留在临时目录。"
              "result_tables['结果名']=DataFrame 可回传内部数据继续用 SQL/公式；display_tables 默认[]，只把需要用户查看的最终结果表名列入，其他表不展示。"
              "result 可保存简短 JSON 摘要，check(condition,message) 记录校验，失败会阻止本次交付。"
-             "使用 openpyxl.load_workbook(files['别名']) 修改原格式副本，另存到 OUTPUT_DIR，不覆盖输入。"
+             "使用 openpyxl.load_workbook(files['别名'], rich_text=True) 修改原格式副本并保留单元格内富文本，另存到 OUTPUT_DIR，不覆盖输入。"
              "执行错误、日志、校验和实际产物返回后可继续改代码重试；不要把代码无异常等同于满足用户目标。"
              "无网络、无安装包能力；只能访问隔离副本和运行目录，支持已有的 pandas/numpy/openpyxl 和标准处理库。",
              parameters, stream=run, label=lambda args: "处理表格",

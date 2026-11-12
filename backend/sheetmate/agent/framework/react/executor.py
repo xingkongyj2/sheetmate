@@ -879,7 +879,10 @@ class AgentExecutor:
                             completion_retries += 1
                             if display:
                                 msgs.append(reply)
-                                yield {"type": "note", "content": display}
+                            # A rejected candidate is internal context, not a
+                            # public progress note. Notes are rendered as text
+                            # and would expose every draft alongside the answer.
+                            yield {"type": "activity", "text": "核对发现需要修正，正在继续处理"}
                             msgs.append({"role": "user", "content": continuation(check)})
                             continue
                         code = limit_code or ("premature_stop" if check.verified else "completion_unverified")
