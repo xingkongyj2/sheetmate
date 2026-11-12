@@ -25,7 +25,9 @@ from uuid import uuid4
 from sheetmate.agent.framework.shared.prompt_builder import build_customer_block, build_system_prompt
 from sheetmate.agent.framework.react.completion import (
     MAX_COMPLETION_RETRIES,
+    accept_with_conflicts,
     check_completion,
+    conflict_note,
     continuation,
     text_content,
 )
@@ -921,6 +923,7 @@ class AgentExecutor:
                     msgs.append({"role": "user", "content": AUTONOMOUS_RECOVERY_MESSAGE})
                     recovery_finish_prompts += 1
                     continue
+                conflicts_accepted = False
                 if tools:
                     yield {"type": "activity", "text": "正在确认任务完成情况"}
                     check_id = uuid4().hex
@@ -933,7 +936,15 @@ class AgentExecutor:
                         previous_conflicts=conflict_history,
                     )
                     yield {**check.event(), "call_id": check_id}
-                    if not check.completed:
+                    conflicts_accepted = (not check.completed and not limit_code and accept_with_conflicts(
+                        check, conflict_rounds, completion_retries))
+                    if conflicts_accepted:
+                        # The verifier only disputes facts and has not converged after
+                        # several rewrites: deliver the answer with the disputes flagged
+                        # instead of discarding a finished analysis.
+                        display += conflict_note(check)
+                        reply["content"] = display
+                    if not check.completed and not conflicts_accepted:
                         if check.verified and check.can_continue and not final_round and completion_retries < MAX_COMPLETION_RETRIES:
                             # Progress review permits drafting an answer; only
                             # completion verification can approve it. Missing
@@ -976,8 +987,10 @@ class AgentExecutor:
                         yield {"type": "text_chunk", "content": answer}
                         yield {"type": "final_text", "content": answer}
                         return
-                terminal = stop("completed", limit_code or "model_stop", "任务完成情况已核对。" if tools else "本轮回答已结束。",
-                                verified=bool(tools))
+                terminal = (stop("completed", "conflict_unresolved", "回答已交付，个别说法与自动核对存在分歧，已在回答中标注。")
+                            if conflicts_accepted else
+                            stop("completed", limit_code or "model_stop", "任务完成情况已核对。" if tools else "本轮回答已结束。",
+                                 verified=bool(tools)))
                 if runtime is not None:
                     snapshot_loop(snapshot_messages=msgs + ([reply] if display else []), terminal_events=[
                         terminal, {"type": "final_text", "content": display}])

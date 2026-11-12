@@ -15,6 +15,10 @@ COMPLETION_TIMEOUT = 30.0
 MAX_COMPLETION_RETRIES = 12
 # After this many fact-conflict rounds, ask for a verbatim-only answer.
 CONFLICT_SIMPLIFY_AFTER = 3
+# A verifier that keeps reporting conflicts after this many rewrites is itself
+# not converging (cv_59e695ac13: "12 + 2 = 14" was rejected nine times). The
+# answer is then delivered with the disputed claims flagged instead of dropped.
+CONFLICT_ACCEPT_AFTER = 4
 _SCHEMA = {
     "type": "object",
     "properties": {
@@ -52,6 +56,9 @@ _SYSTEM = """你是 SheetMate 的任务完成核对助手。执行助手的模�
 - correction 和 claim 涉及的行、类别、数字必须能在 actual_results 的结果正文里逐字找到；找不到的行或类别不得写进 correction，更不能要求回答补列材料中不存在的行。
 - previous_conflicts 是此前轮次你给出的冲突意见。先逐条对照 actual_results 复核：若某条与实际结果不符，以实际结果为准，不得为保持一致而重复它，也不得无依据地反向推翻已被证据证实的修正。
 - 只有数字、范围或“所有/均/只有/没有”等全称判断与结果直接矛盾时才列入 contradictions。归类口径、合计方式、措辞和“几乎/大致”类概括不算冲突；回答没有断言的内容不要要求补充。
+- 由结果中的数字或名单直接推出的加总、计数、差值、占比和排名位次是正常推导：自己算一遍，算出来一致就不算冲突；“结果原文没有直接写出这个合计/排名”不是冲突理由。只有重新计算后确实得到不同数字，才列入 contradictions。
+- 列入 contradictions 前先确认 correction 与 claim 的结论确实不同。若 correction 的结论和 claim 一致，或只是在复述 claim，说明没有冲突，不得列入；completed 以其余目标是否完成为准。
+- 同一条断言在 previous_conflicts 中已出现过、且回答已按其修改，除非能在 actual_results 里指出具体矛盾的数字，否则不要再次列入。
 - evidence_ids 只能引用材料中成功且实际执行过的调用编号；completed=true 时 remaining 必须为空。
 - execution 包含唯一证据编号、源表版本、结果行数与交付引用。full_data=false 只能支持读取风险或局部诊断，不能支持全表计算、完整匹配或交付完成；null 表示未确认输入完整性。新旧源表版本的结果不能混作同一口径。
 - requires_execution 表示当前目标是否需要实际读取、计算、匹配、修改或交付。为 true 时，完成必须引用覆盖该目标的成功调用编号，不能留空。纯解释和结构设计才可为 false。
@@ -318,6 +325,23 @@ async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: 
                            evidence_ids=list(dict.fromkeys(successful[identifier][0] for identifier in value["evidence_ids"])),
                            requires_execution=value["requires_execution"] or requires_full_data,
                            requires_full_data=requires_full_data)
+
+
+def accept_with_conflicts(check: CompletionCheck, conflict_rounds: int, retries: int) -> bool:
+    """Whether a conflict-only verdict should stop blocking delivery.
+
+    Only fact conflicts are softened: missing work, unverified checks and local
+    guards still block. The conflicts were checked against real results, so the
+    answer is delivered with a visible caveat rather than discarded.
+    """
+    return bool(check.contradictions and check.verified and check.can_continue
+                and (conflict_rounds >= CONFLICT_ACCEPT_AFTER or retries >= MAX_COMPLETION_RETRIES))
+
+
+def conflict_note(check: CompletionCheck) -> str:
+    claims = "\n".join(f"- {item['claim'][:160]}" for item in check.contradictions[:5])
+    return ("\n\n> 注：自动核对对以下说法仍有分歧，未能达成一致，请以上面的结果表为准：\n" + "\n".join(
+        f"> {line}" for line in claims.splitlines()))
 
 
 def continuation(check: CompletionCheck, conflict_rounds: int = 0) -> str:

@@ -127,6 +127,8 @@ sheetmate/
 | `rename_input_alias` | 输入别名 | 流程图上输入和步骤引用处显示的名字；同步改输入绑定、步骤参数、SQL、公式表参数和脚本里直接用到的别名 |
 | `rename_output_file` | 脚本生成的输出/中间文件 | 同步改声明、后续步骤的引用，以及脚本里出现的原文件名；扩展名不能改 |
 | `rename_output_sheet` | 输出工作表 | 名称 |
+| `remove_input` | 输入 | 从流程移除，原文件和历史记录保留；只能移除没有步骤/脚本在用的输入，在用的用 `revise_recipe` 的 `input_changes` 让模型适配脚本 |
+| `remove_output` | 输出文件 | 从流程交付里移除（记入 `metadata.removed_output_refs`，运行时不再交付），已生成的历史文件保留；不能移除唯一的输出 |
 | `update_step` | 步骤 | 名称、说明、启停、参数（含 SQL；`null` 删除参数） |
 | `rename_script` / `edit_script` | Python 脚本 | 脚本名；脚本内容（整段 `code` 或精确的 `replacements` 查找替换，语法错误直接拒绝） |
 | `update_workflow` | 流程 | 流程名、说明（普通表格流程的导出文件名是「流程名_结果.xlsx」，改流程名即可） |
