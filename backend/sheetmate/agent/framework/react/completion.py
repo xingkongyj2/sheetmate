@@ -274,11 +274,15 @@ async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: 
     contradictions = value.get("contradictions") or []
     successful = {alias: (identifier, item) for identifier, item in eligible.items() if _usable_result(item)
                   for alias in _identifiers(identifier, item)}
-    cited_ids = [*value["evidence_ids"], *(identifier for conflict in contradictions
-                                         for identifier in conflict["evidence_ids"])]
-    if any(call_id not in successful for call_id in cited_ids):
+    conflict_ids = [identifier for conflict in contradictions for identifier in conflict["evidence_ids"]]
+    if any(call_id not in successful for call_id in conflict_ids):
+        # 纠正必须有真实依据；引用不存在或失败的结果来否定回答，不能采信。
         return CompletionCheck(reason="任务完成核对引用了不存在或未成功的执行结果，尚不能确认完成。",
                                verified=False, duration_ms=duration)
+    # 支持完成的证据里夹带了失败或不存在的调用时只丢掉这些引用，不整轮作废；
+    # 丢完没有剩下有效证据的，由下面“没有实际成功的执行结果”的检查要求继续执行。
+    value["evidence_ids"] = [call_id for call_id in value["evidence_ids"] if call_id in successful]
+    cited_ids = [*value["evidence_ids"], *conflict_ids]
     if contradictions:
         conflicts = [{"claim": item["claim"][:500], "correction": item["correction"][:1000],
                       "evidence_ids": list(dict.fromkeys(successful[identifier][0]

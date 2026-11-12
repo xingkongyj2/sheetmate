@@ -256,7 +256,7 @@ class ExecutionControl:
 
     async def start_tool(self, call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         readonly = name in {"table_info", "preview_table", "value_counts", "column_stats", "list_files",
-                            "show_files", "list_recipes", "get_recipe", "inspect_python_script",
+                            "show_files", "list_recipes", "get_recipe", "inspect_recipe_nodes", "inspect_python_script",
                             "inspect_task", "inspect_history", "inspect_memory", "inspect_evidence", "read_tool_result"}
         with session_scope() as db:
             start = state_store.start_tool(db, self.job.execution_id, user_id=self.user_id,

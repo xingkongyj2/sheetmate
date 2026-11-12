@@ -166,7 +166,7 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
         ContextBlock("system_policy", policy + (THINKING_RULES if thinking else ""), required=True),
         ContextBlock("recipe_edit", ("## 用户选中的流程修改对象（已由服务端校验）\n"
             + json.dumps(ctx.recipe_edit, ensure_ascii=False)
-            + "\n结合当前消息理解操作；如果只是询问解释，不执行修改。要求修改时必须使用 revise_recipe，明确 recipe_id、base_version、instruction，"
+            + "\n结合当前消息理解操作；如果只是询问解释，不执行修改。要求修改处理逻辑时必须使用 revise_recipe，明确 recipe_id、base_version、instruction，只是改名字、说明或脚本文字（输入/输出文件名、步骤名、脚本名、脚本内容）时改用 edit_recipe_nodes 直接修改，不必重新生成流程；"
               "单步修改传 step_ids，输入变更传 input_changes；通过完整流程重跑适配依赖并核对结果后才能报告完成。"
               "移除输入或输出指解除流程绑定/交付声明，原文件与历史记录保留。用户上传的新输入必须实际绑定到重跑，不能只改名称。"
               "除用户要求及必要的依赖适配外保留原流程。重跑失败不得声称已更新。"

@@ -599,6 +599,7 @@ class ConversationHost:
                     raise ServiceError("待保存的修改与本次实际执行的流程不一致，请重新跑完整流程后保存。")
             original_id = recipe.id
             record = recipe_service.save_recipe_if_changed(db, recipe, conversation_id=self.conversation_id)
+            saved_version = record.version
             if base_version is not None and self.customer_id and last_run is not None:
                 self._sync_revision_files(db, recipe, previous, last_run)
             brief = recipe_service.recipe_brief(record)
@@ -606,6 +607,14 @@ class ConversationHost:
                 last_run.recipe_id = recipe.id
                 last_run.recipe_version = recipe.version
                 last_run.validation = {**(last_run.validation or {}), "recipe_snapshot": recipe.to_dict()}
+        # The saved version is the baseline for the next revision in this
+        # conversation. Leaving the version recorded at first read makes every
+        # later revise_recipe look like a concurrent update, whatever
+        # base_version it passes (cv_c87018e412).
+        for saved_id in {original_id, recipe.id}:
+            self._revision_versions[saved_id] = saved_version
+        if self.recipe_edit.get("recipe_id") in {original_id, recipe.id}:
+            self.recipe_edit["saved_version"] = saved_version
         self.activate_recipe(recipe)
         self._edit_base_recipe = None
         self._last_recipe = recipe.model_copy(deep=True)

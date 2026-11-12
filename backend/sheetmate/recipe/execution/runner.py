@@ -45,6 +45,7 @@ from sheetmate.engine.tables.workspace import Workspace, validated_row_lineage
 from sheetmate.engine.workbooks.atomic import atomic_path
 from sheetmate.engine.workbooks.writer import SheetSpec, write_excel
 from sheetmate.recipe.definition.schema import (
+    REMOVED_OUTPUT_REFS,
     OutputSheet,
     Recipe,
     RecipeInput,
@@ -460,6 +461,7 @@ class RecipeRunner:
             downstream = {ref for later in steps[index + 1:] for ref in step_table_refs(later, self.library)}
             consumed.update(spec["ref"] for table, spec in step.params.get("file_tables", {}).items() if table in downstream)
         intermediate_exports = {step.id for step in steps[:-1] if step.params.get("workbook_export") is not None}
+        consumed.update(self.recipe.metadata.get(REMOVED_OUTPUT_REFS) or [])  # 用户已从流程中删除的输出
         return [dict(item) for item in self.report["artifacts"]
                 if item["ref"] not in consumed and item["step_id"] not in intermediate_exports]
 

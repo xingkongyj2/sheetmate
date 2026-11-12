@@ -143,7 +143,8 @@ def apply_input_changes(recipe: Recipe, changes: Any, explicit: Any,
         raise ValueError("inputs 必须使用非空输入名和真实表名或文件 ID。")
     revised = recipe.model_copy(deep=True)
     definitions = {item.alias: item for item in revised.inputs}
-    changed = set()
+    changed: set[str] = set()
+    renamed: set[str] = set()  # definition-only edits keep their file binding
     for change in changes:
         if not isinstance(change, dict):
             raise ValueError("每项 input_changes 必须包含 operation 和 alias。")
@@ -153,12 +154,34 @@ def apply_input_changes(recipe: Recipe, changes: Any, explicit: Any,
         if alias in changed:
             raise ValueError(f"输入「{alias}」不能在一次修订中重复修改。")
         changed.add(alias)
-        if operation not in {"add", "replace", "remove"}:
-            raise ValueError("输入修改 operation 只能为 add、replace 或 remove。")
+        if operation not in {"add", "replace", "remove", "rename"}:
+            raise ValueError("输入修改 operation 只能为 add、replace、remove 或 rename。")
         if operation == "add" and alias in definitions:
             raise ValueError(f"输入「{alias}」已存在，替换来源请使用 replace。")
         if operation != "add" and alias not in definitions:
             raise ValueError(f"流程没有输入「{alias}」，请先查看真实输入别名。")
+        if operation == "rename":
+            # Only the file-name matching rule (and its display text) change.
+            # The bound source file, columns and steps stay as they are, so no
+            # replacement source is needed and the binding is kept.
+            if "source" in change or "kind" in change:
+                raise ValueError("重命名输入文件规则只填写 alias、file_pattern、description，不提供 source 或 kind。")
+            pattern, description = change.get("file_pattern"), change.get("description")
+            if pattern is None and description is None:
+                raise ValueError(f"输入「{alias}」的 rename 必须提供 file_pattern 或 description。")
+            update: dict[str, str] = {}
+            if pattern is not None:
+                if (not isinstance(pattern, str) or not pattern.strip() or pattern != pattern.strip()
+                        or "/" in pattern or "\\" in pattern):
+                    raise ValueError(f"输入「{alias}」的 file_pattern 必须是不含路径和首尾空格的文件名规则，例如「订单表*」。")
+                update["file_pattern"] = pattern
+            if description is not None:
+                if not isinstance(description, str) or not description.strip():
+                    raise ValueError(f"输入「{alias}」的 description 不能为空。")
+                update["description"] = description.strip()
+            definitions[alias] = definitions[alias].model_copy(update=update)
+            renamed.add(alias)
+            continue
         if operation == "remove":
             if alias in mapping:
                 raise ValueError(f"输入「{alias}」已指定删除，不能同时在 inputs 中绑定。")
@@ -191,5 +214,5 @@ def apply_input_changes(recipe: Recipe, changes: Any, explicit: Any,
     bindings = revised.learned_from.get("input_bindings")
     if isinstance(bindings, dict):
         revised.learned_from["input_bindings"] = {alias: binding for alias, binding in bindings.items()
-                                                    if alias in definitions and alias not in changed}
+                                                    if alias in definitions and (alias not in changed or alias in renamed)}
     return revised, mapping

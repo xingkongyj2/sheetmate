@@ -94,7 +94,7 @@ _RECIPE_TOOLS = {"build_recipe", "revise_recipe", "run_recipe"}
 _SCRIPT_TOOL = "run_python_script"
 _SCRIPT_EXTRA_ITERATIONS = 60
 _DIAGNOSTIC_TOOLS = (_EXPLORE_TOOLS - {"run_sql"}) | {
-    "inspect_python_script", "inspect_workbook_creation", "list_recipes", "load_file", "show_files",
+    "inspect_python_script", "inspect_workbook_creation", "inspect_recipe_nodes", "list_recipes", "load_file", "show_files",
     "remember", "save_field_mapping", "save_as_recipe", "delete_recipe", "delete_recipes", "ask_user",
     "load_tool_group", "inspect_execution_evidence", "inspect_task_context", "inspect_saved_memories",
     "inspect_conversation_history",

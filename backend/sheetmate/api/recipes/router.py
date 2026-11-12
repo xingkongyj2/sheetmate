@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sheetmate.api.recipes.schemas import MatchBody, RunBody
+from sheetmate.api.recipes.schemas import FileRenameBody, MatchBody, NodeEditBody, RunBody
 
 from typing import Any
 
@@ -13,6 +13,9 @@ from sheetmate.api.deps import current_user, sse_response
 from sheetmate.db.session import get_db
 from sheetmate.db.models import User
 from sheetmate.services.customers import service as customer_service
+from sheetmate.services.files import service as file_service
+from sheetmate.services.workflows import file_rename as file_rename_service
+from sheetmate.services.workflows import node_edit as node_edit_service
 from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import replay as replay_service
 from sheetmate.services.workflows import runs as run_service
@@ -46,6 +49,35 @@ def update_recipe(recipe_id: str, body: dict[str, Any], background: BackgroundTa
     record = recipe_service.update_recipe(db, user, recipe_id, body)
     _refresh_later(db, background, record.customer_id)
     return {"ok": True, "recipe": recipe_service.recipe_brief(record)}
+
+
+@router.get("/recipes/{recipe_id}/nodes")
+def inspect_nodes(recipe_id: str, version: int | None = None, step_id: int | None = None, line_start: int | None = None,
+                  line_end: int | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """各节点的可修改内容；带 step_id 时返回该步脚本内容（可按行区间读取）。"""
+    return {"ok": True, "nodes": node_edit_service.inspect_nodes(db, user, recipe_id, version=version, step_id=step_id,
+                                                                  line_start=line_start, line_end=line_end)}
+
+
+@router.post("/recipes/{recipe_id}/nodes/edit")
+def edit_nodes(recipe_id: str, body: NodeEditBody, background: BackgroundTasks, db: Session = Depends(get_db),
+               user: User = Depends(current_user)) -> dict[str, Any]:
+    """直接修改输入/输出文件名、步骤、脚本名和脚本内容，保存为新版本；任一项不合法则整体不保存。"""
+    result = node_edit_service.edit_nodes(db, user, recipe_id, body.edits, base_version=body.base_version, note=body.note)
+    _refresh_later(db, background, result["customer_id"])
+    return {"ok": True, **result}
+
+
+@router.post("/recipes/files/rename")
+def rename_files(body: FileRenameBody, background: BackgroundTasks, db: Session = Depends(get_db),
+                 user: User = Depends(current_user)) -> dict[str, Any]:
+    """修改输入/输出文件的文件名，并默认同步引用这些文件的流程（保存为新版本）。"""
+    result = file_rename_service.rename_files(db, user, body.renames, sync_recipes=body.sync_recipes,
+                                              accessible=lambda record: file_service.can_access_file(db, user, record))
+    for customer_id in {item["customer_id"] for item in result["recipes"]}:
+        _refresh_later(db, background, customer_id)
+    return {"ok": True, **{key: [{k: v for k, v in item.items() if k not in {"flow", "description"}} for item in value]
+                           for key, value in result.items()}}
 
 
 @router.delete("/recipes/{recipe_id}")

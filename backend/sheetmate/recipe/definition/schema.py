@@ -28,6 +28,10 @@ def _now() -> str:
     return datetime.now().replace(microsecond=0).isoformat()
 
 
+# 节点编辑删除的脚本交付文件：脚本仍可能写出它们，但不再作为流程输出交付。
+REMOVED_OUTPUT_REFS = "removed_output_refs"
+
+
 def new_recipe_id() -> str:
     return f"rcp_{uuid.uuid4().hex[:10]}"
 
@@ -225,6 +229,7 @@ class Recipe(BaseModel):
             consumed.update(spec["ref"] for table, spec in step.params.get("file_tables", {}).items()
                             if table in downstream and isinstance(spec, dict) and isinstance(spec.get("ref"), str))
         files: dict[str, dict[str, Any]] = {}
+        consumed.update(self.metadata.get(REMOVED_OUTPUT_REFS) or [])
         for index, step in enumerate(steps):
             if step.kind != "python":
                 continue

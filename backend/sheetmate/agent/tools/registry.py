@@ -22,6 +22,13 @@ from sheetmate.agent.tools.files.builtin import (
 from sheetmate.agent.tools.formulas.builtin import formula_tool
 from sheetmate.agent.tools.interaction.builtin import _tool_ask_user, _tool_inspect_evidence
 from sheetmate.agent.tools.memory.builtin import _tool_remember, _tool_save_field_mapping
+from sheetmate.agent.tools.workflows.node_edit import (
+    EDIT_ITEM_SCHEMA,
+    RENAME_ITEM_SCHEMA,
+    _tool_edit_recipe_nodes,
+    _tool_inspect_recipe_nodes,
+    _tool_rename_files,
+)
 from sheetmate.agent.tools.workflows.builtin import (
     _stream_build_recipe,
     _stream_revise_recipe,
@@ -117,6 +124,14 @@ def _static_tools() -> list[Tool]:
                    "kinds": {"type": "array", "items": {"type": "string", "enum": ["input", "expected", "output"]},
                              "description": "筛选多种文件类型；例如查看所有输入输出用 [input,output]，与 kind 互斥；单独提供时展示这些类型全部文件"}}),
              both, run=_tool_show_files, label=lambda a: "展示文件"),
+        Tool("rename_files", "修改已上传文件的文件名：输入文件、期望结果文件，以及流程输出和过程文件（只改显示名，内容和 ID 不变，扩展名不能改）。"
+             "用户直接给出新名字就原样使用；用户给的是命名规则（如“去掉文件名里的模拟数据”“统一成 客户-类型 格式”）时，先用 list_files 看当前文件名，"
+             "按规则为每个文件给出规范的新名字再调用，并在回复里列出旧名→新名。重名时系统自动追加（1）。"
+             "默认同步引用这些文件的流程（来源文件名、说明、已匹配不上新名字的文件规则，保存为新版本）；用户只想改文件名、不动流程时 sync_recipes=false。"
+             "这是用户明确的改名请求，不需要另外授权。流程图里“输入文件”显示的就是这里的文件名。",
+             _obj({"renames": {"type": "array", "minItems": 1, "maxItems": 50, "items": RENAME_ITEM_SCHEMA},
+                   "sync_recipes": {"type": "boolean", "description": "是否同步引用这些文件的流程，默认 true"}}, ["renames"]),
+             both, run=_tool_rename_files, label=lambda a: f"修改文件名 · {len(a.get('renames') or [])} 个"),
         Tool("load_file", "把一个文件加载到工作区（每个 sheet 一张表）。",
              _obj({"file_id": _STR}, ["file_id"]), both, run=_tool_load_file, label=lambda a: "加载文件"),
         Tool("export_excel", "把一张或多张已核对的结果表导出成 Excel，由文件卡片提供查看和下载。正式明细或较大结果使用此工具交付，不把完整数据粘贴到回复中；已有交付文件不重复导出。",
@@ -133,17 +148,20 @@ def _static_tools() -> list[Tool]:
                    "recipe_name": {**_STR, "description": "可选：本次处理名称，不构成保存授权"}}, ["requirement"]),
              modify, stream=_stream_build_recipe, label=lambda a: "处理表格"),
         Tool("revise_recipe", "通过对话修改流程的输入、输出或指定步骤，并从输入开始重新执行完整流程、适配上下游依赖和验证。"
-             "输入新增/删除/替换用 input_changes；单步修改用 step_ids；输出表增删改可提供完整 output_sheets。"
+"输入新增/删除/替换用 input_changes；单步修改用 step_ids；输出表增删改可提供完整 output_sheets。"
+             "只想改名字、说明或脚本文字（输入/输出文件名、脚本名、脚本内容等）不需要重新生成流程，请改用 edit_recipe_nodes 直接修改。"
              "删除流程中的输入/输出仅修改本次处理定义，不删除用户原文件。仅在用户明确要求保存或长期更新规则时持久化，选中或修改流程本身不构成保存授权。",
              _obj({"instruction": {**_STR, "description": "修改要求"},
                    "recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
                    "base_version": {"type": "integer", "minimum": 1, "description": "所修改流程的当前版本，选中流程时必须与选择版本相同；版本已更新时先刷新"},
                    "inputs": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}, "description": "可选：{保留输入的完整alias: 表名或文件file_id}。仅覆盖运行绑定，不增加或删除定义；结构变动用input_changes"},
                    "input_changes": {"type": "array", "maxItems": 40, "items": _obj({
-                       "operation": {"type": "string", "enum": ["add", "replace", "remove"]},
+                       "operation": {"type": "string", "enum": ["add", "replace", "remove", "rename"]},
                        "alias": {"type": "string", "minLength": 1, "description": "完整输入别名，删除文件时列出该文件的全部输入别名"},
-                       "kind": {"type": "string", "enum": ["table", "file"], "description": "add默认table，replace默认沿用；remove不填"},
-                       "source": {"type": "string", "minLength": 1, "description": "add/replace必填：table用真实原始输入表名，file用当前可访问file_id；remove不填"}}, ["operation", "alias"])},
+                       "kind": {"type": "string", "enum": ["table", "file"], "description": "add默认table，replace默认沿用；remove、rename不填"},
+                       "source": {"type": "string", "minLength": 1, "description": "add/replace必填：table用真实原始输入表名，file用当前可访问file_id；remove、rename不填"},
+                       "file_pattern": {"type": "string", "minLength": 1, "description": "rename：新的文件名匹配规则，如「订单表*」，不含路径；可与description同时提供"},
+                       "description": {"type": "string", "minLength": 1, "description": "rename可选：新的输入说明文字，例如把说明里的文件名同步改掉"}}, ["operation", "alias"])},
                    "step_ids": {"type": "array", "uniqueItems": True, "items": {"type": "integer", "minimum": 1}, "description": "本次修改的真实步骤编号；其余步骤保留，仅因依赖适配所需时同步修改"},
                    "output_sheets": {"type": "array", "maxItems": 100, "description": "可选完整最终工作表声明，遗漏项将不再输出；保留未选中输出。[]明确取消普通表输出。脚本文件产物由instruction调整脚本声明", "items": _obj({
                        "name": {"type": "string", "minLength": 1}, "source": {"type": "string", "minLength": 1},
@@ -162,6 +180,25 @@ def _static_tools() -> list[Tool]:
                    "recipe_id": {**_STR, "description": "可选：指定本会话已执行的流程 ID，不填用最近的"},
                    "description": {**_STR, "description": "流程说明"}}),
              both, run=_tool_save_as_recipe, label=lambda a: f"保存流程 · {a.get('name', '')}"),
+        Tool("inspect_recipe_nodes", "查看已保存流程各节点的可修改内容：输入（文件规则、来源文件名）、步骤（名称、参数、脚本名）、脚本生成的文件、输出工作表；"
+             "指定 step_id 时返回该步脚本内容（过长按 line_start/line_end 分段读取）。修改节点内容前先用它确认真实的步骤编号、文件名和脚本原文。只读。",
+             _obj({"recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
+                   "version": {"type": "integer", "minimum": 1, "description": "可选：查看历史版本，默认最新"},
+                   "step_id": {"type": "integer", "minimum": 1, "description": "可选：返回这一步 Python 脚本的内容"},
+                   "line_start": {"type": "integer", "minimum": 1, "description": "可选：脚本起始行（含）"},
+                   "line_end": {"type": "integer", "minimum": 1, "description": "可选：脚本结束行（含）"}}),
+             both, run=_tool_inspect_recipe_nodes, label=lambda a: "查看流程节点"),
+        Tool("edit_recipe_nodes", "直接修改已保存流程的指定节点并保存为新版本（不调用模型、不重跑整条流程）：改输入文件名规则（rename_input_file）、输入别名（rename_input_alias，即流程图里输入和步骤引用处显示的名字，如“依赖_xxx_订单表_模拟数据_6”，会同步改所有引用）、"
+             "脚本生成的输出/中间文件名（rename_output_file，同步改声明、后续步骤引用和脚本里的文件名）、输出工作表名（rename_output_sheet）、从流程移除输入（remove_input，仅限没有步骤在用的输入；在用的要用 revise_recipe 让模型改脚本）、从流程移除输出文件（remove_output，不能移除唯一的输出）、"
+             "步骤名称/说明/启停/参数（update_step）、脚本名（rename_script）、脚本内容（edit_script，整段替换或精确查找替换）、流程名与说明（update_workflow）。"
+             "用户直接给出新名字就原样使用；用户给的是命名规则（如“去掉文件名里的模拟数据”）时，先用 inspect_recipe_nodes 查看现有名字，"
+             "按规则为每个节点给出规范的新名字再调用，并在回复里列出旧名→新名。本工具只改流程定义里记录的名字；用户说的“输入文件名/输出文件名”若指界面上“输入文件”“输出与过程文件”列表里显示的已上传/已生成的文件，要用 rename_files 改真实文件名（会同步流程里记录的名字）。两者都要改时，先 rename_files，再用本工具改剩下的别名等。返回“目标值已经生效”表示已经改好了，不要重复提交。多项修改放进同一次调用，任一项不合法则整体不保存。"
+             "会影响执行行为的修改保存后必须用 run_recipe 重跑验证；这是用户明确的流程修改请求，不需要另外的保存授权。",
+             _obj({"recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
+                   "base_version": {"type": "integer", "minimum": 1, "description": "可选：基于的流程版本；版本已变化时拒绝并提示刷新"},
+                   "note": {"type": "string", "description": "可选：版本说明；不填自动用变更摘要"},
+                   "edits": {"type": "array", "minItems": 1, "maxItems": 30, "items": EDIT_ITEM_SCHEMA}}, ["edits"]),
+             modify, run=_tool_edit_recipe_nodes, label=lambda a: f"修改流程节点 · {len(a.get('edits') or [])} 项"),
         Tool("get_recipe", "在本轮对话中展示客户页同款原生流程图：单个用 recipe_id，多个用 recipe_ids，查看所有流程图直接用 all=true。界面自动绘制输入、步骤和输出，模型只需简短说明，不要画字符图或 Mermaid。只读，不执行、修改或保存流程。",
              _obj({"recipe_id": {**_STR, "description": "查看单个流程时指定 ID，与 recipe_ids、all=true 三选一"},
                    "recipe_ids": {**_STR_LIST, "description": "查看指定多个流程的 ID 列表"},
@@ -209,12 +246,14 @@ class ToolRegistry:
         "run_python_script", "inspect_python_script", "create_workbook", "inspect_workbook_creation",
         "build_recipe", "revise_recipe", "run_recipe", "save_as_recipe", "get_recipe",
         "list_recipes", "delete_recipe", "delete_recipes",
+        "inspect_recipe_nodes", "edit_recipe_nodes",
     })
     _BRANCH_TOOL_NAMES = frozenset({"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "ask_user", "inspect_task_context", "inspect_execution_evidence", "read_tool_result"})
     _GROUP_TOOLS = {
         "workbook": frozenset({"create_workbook", "inspect_workbook_creation"}),
         "python": frozenset({"run_python_script", "inspect_python_script"}),
-        "workflow": frozenset({"build_recipe", "revise_recipe", "run_recipe", "save_as_recipe", "get_recipe", "list_recipes", "delete_recipe", "delete_recipes"}),
+        "workflow": frozenset({"build_recipe", "revise_recipe", "run_recipe", "save_as_recipe", "get_recipe", "list_recipes", "delete_recipe", "delete_recipes",
+                               "inspect_recipe_nodes", "edit_recipe_nodes"}),
     }
 
     def __init__(self) -> None:

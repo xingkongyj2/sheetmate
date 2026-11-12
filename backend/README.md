@@ -110,11 +110,36 @@ sheetmate/
 | 优化 SQL 与公式 | `engine/tables/`、`engine/formulas/` | 工作区、算子输入与执行结果 |
 | 优化脚本隔离 | `engine/scripts/` | 输入副本、取消、超时和显式输出 |
 | 修改流程执行与校验 | `recipe/execution/`、`recipe/validation/` | Recipe Schema、修复器协议 |
+| 流程节点的直接修改（文件名、步骤、脚本） | `recipe/editing/`（规则）、`services/workflows/node_edit.py`（权限、版本、保存） | `apply_node_edits`、`edit_nodes` |
 
 当前记忆召回是本地词项评分，不含向量库或 embedding 服务。向量实现可以放在
 `long_term/retrieval/`，实现 `MemoryScorer` 并通过 `set_memory_scorer` 装配。
 评分器只收到已授权候选，人工规则、证据约束、去重和预算仍由 selector 保证。
 若还要新增向量索引的写入与持久化，需要在记忆仓储适配器中完成索引同步。
+
+## 流程节点编辑
+
+流程的每个节点都能直接修改，不调用模型、不重跑整条流程，保存为新版本（旧版本和历史运行记录不变）：
+
+| `op` | 修改对象 | 说明 |
+| --- | --- | --- |
+| `rename_input_file` | 输入 | 文件名匹配规则 `file_pattern`、来源文件名 `source_file`、说明 |
+| `rename_input_alias` | 输入别名 | 流程图上输入和步骤引用处显示的名字；同步改输入绑定、步骤参数、SQL、公式表参数和脚本里直接用到的别名 |
+| `rename_output_file` | 脚本生成的输出/中间文件 | 同步改声明、后续步骤的引用，以及脚本里出现的原文件名；扩展名不能改 |
+| `rename_output_sheet` | 输出工作表 | 名称 |
+| `update_step` | 步骤 | 名称、说明、启停、参数（含 SQL；`null` 删除参数） |
+| `rename_script` / `edit_script` | Python 脚本 | 脚本名；脚本内容（整段 `code` 或精确的 `replacements` 查找替换，语法错误直接拒绝） |
+| `update_workflow` | 流程 | 流程名、说明（普通表格流程的导出文件名是「流程名_结果.xlsx」，改流程名即可） |
+
+- **文件改名**：`rename_files` 工具 / `POST /api/recipes/files/rename`（`{renames: [{file_id, new_name}], sync_recipes?}`）。改的是真实文件的显示名
+  （输入、期望结果、输出和过程文件），内容和 ID 不变，扩展名不能改，重名自动加（1）、（2），整批要么全改要么全不改。默认同步绑定了这些文件的流程
+  （来源文件名、说明、已匹配不上新名字的文件规则），保存为新版本；会话工作区里已加载的表保持表名，只更新显示的来源文件名。
+  流程图里的“输入文件”和文件列表显示的是真实文件名，所以“改输入文件名”要用它，仅改流程定义（`rename_input_file`）不会改变这些显示。
+- HTTP：`GET /api/recipes/{id}/nodes`（节点详情，带 `step_id` 读脚本，可按行区间分段）、`POST /api/recipes/{id}/nodes/edit`（`{edits, base_version?, note?}`）。
+- 聊天工具：`inspect_recipe_nodes`、`edit_recipe_nodes`（`workflow` 工具组）。名字由用户直接给出，或由模型按用户的命名规则逐个给出规范名字后调用。
+- 一次调用内的修改整体生效或整体拒绝；修改后流程不得比修改前多出结构问题。`needs_rerun=true` 表示会影响执行行为或产物，保存后需要重跑验证。
+- 分层：规则在 `recipe/editing/`（纯函数）；权限、会话范围、版本冲突和新脚本版本的归属绑定在服务层；
+  `agent` 层不能导入服务，所以服务模块导入时向 `agent/tools/workflows/node_edit.py` 注册后端实现。
 
 ## 复用 Agent
 

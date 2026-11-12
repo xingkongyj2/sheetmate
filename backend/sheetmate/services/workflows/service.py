@@ -79,7 +79,7 @@ def _definition(recipe: Recipe) -> dict[str, Any]:
     for rule in definition["validation_rules"]:
         rule.pop("id", None)
     definition["execution"] = {key: body["metadata"].get(key) for key in (
-        "explicit_outputs", "has_expected", "validation_checkpoints",
+        "explicit_outputs", "has_expected", "validation_checkpoints", "removed_output_refs",
     )}
     return definition
 
