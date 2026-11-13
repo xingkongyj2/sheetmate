@@ -209,6 +209,10 @@ export const recipeApi = {
       `/recipes/${id}/match`, { file_ids: fileIds })).data,
   run: (id: string, body: { file_ids: string[]; inputs?: Record<string, string>; allow_repair?: boolean; version?: number }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/recipes/${id}/run`, body, onEvent),
+  /** 修改输入/输出文件的文件名，并同步引用这些文件的流程（保存为新版本）。 */
+  renameFiles: async (renames: { file_id: string; new_name: string }[]) =>
+    (await http.post<{ files: { file_id: string; old: string; new: string; changed: boolean }[] }>(
+      '/recipes/files/rename', { renames, sync_recipes: true })).data,
   formulas: async (customerId?: string) =>
     (await http.get<{ builtin: FormulaInfo[]; customer: FormulaInfo[]; reserved_ids: string[] }>('/formulas', { params: { customer_id: customerId } })).data,
 }

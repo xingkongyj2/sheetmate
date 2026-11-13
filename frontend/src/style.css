@@ -392,3 +392,20 @@ body {
 .fade-leave-to {
   opacity: 0;
 }
+
+/*
+ * 表单控件聚焦：只用一层——边框略深 + 很淡的光晕。
+ * 不再叠加 daisyUI 默认的黑色外轮廓（会和边框一起变成「双边」）。放在样式层之外，优先于组件库。
+ */
+.input:focus, .input:focus-within,
+.select:focus, .select:focus-within,
+.textarea:focus, .textarea:focus-within {
+  outline: none;
+  --input-color: color-mix(in oklab, var(--color-ink) 40%, transparent);
+  border-color: color-mix(in oklab, var(--color-ink) 40%, transparent);
+  box-shadow: 0 0 0 4px rgb(0 0 0 / 0.05);
+}
+.toggle:focus-visible, .checkbox:focus-visible, .radio:focus-visible, .range:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 4px rgb(0 0 0 / 0.08);
+}

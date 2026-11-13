@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from sheetmate.core.errors import Conflict, Forbidden, NotFound, ServiceError
 from sheetmate.db.models import Conversation, RecipeRecord, Run, User
+from sheetmate.engine.scripts.store import resolve_script_code
 from sheetmate.recipe.definition.schema import Recipe
 from sheetmate.services.workflows import service
 from sheetmate.services.workflows.contracts import RecipeEditBody
@@ -59,6 +60,47 @@ def resolve_edit_recipe(db: Session, user: User, conv: Conversation, recipe_id: 
     raise NotFound("流程不存在，或尚未成功运行。")
 
 
+_INFO_CHARS = 8_000  # 带给模型的 SQL / 脚本字符上限；更长的只给开头，其余让模型按行读取
+_SCRIPT_KEYS = {"code", "script_id", "script_title", "script_filename"}
+
+
+def _clip(text: str) -> tuple[str, bool]:
+    return (text, False) if len(text) <= _INFO_CHARS else (text[:_INFO_CHARS], True)
+
+
+def step_info(recipe: Recipe, step: Any) -> dict[str, Any]:
+    """所选步骤当前的内容：类型、说明、输入输出表，以及 SQL / 公式参数 / 脚本原文，省得模型再去查一遍。"""
+    flow_step = next((item for item in recipe.flow()["steps"] if item["id"] == step.id), {})
+    info: dict[str, Any] = {
+        "id": step.id, "name": step.name, "kind": step.kind, "description": step.description,
+        "inputs": flow_step.get("inputs", []), "output": step.output, "enabled": step.enabled,
+    }
+    if step.kind == "formula":
+        info["formula"] = step.formula
+        info["formula_kind"] = step.formula_kind
+    params = {key: value for key, value in step.params.items() if key not in _SCRIPT_KEYS and key != "sql"}
+    if params:
+        info["params"] = params
+    sql = step.params.get("sql")
+    if isinstance(sql, str) and sql.strip():
+        info["sql"], clipped = _clip(sql)
+        if clipped:
+            info["sql_truncated"] = True
+    if step.kind == "python":
+        try:
+            code = resolve_script_code(step.params)
+        except (OSError, ValueError):
+            code = ""
+        script: dict[str, Any] = {"script_id": step.params.get("script_id"), "script_title": step.params.get("script_title"),
+                                  "line_count": code.count("\n") + 1 if code else 0}
+        if code:
+            script["code"], clipped = _clip(code)
+            if clipped:
+                script["truncated"] = True
+        info["script"] = script
+    return info
+
+
 def validate_recipe_edit(db: Session, user: User, conv: Conversation, payload: dict[str, Any] | None) -> dict[str, Any]:
     if not payload:
         return {}
@@ -78,6 +120,8 @@ def validate_recipe_edit(db: Session, user: User, conv: Conversation, payload: d
         if step is None or edit.operation != "modify":
             raise ServiceError("所选步骤不存在，请刷新流程后重试。")
         target = {"kind": "step", "step_id": step.id, "name": step.name}
+        if data["target"].get("focus"):
+            target["focus"] = step.kind  # 以流程里这一步真实的类型为准，不信任前端传来的
     elif kind == "input":
         if edit.operation == "add":
             target = {"kind": "input"}
@@ -105,5 +149,8 @@ def validate_recipe_edit(db: Session, user: User, conv: Conversation, payload: d
     saved = (record is not None and record.version == recipe.version
              and service._definition(service.record_to_recipe(record)) == service._definition(recipe)
              and (record.body or {}).get("learned_from", {}).get("input_bindings", {}) == recipe.learned_from.get("input_bindings", {}))
-    return {**data, "target": target, "saved": saved, "saved_version": record.version if record else 0,
-            "recipe_name": recipe.name, "base_run_id": run_id}
+    result = {**data, "target": target, "saved": saved, "saved_version": record.version if record else 0,
+              "recipe_name": recipe.name, "base_run_id": run_id}
+    if kind == "step":
+        result["step_info"] = step_info(recipe, step)
+    return result

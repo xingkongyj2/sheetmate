@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -10,15 +11,17 @@ from typing import Any
 import duckdb
 
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.scripts.store import script_params
+from sheetmate.engine.scripts.store import resolve_script_code, script_params
 from sheetmate.engine.tables.sql import sanitize_table_name, sql_base_table_nodes
 from sheetmate.engine.tables.workspace import Workspace
 from sheetmate.recipe.learning.learner import InputMeta, LearnContext, build_inputs
 from sheetmate.recipe.definition.schema import (
+    REMOVED_OUTPUT_REFS,
     OutputSheet,
     Recipe,
     RecipeInput,
     RecipeStep,
+    check_recipe,
     file_pattern_from_name,
     step_table_refs,
 )
@@ -87,6 +90,103 @@ def _params(step: RecipeStep, names: dict[str, str], library: FormulaLibrary) ->
             elif key in params and spec.type == "tables":
                 params[key] = [names.get(value, value) for value in params[key]]
     return params
+
+
+# ---------------------------------------------------------------------------
+# 表名：编译时用带哈希的内部唯一名防止上游流程的表互相重名，最后再换成干净的名字
+# ---------------------------------------------------------------------------
+
+_DEPENDENCY_NAME = re.compile(r"^依赖_[0-9a-f]{10}_(?P<base>.+?)(?:_\d+)?$")
+
+
+def _table_aliases(recipe: Recipe) -> set[str]:
+    aliases = {item.alias for item in recipe.inputs}
+    for step in recipe.steps:
+        aliases.add(step.output)
+        aliases.update((step.params.get("output_tables") or {}).values())
+        aliases.update((step.params.get("file_tables") or {}).keys())
+    return {alias for alias in aliases if isinstance(alias, str)}
+
+
+def dependency_name_map(recipe: Recipe) -> dict[str, str]:
+    """{带「依赖_哈希_」前缀的内部名: 干净的名字}。只有和别的表重名时才加数字区分，同名按原名排序保证稳定。"""
+    aliases = _table_aliases(recipe)
+    prefixed = sorted(alias for alias in aliases if _DEPENDENCY_NAME.match(alias))
+    taken = {alias for alias in aliases if alias not in prefixed}
+    names: dict[str, str] = {}
+    for old in prefixed:
+        base = _DEPENDENCY_NAME.match(old).group("base")  # type: ignore[union-attr]
+        name, count = base, 1
+        while name in taken:
+            count += 1
+            name = f"{base}_{count}"
+        names[old] = name
+        taken.add(name)
+    return names
+
+
+def _remap_value(value: Any, names: dict[str, str]) -> Any:
+    """校验规则、断言、检查点里引用的表名（可能是「表名」或「表名/文件名」），整体替换。"""
+    if isinstance(value, str):
+        if value in names:
+            return names[value]
+        head, slash, tail = value.partition("/")
+        return names[head] + slash + tail if slash and head in names else value
+    if isinstance(value, list):
+        return [_remap_value(item, names) for item in value]
+    if isinstance(value, dict):
+        return {key: _remap_value(item, names) for key, item in value.items()}
+    return value
+
+
+def _rename_sql(sql: str, names: dict[str, str]) -> str:
+    """按完整标识符替换 SQL 里的表名（带引号或不带引号都行，也覆盖 t.\"列\" 这类限定写法）。"""
+    for old in sorted(names, key=len, reverse=True):
+        sql = re.sub(r"(?<!\w)" + re.escape(old) + r"(?!\w)", lambda _match, new=names[old]: new, sql)
+    return sql
+
+
+def clean_dependency_names(recipe: Recipe, library: FormulaLibrary) -> Recipe:
+    """把「依赖_哈希_名字_序号」换回干净的名字，并同步所有引用。
+
+    改不干净（脚本里直接写了内部名、改名后引用悬空等）时原样返回：名字难看但流程照常能跑。"""
+    names = dependency_name_map(recipe)
+    if not names:
+        return recipe
+    try:
+        pattern = re.compile("|".join(re.escape(old) for old in sorted(names, key=len, reverse=True)))
+        for step in recipe.steps:
+            if step.kind == "python" and step.formula == "python_script":
+                if pattern.search(resolve_script_code(step.params)):
+                    return recipe  # 脚本直接引用了内部名，改名会让脚本读不到表
+        cleaned = recipe.model_copy(deep=True)
+        for item in cleaned.inputs:
+            item.alias = names.get(item.alias, item.alias)
+        bindings = cleaned.learned_from.get("input_bindings")
+        if isinstance(bindings, dict):
+            cleaned.learned_from["input_bindings"] = {names.get(key, key): value for key, value in bindings.items()}
+        for step in cleaned.steps:
+            step.output = names.get(step.output, step.output)
+            if step.formula == "custom_sql":
+                step.params = {**step.params, "sql": _rename_sql(str(step.params.get("sql") or ""), names)}
+            else:
+                step.params = _params(step, names, library)
+            if step.sql:
+                step.sql = _rename_sql(step.sql, names)
+            for assertion in step.assertions:
+                assertion.params = _remap_value(assertion.params, names)
+        for spec in cleaned.output_spec:
+            spec.source = names.get(spec.source, spec.source)
+        for rule in cleaned.validation_rules:
+            rule.params = _remap_value(rule.params, names)
+        for key in ("validation_checkpoints", REMOVED_OUTPUT_REFS):
+            if key in cleaned.metadata:
+                cleaned.metadata[key] = _remap_value(cleaned.metadata[key], names)
+        if len(check_recipe(cleaned, library)) > len(check_recipe(recipe, library)):
+            return recipe
+        return cleaned
+    except Exception:
+        return recipe
 
 
 class _Compiler:
@@ -246,14 +346,15 @@ class _Compiler:
                                      header=self.inputs[alias].header) for alias in direct}
             ctx = LearnContext(requirement=description, library=self.library, input_frames=direct, input_meta=meta)
             self.inputs.update({inp.alias: inp for inp in build_inputs(ctx, self.steps, {}, None)})
-        return Recipe(name=name[:80], description=description, customer_id=customer_id, created_by="ai",
-                      inputs=list(self.inputs.values()), steps=self.steps, output_spec=outputs,
-                      field_mapping=dict(field_mapping or {}),
-                      learned_from={"conversation_id": conversation_id, "from": "execution",
-                                    "input_files": list(dict.fromkeys(i.source_file for i in self.inputs.values() if i.source_file)),
-                                    "input_bindings": self.bindings},
-                      metadata={"requirement": description, "confidence_overall": 0.9, "explicit_outputs": True,
-                                "validation_checkpoints": self.checkpoints})
+        recipe = Recipe(name=name[:80], description=description, customer_id=customer_id, created_by="ai",
+                        inputs=list(self.inputs.values()), steps=self.steps, output_spec=outputs,
+                        field_mapping=dict(field_mapping or {}),
+                        learned_from={"conversation_id": conversation_id, "from": "execution",
+                                      "input_files": list(dict.fromkeys(i.source_file for i in self.inputs.values() if i.source_file)),
+                                      "input_bindings": self.bindings},
+                        metadata={"requirement": description, "confidence_overall": 0.9, "explicit_outputs": True,
+                                  "validation_checkpoints": self.checkpoints})
+        return clean_dependency_names(recipe, self.library)
 
 
 def compile_from_workspace(ws: Workspace, targets: list[str], library: FormulaLibrary, *, name: str,

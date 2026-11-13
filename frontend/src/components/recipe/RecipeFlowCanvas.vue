@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** Shared flow canvas; selection and inspection are managed by the containing view. */
-import { Check, CircleAlert, LoaderCircle, TriangleAlert, Wrench } from '@lucide/vue'
+import { Check, CircleAlert, FileSpreadsheet, LoaderCircle, TriangleAlert, Wrench } from '@lucide/vue'
 import { computed } from 'vue'
 
 import type { FlowStep, RecipeFlowData } from '@/api/types'
@@ -120,7 +120,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
     aria-label="处理流程图"
     tabindex="0"
   >
-    <div class="recipe-flow-row flex min-w-max items-stretch gap-0">
+    <div class="recipe-flow-row flex min-w-max items-center gap-0">
       <div class="flex flex-col justify-center gap-2 pr-1">
         <button
           v-for="file in inputs"
@@ -133,11 +133,9 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
           :title="file.aliases.join('、') || file.name"
           @click="emit('selectFile', file)"
         >
-          <FunObject kind="folder" :size="compact ? 28 : 26" />
+          <span class="recipe-flow-file-icon flex shrink-0 items-center justify-center rounded-lg bg-[#e9f8f0]" :class="compact ? 'size-7' : 'size-[26px]'"><FileSpreadsheet class="size-4 text-fun-green" /></span>
           <span class="min-w-0 leading-tight">
             <span class="recipe-flow-file-name block text-[13px] font-medium">{{ file.name }}</span>
-            <span v-if="!compact && file.pattern" class="block font-mono text-[10px] text-faint">{{ file.pattern }}</span>
-            <span v-if="!compact" class="block text-[10px] text-faint">输入文件</span>
           </span>
         </button>
       </div>
@@ -170,14 +168,11 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
           </span>
           <span class="recipe-flow-step-name mt-2 block text-[13.5px] font-semibold leading-snug">{{ step.name }}</span>
           <span v-if="!compact" class="mt-1 line-clamp-2 text-xs leading-relaxed text-mute">{{ step.description }}</span>
-          <span v-if="!compact" class="mt-auto flex w-full items-center gap-1.5 pt-2.5 text-[11px] text-faint">
-            <template v-if="state(step.id)">
-              <component :is="stateIcon(step.id)" v-if="stateIcon(step.id)" class="recipe-flow-status size-3.5 shrink-0" :class="[`is-${stepTone(step.id)}`, { 'flow-spinner': state(step.id)?.status === 'running' }]" aria-hidden="true" />
-              <span>{{ stateLabel(step.id) }}</span>
-              <span v-if="rowsText(state(step.id))" class="ml-auto">{{ rowsText(state(step.id)) }}</span>
-              <span v-if="state(step.id)?.report?.metrics?.match_rate !== undefined">匹配 {{ percent(state(step.id)!.report!.metrics!.match_rate as number, 0) }}</span>
-            </template>
-            <span v-else class="font-mono">→ {{ step.output }}</span>
+          <span v-if="!compact && state(step.id)" class="mt-auto flex w-full items-center gap-1.5 pt-2.5 text-[11px] text-faint">
+            <component :is="stateIcon(step.id)" v-if="stateIcon(step.id)" class="recipe-flow-status size-3.5 shrink-0" :class="[`is-${stepTone(step.id)}`, { 'flow-spinner': state(step.id)?.status === 'running' }]" aria-hidden="true" />
+            <span>{{ stateLabel(step.id) }}</span>
+            <span v-if="rowsText(state(step.id))" class="ml-auto">{{ rowsText(state(step.id)) }}</span>
+            <span v-if="state(step.id)?.report?.metrics?.match_rate !== undefined">匹配 {{ percent(state(step.id)!.report!.metrics!.match_rate as number, 0) }}</span>
           </span>
         </button>
       </template>
@@ -202,7 +197,6 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
           <span class="flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-white/15"><FunObject kind="plane" :size="18" /></span>
           <span class="min-w-0 leading-tight">
             <span class="recipe-flow-file-name block text-[13px] font-medium">{{ file.name }}</span>
-            <span v-if="!compact" class="block text-[10px] opacity-60">输出文件</span>
           </span>
         </button>
       </div>
@@ -221,10 +215,9 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
         :aria-pressed="selectedFileKey === file.key"
         @click="emit('selectFile', file)"
       >
-        <FunObject kind="folder" :size="26" />
+        <span class="recipe-flow-file-icon flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-[#e9f8f0]"><FileSpreadsheet class="size-4 text-fun-green" /></span>
         <span class="min-w-0 leading-tight">
           <span class="recipe-flow-file-name block text-[13px] font-medium">{{ file.name }}</span>
-          <span class="block text-[10px] text-faint">输入文件<span v-if="file.pattern"> · {{ file.pattern }}</span></span>
         </span>
       </button>
     </div>
@@ -280,7 +273,6 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
         <span class="flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-white/15"><FunObject kind="plane" :size="18" /></span>
         <span class="min-w-0 leading-tight">
           <span class="recipe-flow-file-name block text-[13px] font-medium">{{ file.name }}</span>
-          <span class="block text-[10px] opacity-60">输出文件</span>
         </span>
       </button>
     </div>

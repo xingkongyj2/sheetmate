@@ -697,8 +697,10 @@ class RecipeRunner:
                     path.unlink(missing_ok=True)
                     path = path.with_suffix(".csv")
                     _write_csv(path, frame)
+            # 一步只有一张表时，文件名只用步骤名；表名常常和步骤名一样，写两遍没有意义
+            label = step.name if len(tables) == 1 or table == step.name else f"{step.name}_{table}"
             snapshots.append({"step_id": step.id, "step_name": step.name, "table": table,
-                              "name": f"{step.id:02d}_{step.name}_{table}{path.suffix}", "path": str(path.resolve()),
+                              "name": f"{step.id:02d}_{label}{path.suffix}", "path": str(path.resolve()),
                               "intermediate": True})
         return snapshots
 

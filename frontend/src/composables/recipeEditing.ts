@@ -1,6 +1,8 @@
 import type { ConversationDetail, RecipeEditRequest } from '../api/types.ts'
 import type { FlowSelection } from './recipeFlowInteraction.ts'
 
+const FOCUS_LABELS = { sql: 'SQL', python: '脚本', formula: '公式' } as const
+
 export interface RecipeEditDraft {
   title: string
   request: RecipeEditRequest
@@ -35,6 +37,7 @@ export function storedRecipeEdit(value: unknown): RecipeEditRequest | null {
     !['modify', 'add', 'remove', 'replace'].includes(item.operation)) return null
   if (item.target.kind === 'step' && (!Number.isInteger(item.target.step_id) || item.target.step_id! < 1)) return null
   if (item.target.name !== undefined && typeof item.target.name !== 'string') return null
+  if (item.target.focus !== undefined && !['sql', 'python', 'formula'].includes(item.target.focus)) return null
   if (item.target.source !== undefined && typeof item.target.source !== 'string') return null
   for (const key of ['aliases', 'sources'] as const) {
     if (item.target[key] !== undefined && (!Array.isArray(item.target[key]) || !item.target[key]!.every((name) => typeof name === 'string'))) return null
@@ -46,11 +49,12 @@ export function recipeEditLabel(edit: RecipeEditRequest): string {
   const action = { modify: '修改', add: '新增', remove: '移除', replace: '替换' }[edit.operation]
   const target = edit.target
   if (target.kind === 'workflow') return '修改流程'
-  if (target.kind === 'step') return `修改第 ${target.step_id} 步`
+  if (target.kind === 'step') return target.focus ? `修改第 ${target.step_id} 步${target.name ? `「${target.name}」` : ''}的${FOCUS_LABELS[target.focus]}` : `修改第 ${target.step_id} 步`
   return `${action}${target.kind === 'input' ? '输入' : '输出'}${target.name ? ` · ${target.name}` : ''}`
 }
 
 export function recipeEditPlaceholder(edit: RecipeEditRequest): string {
+  if (edit.target.kind === 'step' && edit.target.focus) return `描述这段${FOCUS_LABELS[edit.target.focus]}要怎么改…`
   if (edit.target.kind === 'step') return '描述这一步要怎么改，其他依赖步骤会重新适配…'
   if (edit.target.kind === 'input') return edit.operation === 'remove'
     ? '说明移除后如何调整处理规则…' : '描述输入变化，可添加新文件或引用已有文件…'

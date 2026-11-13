@@ -240,6 +240,18 @@ def _usable_result(item: dict[str, Any]) -> bool:
             and execution.get("status") not in {"failed", "blocked", "rejected"})
 
 
+def workflow_revised(results: Any) -> bool:
+    """所选流程已经改好并重跑：revise_recipe 成功；或用 edit_recipe_nodes 直接改好之后，又用 run_recipe 成功重跑。
+
+    只认 revise_recipe 时，删一个输出、改个名字这类直接改节点的修改永远「未完成」，模型会被逼着再走一遍
+    revise_recipe（cv_eef3d95a51：12 次处理、8 次失败）。证据按调用先后排列。"""
+    items = list(results)
+    if any(item.get("tool") == "revise_recipe" and _usable_result(item) for item in items):
+        return True
+    edited = [index for index, item in enumerate(items) if item.get("tool") == "edit_recipe_nodes" and _usable_result(item)]
+    return bool(edited) and any(item.get("tool") == "run_recipe" and _usable_result(item) for item in items[edited[-1] + 1:])
+
+
 async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: str, *,
                            scope: str, results: dict[str, dict[str, Any]],
                            eligible_evidence_ids: set[str] | None = None,
@@ -258,10 +270,9 @@ async def check_completion(llm: Any, messages: list[dict[str, Any]], candidate: 
     # Filter before sending material to the verifier, not only after it cites it.
     eligible = {identifier: item for identifier, item in results.items()
                 if eligible_evidence_ids is None or _identifiers(identifier, item) & eligible_evidence_ids}
-    if require_workflow_revision and not any(item.get("tool") == "revise_recipe" and _usable_result(item)
-                                             for item in eligible.values()):
+    if require_workflow_revision and not workflow_revised(eligible.values()):
         return CompletionCheck(reason="所选流程还没有完成修改和完整重跑。",
-                               remaining=["调用 revise_recipe 修改所选流程，完整重跑并核对输入、步骤和输出。"],
+                               remaining=["调用 revise_recipe 修改所选流程并完整重跑核对；若已用 edit_recipe_nodes 直接改好，用 run_recipe 重跑并核对输入、步骤和输出。"],
                                can_continue=True, source="local", requires_execution=True)
     requests = [text_content(item.get("content"))[:4000] for item in messages if item.get("role") == "user"]
     payload = {"scope": scope[:6000], "requests_and_step_context": requests[-5:],

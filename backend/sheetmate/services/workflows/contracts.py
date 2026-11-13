@@ -14,6 +14,7 @@ class RecipeEditTarget(BaseModel):
     source: str | None = Field(default=None, max_length=512)
     sources: list[str] | None = Field(default=None, max_length=100)
     step_id: int | None = Field(default=None, ge=1, strict=True)
+    focus: Literal["sql", "python", "formula"] | None = None  # 只改这一步的 SQL / 脚本 / 公式（节点里的「AI 修改」）
 
 
 class RecipeEditBody(BaseModel):

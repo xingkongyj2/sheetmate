@@ -74,14 +74,24 @@ def _recipe_id(args: dict[str, Any], ctx: AgentContext) -> str:
     return latest.id
 
 
-def _forget_stale_host_state(host: Any, recipe_id: str, version: int) -> None:
-    """保存出新版本后，让宿主缓存的“已读版本/最近流程”追上，否则同一轮里再用 revise_recipe 会被当成并发冲突。"""
+def _forget_stale_host_state(host: Any, recipe_id: str, version: int, ctx: Any = None) -> None:
+    """保存出新版本后，让宿主缓存的“已读版本/最近流程/本轮修改基线”追上。
+
+    否则同一轮里 run_recipe 仍然跑对话开头的旧版本（改了没生效、AI 反复再改），再用 revise_recipe
+    也会被当成并发冲突（cv_eef3d95a51）。"""
     versions = getattr(host, "_revision_versions", None)
     if isinstance(versions, dict):
         versions[recipe_id] = version
     last = getattr(host, "_last_recipe", None)
     if last is not None and getattr(last, "id", None) == recipe_id and getattr(last, "version", 0) < version:
         host._last_recipe = None
+    base = getattr(host, "_edit_base_recipe", None)
+    if base is not None and getattr(base, "id", None) == recipe_id and getattr(base, "version", 0) < version:
+        host._edit_base_recipe = None  # 之后按已保存的最新版本读取
+    for edit in (getattr(host, "recipe_edit", None), getattr(ctx, "recipe_edit", None)):
+        if isinstance(edit, dict) and edit.get("recipe_id") == recipe_id and edit.get("version", 0) < version:
+            edit["version"] = version
+            edit["saved_version"] = version
 
 
 def _tool_inspect_recipe_nodes(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
@@ -109,7 +119,7 @@ def _tool_edit_recipe_nodes(args: dict[str, Any], ctx: AgentContext) -> ToolResu
                 + "\n".join(f"- {item}" for item in result.get("unchanged", [])))
         summary = f"流程「{result['name']}」已是目标状态"
         return ToolResult(text, summary=summary, public_text=summary)
-    _forget_stale_host_state(ctx.host, result["recipe_id"], result["version"])
+    _forget_stale_host_state(ctx.host, result["recipe_id"], result["version"], ctx)
     lines = [f"已保存流程「{result['name']}」v{result['version']}（节点编辑）：", *[f"- {change}" for change in result["changes"]]]
     lines += [f"提醒：{warning}" for warning in result["warnings"]]
     lines.append("这次修改会影响执行行为或产物，已保存但尚未重跑；请用 run_recipe 重跑验证后再告诉用户结果。"
@@ -140,7 +150,7 @@ def _tool_rename_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
         if not item["changed"] and changed:
             lines.append(f"- 「{item['old']}」已经是目标名字，未改动")
     for recipe in result["recipes"]:
-        _forget_stale_host_state(ctx.host, recipe["recipe_id"], recipe["version"])
+        _forget_stale_host_state(ctx.host, recipe["recipe_id"], recipe["version"], ctx)
         lines.append(f"已同步流程「{recipe['name']}」→ v{recipe['version']}：" + "；".join(recipe["changes"]))
     loaded = [name for item in changed for name in item.get("tables", [])]
     if loaded:

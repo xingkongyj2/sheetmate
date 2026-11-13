@@ -29,7 +29,7 @@ const props = withDefaults(defineProps<{
   activeStep?: number | null
   compact?: boolean
   context?: RecipeFlowContext
-  toolbarPlacement?: 'inline' | 'card'
+  toolbarPlacement?: 'inline' | 'card' | 'hidden'
 }>(), { states: () => [], direction: 'horizontal', activeStep: null, compact: false, context: () => ({}), toolbarPlacement: 'inline' })
 const emit = defineEmits<{ changed: [] }>()
 const router = useRouter()
@@ -131,7 +131,7 @@ function selectFile(file: FlowFileNode) {
   replay.closeSetup()
   selection.value = { kind: 'file', file }
 }
-async function editFlow(operation: RecipeEditRequest['operation'] = 'modify', target = recipeEditTarget(selection.value)) {
+async function editFlow(operation: RecipeEditRequest['operation'] = 'modify', target = recipeEditTarget(selection.value), focus?: 'sql' | 'python' | 'formula') {
   if (!canEdit.value || running.value || openingEdit.value) return
   openingEdit.value = true
   const current = context.value
@@ -150,7 +150,10 @@ async function editFlow(operation: RecipeEditRequest['operation'] = 'modify', ta
     }
     const version = displayedVersion ?? savedRecipe?.version
     if (version === undefined) throw new Error('无法确认流程版本，请刷新流程后重试。')
-    const request: RecipeEditRequest = { recipe_id: recipeId, version, operation, target }
+    // 节点里的「AI 修改」：带上步骤名和要改的是 SQL / 脚本 / 公式，聊天里据此显示和提示
+    const stepName = target.kind === 'step' ? shownFlow.value.steps.find((item) => item.id === target.step_id)?.name : undefined
+    const request: RecipeEditRequest = { recipe_id: recipeId, version, operation,
+      target: focus && target.kind === 'step' ? { ...target, focus, ...(stepName ? { name: stepName } : {}) } : target }
     if (!conversationId) {
       if (savedRecipe && current.customerId) {
         const conversation = await conversationApi.create({ customer_id: current.customerId, recipe_id: recipeId })
@@ -209,6 +212,7 @@ function onKey(event: KeyboardEvent) {
   if (!dialogOpen.value || preview.value || !dialog.value) return
   const dialogs = document.querySelectorAll('[role="dialog"]')
   if (dialogs[dialogs.length - 1] !== dialog.value) return
+  if (event.key === 'Escape' && (event.target as HTMLElement | null)?.tagName === 'INPUT') return
   if (event.key === 'Escape') {
     event.preventDefault()
     event.stopImmediatePropagation()
@@ -237,6 +241,7 @@ watch(dialogOpen, async (opened) => {
   }
 })
 watch(() => currentStep.value?.step_id, () => { if (fullscreen.value && follow.value) void locateCurrent() })
+defineExpose({ openFullscreen })
 watch(replay.running, (value, previous) => { if (previous && !value) emit('changed') })
 watch([() => props.context.recipeId || props.context.recipe?.id, () => props.context.runId], ([recipeId, runId], previous) => {
   selection.value = null
@@ -256,7 +261,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="recipe-flow-viewer min-w-0">
-    <div class="recipe-flow-toolbar flex min-h-6 items-center justify-end gap-1" :class="toolbarPlacement === 'card' ? 'recipe-flow-toolbar--card' : 'mb-2'">
+    <div v-if="toolbarPlacement !== 'hidden'" class="recipe-flow-toolbar flex min-h-6 items-center justify-end gap-1" :class="toolbarPlacement === 'inline' ? 'mb-2' : 'recipe-flow-toolbar--card'">
       <span v-if="running && toolbarPlacement === 'inline'" class="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-[#6265DC]" role="status"><LoaderCircle class="size-3 shrink-0 animate-spin" /><span class="truncate">{{ currentStep?.name || '执行中' }}</span></span>
       <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageSquare class="size-3.5" />对话修改</button>
       <button v-if="canReplay" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running" @click="prepareRun"><Play class="size-3.5" />重新执行</button>
@@ -306,12 +311,12 @@ onBeforeUnmount(() => {
             </div>
             <aside v-if="replay.setupOpen.value || selection" class="flow-side-panel" :aria-label="replay.setupOpen.value ? '执行设置' : '节点详情'">
               <RecipeFlowRunSetup v-if="replay.setupOpen.value" :controller="replay" @close="replay.closeSetup()" @started="runStarted" @preview="(file) => (preview = file)" />
-              <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation) => editFlow(operation)" @close="selection = null" @preview="(file) => (preview = file)" />
+              <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @renamed="emit('changed')" @close="selection = null" @preview="(file) => (preview = file)" />
             </aside>
           </div>
           <div v-if="replay.error.value && !replay.setupOpen.value" class="border-t border-error/10 bg-error/5 px-5 py-2 text-xs text-error" role="alert">{{ replay.error.value }}</div>
         </template>
-        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation) => editFlow(operation)" @close="closeDialog" @preview="(file) => (preview = file)" />
+        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @renamed="emit('changed')" @close="closeDialog" @preview="(file) => (preview = file)" />
       </section>
     </div>
   </Teleport>
@@ -324,7 +329,7 @@ onBeforeUnmount(() => {
 .flow-layer--detail { display: flex; align-items: center; justify-content: center; padding: 24px; background: #0b0b0c35; backdrop-filter: blur(3px); }
 .flow-dialog { min-width: 0; background: white; outline: none; }
 .flow-dialog--full { display: flex; height: 100dvh; flex-direction: column; }
-.flow-dialog--detail { width: min(760px, 100%); max-height: 88dvh; overflow-y: auto; border: 1px solid #ececef; border-radius: 24px; box-shadow: 0 24px 90px #22224225; }
+.flow-dialog--detail { display: flex; flex-direction: column; width: clamp(360px, 42vw, 560px); max-width: 100%; max-height: 88dvh; overflow: hidden; border: 1px solid #ececef; border-radius: 24px; box-shadow: 0 24px 90px #22224225; }
 .flow-header { display: flex; min-height: 68px; flex: none; align-items: center; gap: 10px; border-bottom: 1px solid #ececef; padding: 12px 24px; }
 .flow-run-button { display: inline-flex; height: 34px; flex: none; align-items: center; justify-content: center; gap: 7px; border-radius: 10px; padding: 0 14px; background: #6265dc; color: white; font-size: 12px; font-weight: 500; transition: background .2s; }
 .flow-run-button:hover { background: #5356c6; }

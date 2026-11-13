@@ -188,7 +188,7 @@ def _static_tools() -> list[Tool]:
                    "line_start": {"type": "integer", "minimum": 1, "description": "可选：脚本起始行（含）"},
                    "line_end": {"type": "integer", "minimum": 1, "description": "可选：脚本结束行（含）"}}),
              both, run=_tool_inspect_recipe_nodes, label=lambda a: "查看流程节点"),
-        Tool("edit_recipe_nodes", "直接修改已保存流程的指定节点并保存为新版本（不调用模型、不重跑整条流程）：改输入文件名规则（rename_input_file）、输入别名（rename_input_alias，即流程图里输入和步骤引用处显示的名字，如“依赖_xxx_订单表_模拟数据_6”，会同步改所有引用）、"
+        Tool("edit_recipe_nodes", "直接修改已保存流程的指定节点并保存为新版本（不调用模型、不重跑整条流程）：改输入文件名规则（rename_input_file）、输入别名（rename_input_alias，即流程图里输入和步骤引用处显示的名字，如“订单表_模拟数据”，会同步改所有引用）、"
              "脚本生成的输出/中间文件名（rename_output_file，同步改声明、后续步骤引用和脚本里的文件名）、输出工作表名（rename_output_sheet）、从流程移除输入（remove_input，仅限没有步骤在用的输入；在用的要用 revise_recipe 让模型改脚本）、从流程移除输出文件（remove_output，不能移除唯一的输出）、"
              "步骤名称/说明/启停/参数（update_step）、脚本名（rename_script）、脚本内容（edit_script，整段替换或精确查找替换）、流程名与说明（update_workflow）。"
              "用户直接给出新名字就原样使用；用户给的是命名规则（如“去掉文件名里的模拟数据”）时，先用 inspect_recipe_nodes 查看现有名字，"

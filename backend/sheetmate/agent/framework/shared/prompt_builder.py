@@ -16,6 +16,19 @@ _ROLE_TAGS = {"input": "", "expected": "，⭐期望结果（人工做好的样�
 _SCRIPT_TOOL = "run_python_script"
 
 
+_FOCUS_NAMES = {"sql": "SQL", "python": "脚本", "formula": "公式"}
+
+
+def _step_code_rule(edit: dict[str, Any]) -> str:
+    """节点里点了「AI 修改」：用户只想改这一步的 SQL / 脚本 / 公式，内容已经在 step_info 里。"""
+    focus = (edit.get("target") or {}).get("focus")
+    if not focus or not edit.get("step_info"):
+        return ""
+    return (f"用户点了节点里的 AI 修改，只想改这一步的{_FOCUS_NAMES.get(focus, '内容')}；recipe_edit.step_info 是这一步现在的完整内容，直接据此理解，不必再用 inspect_recipe_nodes 查看（step_info.script.truncated 或 sql_truncated 为 true 时才需要读完整原文）。"
+            "用 revise_recipe 修改：step_ids 只传这一步的编号，instruction 写清楚要对这一步的内容做什么改动，其余步骤保持不变、仅为适配依赖才调整；改完必须完整重跑并核对结果，不要重新生成整个流程。"
+            "用户只是询问这段内容的含义时，解释即可，不要修改。")
+
+
 def build_customer_block(ctx: AgentContext) -> str:
     """客户身份独立于聊天历史和所选流程，每轮从宿主提供的最新资料构建。"""
     if not ctx.customer:
@@ -170,6 +183,7 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
               "单步修改传 step_ids，输入变更传 input_changes；通过完整流程重跑适配依赖并核对结果后才能报告完成。"
               "移除输入或输出指解除流程绑定/交付声明，原文件与历史记录保留。用户上传的新输入必须实际绑定到重跑，不能只改名称。"
               "除用户要求及必要的依赖适配外保留原流程。重跑失败不得声称已更新。"
+              + _step_code_rule(ctx.recipe_edit)
             if ctx.recipe_edit else ""), required=True),
         ContextBlock("customer", "## 客户\n" + build_customer_block(ctx), required=True),
         ContextBlock("business_memory", "## 客户与当前流程的长期记忆（用户维护的规则优先于 AI 参考）\n" + (ctx.host.memory_text(message) or "（没有）"), required=True),
