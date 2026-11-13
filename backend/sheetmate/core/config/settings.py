@@ -14,9 +14,9 @@ from pathlib import Path
 from threading import RLock
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, TypeAdapter, ValidationError
+from pydantic import BaseModel, ValidationError
 
-from sheetmate.core.config.model_policy import LLMCapabilities, LLMMaxTokens, LLMRuntimePolicy, LLMTimeout
+from sheetmate.core.config.model_policy import LLMCapabilities, LLMRuntimePolicy
 
 BACKEND_DIR = Path(__file__).resolve().parents[3]
 PROJECT_DIR = BACKEND_DIR.parent
@@ -57,6 +57,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(_env(name, str(default)))
+    except ValueError:
+        return default
+
+
 def _env_bool(name: str, default: bool) -> bool:
     value = _env(name, "1" if default else "0").lower()
     return value in {"1", "true", "yes", "on"}
@@ -66,17 +73,29 @@ def _env_bool(name: str, default: bool) -> bool:
 class Settings:
     """进程级配置（启动时确定，修改需要重启）。"""
 
+    # 数据目录：数据库、上传文件、输出文件、工作区都在这里。环境变量 SHEETMATE_DATA_DIR，默认 backend/data。
     data_dir: Path
+    # 后端监听地址。环境变量 HOST。
     host: str
+    # 后端监听端口。环境变量 PORT。
     port: int
+    # 单个上传文件的大小上限（MB）。环境变量 MAX_UPLOAD_MB。
     max_upload_mb: int
+    # ReAct 循环最多推理几轮。环境变量 AGENT_MAX_ITERATIONS。
     agent_max_iterations: int
+    # 流程某一步出错时，AI 最多自动修复几次。环境变量 REPAIR_MAX_ATTEMPTS。
     repair_max_attempts: int
+    # 生成流程后与人工结果比对不通过时，最多再修正几轮。环境变量 VERIFY_MAX_ROUNDS。
     verify_max_rounds: int
+    # 首次启动是否写入示例客户。环境变量 SEED_DEMO。
     seed_demo: bool
+    # 首次启动自动创建的管理员账号。环境变量 ADMIN_ACCOUNT。
     admin_account: str
+    # 首次启动自动创建的管理员密码。环境变量 ADMIN_PASSWORD。
     admin_password: str
+    # 前端构建产物目录，由后端一起托管。环境变量 FRONTEND_DIST。
     frontend_dist: Path
+    # 开发模式下允许跨域访问的前端地址。环境变量 CORS_ORIGINS（逗号分隔）。
     cors_origins: list[str] = field(default_factory=list)
     # OOXML 结构编辑：auto=原件含 openpyxl 会丢失的对象时启用；always=可行时一律启用；off=关闭
     ooxml_edit: str = "auto"
@@ -135,9 +154,9 @@ def _load_settings() -> Settings:
         host=_env("HOST", "127.0.0.1"),
         port=_env_int("PORT", 8000),
         max_upload_mb=_env_int("MAX_UPLOAD_MB", 50),
-        agent_max_iterations=_env_int("AGENT_MAX_ITERATIONS", 200),
-        repair_max_attempts=_env_int("REPAIR_MAX_ATTEMPTS", 6),
-        verify_max_rounds=_env_int("VERIFY_MAX_ROUNDS", 4),
+        agent_max_iterations=_env_int("AGENT_MAX_ITERATIONS", 1000),
+        repair_max_attempts=_env_int("REPAIR_MAX_ATTEMPTS", 30),
+        verify_max_rounds=_env_int("VERIFY_MAX_ROUNDS", 20),
         seed_demo=_env_bool("SEED_DEMO", True),
         admin_account=_env("ADMIN_ACCOUNT", "admin"),
         admin_password=_env("ADMIN_PASSWORD", "admin123"),
@@ -159,25 +178,35 @@ settings = _load_settings()
 class LLMSettings:
     """LLM 连接参数。OpenAI 兼容接口，默认 DeepSeek。"""
 
+    # 模型服务的 API Key；在设置页填写，保存在 settings.json。
     api_key: str
+    # 接口地址（OpenAI 兼容，不要带 /chat/completions）；在设置页填写。
     base_url: str
+    # 模型名称，按原样发给服务端；在设置页填写。
     model: str
+    # 采样温度，越低越稳定。
     temperature: float = 0.1
-    timeout: float = 1800.0
-    # 输出 Token 上限只在 max_tokens_enabled 为 True 时才固定使用；默认关闭，请求自动尝试模型能接受的最大值。
-    max_tokens: int = 32768
-    max_tokens_enabled: bool = False
+    # 单次模型请求的总超时（秒）。来自环境变量 LLM_TIMEOUT_SECONDS。
+    timeout: float = 7200.0
+    # 单次回复的输出 Token 上限。来自环境变量 LLM_MAX_TOKENS：0 表示不固定，请求自动尝试模型能接受的最大值。
+    max_tokens: int = 0
+    # 额外的请求体字段（私有部署的特殊参数）；只能手工写入 settings.json。
     extra_body: dict = field(default_factory=dict)
+    # 是否启用模型自带的深度思考（与输入框旁的「思考模式」不是一回事）；在设置页开关。
     thinking_enabled: bool = False
+    # 提供商：deepseek / qwen / custom。
     provider_id: str = "deepseek"
+    # 协议能力（结构化输出协议、思考参数协议）；在设置页「结构协议」里选择。
     capabilities: LLMCapabilities = field(default_factory=LLMCapabilities)
+    # 运行策略（重试、等待、预算等数值）。来自环境变量，见 env_runtime_policy。
     runtime_policy: LLMRuntimePolicy = field(default_factory=LLMRuntimePolicy)
+    # 该提供商是否启用；关闭后不参与当前服务的选择。
     enabled: bool = True
 
     @property
     def output_limit(self) -> int:
-        """用户主动开启并设置的输出上限；0 表示没有开启（此时请求按 AUTO_MAX_TOKENS 尝试最大值）。"""
-        return self.max_tokens if self.max_tokens_enabled and self.max_tokens > 0 else 0
+        """环境变量固定的输出上限；0 表示没有固定（此时请求按 AUTO_MAX_TOKENS 尝试最大值）。"""
+        return max(0, self.max_tokens)
 
     @property
     def thinking_protocol(self) -> str:
@@ -264,13 +293,13 @@ def _write_settings_file(data: dict) -> None:
             pass
 
 
+# settings.json 里只保存连接信息和协议选择；超时、重试、Token 上限、预算等数值全部来自环境变量。
 _LLM_FIELDS = {
-    "api_key", "base_url", "model", "temperature", "timeout", "max_tokens", "max_tokens_enabled", "extra_body", "thinking_enabled",
-    "capabilities", "runtime_policy", "enabled",
+    "api_key", "base_url", "model", "temperature", "extra_body", "thinking_enabled", "capabilities", "enabled",
 }
+# 旧版设置页写进文件的数值项：读取时忽略，保存时清掉。
+_RETIRED_LLM_FIELDS = ("timeout", "max_tokens", "max_tokens_enabled", "runtime_policy")
 _llm_settings_lock = RLock()
-_timeout_adapter = TypeAdapter(LLMTimeout)
-_max_tokens_adapter = TypeAdapter(LLMMaxTokens)
 
 
 def _saved_policy(model: type[BaseModel], value: object) -> BaseModel:
@@ -281,27 +310,51 @@ def _saved_policy(model: type[BaseModel], value: object) -> BaseModel:
         return model()
 
 
-_LEGACY_POLICY_DEFAULTS = {
-    "structured_retries": 1, "tool_protocol_retries": 2, "sdk_retries": 1,
-    "max_task_seconds": 600, "llm_hard_idle_seconds": 540,
-    "stream_idle_seconds": 90, "tool_timeout_seconds": 120,
-}
+def env_runtime_policy() -> LLMRuntimePolicy:
+    """模型运行策略：全部来自环境变量（.env），默认值都放得很大，保证长任务能跑完；修改后重启生效。
 
-
-def _saved_runtime_policy(value: object) -> LLMRuntimePolicy:
-    """Upgrade legacy shipped defaults once; retain customized limits.
-
-    Any explicit compatibility mode marks the new schema. Legacy ``strict``
-    normalizes to ``relaxed`` without migrating its explicit numeric values.
-    A subsequent save writes that marker so old numeric choices stay exact.
+    每个参数上方的注释是它的含义；字段的完整说明见 model_policy.LLMRuntimePolicy，环境变量清单见 .env.example。
     """
-    if isinstance(value, dict) and "compatibility_mode" not in value:
-        value = dict(value)
-        defaults = LLMRuntimePolicy()
-        for key, previous in _LEGACY_POLICY_DEFAULTS.items():
-            if value.get(key) == previous:
-                value[key] = getattr(defaults, key)
-    return _saved_policy(LLMRuntimePolicy, value)
+    return LLMRuntimePolicy(
+        # 回复流中途断开后，自动恢复的最多次数。
+        stream_recovery_retries=_env_int("LLM_STREAM_RECOVERY_RETRIES", 20),
+        # 结构化 JSON 输出格式不对时，让模型重新输出的最多次数。
+        structured_retries=_env_int("LLM_STRUCTURED_RETRIES", 20),
+        # 工具调用参数不完整或格式不对时，让模型重新发起的最多次数。
+        tool_protocol_retries=_env_int("LLM_TOOL_PROTOCOL_RETRIES", 40),
+        # 连接错误、限流、5xx 时，网络层自动重试的最多次数。
+        sdk_retries=_env_int("LLM_SDK_RETRIES", 10),
+        # 整次结构化调用的总时长上限（秒）；0 = 不额外限制。
+        structured_timeout=_env_float("LLM_STRUCTURED_TIMEOUT_SECONDS", 0),
+        # 上下文超过多少字符后自动整理较早的执行过程；0 = 不按字符触发。
+        context_target_chars=_env_int("LLM_CONTEXT_TARGET_CHARS", 80000),
+        # 模型服务实际的上下文容量（Token）；0 = 未知。
+        context_window_tokens=_env_int("LLM_CONTEXT_WINDOW_TOKENS", 0),
+        # 是否开启任务预算；关闭时下面 5 项预算都不生效。
+        budget_enabled=_env_bool("LLM_BUDGET_ENABLED", False),
+        # 预算：单次任务最多调用模型多少次；0 = 不限。
+        max_model_calls=_env_int("LLM_MAX_MODEL_CALLS", 100_000),
+        # 预算：单次任务累计输入 Token 上限；0 = 不限。
+        max_prompt_tokens=_env_int("LLM_MAX_PROMPT_TOKENS", 1_000_000_000),
+        # 预算：单次任务累计总 Token 上限；0 = 不限。
+        max_total_tokens=_env_int("LLM_MAX_TOTAL_TOKENS", 2_000_000_000),
+        # 预算：单次任务调用模型的总时长上限（秒）；0 = 不限。
+        max_task_seconds=_env_float("LLM_MAX_TASK_SECONDS", 604_800),
+        # 预算：单次请求输入内容的字符数上限；0 = 不限。
+        max_input_chars=_env_int("LLM_MAX_INPUT_CHARS", 100_000_000),
+        # 辅助判断是否也启用模型的深度思考。
+        auxiliary_thinking_enabled=_env_bool("LLM_AUXILIARY_THINKING", False),
+        # 模型多久没有新内容时界面只提示「仍在等待」（秒）；0 = 不提示。
+        llm_soft_idle_seconds=_env_float("LLM_SOFT_IDLE_SECONDS", 90),
+        # 模型长时间没有任何响应时，最多等多久后放弃（秒）。
+        llm_hard_idle_seconds=_env_float("LLM_HARD_IDLE_SECONDS", 86_400),
+        # 回复流连续多久没有新内容就判定断流（秒）。
+        stream_idle_seconds=_env_float("LLM_STREAM_IDLE_SECONDS", 7200),
+        # 单个工具执行的最长等待（秒）。
+        tool_timeout_seconds=_env_float("TOOL_TIMEOUT_SECONDS", 14_400),
+        # 点击「停止」后，给模型和工具收尾的宽限时间（秒）。
+        cancellation_grace_seconds=_env_float("LLM_CANCELLATION_GRACE_SECONDS", 5),
+    )
 
 
 def _provider_defaults(provider_id: str) -> tuple[str, str]:
@@ -361,36 +414,18 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         enabled = True
     base_url = str(overrides.get("base_url") or default_base_url).strip()
     model = str(overrides.get("model") or default_model).strip()
-    policy = overrides.get("runtime_policy")
-    legacy = not isinstance(policy, dict) or "compatibility_mode" not in policy
-    saved_timeout = overrides.get("timeout", 1800)
-    if legacy and saved_timeout == 120:
-        saved_timeout = 1800
-    try:
-        timeout = _timeout_adapter.validate_python(float(saved_timeout))
-    except (TypeError, ValueError):
-        timeout = 1800.0
-    try:
-        max_tokens = _max_tokens_adapter.validate_python(overrides.get("max_tokens", 32768))
-    except (TypeError, ValueError):
-        max_tokens = 32768
-    # 旧配置没有这个开关：之前保存的 8192 是界面写入的出厂默认值，不是用户主动设置，一律视为未开启。
-    max_tokens_enabled = overrides.get("max_tokens_enabled")
-    if not isinstance(max_tokens_enabled, bool):
-        max_tokens_enabled = False
     cfg = LLMSettings(
         api_key=str(overrides.get("api_key") or "").strip(),
         base_url=base_url,
         model=model,
         temperature=float(overrides.get("temperature", 0.1)),
-        timeout=timeout,
-        max_tokens=max_tokens,
-        max_tokens_enabled=max_tokens_enabled,
+        timeout=_env_float("LLM_TIMEOUT_SECONDS", 7200),
+        max_tokens=max(0, _env_int("LLM_MAX_TOKENS", 0)),
         extra_body=extra_body,
         thinking_enabled=thinking_enabled,
         provider_id=provider_id,
         capabilities=_saved_policy(LLMCapabilities, overrides.get("capabilities")),
-        runtime_policy=_saved_runtime_policy(policy),
+        runtime_policy=env_runtime_policy(),
         enabled=enabled,
     )
     return cfg
@@ -420,10 +455,8 @@ def get_llm_settings() -> LLMSettings:
 
 
 def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | None, model: str | None,
-                      thinking_enabled: bool | None = None, *, timeout: float | None = None,
-                      max_tokens: int | None = None, max_tokens_enabled: bool | None = None,
+                      thinking_enabled: bool | None = None, *,
                       capabilities: LLMCapabilities | dict | None = None,
-                      runtime_policy: LLMRuntimePolicy | dict | None = None,
                       enabled: bool | None = None) -> LLMSettings:
     """Save one provider. None keeps a field; an empty API key clears it."""
     _provider_defaults(provider_id)  # validate before touching the file
@@ -434,10 +467,8 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
         providers = _provider_overrides(data.get("llm", {}))
         llm = dict(providers.get(provider_id, {}))
         current = _build_provider_settings(provider_id, llm)
-        # Materialize the legacy upgrade before applying explicit user edits.
-        # In particular a newly selected 120 seconds must not be migrated again.
-        llm["timeout"] = current.timeout
-        llm["runtime_policy"] = current.runtime_policy.model_dump()
+        for retired in _RETIRED_LLM_FIELDS:  # 旧版保存的数值项不再使用，顺便清理
+            llm.pop(retired, None)
         if api_key is not None:
             llm["api_key"] = api_key.strip()
         if base_url is not None:
@@ -448,18 +479,9 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
             llm["thinking_enabled"] = thinking_enabled
         if enabled is not None:
             llm["enabled"] = enabled
-        if timeout is not None:
-            llm["timeout"] = _timeout_adapter.validate_python(timeout)
-        if max_tokens is not None:
-            llm["max_tokens"] = _max_tokens_adapter.validate_python(max_tokens)
-        if max_tokens_enabled is not None:
-            llm["max_tokens_enabled"] = max_tokens_enabled
-        for name, policy, schema in (("capabilities", capabilities, LLMCapabilities),
-                                     ("runtime_policy", runtime_policy, LLMRuntimePolicy)):
-            if policy is not None:
-                changes = policy.model_dump(exclude_unset=True) if isinstance(policy, BaseModel) else policy
-                validated = schema.model_validate({**getattr(current, name).model_dump(), **changes})
-                llm[name] = validated.model_dump()
+        if capabilities is not None:
+            changes = capabilities.model_dump(exclude_unset=True) if isinstance(capabilities, BaseModel) else capabilities
+            llm["capabilities"] = LLMCapabilities.model_validate({**current.capabilities.model_dump(), **changes}).model_dump()
         # false and 0 are real configuration values, including disabled retries.
         providers[provider_id] = {k: v for k, v in llm.items() if v is not None and v != ""}
         data["llm"] = {"providers": {

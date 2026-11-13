@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from sheetmate.core.config import limits
 from sheetmate.agent.framework.react.completion import (
     _completion_material,
     _identifiers,
@@ -16,7 +17,7 @@ from sheetmate.agent.framework.react.completion import (
 from sheetmate.agent.llm.client import aux_json
 
 
-PROGRESS_TIMEOUT = 30.0
+PROGRESS_TIMEOUT = limits.AUX_CALL_TIMEOUT
 _SCHEMA = {
     "type": "object",
     "properties": {

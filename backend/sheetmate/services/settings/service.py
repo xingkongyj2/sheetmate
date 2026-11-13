@@ -12,7 +12,7 @@ from sheetmate.core.config.settings import (
     QWEN_BASE_URL, QWEN_MODELS, QWEN_THINKING_MODELS, LLMSettings, get_all_llm_settings,
     get_llm_provider_settings, save_llm_settings, select_llm_settings,
 )
-from sheetmate.core.config.model_policy import LLMCapabilities, LLMRuntimePolicy
+from sheetmate.core.config.model_policy import LLMCapabilities
 
 
 @dataclass(frozen=True)
@@ -25,11 +25,7 @@ class ModelSettingsUpdate:
     model: str | None = None
     thinking_enabled: bool | None = None
     enabled: bool | None = None
-    timeout: float | None = None
-    max_tokens: int | None = None
-    max_tokens_enabled: bool | None = None
     capabilities: LLMCapabilities | None = None
-    runtime_policy: LLMRuntimePolicy | None = None
 
 
 PROVIDERS = [
@@ -46,9 +42,8 @@ PROVIDERS = [
 
 
 def _policy_view(cfg: LLMSettings) -> dict[str, Any]:
-    return {"timeout": cfg.timeout, "max_tokens": cfg.max_tokens,
-            "max_tokens_enabled": cfg.max_tokens_enabled,
-            "capabilities": cfg.capabilities.model_dump(), "runtime_policy": cfg.runtime_policy.model_dump()}
+    # 超时、重试、Token 上限、预算等数值来自环境变量，不通过接口展示或修改。
+    return {"capabilities": cfg.capabilities.model_dump()}
 
 
 def _provider_view(provider: dict[str, Any], cfg: LLMSettings) -> dict[str, Any]:
@@ -92,9 +87,7 @@ def get_llm_config() -> dict[str, Any]:
 
 def put_llm_config(update: ModelSettingsUpdate) -> dict[str, Any]:
     save_llm_settings(update.provider_id, update.api_key, update.base_url, update.model, update.thinking_enabled,
-                      timeout=update.timeout, max_tokens=update.max_tokens,
-                      max_tokens_enabled=update.max_tokens_enabled,
-                      capabilities=update.capabilities, runtime_policy=update.runtime_policy, enabled=update.enabled)
+                      capabilities=update.capabilities, enabled=update.enabled)
     return _view()
 
 
@@ -106,14 +99,8 @@ async def test_llm_config(update: ModelSettingsUpdate) -> dict[str, Any]:
                   base_url=current.base_url if update.base_url is None else update.base_url.strip(),
                   model=current.model if update.model is None else update.model.strip(),
                   thinking_enabled=current.thinking_enabled if update.thinking_enabled is None else update.thinking_enabled,
-                  timeout=current.timeout if update.timeout is None else update.timeout,
-                  max_tokens=current.max_tokens if update.max_tokens is None else update.max_tokens,
-                  max_tokens_enabled=(current.max_tokens_enabled if update.max_tokens_enabled is None
-                                      else update.max_tokens_enabled),
                   capabilities=current.capabilities if update.capabilities is None else current.capabilities.model_copy(
-                      update=update.capabilities.model_dump(exclude_unset=True)),
-                  runtime_policy=current.runtime_policy if update.runtime_policy is None else current.runtime_policy.model_copy(
-                      update=update.runtime_policy.model_dump(exclude_unset=True)))
+                      update=update.capabilities.model_dump(exclude_unset=True)))
     try:
         result = await test_connection(cfg)
     except LLMError as exc:

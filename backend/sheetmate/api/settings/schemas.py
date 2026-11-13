@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import Literal
 from pydantic import BaseModel, ConfigDict
-from sheetmate.core.config.model_policy import LLMCapabilities, LLMMaxTokens, LLMRuntimePolicy, LLMTimeout
+from sheetmate.core.config.model_policy import LLMCapabilities
 
 
 ProviderId = Literal["deepseek", "qwen", "custom"]
@@ -17,9 +17,5 @@ class LLMBody(BaseModel):
     model: str | None = None
     thinking_enabled: bool | None = None
     enabled: bool | None = None
-    timeout: LLMTimeout | None = None
-    max_tokens: LLMMaxTokens | None = None
-    max_tokens_enabled: bool | None = None
     capabilities: LLMCapabilities | None = None
-    runtime_policy: LLMRuntimePolicy | None = None
 

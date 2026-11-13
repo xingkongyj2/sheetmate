@@ -18,6 +18,7 @@ from typing import Any
 
 import pandas as pd
 
+from sheetmate.core.config import limits
 from sheetmate.agent.memory.short_term.context import stage_history
 from sheetmate.agent.framework.shared.schemas import PLAN_REVIEW_SCHEMA, PLAN_SCHEMA
 from sheetmate.agent.framework.shared.prompt_builder import build_system_prompt
@@ -38,8 +39,8 @@ MAX_PLAN_STEPS = 8
 MAX_STEP_DESCRIPTION = 4000
 MAX_STEP_CHECK = 3000
 _DEFAULT_STEP_CHECK = "本项结果符合完整需求并有实际依据；涉及表格或文件时，核对实际产出及关键行数、金额或数量。"
-PLAN_TIMEOUT = 120.0  # 起草计划最多等多久；超时按兜底计划继续
-REVIEW_TIMEOUT = 90.0  # 审查计划最多等多久；超时保留原计划
+PLAN_TIMEOUT = limits.AUX_CALL_TIMEOUT  # 起草计划最多等多久；超时按兜底计划继续
+REVIEW_TIMEOUT = limits.AUX_CALL_TIMEOUT  # 审查计划最多等多久；超时保留原计划
 _ROLE_TAGS = {"expected": "，人工做好的期望结果", "derived": "，分析结果", "result": "，流程产出"}
 _BRIEF_LIMIT = 14000  # 数据画像总长度上限（字符）
 

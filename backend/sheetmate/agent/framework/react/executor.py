@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sheetmate.core.config import limits
 from sheetmate.agent.framework.shared.prompt_builder import build_customer_block, build_system_prompt
 from sheetmate.agent.framework.react.completion import (
     MAX_COMPLETION_RETRIES,
@@ -94,7 +95,7 @@ _RECOVERABLE_MODEL_ERRORS = frozenset({
 })
 _RECIPE_TOOLS = {"build_recipe", "revise_recipe", "run_recipe"}
 _SCRIPT_TOOL = "run_python_script"
-_SCRIPT_EXTRA_ITERATIONS = 60
+_SCRIPT_EXTRA_ITERATIONS = limits.SCRIPT_EXTRA_ITERATIONS
 _DIAGNOSTIC_TOOLS = (_EXPLORE_TOOLS - {"run_sql"}) | {
     "inspect_python_script", "inspect_workbook_creation", "inspect_recipe_nodes", "list_recipes", "load_file", "show_files",
     "remember", "save_field_mapping", "save_as_recipe", "delete_recipe", "delete_recipes", "ask_user",
@@ -261,7 +262,7 @@ class _ToolBudget:
 
 class AgentExecutor:
     def __init__(self, llm: LanguageModel, registry: ToolRegistry | None = None, max_iterations: int = 200,
-                 max_tool_calls: int = 800, max_parallel_tools: int = 3):
+                 max_tool_calls: int = limits.TOOL_CALL_BUDGET, max_parallel_tools: int = 3):
         self.llm = llm
         self.registry = registry or ToolRegistry()
         self.max_iterations = max(1, max_iterations)

@@ -563,37 +563,9 @@ export interface LLMCapabilities {
   thinking_protocol: 'auto' | 'deepseek' | 'qwen' | 'none'
 }
 
-export interface LLMRuntimePolicy {
-  compatibility_mode: 'relaxed'
-  stream_recovery_retries: number
-  budget_enabled: boolean
-  structured_retries: number
-  tool_protocol_retries: number
-  sdk_retries: number
-  structured_timeout: number
-  context_target_chars: number
-  context_window_tokens: number
-  max_model_calls: number
-  max_prompt_tokens: number
-  max_total_tokens: number
-  max_task_seconds: number
-  max_input_chars: number
-  auxiliary_thinking_enabled: boolean
-  llm_soft_idle_seconds: number
-  llm_hard_idle_seconds: number
-  stream_idle_seconds: number
-  tool_timeout_seconds: number
-  cancellation_grace_seconds: number
-}
-
+/** 模型协议选择；超时、重试、Token 上限、预算等运行参数在后端环境变量里，前端不展示 */
 export interface LLMAdvancedConfig {
-  timeout: number
-  /** 输出 Token 上限，仅在 max_tokens_enabled 为 true 时生效 */
-  max_tokens: number
-  /** 关闭时自动按模型可接受的最大输出请求，不额外限制 */
-  max_tokens_enabled: boolean
   capabilities: LLMCapabilities
-  runtime_policy: LLMRuntimePolicy
 }
 
 export interface LLMConfigUpdate {
@@ -603,11 +575,7 @@ export interface LLMConfigUpdate {
   base_url?: string
   model?: string
   thinking_enabled?: boolean
-  timeout?: number
-  max_tokens?: number
-  max_tokens_enabled?: boolean
   capabilities?: Partial<LLMCapabilities>
-  runtime_policy?: Partial<LLMRuntimePolicy>
 }
 
 export interface LLMProviderConfig extends LLMAdvancedConfig {

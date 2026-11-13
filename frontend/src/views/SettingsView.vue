@@ -59,11 +59,7 @@ function draftFrom(provider: LLMProviderConfig): ProviderDraft {
     base_url: provider.base_url,
     model: provider.model || '',
     thinking_enabled: provider.thinking_enabled,
-    timeout: provider.timeout,
-    max_tokens: provider.max_tokens,
-    max_tokens_enabled: provider.max_tokens_enabled,
     capabilities: { ...provider.capabilities },
-    runtime_policy: { ...provider.runtime_policy },
   }
 }
 
@@ -111,53 +107,16 @@ function isThinkingSupported(provider: LLMProviderConfig) {
 
 function isComplete(provider: LLMProviderConfig) {
   const draft = drafts[provider.id]
-  return !!draft?.api_key.trim() && !!draft.base_url.trim() && !!draft.model.trim() && !validationMessage(provider)
+  return !!draft?.api_key.trim() && !!draft.base_url.trim() && !!draft.model.trim()
 }
 
 function canSave(provider: LLMProviderConfig) {
   const draft = drafts[provider.id]
-  return !!draft && !validationMessage(provider) && (!draft.enabled || isComplete(provider))
-}
-
-function validationMessage(provider: LLMProviderConfig): string {
-  const draft = drafts[provider.id]
-  if (!draft) return ''
-  const numberInRange = (value: number, min: number, max: number, integer = false) =>
-    typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isInteger(value))
-  if (!numberInRange(draft.timeout, 5, 3600)) return '请求超时需为 5–3600 秒。'
-  if (draft.max_tokens_enabled && !numberInRange(draft.max_tokens, 1, 131072, true)) return '输出 Token 上限需为 1–131072 的整数。'
-  if (!numberInRange(draft.runtime_policy.structured_retries, 0, 10, true)) return '结构输出纠错次数需为 0–10 的整数。'
-  if (!numberInRange(draft.runtime_policy.tool_protocol_retries, 0, 20, true)) return '工具调用纠错次数需为 0–20 的整数。'
-  if (!numberInRange(draft.runtime_policy.stream_recovery_retries, 0, 10, true)) return '断流恢复次数需为 0–10 的整数。'
-  if (!numberInRange(draft.runtime_policy.sdk_retries, 0, 5, true)) return '连接重试次数需为 0–5 的整数。'
-  if (!numberInRange(draft.runtime_policy.stream_idle_seconds, 0.001, 3600)) return '回复流等待时间需大于 0 且不超过 3600 秒。'
-  if (!numberInRange(draft.runtime_policy.llm_hard_idle_seconds, 0.001, 7200)) return '模型等待时间需大于 0 且不超过 7200 秒。'
-  if (!numberInRange(draft.runtime_policy.tool_timeout_seconds, 0.001, 7200)) return '工具等待时间需大于 0 且不超过 7200 秒。'
-  if (!numberInRange(draft.runtime_policy.context_target_chars, 0, 2000000, true)) return '上下文压缩字符目标需为 0–2000000 的整数。'
-  if (!numberInRange(draft.runtime_policy.context_window_tokens, 0, 2000000, true)) return '模型上下文容量需为 0–2000000 的整数。'
-  if (!numberInRange(draft.runtime_policy.max_model_calls, 0, 1000, true)) return '每任务模型调用上限需为 0–1000 的整数。'
-  if (!numberInRange(draft.runtime_policy.max_prompt_tokens, 0, 10000000, true) ||
-      !numberInRange(draft.runtime_policy.max_total_tokens, 0, 10000000, true)) return '任务 Token 预算需为 0–10000000 的整数。'
-  if (!numberInRange(draft.runtime_policy.max_task_seconds, 0, 7200)) return '任务模型调用时限需为 0–7200 秒。'
-  if (!numberInRange(draft.runtime_policy.max_input_chars, 0, 2000000, true)) return '单次输入字符上限需为 0–2000000 的整数。'
-  return ''
+  return !!draft && (!draft.enabled || isComplete(provider))
 }
 
 function resetTestResult(id: LLMProviderId) {
   testResults[id] = null
-}
-
-function resetWaitingAndRetries(id: LLMProviderId) {
-  const draft = drafts[id]
-  if (!draft) return
-  draft.timeout = 1800
-  Object.assign(draft.runtime_policy, {
-    compatibility_mode: 'relaxed', stream_recovery_retries: 5,
-    structured_retries: 6, tool_protocol_retries: 12, sdk_retries: 3,
-    structured_timeout: 0, llm_soft_idle_seconds: 90,
-    llm_hard_idle_seconds: 3600, stream_idle_seconds: 1800, tool_timeout_seconds: 1800,
-  })
-  resetTestResult(id)
 }
 
 function onModelChanged(provider: LLMProviderConfig) {
@@ -177,11 +136,7 @@ async function save(provider: LLMProviderConfig) {
       base_url: draft.base_url,
       model: draft.model,
       thinking_enabled: draft.thinking_enabled,
-      timeout: draft.timeout,
-      max_tokens: draft.max_tokens,
-      max_tokens_enabled: draft.max_tokens_enabled,
       capabilities: { ...draft.capabilities },
-      runtime_policy: { ...draft.runtime_policy },
     })
     applyConfig(next, provider.id)
     resetTestResult(provider.id)
@@ -207,11 +162,7 @@ async function test(provider: LLMProviderConfig) {
       base_url: draft.base_url,
       model: draft.model,
       thinking_enabled: draft.thinking_enabled,
-      timeout: draft.timeout,
-      max_tokens: draft.max_tokens,
-      max_tokens_enabled: draft.max_tokens_enabled,
       capabilities: { ...draft.capabilities },
-      runtime_policy: { ...draft.runtime_policy },
     })
     testResults[provider.id] = result.ok
       ? { ok: true, text: '连接成功' }
@@ -374,8 +325,7 @@ async function test(provider: LLMProviderConfig) {
             <section class="mt-7" :aria-labelledby="`${provider.id}-protocol-heading`">
               <h2 :id="`${provider.id}-protocol-heading`" class="mb-3 text-[16px] font-semibold">结构协议</h2>
               <div class="card-soft space-y-4 p-5 sm:p-6">
-                <button type="button" class="btn-line" :disabled="anyBusy" @click="resetWaitingAndRetries(provider.id)">恢复默认等待与重试</button>
-                <p class="text-xs leading-relaxed text-mute">系统会修复常见格式问题，并自动恢复断流。默认允许连续 30 分钟无新内容；90 秒时只提示等待，处理过程中可主动停止。调整后点击下方保存。</p>
+                <p class="text-xs leading-relaxed text-mute">系统会修复常见格式问题，并自动恢复断流。超时、重试次数、输出 Token 上限、任务预算等运行参数都放在后端 .env 环境变量里，默认值很大，一般无需调整。</p>
                 <label class="block">
                   <span class="mb-1.5 block text-xs font-medium text-mute">结构输出协议</span>
                   <select v-model="drafts[provider.id]!.capabilities.structured_output" class="field"
@@ -397,122 +347,10 @@ async function test(provider: LLMProviderConfig) {
                   </select>
                   <span class="mt-1.5 block text-xs leading-relaxed text-mute">自动识别仅适用于已知官方模型或已有手工参数；中转服务和模型别名可按服务文档指定协议。辅助判断默认关闭思考。</span>
                 </label>
-                <div class="grid gap-4 sm:grid-cols-2">
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">请求超时（秒）</span>
-                    <input v-model.number="drafts[provider.id]!.timeout" type="number" min="5" max="3600" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                  <div class="space-y-2 sm:col-span-2">
-                    <label class="flex cursor-pointer items-center justify-between gap-4">
-                      <span class="text-xs font-medium text-mute">限制输出 Token 上限</span>
-                      <input v-model="drafts[provider.id]!.max_tokens_enabled" type="checkbox"
-                        role="switch" class="toggle toggle-sm shrink-0" :disabled="anyBusy"
-                        @change="resetTestResult(provider.id)" />
-                    </label>
-                    <input v-model.number="drafts[provider.id]!.max_tokens" type="number" min="1" max="131072" step="1"
-                      class="field" :disabled="anyBusy || !drafts[provider.id]!.max_tokens_enabled"
-                      aria-label="输出 Token 上限" @input="resetTestResult(provider.id)" />
-                    <span class="block text-xs leading-relaxed text-mute">默认关闭：自动按模型能接受的最大输出请求（先试 131072，模型不支持时自动降到它的上限）。开启后固定为下面的值，单次模型回复最多输出这么多 Token（1–131072）。</span>
-                  </div>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">结构输出纠错次数</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.structured_retries" type="number" min="0" max="10" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">工具调用纠错次数</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.tool_protocol_retries" type="number" min="0" max="20" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">回复流无新内容等待（秒）</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.stream_idle_seconds" type="number" min="1" max="3600" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">模型等待上限（秒）</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.llm_hard_idle_seconds" type="number" min="1" max="7200" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">工具执行等待（秒）</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.tool_timeout_seconds" type="number" min="1" max="7200" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">断流自动恢复次数</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.stream_recovery_retries" type="number" min="0" max="10" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">连接错误重试次数</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.sdk_retries" type="number" min="0" max="5" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                </div>
-                <p class="text-xs leading-relaxed text-mute">实际等待采用请求超时、对应等待上限和已启用任务预算中的较小值。任务预算默认关闭，便于慢模型完成处理。</p>
-              </div>
-            </section>
-
-            <section class="mt-7" :aria-labelledby="`${provider.id}-context-heading`">
-              <h2 :id="`${provider.id}-context-heading`" class="mb-3 text-[16px] font-semibold">上下文压缩</h2>
-              <div class="card-soft space-y-4 p-5 sm:p-6">
-                <p class="text-xs leading-relaxed text-mute">长任务自动收起旧过程，保留当前要求和原始结果回查；独立于任务预算，达到压缩目标不会停止任务。</p>
-                <div class="grid gap-4 sm:grid-cols-2">
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">压缩字符目标（0 不按字符触发）</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.context_target_chars" type="number" min="0" max="2000000" step="1000"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">模型上下文容量（Token，0 未指定）</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.context_window_tokens" type="number" min="0" max="2000000" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
-                </div>
-              </div>
-            </section>
-
-            <section class="mt-7" :aria-labelledby="`${provider.id}-budget-heading`">
-              <h2 :id="`${provider.id}-budget-heading`" class="mb-3 text-[16px] font-semibold">任务预算</h2>
-              <div class="card-soft space-y-4 p-5 sm:p-6">
-                <label class="flex cursor-pointer items-center justify-between gap-4 border-b border-line pb-4">
-                  <span class="text-sm font-medium">开启任务预算</span>
-                  <input v-model="drafts[provider.id]!.runtime_policy.budget_enabled" type="checkbox"
-                    role="switch" class="toggle toggle-sm shrink-0" :disabled="anyBusy"
-                    @change="resetTestResult(provider.id)" />
-                </label>
-                <div class="grid gap-4 sm:grid-cols-2">
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">每任务模型调用上限</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.max_model_calls" type="number" min="0" max="1000" step="1" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">每任务累计输入 Token 预算</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.max_prompt_tokens" type="number" min="0" max="10000000" step="1" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">每任务累计总 Token 预算</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.max_total_tokens" type="number" min="0" max="10000000" step="1" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">每任务模型调用时限（秒）</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.max_task_seconds" type="number" min="0" max="7200" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">单次输入字符上限（含工具定义）</span>
-                    <input v-model.number="drafts[provider.id]!.runtime_policy.max_input_chars" type="number" min="0" max="2000000" step="1" class="field" :disabled="anyBusy || !drafts[provider.id]!.runtime_policy.budget_enabled" />
-                  </label>
-                  <label class="flex items-center gap-2 text-xs text-mute">
-                    <input v-model="drafts[provider.id]!.runtime_policy.auxiliary_thinking_enabled" type="checkbox" :disabled="anyBusy" />辅助判断也启用深度思考
-                  </label>
-                </div>
               </div>
             </section>
 
             <div class="mt-7 flex flex-col items-center gap-3">
-              <p v-if="validationMessage(provider)" class="text-center text-xs text-error" role="alert">{{ validationMessage(provider) }}</p>
               <button type="button" class="btn-ink min-w-32" :disabled="anyBusy || !canSave(provider)" @click="save(provider)">
                 <LoaderCircle v-if="savingProvider === provider.id" class="size-4 animate-spin" /><Save v-else class="size-4" />保存
               </button>

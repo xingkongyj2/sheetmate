@@ -688,7 +688,7 @@ class LLMClient:
                             if reason == "length":
                                 limit = self.cfg.output_limit
                                 auto = self._auto_output_tokens()
-                                hint = (f"当前设置的输出 Token 上限为 {limit}，可在设置中调大后重试。" if limit else
+                                hint = (f"当前固定的输出 Token 上限为 {limit}（环境变量 LLM_MAX_TOKENS），可调大后重启重试。" if limit else
                                         f"当前未设置输出上限，已按模型可接受的最大值（{auto}）请求，已到该模型的输出上限；可尝试精简任务或分步处理。"
                                         if auto else
                                         "当前未设置输出上限，且该模型不接受输出上限参数，长度由模型服务自身决定；可尝试精简任务或分步处理。")
@@ -956,17 +956,17 @@ def get_llm() -> LanguageModel:
 
 
 async def test_connection(cfg: LLMSettings) -> dict[str, Any]:
-    """设置页「测试连接」：沿用输出预算，并限制整次测试的等待时间。"""
+    """设置页「测试连接」：只是探测接口是否可用，等待时间不超过 5 分钟。"""
     client = LLMClient(replace(cfg, thinking_enabled=False))
+    wait = min(cfg.timeout, 300)
     try:
         # 思考内容可能计入输出额度，不能为两个字的回复强制缩成 10 Token。
         msg = await asyncio.wait_for(
-            client.chat([{"role": "user", "content": "回复两个字：你好"}], _auxiliary=True), cfg.timeout,
+            client.chat([{"role": "user", "content": "回复两个字：你好"}], _auxiliary=True), wait,
         )
     except (asyncio.TimeoutError, LLMTimeout) as exc:
         raise LLMTimeout(
-            f"连接测试超时（等待上限为 {cfg.timeout:g} 秒）。模型可能响应较慢，"
-            "可在「高级配置」中增加「请求超时」后重试。"
+            f"连接测试超时（等待上限为 {wait:g} 秒）。模型可能响应较慢或接口地址不通，请稍后重试。"
         ) from exc
     finally:
         await client.client.close()
@@ -975,12 +975,12 @@ async def test_connection(cfg: LLMSettings) -> dict[str, Any]:
         if getattr(msg, "_sheetmate_finish_reason", None) == "length":
             raise LLMError(
                 "模型输出达到 Token 上限，尚未生成回复。"
-                "请在「高级配置」中增加「输出 Token 上限」后重试。"
+                "可在 .env 中调大 LLM_MAX_TOKENS（0 表示自动使用模型最大值）后重启，或关闭模型思考后重试。"
             )
         if getattr(msg, "reasoning_content", None):
             raise LLMError(
                 "模型只返回了思考内容，没有返回最终回复。"
-                "请增加「输出 Token 上限」，或关闭模型思考后重试。"
+                "可关闭模型思考后重试，或在 .env 中调大 LLM_MAX_TOKENS 后重启。"
             )
         raise LLMError("模型服务已响应，但返回的回复内容为空，请检查模型或接口兼容性后重试。")
     return {"ok": True, "model": cfg.model, "reply": reply}

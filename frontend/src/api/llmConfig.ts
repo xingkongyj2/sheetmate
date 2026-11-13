@@ -11,30 +11,11 @@ function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === 'string')
 }
 
-function boundedNumber(value: unknown, fallback: number, min: number, max: number, integer = false): number {
-  if (value === undefined) return fallback
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max ||
-    (integer && !Number.isInteger(value))) throw new Error(VERSION_ERROR)
-  return value
-}
-
 function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
   const capabilities = value.capabilities === undefined ? {} : value.capabilities
-  const policy = value.runtime_policy === undefined ? {} : value.runtime_policy
-  if (!isRecord(capabilities) || !isRecord(policy)) throw new Error(VERSION_ERROR)
-  if (value.max_tokens_enabled !== undefined && typeof value.max_tokens_enabled !== 'boolean') {
-    throw new Error(VERSION_ERROR)
-  }
-  if (policy.budget_enabled !== undefined && typeof policy.budget_enabled !== 'boolean') {
-    throw new Error(VERSION_ERROR)
-  }
-  if (policy.auxiliary_thinking_enabled !== undefined && typeof policy.auxiliary_thinking_enabled !== 'boolean') {
-    throw new Error(VERSION_ERROR)
-  }
+  if (!isRecord(capabilities)) throw new Error(VERSION_ERROR)
   const protocol = capabilities.structured_output === undefined ? 'auto' : capabilities.structured_output
   const thinkingProtocol = capabilities.thinking_protocol === undefined ? 'auto' : capabilities.thinking_protocol
-  const compatibility = policy.compatibility_mode === undefined ? 'relaxed' : policy.compatibility_mode
-  if (compatibility !== 'relaxed' && compatibility !== 'strict') throw new Error(VERSION_ERROR)
   if (typeof protocol !== 'string' || !['auto', 'json_schema', 'json_object', 'prompt'].includes(protocol)) {
     throw new Error(VERSION_ERROR)
   }
@@ -42,34 +23,9 @@ function advancedConfig(value: Record<string, unknown>): LLMAdvancedConfig {
     throw new Error(VERSION_ERROR)
   }
   return {
-    timeout: boundedNumber(value.timeout, 1800, 5, 3600),
-    max_tokens: boundedNumber(value.max_tokens, 32768, 1, 131072, true),
-    max_tokens_enabled: value.max_tokens_enabled === true,
     capabilities: {
       structured_output: protocol as LLMCapabilities['structured_output'],
       thinking_protocol: thinkingProtocol as LLMCapabilities['thinking_protocol'],
-    },
-    runtime_policy: {
-      compatibility_mode: 'relaxed',
-      stream_recovery_retries: boundedNumber(policy.stream_recovery_retries, 5, 0, 10, true),
-      budget_enabled: policy.budget_enabled === true,
-      structured_retries: boundedNumber(policy.structured_retries, 6, 0, 10, true),
-      tool_protocol_retries: boundedNumber(policy.tool_protocol_retries, 12, 0, 20, true),
-      sdk_retries: boundedNumber(policy.sdk_retries, 3, 0, 5, true),
-      structured_timeout: boundedNumber(policy.structured_timeout, 0, 0, 900),
-      context_target_chars: boundedNumber(policy.context_target_chars, 80000, 0, 2000000, true),
-      context_window_tokens: boundedNumber(policy.context_window_tokens, 0, 0, 2000000, true),
-      max_model_calls: boundedNumber(policy.max_model_calls, 1000, 0, 1000, true),
-      max_prompt_tokens: boundedNumber(policy.max_prompt_tokens, 300000, 0, 10000000, true),
-      max_total_tokens: boundedNumber(policy.max_total_tokens, 500000, 0, 10000000, true),
-      max_task_seconds: boundedNumber(policy.max_task_seconds, 7200, 0, 7200),
-      max_input_chars: boundedNumber(policy.max_input_chars, 240000, 0, 2000000, true),
-      auxiliary_thinking_enabled: policy.auxiliary_thinking_enabled === true,
-      llm_soft_idle_seconds: boundedNumber(policy.llm_soft_idle_seconds, 90, 0, 900),
-      llm_hard_idle_seconds: boundedNumber(policy.llm_hard_idle_seconds, 3600, Number.MIN_VALUE, 7200),
-      stream_idle_seconds: boundedNumber(policy.stream_idle_seconds, 1800, Number.MIN_VALUE, 3600),
-      tool_timeout_seconds: boundedNumber(policy.tool_timeout_seconds, 1800, Number.MIN_VALUE, 7200),
-      cancellation_grace_seconds: boundedNumber(policy.cancellation_grace_seconds, 5, Number.MIN_VALUE, 30),
     },
   }
 }

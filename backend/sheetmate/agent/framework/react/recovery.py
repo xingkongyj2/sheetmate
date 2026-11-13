@@ -5,12 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from sheetmate.core.config import limits
 from sheetmate.agent.framework.shared.feedback import public_detail as _public_detail
 from sheetmate.agent.tools.contracts import Tool, ToolResult
 
 RECONSIDER_TOOL = "reconsider_approach"
-METHOD_FAILURE_LIMIT = 6
-MAX_METHODS = 10
+METHOD_FAILURE_LIMIT = limits.METHOD_FAILURE_LIMIT
+MAX_METHODS = limits.MAX_METHODS
 
 
 def _public_params(args: dict[str, Any]) -> dict[str, str]:

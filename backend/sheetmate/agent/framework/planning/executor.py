@@ -30,6 +30,7 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from sheetmate.core.config import limits
 from sheetmate.agent.llm.content import model_history, user_content
 from sheetmate.agent.memory.short_term.context import stage_history
 from sheetmate.agent.framework.shared.evidence import evidence_projection
@@ -72,10 +73,10 @@ from sheetmate.agent.tools.contracts import AgentContext
 
 log = logging.getLogger(__name__)
 
-MAX_STEP_FIXES = 3  # 每一步核对不通过时最多补做的次数
-CHECK_TIMEOUT = 60.0  # 核对的最低等待窗口；实际等待由 aux_json 结合全局模型超时确定
+MAX_STEP_FIXES = limits.MAX_STEP_FIXES  # 每一步核对不通过时最多补做的次数
+CHECK_TIMEOUT = limits.AUX_CALL_TIMEOUT  # 核对的最低等待窗口；实际等待由 aux_json 结合全局模型超时确定
 CHECK_MAX_TOKENS = 4096  # 为核对时的推理和完整结构化结果预留余量
-THINKING_TOOL_BUDGET = 1000  # 计划各步、补做和自检共用（普通模式是 800）
+THINKING_TOOL_BUDGET = limits.TOOL_CALL_BUDGET  # 计划各步、补做和自检共用
 _DIGEST_RESULT = 700  # 送去核对的单个工具结果长度上限
 _AUDIT_RESULTS = 20  # 回答核对最多参考最近多少个工具结果
 

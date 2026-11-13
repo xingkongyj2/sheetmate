@@ -9,6 +9,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from sheetmate.core.config import limits
 from sheetmate.agent.llm.client import LLMError
 from sheetmate.agent.llm.prompts import REUSABLE_BUSINESS_RULE_POLICY
 from sheetmate.db.models import Customer
@@ -23,7 +24,7 @@ from sheetmate.core.errors import Forbidden, ServiceError
 MAX_REFERENCE_FILES = 5
 MAX_DESCRIPTION = 12_000
 MAX_DRAFT_CHARS = 40_000
-MAX_ATTEMPTS = 3
+MAX_ATTEMPTS = limits.FORMULA_MAX_ATTEMPTS
 
 SYSTEM = """你是 SheetMate 的客户公式生成助手。把用户描述的表格处理规则写成可复用公式草稿。
 只返回 json 对象：{"formula": {...}, "explanation": "普通用户能懂的作用说明", "warnings": [], "questions": []}。

@@ -8,11 +8,12 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from sheetmate.core.config import limits
 from sheetmate.agent.llm.client import aux_json
 from sheetmate.agent.framework.shared.evidence import evidence_projection
 
-COMPLETION_TIMEOUT = 30.0
-MAX_COMPLETION_RETRIES = 12
+COMPLETION_TIMEOUT = limits.AUX_CALL_TIMEOUT
+MAX_COMPLETION_RETRIES = limits.MAX_COMPLETION_RETRIES
 # After this many fact-conflict rounds, ask for a verbatim-only answer.
 CONFLICT_SIMPLIFY_AFTER = 3
 # A verifier that keeps reporting conflicts after this many rewrites is itself

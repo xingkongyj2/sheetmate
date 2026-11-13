@@ -6,10 +6,11 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from sheetmate.core.config import limits
 from sheetmate.agent.llm.client import aux_json
 
 
-DELIVERY_TIMEOUT = 30.0
+DELIVERY_TIMEOUT = limits.AUX_CALL_TIMEOUT
 _MAX_CANDIDATES = 80
 _GENERATING_TOOLS = {
     "run_python_script", "export_excel", "create_workbook", "build_recipe", "revise_recipe", "run_recipe",

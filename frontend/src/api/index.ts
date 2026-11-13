@@ -54,8 +54,8 @@ export const settingsApi = {
     parseLLMConfig((await http.put<unknown>('/settings/llm', payload)).data),
   testLLM: async (payload: LLMConfigUpdate) =>
     (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/llm/test', payload,
-      // 留出后端返回超时说明的时间，避免慢模型被前端固定的 120 秒超时提前中断。
-      { timeout: (payload.timeout ?? 1800) * 1000 + 10_000, validateStatus: () => true })).data,
+      // 后端测试连接最多等 300 秒，这里多留 10 秒接收超时说明，避免被前端的默认超时提前中断。
+      { timeout: 310_000, validateStatus: () => true })).data,
 }
 
 // ---------------------------------------------------------------- 客户

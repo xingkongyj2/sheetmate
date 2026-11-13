@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from sheetmate.core.config import limits
 from sheetmate.agent.framework.react.executor import AgentExecutor
 from sheetmate.agent.framework.shared.intent import RequestIntent, infer_request
 from sheetmate.agent.llm.client import (
@@ -1723,7 +1724,7 @@ async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str
     try:
         with trace_phase("background_title"):
             try:
-                title = await asyncio.wait_for(make_title(llm, message, answer), timeout=60)
+                title = await asyncio.wait_for(make_title(llm, message, answer), timeout=limits.TITLE_TIMEOUT)
             except Exception:
                 title = fallback_title(message)
             with session_scope() as db:
@@ -1771,7 +1772,7 @@ async def _learn_memories(llm: Any, user_id: int, conversation_id: str, customer
             }
             items = await asyncio.wait_for(extract_memories(
                 llm, message, answer, existing=existing[:12], target_scope=target_scope,
-            ), timeout=120)
+            ), timeout=limits.MEMORY_EXTRACT_TIMEOUT)
         except Exception as exc:
             record_event("memory.error", "sheetmate.services.conversations.chat._learn_memories", error_data(exc))
             return

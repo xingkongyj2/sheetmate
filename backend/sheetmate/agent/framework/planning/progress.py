@@ -5,11 +5,12 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from sheetmate.core.config import limits
 from sheetmate.agent.llm.client import aux_json
 from sheetmate.agent.framework.planning.planner import Plan
 
-MAX_PLAN_REPAIRS = 3
-REPAIR_TIMEOUT = 30.0
+MAX_PLAN_REPAIRS = limits.MAX_PLAN_REPAIRS
+REPAIR_TIMEOUT = limits.AUX_CALL_TIMEOUT
 _SCHEMA = {
     "type": "object",
     "properties": {
