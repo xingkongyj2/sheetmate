@@ -10,17 +10,23 @@ import BackgroundPage from './BackgroundPage.vue'
 
 const store = useWorkspaceStore()
 const router = useRouter()
+// 「设置」和「统计」是同级的覆盖层：盖在当前页面上，各自保持实例，关闭只是隐藏。
 const settingsOpen = computed(() => router.currentRoute.value.name === 'settings')
+const statsOpen = computed(() => router.currentRoute.value.name === 'stats')
+const overlayOpen = computed(() => settingsOpen.value || statsOpen.value)
 const backgroundRoute = shallowRef<RouteLocationNormalizedLoaded | null>(
-  settingsOpen.value ? null : router.currentRoute.value,
+  overlayOpen.value ? null : router.currentRoute.value,
 )
 const settingsRoute = shallowRef<RouteLocationNormalizedLoaded | null>(
   settingsOpen.value ? router.currentRoute.value : null,
 )
+const statsRoute = shallowRef<RouteLocationNormalizedLoaded | null>(
+  statsOpen.value ? router.currentRoute.value : null,
+)
 
-// 两层页面各自保持实例，关闭设置只隐藏覆盖层。
 watch(router.currentRoute, (route) => {
   if (route.name === 'settings') settingsRoute.value = route
+  else if (route.name === 'stats') statsRoute.value = route
   else if (route.matched[0]?.path === '/') backgroundRoute.value = route
 }, { flush: 'sync' })
 
@@ -37,8 +43,8 @@ onMounted(() => {
       <BackgroundPage
         v-if="backgroundRoute"
         :route="backgroundRoute"
-        :inert="settingsOpen"
-        :aria-hidden="settingsOpen || undefined"
+        :inert="overlayOpen"
+        :aria-hidden="overlayOpen || undefined"
       />
       <div
         v-if="settingsRoute"
@@ -50,6 +56,17 @@ onMounted(() => {
         @keydown.stop
       >
         <RouterView :route="settingsRoute" />
+      </div>
+      <div
+        v-if="statsRoute"
+        v-show="statsOpen"
+        class="absolute inset-0 z-40 bg-white"
+        :inert="!statsOpen"
+        :aria-hidden="!statsOpen || undefined"
+        aria-label="统计"
+        @keydown.stop
+      >
+        <RouterView :route="statsRoute" />
       </div>
     </main>
   </div>

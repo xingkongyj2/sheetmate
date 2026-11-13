@@ -13,6 +13,7 @@ from typing import Any
 from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session
 
+from sheetmate.services.observability.tool_catalog import tool_catalog
 from sheetmate.db.models import (
     AgentExecution,
     AgentToolReceipt,
@@ -259,5 +260,8 @@ def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime |
         "daily": [{"date": key, **value} for key, value in daily.items()],
         "failures": [{"code": key, "tasks": value} for key, value in failures.most_common()],
         "stages": [{"stage": key, **value} for key, value in sorted(stages.items())],
-        "tools": sorted(tools.values(), key=lambda item: (-item["calls"], item["tool"]))[:50],
+        # 全部工具各留一条（固定工具 + 内置公式 + 客户公式），不再只取前 50。
+        "tools": sorted(tools.values(), key=lambda item: (-item["calls"], item["tool"]))[:300],
+        # 工具目录：包含这段时间没用过的工具，附中文名、分类和一句话作用。
+        "catalog": tool_catalog(),
     }

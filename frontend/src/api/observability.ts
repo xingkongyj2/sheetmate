@@ -30,6 +30,8 @@ export interface ExecutionMetrics {
   failures: { code: string; tasks: number }[]
   tools: { tool: string; calls: number; completed: number; failed: number; pending: number; average_duration_ms: number | null }[]
   stages: { stage: string; model_calls: number; prompt_tokens: number; completion_tokens: number }[]
+  /** 全部工具的目录（含这段时间没用过的）：中文名、分类、一句话作用 */
+  catalog: { tool: string; label: string; group: string; purpose: string }[]
 }
 
 export async function getExecutionMetrics(days: number): Promise<ExecutionMetrics> {

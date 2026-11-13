@@ -47,6 +47,14 @@
 
 :root {
   --sheetmate-content-width: 700px;
+
+  /* 统计图表色板：颜色跟着含义走，同一含义在所有图里同色。
+     蓝 / 橙 / 紫 / 青 在红绿、蓝黄色盲下的区分度均 ≥ 12（目标 ≥ 8），对白底对比度 ≥ 3:1。 */
+  --chart-done: #2f6fe8;    /* 完成 / 成功 */
+  --chart-fail: #e8650a;    /* 失败 / 未完成 */
+  --chart-neutral: #8a8a95; /* 其他状态、待完成 */
+  --chart-input: #7c5ce6;   /* 输入 Token */
+  --chart-output: #14a0b4;  /* 输出 Token */
 }
 
 @theme {

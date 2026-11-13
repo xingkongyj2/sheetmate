@@ -2,7 +2,7 @@
 /**
  * 侧边栏：新对话、客户，下面是按时间分组的对话列表（显示绑定的客户），底部是用户名与账号操作。
  */
-import { ChevronLeft, ChevronRight, LoaderCircle, LogOut, Plus, Settings, Trash2 } from '@lucide/vue'
+import { ChartColumn, ChevronLeft, ChevronRight, LoaderCircle, LogOut, Plus, Settings, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -24,12 +24,15 @@ const { confirmDelete } = useConfirm()
 const narrowScreen = window.matchMedia('(max-width: 767px)')
 const collapsed = ref(narrowScreen.matches)
 const menuOpen = ref(false)
-const settingsReturnPath = ref('/')
-const settingsDestination = computed(() => route.name === 'settings' ? settingsReturnPath.value : { name: 'settings' })
+// 「设置」和「统计」是同级的覆盖层：再点一次同一个图标回到打开前的页面，点另一个图标直接切换。
+const overlayReturnPath = ref('/')
+const isOverlay = (name: unknown) => name === 'settings' || name === 'stats'
+const settingsDestination = computed(() => route.name === 'settings' ? overlayReturnPath.value : { name: 'settings' })
+const statsDestination = computed(() => route.name === 'stats' ? overlayReturnPath.value : { name: 'stats' })
 
 const stopTrackingSettings = router.afterEach((to, from, failure) => {
-  if (!failure && to.name === 'settings' && from.name !== 'settings' && from.matched[0]?.path === '/') {
-    settingsReturnPath.value = from.fullPath
+  if (!failure && isOverlay(to.name) && !isOverlay(from.name) && from.matched[0]?.path === '/') {
+    overlayReturnPath.value = from.fullPath
   }
 })
 
@@ -161,6 +164,15 @@ async function logout() {
         <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="username">{{ username }}</span>
         <div class="flex shrink-0 items-center gap-1">
           <RouterLink
+            :to="statsDestination"
+            class="icon-btn"
+            :class="route.name === 'stats' ? 'bg-black/[0.05] text-ink' : ''"
+            title="统计"
+            aria-label="统计"
+          >
+            <ChartColumn class="size-4" />
+          </RouterLink>
+          <RouterLink
             :to="settingsDestination"
             class="icon-btn"
             :class="route.name === 'settings' ? 'bg-black/[0.05] text-ink' : ''"
@@ -190,6 +202,9 @@ async function logout() {
         class="absolute bottom-16 left-3 z-30 w-52 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl"
         @mouseleave="menuOpen = false"
       >
+        <RouterLink :to="statsDestination" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
+          <ChartColumn class="size-4" />统计
+        </RouterLink>
         <RouterLink :to="settingsDestination" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
           <Settings class="size-4" />设置
         </RouterLink>
