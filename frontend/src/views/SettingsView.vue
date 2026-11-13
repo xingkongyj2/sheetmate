@@ -61,6 +61,7 @@ function draftFrom(provider: LLMProviderConfig): ProviderDraft {
     thinking_enabled: provider.thinking_enabled,
     timeout: provider.timeout,
     max_tokens: provider.max_tokens,
+    max_tokens_enabled: provider.max_tokens_enabled,
     capabilities: { ...provider.capabilities },
     runtime_policy: { ...provider.runtime_policy },
   }
@@ -124,7 +125,7 @@ function validationMessage(provider: LLMProviderConfig): string {
   const numberInRange = (value: number, min: number, max: number, integer = false) =>
     typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max && (!integer || Number.isInteger(value))
   if (!numberInRange(draft.timeout, 5, 3600)) return '请求超时需为 5–3600 秒。'
-  if (!numberInRange(draft.max_tokens, 1, 131072, true)) return '输出 Token 上限需为 1–131072 的整数。'
+  if (draft.max_tokens_enabled && !numberInRange(draft.max_tokens, 1, 131072, true)) return '输出 Token 上限需为 1–131072 的整数。'
   if (!numberInRange(draft.runtime_policy.structured_retries, 0, 10, true)) return '结构输出纠错次数需为 0–10 的整数。'
   if (!numberInRange(draft.runtime_policy.tool_protocol_retries, 0, 20, true)) return '工具调用纠错次数需为 0–20 的整数。'
   if (!numberInRange(draft.runtime_policy.stream_recovery_retries, 0, 10, true)) return '断流恢复次数需为 0–10 的整数。'
@@ -178,6 +179,7 @@ async function save(provider: LLMProviderConfig) {
       thinking_enabled: draft.thinking_enabled,
       timeout: draft.timeout,
       max_tokens: draft.max_tokens,
+      max_tokens_enabled: draft.max_tokens_enabled,
       capabilities: { ...draft.capabilities },
       runtime_policy: { ...draft.runtime_policy },
     })
@@ -207,6 +209,7 @@ async function test(provider: LLMProviderConfig) {
       thinking_enabled: draft.thinking_enabled,
       timeout: draft.timeout,
       max_tokens: draft.max_tokens,
+      max_tokens_enabled: draft.max_tokens_enabled,
       capabilities: { ...draft.capabilities },
       runtime_policy: { ...draft.runtime_policy },
     })
@@ -400,11 +403,18 @@ async function test(provider: LLMProviderConfig) {
                     <input v-model.number="drafts[provider.id]!.timeout" type="number" min="5" max="3600" step="1"
                       class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
                   </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-mute">输出 Token 上限</span>
+                  <div class="space-y-2 sm:col-span-2">
+                    <label class="flex cursor-pointer items-center justify-between gap-4">
+                      <span class="text-xs font-medium text-mute">限制输出 Token 上限</span>
+                      <input v-model="drafts[provider.id]!.max_tokens_enabled" type="checkbox"
+                        role="switch" class="toggle toggle-sm shrink-0" :disabled="anyBusy"
+                        @change="resetTestResult(provider.id)" />
+                    </label>
                     <input v-model.number="drafts[provider.id]!.max_tokens" type="number" min="1" max="131072" step="1"
-                      class="field" :disabled="anyBusy" @input="resetTestResult(provider.id)" />
-                  </label>
+                      class="field" :disabled="anyBusy || !drafts[provider.id]!.max_tokens_enabled"
+                      aria-label="输出 Token 上限" @input="resetTestResult(provider.id)" />
+                    <span class="block text-xs leading-relaxed text-mute">默认关闭：请求不带输出上限，长度由模型服务决定。开启后单次模型回复最多输出这么多 Token（1–131072）；回复被截断时可调大。</span>
+                  </div>
                   <label class="block">
                     <span class="mb-1.5 block text-xs font-medium text-mute">结构输出纠错次数</span>
                     <input v-model.number="drafts[provider.id]!.runtime_policy.structured_retries" type="number" min="0" max="10" step="1"

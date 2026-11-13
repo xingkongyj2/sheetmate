@@ -27,6 +27,7 @@ class ModelSettingsUpdate:
     enabled: bool | None = None
     timeout: float | None = None
     max_tokens: int | None = None
+    max_tokens_enabled: bool | None = None
     capabilities: LLMCapabilities | None = None
     runtime_policy: LLMRuntimePolicy | None = None
 
@@ -46,6 +47,7 @@ PROVIDERS = [
 
 def _policy_view(cfg: LLMSettings) -> dict[str, Any]:
     return {"timeout": cfg.timeout, "max_tokens": cfg.max_tokens,
+            "max_tokens_enabled": cfg.max_tokens_enabled,
             "capabilities": cfg.capabilities.model_dump(), "runtime_policy": cfg.runtime_policy.model_dump()}
 
 
@@ -91,6 +93,7 @@ def get_llm_config() -> dict[str, Any]:
 def put_llm_config(update: ModelSettingsUpdate) -> dict[str, Any]:
     save_llm_settings(update.provider_id, update.api_key, update.base_url, update.model, update.thinking_enabled,
                       timeout=update.timeout, max_tokens=update.max_tokens,
+                      max_tokens_enabled=update.max_tokens_enabled,
                       capabilities=update.capabilities, runtime_policy=update.runtime_policy, enabled=update.enabled)
     return _view()
 
@@ -105,6 +108,8 @@ async def test_llm_config(update: ModelSettingsUpdate) -> dict[str, Any]:
                   thinking_enabled=current.thinking_enabled if update.thinking_enabled is None else update.thinking_enabled,
                   timeout=current.timeout if update.timeout is None else update.timeout,
                   max_tokens=current.max_tokens if update.max_tokens is None else update.max_tokens,
+                  max_tokens_enabled=(current.max_tokens_enabled if update.max_tokens_enabled is None
+                                      else update.max_tokens_enabled),
                   capabilities=current.capabilities if update.capabilities is None else current.capabilities.model_copy(
                       update=update.capabilities.model_dump(exclude_unset=True)),
                   runtime_policy=current.runtime_policy if update.runtime_policy is None else current.runtime_policy.model_copy(

@@ -374,7 +374,7 @@ class ExecutionControl:
                 _, prompt = request_size({"messages": messages})
                 budget.calls = before + 1
                 budget.prompt_tokens += prompt
-                budget.total_tokens += prompt + int(getattr(getattr(llm, "cfg", None), "max_tokens", 8192))
+                budget.total_tokens += prompt + int(getattr(getattr(llm, "cfg", None), "output_limit", 0) or 8192)
                 budget.estimated_calls += 1
             usage = self.checkpoint.get("llm_usage") or {}
             llm.usage = deepcopy(usage.get("usage", llm.usage))

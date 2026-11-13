@@ -588,7 +588,10 @@ export interface LLMRuntimePolicy {
 
 export interface LLMAdvancedConfig {
   timeout: number
+  /** 输出 Token 上限，仅在 max_tokens_enabled 为 true 时生效 */
   max_tokens: number
+  /** 关闭时请求不带输出上限，不额外限制 */
+  max_tokens_enabled: boolean
   capabilities: LLMCapabilities
   runtime_policy: LLMRuntimePolicy
 }
@@ -602,6 +605,7 @@ export interface LLMConfigUpdate {
   thinking_enabled?: boolean
   timeout?: number
   max_tokens?: number
+  max_tokens_enabled?: boolean
   capabilities?: Partial<LLMCapabilities>
   runtime_policy?: Partial<LLMRuntimePolicy>
 }

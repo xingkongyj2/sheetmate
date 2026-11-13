@@ -39,6 +39,8 @@ from sheetmate.core.observability.conversation_log import record_event
 
 log = logging.getLogger(__name__)
 _LLM_STAGE: contextvars.ContextVar[str | None] = contextvars.ContextVar("sheetmate_llm_stage", default=None)
+# 未开启输出上限时，辅助结构化调用遇到截断后扩大额度的上限。
+_UNCAPPED_GROWTH_LIMIT = 32768
 _AUXILIARY_JSON_STAGES = frozenset({
     "request_intent", "recipe_persistence", "title", "memory_extraction", "history_compaction", "customer_summary",
     "execution_plan", "plan_review", "plan_repair", "step_verdict", "answer_audit", "task_completion", "final_delivery",
@@ -357,8 +359,8 @@ class LLMClient:
             "messages": messages,
             "temperature": self.cfg.temperature if temperature is None else temperature,
         }
-        if self.cfg.max_tokens > 0:
-            kwargs["max_tokens"] = self.cfg.max_tokens
+        if self.cfg.output_limit > 0:  # 未开启输出上限时不传 max_tokens，由服务端决定
+            kwargs["max_tokens"] = self.cfg.output_limit
         # An explicitly selected dialect controls both the primary switch and
         # auxiliary calls. Unknown/disabled protocols leave custom body fields
         # untouched; field names alone must never override explicit `none`.
@@ -632,7 +634,10 @@ class LLMClient:
                         if reason is not None:
                             finish_reason = reason
                             if reason == "length":
-                                raise LLMError("模型输出达到长度上限，本轮响应不完整，请增加输出上限后重试。",
+                                limit = self.cfg.output_limit
+                                hint = (f"当前设置的输出 Token 上限为 {limit}，可在设置中调大后重试。" if limit else
+                                        "当前未设置输出上限，长度由模型服务自身决定；可在设置中开启并设置更大的输出 Token 上限后重试。")
+                                raise LLMError(f"模型输出达到长度上限，本轮响应不完整。{hint}",
                                                code="output_limit", finish_reason=reason)
                             if reason == "content_filter":
                                 raise LLMError("模型服务因内容过滤停止了输出，本轮响应不完整。",
@@ -734,8 +739,9 @@ class LLMClient:
         # still grow the budget within the user's configured cap.
         auxiliary = schema_name in _AUXILIARY_JSON_STAGES
         output_tokens = max_tokens
-        if auxiliary and self.cfg.max_tokens > 0:
-            output_tokens = min(max_tokens, self.cfg.max_tokens) if max_tokens else self.cfg.max_tokens
+        output_cap = self.cfg.output_limit
+        if auxiliary and output_cap > 0:
+            output_tokens = min(max_tokens, output_cap) if max_tokens else output_cap
         if schema is not None:
             prompt += ("\n\n请只返回符合以下 JSON Schema 的 json，不要省略必填字段，不能把布尔值或数组写成字符串：\n"
                        + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
@@ -800,9 +806,9 @@ class LLMClient:
                     break
                 repairs_left -= 1
                 if (auxiliary and getattr(msg, "_sheetmate_finish_reason", None) == "length"
-                        and output_tokens and self.cfg.max_tokens > output_tokens):
+                        and output_tokens and (output_cap or _UNCAPPED_GROWTH_LIMIT) > output_tokens):
                     previous_tokens = output_tokens
-                    output_tokens = min(self.cfg.max_tokens, output_tokens * 2)
+                    output_tokens = min(output_cap or _UNCAPPED_GROWTH_LIMIT, output_tokens * 2)
                     record_event("llm.structured.output_budget", "sheetmate.agent.llm.client.LLMClient._complete_json",
                                  {"schema_name": schema_name, "from": previous_tokens, "to": output_tokens,
                                   "reason": "output_truncated", "repairs_left": repairs_left})

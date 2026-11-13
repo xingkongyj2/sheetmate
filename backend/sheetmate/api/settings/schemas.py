@@ -19,6 +19,7 @@ class LLMBody(BaseModel):
     enabled: bool | None = None
     timeout: LLMTimeout | None = None
     max_tokens: LLMMaxTokens | None = None
+    max_tokens_enabled: bool | None = None
     capabilities: LLMCapabilities | None = None
     runtime_policy: LLMRuntimePolicy | None = None
 

@@ -161,13 +161,20 @@ class LLMSettings:
     model: str
     temperature: float = 0.1
     timeout: float = 1800.0
-    max_tokens: int = 8192  # Recipe JSON 较长，默认预留 8K
+    # 输出 Token 上限只在 max_tokens_enabled 为 True 时才生效；默认关闭，请求不带 max_tokens，不额外限制。
+    max_tokens: int = 32768
+    max_tokens_enabled: bool = False
     extra_body: dict = field(default_factory=dict)
     thinking_enabled: bool = False
     provider_id: str = "deepseek"
     capabilities: LLMCapabilities = field(default_factory=LLMCapabilities)
     runtime_policy: LLMRuntimePolicy = field(default_factory=LLMRuntimePolicy)
     enabled: bool = True
+
+    @property
+    def output_limit(self) -> int:
+        """实际发给模型的输出上限；0 表示没有开启，不限制。"""
+        return self.max_tokens if self.max_tokens_enabled and self.max_tokens > 0 else 0
 
     @property
     def thinking_protocol(self) -> str:
@@ -255,7 +262,7 @@ def _write_settings_file(data: dict) -> None:
 
 
 _LLM_FIELDS = {
-    "api_key", "base_url", "model", "temperature", "timeout", "max_tokens", "extra_body", "thinking_enabled",
+    "api_key", "base_url", "model", "temperature", "timeout", "max_tokens", "max_tokens_enabled", "extra_body", "thinking_enabled",
     "capabilities", "runtime_policy", "enabled",
 }
 _llm_settings_lock = RLock()
@@ -361,9 +368,13 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
     except (TypeError, ValueError):
         timeout = 1800.0
     try:
-        max_tokens = _max_tokens_adapter.validate_python(overrides.get("max_tokens", 8192))
+        max_tokens = _max_tokens_adapter.validate_python(overrides.get("max_tokens", 32768))
     except (TypeError, ValueError):
-        max_tokens = 8192
+        max_tokens = 32768
+    # 旧配置没有这个开关：之前保存的 8192 是界面写入的出厂默认值，不是用户主动设置，一律视为未开启。
+    max_tokens_enabled = overrides.get("max_tokens_enabled")
+    if not isinstance(max_tokens_enabled, bool):
+        max_tokens_enabled = False
     cfg = LLMSettings(
         api_key=str(overrides.get("api_key") or "").strip(),
         base_url=base_url,
@@ -371,6 +382,7 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         temperature=float(overrides.get("temperature", 0.1)),
         timeout=timeout,
         max_tokens=max_tokens,
+        max_tokens_enabled=max_tokens_enabled,
         extra_body=extra_body,
         thinking_enabled=thinking_enabled,
         provider_id=provider_id,
@@ -406,7 +418,8 @@ def get_llm_settings() -> LLMSettings:
 
 def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | None, model: str | None,
                       thinking_enabled: bool | None = None, *, timeout: float | None = None,
-                      max_tokens: int | None = None, capabilities: LLMCapabilities | dict | None = None,
+                      max_tokens: int | None = None, max_tokens_enabled: bool | None = None,
+                      capabilities: LLMCapabilities | dict | None = None,
                       runtime_policy: LLMRuntimePolicy | dict | None = None,
                       enabled: bool | None = None) -> LLMSettings:
     """Save one provider. None keeps a field; an empty API key clears it."""
@@ -436,6 +449,8 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
             llm["timeout"] = _timeout_adapter.validate_python(timeout)
         if max_tokens is not None:
             llm["max_tokens"] = _max_tokens_adapter.validate_python(max_tokens)
+        if max_tokens_enabled is not None:
+            llm["max_tokens_enabled"] = max_tokens_enabled
         for name, policy, schema in (("capabilities", capabilities, LLMCapabilities),
                                      ("runtime_policy", runtime_policy, LLMRuntimePolicy)):
             if policy is not None:
