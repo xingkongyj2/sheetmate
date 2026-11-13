@@ -9,6 +9,11 @@ export function isDeliveredFile(file: { delivery_status?: FileDeliveryStatus; in
     file.delivery_status !== 'intermediate' && file.delivery_status !== 'superseded')
 }
 
+/** 文件页的输出列表：只要最终结果，环节产生的过程文件和已被替换的旧结果不展示。 */
+export function isDeliveredOutput(file: { delivery_status?: FileDeliveryStatus; intermediate?: boolean; step_id?: number | null }): boolean {
+  return !file.intermediate && file.step_id == null && file.delivery_status !== 'intermediate' && file.delivery_status !== 'superseded'
+}
+
 export function progressDeliveryFiles(progress: RecipeProgress): FileArtifact[] {
   const files = progress.files ?? (progress.file ? [progress.file] : [])
   return [...new Map(files.filter(isDeliveredFile).map((file) => [file.file_id, file])).values()]

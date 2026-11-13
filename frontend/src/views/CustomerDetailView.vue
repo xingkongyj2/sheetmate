@@ -19,6 +19,7 @@ import RunRecipeDialog from '@/components/customer/RunRecipeDialog.vue'
 import WorkflowFiles from '@/components/customer/WorkflowFiles.vue'
 import { timeAgo } from '@/composables/chatModel'
 import { primaryFirst, workflowFiles } from '@/composables/customerWorkflow'
+import { isDeliveredOutput } from '@/composables/deliveryFiles'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 import { useWorkspaceStore } from '@/stores/conversations'
@@ -92,8 +93,8 @@ watch(() => route.query.tab, (next) => {
 const orderedRecipes = computed(() => primaryFirst(customer.value?.recipes ?? [], customer.value?.primary_recipe_id))
 const primaryRecipe = computed(() => orderedRecipes.value[0] ?? null)
 const fileCount = computed(() => workflowFiles(orderedRecipes.value.length
-  ? orderedRecipes.value.flatMap((recipe) => [...recipe.files, ...recipe.output_files])
-  : [...(customer.value?.files ?? []), ...(customer.value?.outputs ?? [])]).length)
+  ? orderedRecipes.value.flatMap((recipe) => [...recipe.files, ...recipe.output_files.filter(isDeliveredOutput)])
+  : [...(customer.value?.files ?? []), ...(customer.value?.outputs ?? []).filter(isDeliveredOutput)]).length)
 
 function setTab(next: Tab) {
   tab.value = next
@@ -198,7 +199,7 @@ async function onEdited() {
             <button class="icon-btn size-7 shrink-0" title="编辑客户" @click="editing = true"><Pencil class="size-3.5" /></button>
             <button class="icon-btn size-7 shrink-0 hover:text-error" title="删除客户" aria-label="删除客户" @click="removeCustomer"><Trash2 class="size-3.5" /></button>
           </div>
-          <p class="mt-2 text-sm leading-relaxed text-mute">{{ customer.description || '还没有介绍' }}</p>
+          <p v-if="customer.description" class="mt-2 text-sm leading-relaxed text-mute">{{ customer.description }}</p>
           <div class="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-mute">
             <button
               type="button"

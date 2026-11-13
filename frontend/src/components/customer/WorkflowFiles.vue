@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { Download, FileCheck2, FileSpreadsheet, LoaderCircle, Trash2, Upload } from '@lucide/vue'
-import { nextTick, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 
 import { customerApi, fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo } from '@/api/types'
 import { timeAgo } from '@/composables/chatModel'
+import { isDeliveredOutput } from '@/composables/deliveryFiles'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
@@ -17,6 +18,8 @@ const props = defineProps<{
   refresh: () => Promise<void>
 }>()
 const emit = defineEmits<{ preview: [file: FileInfo] }>()
+// 只展示最终的输出文件，各环节的过程文件不在这里列出
+const results = computed(() => props.outputs.filter(isDeliveredOutput))
 const toast = useToast()
 const { confirmDelete } = useConfirm()
 const uploading = ref(false)
@@ -162,18 +165,18 @@ async function remove(file: FileInfo) {
     </div>
 
     <div class="card-soft p-5">
-      <h3 class="mb-3 text-[15px] font-semibold">输出与过程文件</h3>
-      <div v-for="file in outputs" :key="file.file_id" class="flex items-center gap-3 border-t border-line py-2.5 text-sm first:border-0">
+      <h3 class="mb-3 text-[15px] font-semibold">输出文件</h3>
+      <div v-for="file in results" :key="file.file_id" class="flex items-center gap-3 border-t border-line py-2.5 text-sm first:border-0">
         <FileSpreadsheet class="size-4 shrink-0" />
         <button type="button" class="min-w-0 flex-1 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :title="file.filename" :aria-label="`预览 ${file.filename}`" @click="emit('preview', file)">
           <span class="block truncate">{{ file.filename }}</span>
-          <span class="mt-0.5 block text-[10px] text-faint">{{ file.delivery_status === 'candidate' ? '待核验文件' : file.intermediate || file.delivery_status === 'intermediate' ? (file.step_name ? `环节 ${file.step_id} · ${file.step_name}` : '过程文件') : '最终结果' }}</span>
+          <span v-if="file.delivery_status === 'candidate'" class="mt-0.5 block text-[10px] text-faint">待核验文件</span>
         </button>
         <span class="shrink-0 text-xs text-faint">{{ timeAgo(file.created_at) }}</span>
         <a :href="file.download_url" class="icon-btn shrink-0" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>
         <button type="button" class="icon-btn shrink-0 hover:text-error" title="删除" :aria-label="`删除 ${file.filename}`" @click="remove(file)"><Trash2 class="size-4" /></button>
       </div>
-      <p v-if="!outputs.length" class="py-6 text-center text-sm text-faint">还没有输出文件</p>
+      <p v-if="!results.length" class="py-6 text-center text-sm text-faint">还没有输出文件</p>
     </div>
   </div>
 </template>
