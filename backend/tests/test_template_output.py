@@ -138,6 +138,31 @@ def test_removed_and_reordered_columns_follow_their_styles(tmp_path):
     assert ws["A2"].fill.fgColor.rgb == HEADER_FILL
 
 
+def test_footer_whose_label_column_was_dropped_still_passes_readback(tmp_path):
+    """合计行的标签在被去掉的列里：保留下来的页脚不能被回读核对当成多出来的一行数据。"""
+    src = tmp_path / "账单.xlsx"
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "账单"
+    ws.append(["序号", "订单号", "发货地", "金额"])
+    for i in range(1, 6):
+        ws.append([i, f"DD{i:03d}", "杭州" if i % 2 else "上海", 10.0 * i])
+    ws.append(["合计", "共 5 单", None, 150.0])
+    wb.save(src)
+    recipe = Recipe(
+        name="账单",
+        inputs=[{"alias": "账单", "sheet": "账单", "expected_columns": ["序号", "订单号", "发货地", "金额"],
+                 "required_columns": ["订单号", "金额"], "header": {"header_row": 1, "header_rows": 1}}],
+        steps=[{"id": 1, "name": "去掉序号", "formula": "select_columns",
+                "params": {"table": "账单", "columns": ["订单号", "发货地", "金额"]}, "output": "结果"}],
+        output_spec=[{"name": "账单", "source": "结果"}],
+    )
+    runner = _run(recipe, src, tmp_path / "out.xlsx")
+    failed = [c for c in runner.report.get("output_verification", []) if c["status"] == "fail"]
+    assert not failed, failed
+    assert runner.report["status"] in {"success", "warning"}
+
+
 def test_summary_sheet_is_appended_with_original_header_style(tmp_path):
     src = tmp_path / "订单.xlsx"
     _styled_workbook(src)

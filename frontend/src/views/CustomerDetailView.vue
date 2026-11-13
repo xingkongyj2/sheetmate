@@ -47,6 +47,7 @@ const summarizing = ref(false)
 const settingPrimary = ref(false)
 const editing = ref(false)
 const runDialog = ref<{ recipeId: string | null } | null>(null)
+const runRecipe = computed(() => customer.value?.recipes.find((recipe) => recipe.recipe_id === runDialog.value?.recipeId) ?? null)
 const preview = ref<FileInfo | null>(null)
 const conversationsOpen = ref(false)
 let loadVersion = 0
@@ -318,11 +319,10 @@ async function onEdited() {
     </BaseModal>
     <CustomerFormDialog v-if="editing && customer" :customer="customer" @close="editing = false" @saved="onEdited" />
     <RunRecipeDialog
-      v-if="runDialog && customer"
+      v-if="runRecipe && customer"
+      :key="runRecipe.recipe_id"
       :customer-id="customer.id"
-      :recipes="customer.recipes.filter((recipe) => recipe.recipe_id === runDialog?.recipeId)"
-      :files="customer.recipes.find((recipe) => recipe.recipe_id === runDialog?.recipeId)?.files ?? []"
-      :initial-recipe-id="runDialog.recipeId"
+      :recipe="runRecipe"
       @close="runDialog = null"
       @done="load"
     />

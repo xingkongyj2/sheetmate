@@ -127,6 +127,10 @@ def _verify_sheet(path: Path, workbook: openpyxl.Workbook, plan: Any, title: str
     if len(rows) != len(frame) and len(rows) + len(footers) == len(frame):
         # 计划末尾的“合计”行写出后，读取层会把它归为页脚而不是记录；它仍是计划里的一行，按位置一起核对。
         rows += footers
+    elif plan.edit and plan.template is not None and len(rows) > len(frame):
+        # 沿用原表时保留的页脚，标签所在的列可能已不在结果里（如「合计」在被去掉的序号列），读取层就认不出它是页脚；
+        # 它排在计划行之后：计划行仍按位置逐格核对，多出的尾行是原页脚，不算数据行。
+        rows = rows[:len(frame)]
     elif len(sheet.df) != len(frame):
         return _check(rule, description, "fail", f"「{title}」应有 {len(frame)} 行数据，实际读回 {len(sheet.df)} 行", actual=len(sheet.df))
     if len(rows) != len(frame) or len(columns) != len(expected_columns):
