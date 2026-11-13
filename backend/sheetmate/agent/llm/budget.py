@@ -120,11 +120,11 @@ class RequestBudget:
             raise BudgetExceeded("本次任务已达到总时长上限，已停止后续模型调用。", "task_timeout")
         return remaining
 
-    def reserve(self, call_id: str, kwargs: dict[str, Any]) -> None:
+    def reserve(self, call_id: str, kwargs: dict[str, Any], output_estimate: int | None = None) -> None:
         self.remaining_seconds()
         chars, prompt = request_size(kwargs)
         policy = self.policy
-        output = int(kwargs.get("max_tokens") or 8192)
+        output = int(output_estimate if output_estimate is not None else (kwargs.get("max_tokens") or 8192))
         pending_prompt = sum(item[0] for item in self.active.values())
         pending_total = sum(sum(item) for item in self.active.values())
         if policy.budget_enabled:

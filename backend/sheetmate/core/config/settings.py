@@ -37,6 +37,9 @@ QWEN_DEFAULT_MODEL = "qwen-plus"
 QWEN_MODELS = (QWEN_DEFAULT_MODEL, "qwen-max", "deepseek-v3")
 QWEN_THINKING_MODELS = (QWEN_DEFAULT_MODEL, "qwen-flash", "qwen3.8-max", "qwen3.8-flash")
 LLM_PROVIDER_PRIORITY = ("deepseek", "qwen", "custom")
+# 未开启「限制输出 Token 上限」时，每次请求先尝试的输出上限（与设置页允许的最大值一致）；
+# 模型支持的上限更小时，请求会自动降到模型报错里给出的真实上限。
+AUTO_MAX_TOKENS = 131072
 
 
 def is_deepseek_url(base_url: str) -> bool:
@@ -161,7 +164,7 @@ class LLMSettings:
     model: str
     temperature: float = 0.1
     timeout: float = 1800.0
-    # 输出 Token 上限只在 max_tokens_enabled 为 True 时才生效；默认关闭，请求不带 max_tokens，不额外限制。
+    # 输出 Token 上限只在 max_tokens_enabled 为 True 时才固定使用；默认关闭，请求自动尝试模型能接受的最大值。
     max_tokens: int = 32768
     max_tokens_enabled: bool = False
     extra_body: dict = field(default_factory=dict)
@@ -173,7 +176,7 @@ class LLMSettings:
 
     @property
     def output_limit(self) -> int:
-        """实际发给模型的输出上限；0 表示没有开启，不限制。"""
+        """用户主动开启并设置的输出上限；0 表示没有开启（此时请求按 AUTO_MAX_TOKENS 尝试最大值）。"""
         return self.max_tokens if self.max_tokens_enabled and self.max_tokens > 0 else 0
 
     @property

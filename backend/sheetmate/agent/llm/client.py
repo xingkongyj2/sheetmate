@@ -33,7 +33,7 @@ from sheetmate.agent.llm.cache import reported_cache_usage, request_prefix_profi
 from sheetmate.agent.llm.structured import StructuredOutputError, complete_structured, validate_payload
 from sheetmate.agent.llm.protocol import LanguageModel
 from sheetmate.agent.framework.shared.watchdog import Phase, WatchdogTimeout, phase, wait_owned
-from sheetmate.core.config.settings import LLMSettings, get_llm_settings, is_deepseek_url
+from sheetmate.core.config.settings import AUTO_MAX_TOKENS, LLMSettings, get_llm_settings, is_deepseek_url
 from sheetmate.core.observability.conversation_log import record_event
 
 
@@ -41,6 +41,32 @@ log = logging.getLogger(__name__)
 _LLM_STAGE: contextvars.ContextVar[str | None] = contextvars.ContextVar("sheetmate_llm_stage", default=None)
 # 未开启输出上限时，辅助结构化调用遇到截断后扩大额度的上限。
 _UNCAPPED_GROWTH_LIMIT = 32768
+# 未开启输出上限时，预算和上下文预留按这个常见输出量估算，不按 AUTO_MAX_TOKENS 占满。
+_AUTO_RESERVE_TOKENS = 8192
+# 按（接口地址, 模型）记住服务端实际接受的输出上限；0 表示该模型不接受或无需传 max_tokens。
+_ACCEPTED_MAX_TOKENS: dict[tuple[str, str], int] = {}
+_MAX_TOKENS_ERROR = re.compile(r"max_(?:completion_)?tokens|output tokens|completion tokens|maximum context|context length|上下文", re.I)
+_MAX_TOKENS_PARAM = re.compile(r"max_(?:completion_)?tokens", re.I)
+_CONTEXT_BOUND = re.compile(r"context|input|prompt|上下文|输入", re.I)
+
+
+def lower_max_tokens(kwargs: dict[str, Any], message: str, key: tuple[str, str]) -> bool:
+    """服务端因 max_tokens 过大返回 400 时，按报错里的真实上限降级；解析不出就不再传。
+
+    返回是否改动了请求。只缓存明确针对 max_tokens 参数、且与本次输入长度无关的结论。"""
+    current = int(kwargs.get("max_tokens") or 0)
+    if current <= 0 or not _MAX_TOKENS_ERROR.search(message):
+        return False
+    numbers = [int(item.replace(",", "")) for item in re.findall(r"\d[\d,]*", message)]
+    candidates = [number for number in numbers if 256 <= number < current]
+    accepted = max(candidates) if candidates else 0
+    if accepted:
+        kwargs["max_tokens"] = accepted
+    else:
+        kwargs.pop("max_tokens", None)
+    if _MAX_TOKENS_PARAM.search(message) and (not accepted or not _CONTEXT_BOUND.search(message)):
+        _ACCEPTED_MAX_TOKENS[key] = accepted
+    return True
 _AUXILIARY_JSON_STAGES = frozenset({
     "request_intent", "recipe_persistence", "title", "memory_extraction", "history_compaction", "customer_summary",
     "execution_plan", "plan_review", "plan_repair", "step_verdict", "answer_audit", "task_completion", "final_delivery",
@@ -336,6 +362,23 @@ class LLMClient:
         self.usage_calls: list[dict[str, Any]] = []
         self._cache_prefixes: dict[tuple[str, str], dict[str, Any]] = {}
 
+    def _accepted_key(self) -> tuple[str, str]:
+        return (self.cfg.base_url.rstrip("/"), self.model)
+
+    def _auto_output_tokens(self) -> int:
+        """未开启上限时请求的输出 Token：先试最大值，服务端拒绝后用它记住的真实上限（0 表示不传）。"""
+        return _ACCEPTED_MAX_TOKENS.get(self._accepted_key(), AUTO_MAX_TOKENS)
+
+    def _default_output_tokens(self) -> int:
+        return self.cfg.output_limit or self._auto_output_tokens()
+
+    def _output_reserve(self, kwargs: dict[str, Any]) -> int:
+        """预算与上下文预留使用的输出量：自动最大值只按常见输出量预留，避免占满窗口和任务预算。"""
+        requested = int(kwargs.get("max_tokens") or _AUTO_RESERVE_TOKENS)
+        if not self.cfg.output_limit and requested == self._auto_output_tokens():
+            return min(requested, _AUTO_RESERVE_TOKENS)
+        return requested
+
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
         context_metrics = extra.pop("_context_metrics", None)
         auxiliary = extra.pop("_auxiliary", False)
@@ -359,8 +402,9 @@ class LLMClient:
             "messages": messages,
             "temperature": self.cfg.temperature if temperature is None else temperature,
         }
-        if self.cfg.output_limit > 0:  # 未开启输出上限时不传 max_tokens，由服务端决定
-            kwargs["max_tokens"] = self.cfg.output_limit
+        output_tokens = self._default_output_tokens()
+        if output_tokens > 0:
+            kwargs["max_tokens"] = output_tokens
         # An explicitly selected dialect controls both the primary switch and
         # auxiliary calls. Unknown/disabled protocols leave custom body fields
         # untouched; field names alone must never override explicit `none`.
@@ -399,7 +443,7 @@ class LLMClient:
         # the input target. These are soft targets; inability to shrink does
         # not change output settings, execution limits or request admission.
         context_window = policy.context_window_tokens
-        output_reserve = int(kwargs.get("max_tokens") or 8192) if context_window else 0
+        output_reserve = self._output_reserve(kwargs) if context_window else 0
         safety_reserve = math.ceil(context_window * 0.1)
         projection_tokens = max(1, context_window - output_reserve - safety_reserve) if context_window else 0
         before_chars, before_tokens = request_size(kwargs) if context_metrics is not None else (0, 0)
@@ -456,9 +500,12 @@ class LLMClient:
             raise LLMTimeout(message, code=exc.code) from exc
 
     async def _create(self, kwargs: dict[str, Any], call_id: str, stage: str) -> Any:
+        # 只有「自动最大值」才允许根据服务端报错降级；调用方明确指定的值和用户开启的上限原样使用。
+        auto_sent = (not self.cfg.output_limit and bool(kwargs.get("max_tokens"))
+                     and kwargs["max_tokens"] == self._auto_output_tokens())
         for attempt in range(self.cfg.runtime_policy.sdk_retries + 1):
             try:
-                self.budget.reserve(call_id, kwargs)
+                self.budget.reserve(call_id, kwargs, self._output_reserve(kwargs))
             except BudgetExceeded as exc:
                 cls = LLMTimeout if exc.code == "task_timeout" else LLMError
                 raise cls(str(exc), code=exc.code) from exc
@@ -467,6 +514,11 @@ class LLMClient:
                 return await self._within_deadline(self.client.chat.completions.create(**kwargs))
             except BaseException as exc:
                 self.budget.finish(call_id, None)
+                if (auto_sent and isinstance(exc, openai.APIStatusError) and exc.status_code in {400, 422}
+                        and lower_max_tokens(kwargs, str(exc.message), self._accepted_key())):
+                    log.info("模型 %s 不接受 max_tokens=%s，已改为 %s 重试", self.model, AUTO_MAX_TOKENS,
+                             kwargs.get("max_tokens", "不传"))
+                    return await self._create(kwargs, call_id, stage)
                 retryable = (isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError))
                              or isinstance(exc, openai.APIStatusError) and
                              (exc.status_code in {408, 409, 429} or exc.status_code >= 500))
@@ -635,8 +687,11 @@ class LLMClient:
                             finish_reason = reason
                             if reason == "length":
                                 limit = self.cfg.output_limit
+                                auto = self._auto_output_tokens()
                                 hint = (f"当前设置的输出 Token 上限为 {limit}，可在设置中调大后重试。" if limit else
-                                        "当前未设置输出上限，长度由模型服务自身决定；可在设置中开启并设置更大的输出 Token 上限后重试。")
+                                        f"当前未设置输出上限，已按模型可接受的最大值（{auto}）请求，已到该模型的输出上限；可尝试精简任务或分步处理。"
+                                        if auto else
+                                        "当前未设置输出上限，且该模型不接受输出上限参数，长度由模型服务自身决定；可尝试精简任务或分步处理。")
                                 raise LLMError(f"模型输出达到长度上限，本轮响应不完整。{hint}",
                                                code="output_limit", finish_reason=reason)
                             if reason == "content_filter":

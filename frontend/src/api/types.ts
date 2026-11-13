@@ -590,7 +590,7 @@ export interface LLMAdvancedConfig {
   timeout: number
   /** 输出 Token 上限，仅在 max_tokens_enabled 为 true 时生效 */
   max_tokens: number
-  /** 关闭时请求不带输出上限，不额外限制 */
+  /** 关闭时自动按模型可接受的最大输出请求，不额外限制 */
   max_tokens_enabled: boolean
   capabilities: LLMCapabilities
   runtime_policy: LLMRuntimePolicy

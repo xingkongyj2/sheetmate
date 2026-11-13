@@ -413,7 +413,7 @@ async function test(provider: LLMProviderConfig) {
                     <input v-model.number="drafts[provider.id]!.max_tokens" type="number" min="1" max="131072" step="1"
                       class="field" :disabled="anyBusy || !drafts[provider.id]!.max_tokens_enabled"
                       aria-label="输出 Token 上限" @input="resetTestResult(provider.id)" />
-                    <span class="block text-xs leading-relaxed text-mute">默认关闭：请求不带输出上限，长度由模型服务决定。开启后单次模型回复最多输出这么多 Token（1–131072）；回复被截断时可调大。</span>
+                    <span class="block text-xs leading-relaxed text-mute">默认关闭：自动按模型能接受的最大输出请求（先试 131072，模型不支持时自动降到它的上限）。开启后固定为下面的值，单次模型回复最多输出这么多 Token（1–131072）。</span>
                   </div>
                   <label class="block">
                     <span class="mb-1.5 block text-xs font-medium text-mute">结构输出纠错次数</span>
