@@ -201,7 +201,16 @@ class Recipe(BaseModel):
         # model_copy(update=...) 和断点重跑允许直接改参数，保存前同样转换为不可变脚本引用。
         for step in self.steps:
             if step.kind == "python":
-                step.params = script_params(step.params, title=step.name[:20])
+                try:
+                    step.params = script_params(step.params, title=step.name[:20])
+                except (OSError, ValueError):
+                    if "code" not in step.params:
+                        # 只引用脚本文件、文件已经不在了：没有可转换的内容，保留这条引用，
+                        # 让流程仍能打开和列出；check_recipe / 查看器会指出「无法读取 Python 脚本」。
+                        continue
+                    # 带着完整代码、只是旧的脚本 ID 失效了：丢掉失效的 ID，按这份代码重新保存。
+                    step.params = script_params({k: v for k, v in step.params.items() if k != "script_id"},
+                                                title=step.name[:20])
         return self.model_dump(mode="json")
 
     def flow(self) -> dict[str, Any]:

@@ -15,7 +15,10 @@ from sqlalchemy import select
 from sheetmate.core.config.settings import settings
 from sheetmate.db.models import Message, RecipeRecord, Run
 
-_SCRIPT_ID = re.compile(r"scr_[0-9a-f]{32}\Z")
+_SCRIPT_ID = re.compile(r"scr_[0-9a-f]{32}\Z")  # 校验一个完整的脚本 ID（fullmatch 用）
+# 在一大段 JSON 文本里找脚本 ID 用这个：不能带 \Z 结尾锚点，否则永远一个也找不到，
+# 「被引用的脚本」集合就是空的，删对话时会把流程、消息、运行记录仍在用的脚本一起清掉。
+_SCRIPT_ID_IN_TEXT = re.compile(r"scr_[0-9a-f]{32}")
 
 
 def queue_unreferenced_scope_scripts(db: Any, *, customer_ids: set[str] | None = None,
@@ -28,14 +31,14 @@ def queue_unreferenced_scope_scripts(db: Any, *, customer_ids: set[str] | None =
 
     used: set[str] = set()
     for message in db.scalars(select(Message)):
-        for script_id in _SCRIPT_ID.findall(json.dumps(message.events or {}, ensure_ascii=False)):
+        for script_id in _SCRIPT_ID_IN_TEXT.findall(json.dumps(message.events or {}, ensure_ascii=False)):
             used.add(script_id)
     for run in db.scalars(select(Run)):
         for value in (run.steps, run.validation):
-            for script_id in _SCRIPT_ID.findall(json.dumps(value or {}, ensure_ascii=False)):
+            for script_id in _SCRIPT_ID_IN_TEXT.findall(json.dumps(value or {}, ensure_ascii=False)):
                 used.add(script_id)
     for recipe in db.scalars(select(RecipeRecord)):
-        for script_id in _SCRIPT_ID.findall(json.dumps(recipe.body or {}, ensure_ascii=False)):
+        for script_id in _SCRIPT_ID_IN_TEXT.findall(json.dumps(recipe.body or {}, ensure_ascii=False)):
             used.add(script_id)
 
     folder = settings.data_dir / "scripts"
