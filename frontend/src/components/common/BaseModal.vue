@@ -3,7 +3,8 @@
 import { X } from '@lucide/vue'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
-withDefaults(defineProps<{ title?: string; width?: string }>(), { title: '', width: 'max-w-3xl' })
+// elevated：盖在全屏流程图（z-index 4000）之上；仍低于文件预览（6000），从弹窗里能继续打开预览
+withDefaults(defineProps<{ title?: string; width?: string; elevated?: boolean }>(), { title: '', width: 'max-w-3xl', elevated: false })
 const emit = defineEmits<{ close: [] }>()
 const dialog = ref<HTMLElement | null>(null)
 
@@ -17,7 +18,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 <template>
   <Teleport to="body">
-    <div ref="dialog" class="modal modal-open" role="dialog" aria-modal="true">
+    <div ref="dialog" class="modal modal-open" :style="elevated ? { zIndex: 5000 } : undefined" role="dialog" aria-modal="true">
       <div class="modal-box w-full animate-pop rounded-3xl border border-line p-0 shadow-2xl" :class="width">
         <div class="flex items-center justify-between border-b border-line px-6 py-4">
           <div class="min-w-0">

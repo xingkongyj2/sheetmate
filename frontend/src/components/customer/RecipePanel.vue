@@ -37,8 +37,8 @@ const states = computed(() => inspectorStates([], latestRun.value?.steps ?? []))
       </div>
       <div class="recipe-panel-actions ml-auto flex max-w-full shrink-0 flex-wrap items-center gap-2">
         <button type="button" class="btn-line size-8 justify-center p-0" title="用新文件执行" aria-label="用新文件执行" @click="emit('run', recipe.recipe_id)"><Play class="size-4" /></button>
-        <button type="button" class="btn-line size-8 justify-center p-0" title="流程详情" aria-label="流程详情" aria-haspopup="dialog" @click="showDetail = true"><SlidersHorizontal class="size-4" /></button>
         <button type="button" class="btn-line size-8 justify-center p-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="flowView?.openFullscreen()"><Maximize2 class="size-4" /></button>
+        <button type="button" class="btn-line size-8 justify-center p-0" title="流程详情" aria-label="流程详情" aria-haspopup="dialog" @click="showDetail = true"><SlidersHorizontal class="size-4" /></button>
       </div>
     </header>
 

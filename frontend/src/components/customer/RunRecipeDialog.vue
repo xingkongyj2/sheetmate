@@ -7,7 +7,7 @@
 import { Check, ChevronDown, Download, Eye, FileSpreadsheet, LoaderCircle, Play, TriangleAlert, Upload, X } from '@lucide/vue'
 import { computed, defineAsyncComponent, reactive, ref } from 'vue'
 
-import { customerApi, fileApi, recipeApi } from '@/api'
+import { conversationApi, customerApi, fileApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerWorkflow, FileInfo } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -20,7 +20,14 @@ import { useToast } from '@/composables/useToast'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
-const props = defineProps<{ customerId: string; recipe: CustomerWorkflow }>()
+// customerId / conversationId：新上传的文件放到哪里（客户页传客户；对话里的流程传会话；都没有就只能选已有文件）。
+// recipe 只用到这几项，客户页的 CustomerWorkflow 和全屏流程图里现取的流程都能直接传进来。
+const props = defineProps<{
+  customerId?: string | null
+  conversationId?: string | null
+  recipe: Pick<CustomerWorkflow, 'recipe_id' | 'name' | 'version' | 'flow' | 'recipe' | 'files'>
+  elevated?: boolean
+}>()
 const emit = defineEmits<{ close: []; done: [] }>()
 const toast = useToast()
 
@@ -35,6 +42,7 @@ const sampleOf = (input: RunInput) => sampleFile(props.recipe.recipe, input, poo
 
 const stage = ref<'pick' | 'run'>('pick')
 const uploading = ref<string | null>(null)
+const canUpload = computed(() => !!(props.customerId || props.conversationId))
 const allowRepair = true  // 出错时让 AI 自动修复，始终开启
 const progress = reactive<RecipeProgress>(newProgress('replay'))
 const outputFiles = ref<FileArtifact[]>([])
@@ -78,13 +86,15 @@ function pick(input: RunInput, e: Event) {
 function drop(input: RunInput, e: DragEvent) {
   dragging.value = null
   const file = e.dataTransfer?.files?.[0]
-  if (file && uploading.value === null) void upload(input, file)
+  if (file && canUpload.value && uploading.value === null) void upload(input, file)
 }
 
 async function upload(input: RunInput, file: File) {
   uploading.value = input.alias
   try {
-    const info = await customerApi.uploadFile(props.customerId, file, 'input', props.recipe.recipe_id)
+    const info = props.customerId
+      ? await customerApi.uploadFile(props.customerId, file, 'input', props.recipe.recipe_id)
+      : (await conversationApi.upload(props.conversationId!, file, 'input')).file
     pool.value.unshift(info)
     select(input, info)
   } catch (err) {
@@ -137,7 +147,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
 </script>
 
 <template>
-  <BaseModal :title="`执行「${recipe.name}」`" width="max-w-3xl" @close="emit('close')">
+  <BaseModal :title="`执行「${recipe.name}」`" width="max-w-3xl" :elevated="elevated" @close="emit('close')">
     <!-- 1. 每个输入选一个文件 -->
     <div v-if="stage === 'pick'" class="space-y-3">
       <div v-for="input in inputs" :key="input.alias">
@@ -153,7 +163,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
             <button type="button" class="icon-btn shrink-0" title="清除选择" :aria-label="`清除 ${input.alias} 的选择`" @click="clear(input)"><X class="size-4" /></button>
           </template>
           <p v-else class="min-w-0 flex-1 text-sm text-mute">请上传新的文件：<span class="break-all font-medium text-ink">{{ expectedName(input) }}</span></p>
-          <label class="btn-line h-8 shrink-0 cursor-pointer gap-1.5 px-3 py-0 text-xs">
+          <label v-if="canUpload" class="btn-line h-8 shrink-0 cursor-pointer gap-1.5 px-3 py-0 text-xs">
             <LoaderCircle v-if="uploading === input.alias" class="size-3.5 animate-spin" /><Upload v-else class="size-3.5" />{{ fileOf(input.alias) ? '重新上传' : '上传' }}
             <input type="file" class="hidden" accept=".xlsx,.xlsm,.xls,.csv" :disabled="uploading !== null" @change="pick(input, $event)" />
           </label>
@@ -183,7 +193,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
         </div>
       </div>
       <RecipeFlow :flow="flow" :states="progress.steps" :context="{
-        title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId,
+        title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId, conversationId,
         recipe: recipe.recipe, files: pool, resultFiles: outputFiles,
         runId: progress.runId, running, failed: progress.status === 'failed' || !!progress.failed,
       }" @changed="emit('done')" />
@@ -212,7 +222,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
       </template>
     </template>
 
-    <BaseModal v-if="pickerInput" title="选择已上传的文件" width="max-w-md" @close="menuFor = null">
+    <BaseModal v-if="pickerInput" title="选择已上传的文件" width="max-w-md" :elevated="elevated" @close="menuFor = null">
       <ul class="-mx-2 space-y-0.5" role="listbox" aria-label="已上传的文件">
         <li v-for="file in uploaded(pickerInput)" :key="file.file_id" role="option" :aria-selected="file.file_id === choice[pickerInput.alias].fileId">
           <button type="button" class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper focus-visible:bg-paper focus-visible:outline-none" @click="select(pickerInput, file)">
