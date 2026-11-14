@@ -5,12 +5,20 @@ import { computed } from 'vue'
 import type { FileInfo, PlanStep } from '@/api/types'
 import type { UiMessage } from '@/composables/chatModel'
 import { isImageFile } from '@/composables/attachmentFiles'
+import { renderMarkdown } from '@/composables/markdown'
+import { fillChips, looksLikeMarkdown, markdownWithChips } from '@/composables/messageMarkdown'
 import { parseTableReferences } from '@/composables/tableReferences'
 import { recipeEditLabel, recipeEditReruns, storedRecipeEdit } from '@/composables/recipeEditing'
 
 const props = defineProps<{ message: UiMessage; files: FileInfo[] }>()
 const emit = defineEmits<{ preview: [file: FileInfo] }>()
 const content = computed(() => parseTableReferences(props.message.content))
+// 带标题、列表等写法的消息按 Markdown 渲染（比如导入流程包时写进输入框的处理逻辑）；普通的一两句话保持原样。
+const markdownHtml = computed(() => {
+  if (!looksLikeMarkdown(props.message.content)) return ''
+  const { source, chips } = markdownWithChips(props.message.content)
+  return fillChips(renderMarkdown(source), chips)
+})
 const recipeEdit = computed(() => storedRecipeEdit(props.message.meta.recipe_edit))
 const adopted = computed(() => {
   const steering = props.message.meta.steering
@@ -35,7 +43,8 @@ function fileDetails(file: FileInfo) {
 <template>
   <div class="flex justify-end">
     <div class="flex max-w-[85%] min-w-0 flex-col items-end gap-2">
-      <div class="max-w-full whitespace-pre-wrap break-words rounded-[20px] rounded-br-md bg-paper px-4 py-2.5 text-[15px] leading-relaxed [overflow-wrap:anywhere]"><template v-for="(segment, index) in content" :key="index"><span v-if="segment.type === 'table'" class="mx-0.5 rounded-md bg-[#e0ece5] px-1.5 py-0.5 text-[#3f6152]" :title="`${segment.reference.filename} / ${segment.reference.sheet}`">{{ segment.reference.sheet }}</span><span v-else-if="segment.type === 'file'" class="mx-0.5 rounded-md bg-[#e4eaf2] px-1.5 py-0.5 text-[#42566f]" :title="segment.reference.filename">{{ segment.reference.filename }}</span><template v-else>{{ segment.text }}</template></template></div>
+      <div v-if="markdownHtml" class="prose-sm max-w-full break-words rounded-[20px] rounded-br-md bg-paper px-4 py-2.5 [overflow-wrap:anywhere]" v-html="markdownHtml" />
+      <div v-else class="max-w-full whitespace-pre-wrap break-words rounded-[20px] rounded-br-md bg-paper px-4 py-2.5 text-[15px] leading-relaxed [overflow-wrap:anywhere]"><template v-for="(segment, index) in content" :key="index"><span v-if="segment.type === 'table'" class="mx-0.5 rounded-md bg-[#e0ece5] px-1.5 py-0.5 text-[#3f6152]" :title="`${segment.reference.filename} / ${segment.reference.sheet}`">{{ segment.reference.sheet }}</span><span v-else-if="segment.type === 'file'" class="mx-0.5 rounded-md bg-[#e4eaf2] px-1.5 py-0.5 text-[#42566f]" :title="segment.reference.filename">{{ segment.reference.filename }}</span><template v-else>{{ segment.text }}</template></template></div>
       <p v-if="adopted" class="text-[11px] text-success">追加要求 · 已采纳</p>
       <p v-if="recipeEdit" class="flex max-w-full items-center gap-1.5 break-words text-[11px] text-[#6265dc]"><MessageSquare class="size-3 shrink-0" />{{ recipeEditLabel(recipeEdit) }} · v{{ recipeEdit.version }}<template v-if="recipeEditReruns(recipeEdit)"> · 修改后重跑</template></p>
       <div v-if="attachments.length" class="flex w-[320px] max-w-full flex-col gap-2" aria-label="消息附件">

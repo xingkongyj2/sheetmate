@@ -116,7 +116,7 @@ export interface FileArtifact {
   file_id: string
   toolCallId?: string
   filename: string
-  kind?: 'input' | 'expected' | 'output' | 'doc'
+  kind?: 'input' | 'expected' | 'output'
   kind_label?: string
   download_url: string
   sheets?: { sheet: string; rows: number }[]

@@ -13,7 +13,6 @@ export function fileKindLabel(kind: unknown): string {
     case 'input': return '输入文件'
     case 'expected': return '期望结果'
     case 'output': return '输出文件'
-    case 'doc': return '参考文档'
     default: return ''
   }
 }

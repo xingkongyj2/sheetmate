@@ -13,7 +13,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 import openpyxl
-from sqlalchemy import event, func, or_, select
+from sqlalchemy import and_, event, func, or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.core.config.settings import settings
@@ -92,7 +92,7 @@ def defer_after_commit(db: Session, callback) -> None:
     """Run non-transactional storage cleanup only after the owning DB transaction commits."""
     db.info.setdefault("after_commit_cleanup", []).append(callback)
 
-KIND_LABELS = {"input": "输入文件", "expected": "期望结果", "output": "生成结果", "doc": "处理说明"}
+KIND_LABELS = {"input": "输入文件", "expected": "期望结果", "output": "生成结果"}
 _UNSAFE = re.compile(r"[^\w一-鿿.\-()（） ]+")
 _COPY_SUFFIX = re.compile(r"^(.*?)[（(]([1-9]\d*)[）)]$")
 
@@ -109,11 +109,9 @@ def current_file_condition():
     return func.coalesce(FileRecord.profile["delivery_status"].as_string(), "") != "superseded"
 
 
-def unique_filename(db: Session, filename: str, *, customer_id: str | None = None,
-                    conversation_id: str | None = None, user_id: int | None = None,
-                    exclude_file_id: str | None = None) -> str:
-    """当前可见范围内重名时，在扩展名前依次追加（1）、（2），不覆盖原文件。"""
-    name = safe_filename(filename)
+def _visible_condition(db: Session, *, customer_id: str | None, conversation_id: str | None, user_id: int | None,
+                       exclude_file_id: str | None = None):
+    """当前可见范围内文件的查询条件（命名查重用）。"""
     customer_ids = {customer_id} - {None}
     conversation_ids = {conversation_id} - {None}
     if exclude_file_id:
@@ -137,12 +135,24 @@ def unique_filename(db: Session, filename: str, *, customer_id: str | None = Non
         conditions.extend([FileRecord.conversation_id.in_(conversation_ids), FileRecord.id.in_(linked)])
     if not conditions:
         conditions.append(FileRecord.created_by == user_id)
-    query = select(FileRecord.filename).where(or_(*conditions), current_file_condition())
-    if exclude_file_id:
-        query = query.where(FileRecord.id != exclude_file_id)
+    condition = and_(or_(*conditions), current_file_condition())
+    return and_(condition, FileRecord.id != exclude_file_id) if exclude_file_id else condition
+
+
+def unique_filename(db: Session, filename: str, *, customer_id: str | None = None,
+                    conversation_id: str | None = None, user_id: int | None = None,
+                    exclude_file_id: str | None = None, only_kind: str | None = None) -> str:
+    """当前可见范围内重名时，在扩展名前依次追加（1）、（2），不覆盖原文件。
+
+    only_kind 给出时只和这一类文件比较：交付文件只看有没有重名的交付文件，和输入文件同名不算重名。"""
+    name = safe_filename(filename)
+    condition = _visible_condition(db, customer_id=customer_id, conversation_id=conversation_id, user_id=user_id,
+                                   exclude_file_id=exclude_file_id)
     # 会话在同一个事务里可登记多个结果，先刷入前面的记录，后面的文件名才能正确顺延。
     db.flush()
-    occupied = {item.casefold() for item in db.scalars(query)}
+    if only_kind:
+        condition = and_(condition, FileRecord.kind == only_kind)
+    occupied = {item.casefold() for item in db.scalars(select(FileRecord.filename).where(condition))}
     if name.casefold() not in occupied:
         return name
     suffix = Path(name).suffix
@@ -209,29 +219,6 @@ def save_upload(
     return record
 
 
-def save_doc(db: Session, *, text: str, filename: str, user: User, conversation_id: str) -> FileRecord:
-    """把一段文字存成会话里的 md 文档（类型「处理说明」），比如导入流程包时的处理逻辑。
-
-    它只属于这个会话，不进客户资料库：它只是给这次对话里的 AI 读的，放进客户文件页会被当成输入文件列出来。
-    它不是表格，不走表格解析；AI 通过提示里的文件列表读到它的内容。"""
-    name = unique_filename(db, safe_filename(filename), customer_id=None, conversation_id=conversation_id, user_id=user.id)
-    file_id = f"f_{uuid.uuid4().hex[:10]}"
-    folder = settings.uploads_dir / owner_dir(None, conversation_id)
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{file_id}_{name}"
-    data = text.encode("utf-8")
-    path.write_bytes(data)
-    record = FileRecord(
-        id=file_id, customer_id=None, conversation_id=conversation_id, filename=name, stored_path=str(path),
-        size=len(data), kind="doc", profile={"doc": True, "media_type": "text/markdown", "original_filename": filename},
-        created_by=user.id,
-    )
-    db.add(record)
-    db.flush()
-    retain_for_conversation(db, record, conversation_id)
-    return record
-
-
 def register_output(db: Session, *, path: Path, filename: str, customer_id: str | None, conversation_id: str | None,
                     run_id: str | None, user_id: int | None, delivery_status: str = "final",
                     sheets: list[SheetData] | None = None) -> FileRecord:
@@ -243,7 +230,9 @@ def register_output(db: Session, *, path: Path, filename: str, customer_id: str 
     profile["original_filename"] = filename
     profile["delivery_status"] = delivery_status
     profile["intermediate"] = delivery_status == "intermediate"
-    name = unique_filename(db, filename, customer_id=customer_id, conversation_id=conversation_id, user_id=user_id)
+    # 交付文件只在交付文件之间查重：和输入同名（比如在空白模板副本上填好的结果）不加序号，同一个任务再跑一次才加。
+    name = unique_filename(db, filename, customer_id=customer_id, conversation_id=conversation_id, user_id=user_id,
+                           only_kind="output")
     record = FileRecord(
         id=f"f_{uuid.uuid4().hex[:10]}", customer_id=customer_id, conversation_id=conversation_id, run_id=run_id,
         filename=name, stored_path=str(path), size=path.stat().st_size, kind="output",

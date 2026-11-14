@@ -134,7 +134,7 @@ const referenceFiles = computed(() => messageFiles.value.map((file, index) => ({
 const fileReferences = computed<FileReference[]>(() => referenceFiles.value.map((file) => ({
   filename: file.filename,
   sourceId: file.file_id,
-  kind: file.kind === 'doc' ? undefined : file.kind,
+  kind: file.kind,
 })))
 const referencesLoading = computed(() => loading.value || attachments.value.some((attachment) => attachment.status === 'uploading'))
 const referencesError = computed(() => attachments.value.some((attachment) => attachment.status === 'error')
@@ -148,7 +148,7 @@ const tableReferences = computed<TableReference[]>(() => {
       const reference: TableReference = {
         filename: file.filename,
         sourceId: file.file_id,
-        kind: file.kind === 'doc' ? undefined : file.kind,
+        kind: file.kind,
         sheet: sheet.sheet,
         tableName: table?.name,
       }

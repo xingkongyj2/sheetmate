@@ -745,13 +745,13 @@ class AgentExecutor:
             iteration += 1
             limit_code = ("no_progress" if no_progress else "recovery_exhausted" if recovery.exhausted else
                           "tool_budget_exhausted" if budget.exhausted(self.max_tool_calls, ctx.branch_id) else "max_iterations") if final_round else ""
-            limit_summary = {"no_progress": "对相同版本输入的重复读取未带来新进展，任务尚未确认全部完成。",
+            limit_summary = {"no_progress": "对相同版本输入的重复读取或重复执行未带来新进展，任务尚未确认全部完成。",
                              "recovery_exhausted": "本轮恢复次数已用尽，任务尚未确认全部完成。",
                              "tool_budget_exhausted": "本轮操作次数已用尽，任务尚未确认全部完成。",
                              "max_iterations": "本轮执行轮数已达到上限，任务尚未确认全部完成。"}.get(limit_code, "")
             if final_round:
                 if no_progress:
-                    msgs.append({"role": "user", "content": f"对相同版本输入已连续{_MAX_IDENTICAL_OBSERVATIONS}次重复读取已有结果，本轮停止重复操作。0 行是有效查询结果，不需要反复重查。请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。"})
+                    msgs.append({"role": "user", "content": f"对相同版本输入已连续{_MAX_IDENTICAL_OBSERVATIONS}次重复读取或重复执行相同操作，本轮停止重复操作。0 行是有效查询结果，不需要反复重查；相同代码重复执行不会有新结果。请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。"})
                 if budget_exhausted:
                     msgs.append({"role": "user", "content": RECOVERY_BUDGET_MESSAGE})
                 msgs.append({"role": "user", "content": FINAL_ROUND_MESSAGE})
@@ -1363,6 +1363,9 @@ class AgentExecutor:
                     no_progress = read_progress.observe(observation)
                 elif repeated_read:
                     no_progress = read_progress.observe(previous_read[1].get("observation_key"))
+                elif repeated_script and script_key:
+                    # 原样重发同一段脚本：结果直接复用，没有任何新信息，连续几次就该收尾。
+                    no_progress = read_progress.observe("script:" + script_key)
                 explored += name in _EXPLORE_TOOLS
                 built = built or name in _RECIPE_TOOLS
                 if name == _SCRIPT_TOOL and tool is not None:

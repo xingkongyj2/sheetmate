@@ -45,6 +45,39 @@ class _Attempt:
         return (executed, rank * 2 + valid, (self.verification or {}).get("overall_match_rate", 1.0))
 
 
+def drop_defective_rules(recipe: Recipe, report: dict[str, Any]) -> list[str]:
+    """去掉自己写错、根本没法执行的校验规则（比如对账来源表不存在），返回被去掉的规则描述。
+
+    这类规则没有校验出任何数据问题，却会让整次运行判为失败；模型反复改也常常改不对，
+    所以直接去掉并记在流程里，不再把它当作需要模型修正的失败。"""
+    checks = (report.get("validation") or {}).get("checks", [])
+    ids = {check["rule_id"] for check in checks if check.get("defective") and check.get("rule_id")}
+    dropped = [rule for rule in recipe.validation_rules if rule.id in ids]
+    if not dropped:
+        return []
+    recipe.validation_rules = [rule for rule in recipe.validation_rules if rule.id not in ids]
+    notes = recipe.metadata.setdefault("dropped_rules", [])
+    descriptions = [rule.description or rule.type for rule in dropped]
+    notes.extend(descriptions)
+    return descriptions
+
+
+def _only_defective_failures(report: dict[str, Any]) -> bool:
+    checks = (report.get("validation") or {}).get("checks", [])
+    failing = [c for c in checks if c["status"] in {"fail", "not_evaluated"}]
+    return bool(failing) and all(c.get("defective") for c in failing)
+
+
+STALL_ROUNDS = 4  # 连续这么多轮没有比此前最好的一轮更好，就不再往下修了
+
+
+def _stalled(attempts: list[_Attempt], window: int = STALL_ROUNDS) -> bool:
+    """最近几轮都没能超过此前最好的一轮：再修下去只是白耗时间（每轮要重跑一遍流程、再调用一次模型）。"""
+    if len(attempts) <= window:
+        return False
+    return max(a.score() for a in attempts[-window:]) <= max(a.score() for a in attempts[:-window])
+
+
 @dataclass
 class RunHandle:
     """一次运行的资源：运行 id、独立的 DuckDB 工作区、输出文件路径。"""
@@ -122,6 +155,15 @@ class RecipePipeline:
             stage = report.get("failed_stage")
             if stage in {"input", "step", "error", "checkpoint"}:
                 break  # 执行层面的失败（已经过内层修复），交给用户处理
+            if stage == "validation" and round_no <= self.max_rounds:
+                only_defective = _only_defective_failures(report)
+                dropped = drop_defective_rules(recipe, report)
+                if dropped:
+                    yield {"type": "recipe_thinking",
+                           "message": f"校验规则写得有问题、无法执行，已去掉：{'；'.join(dropped)}"
+                                      + ("，重新运行" if only_defective else "")}
+                    if only_defective:
+                        continue  # 失败只来自写错的规则：去掉后直接重跑，不用再请模型修改
             if revising and instruction and not stage and not ctx.output_revision:
                 added = await asyncio.to_thread(_keep_requested_columns, recipe, runner, handle, instruction)
                 if added:
@@ -151,6 +193,9 @@ class RecipePipeline:
             else:
                 break
             if round_no > self.max_rounds:
+                break
+            if _stalled(attempts):
+                yield {"type": "recipe_thinking", "message": f"连续 {STALL_ROUNDS} 轮修正都没有比之前更好，先停下，交给你确认"}
                 break
             yield {"type": "recipe_refine", "round": round_no + 1, "reason": feedback["summary"]}
             refined = await self.learner.refine(ctx, recipe, feedback)

@@ -1,15 +1,13 @@
-"""流程包：把一个流程的样例文件和处理逻辑打成一个 zip，在聊天里发回来就能让 AI 重新建立这个流程。
+"""流程包导出：把一个流程的样例文件和处理逻辑打成一个 zip。
 
-包里放的是「逻辑」，不是可以原样还原的流程步骤：
-- 流程包.json     指令文件：说明这个包是什么、这次要做什么（action）。后端解压后看到它，
-                  就知道要按包里的逻辑和样例文件重新建立流程；
-- 处理逻辑.md     写给 AI 读的处理说明（做什么、要什么输入、得到什么输出、各步怎么算、有什么规则），
-                  角色等同于 build_recipe 的 requirement；
-- 输入/           样例输入文件；
-- 输出/           样例输出文件（人工做好的结果样例，导入后作为期望结果）。
+只有导出在后端。导入由前端完成（composables/flowPackage.ts）：解开压缩包，把输入表格当普通附件上传，
+处理逻辑写进输入框，就和用户自己重新提交一次完全一样，后端不认识、也不特殊处理压缩包。
 
-导入时 AI 用 build_recipe 重新生成流程，所以步骤、表名、脚本都会按当时的数据重新来过；
-包里的步骤实现只放在「参考实现」一节，不要求一致。
+包里的内容：
+- 流程包.json     标志文件：格式、版本、文件清单。前端看到它才把这个 zip 当作流程包；
+- 处理逻辑.md     处理说明（做什么、要什么输入、得到什么输出、各步怎么算、有什么规则），导入时写进输入框；
+- 输入/           样例输入文件，导入时作为输入附件；
+- 输出/           样例输出文件（人工做好的结果样例），导入时不使用。
 """
 
 from __future__ import annotations
@@ -24,7 +22,6 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from sheetmate.core.config.settings import settings
 from sheetmate.core.errors import ServiceError
 from sheetmate.db.models import FileRecord
 from sheetmate.engine.scripts.store import resolve_script_code
@@ -37,7 +34,7 @@ INPUT_DIR, OUTPUT_DIR = "输入", "输出"
 FORMAT = "sheetmate.flow-package"
 FORMAT_VERSION = 1
 ACTION_REBUILD = "rebuild_flow"  # 目前唯一的指令：按处理逻辑和样例文件重新建立流程
-INSTRUCTION = "根据「处理逻辑.md」和「输入」「输出」里的样例文件，重新建立这个流程。"
+INSTRUCTION = "根据「处理逻辑.md」和「输入」里的文件，重新建立这个流程。"
 MAX_PACKAGE_FILES = 60
 MAX_UNPACKED_BYTES = 200 * 1024 * 1024
 _CODE_CHARS = 6_000  # 每一步放进参考实现的 SQL / 脚本字符上限，过长只留开头
@@ -121,7 +118,8 @@ def build_logic(recipe: Recipe, *, summary: str, memories: list[str], mapping: d
             lines.append(f"  {item.description.strip()}")
     lines.append("")
     if expected_names:
-        lines += ["## 期望结果样例", "", "人工做好的结果，用来核对新建的流程算得对不对，不是数据来源。", ""]
+        lines += ["## 期望结果样例", "", "人工做好的结果，用来核对新建的流程算得对不对，不是数据来源。"
+                  "它是历史样例，可能和下面的处理步骤有出入（比如行数、小计或总计行），出入时以处理逻辑为准。", ""]
         lines += [f"- 输入/{name}" for name in expected_names] + [""]
 
     lines += ["## 处理步骤", ""]
@@ -252,101 +250,3 @@ def build_package(recipe: Recipe, inputs: list[FileRecord], outputs: list[FileRe
         for record, arc in readable:
             archive.write(record.stored_path, arc)
     return buffer.getvalue()
-
-
-# ---------------------------------------------------------------------------
-# 导入：看到标志文件，就按包里的逻辑和样例文件重新建立流程
-# ---------------------------------------------------------------------------
-
-
-def is_package(data: bytes) -> bool:
-    """压缩包里有隐藏的指令文件，且格式合法。只看指令文件本身，不解压其他内容。"""
-    try:
-        with zipfile.ZipFile(io.BytesIO(data)) as archive:
-            return read_manifest(archive) is not None
-    except (zipfile.BadZipFile, OSError):
-        return False
-
-
-def read_manifest(archive: zipfile.ZipFile) -> dict[str, Any] | None:
-    if MARKER_FILE not in archive.namelist():
-        return None
-    try:
-        manifest = json.loads(archive.read(MARKER_FILE).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return None
-    if not isinstance(manifest, dict) or manifest.get("format") != FORMAT:
-        return None
-    return manifest
-
-
-def unpack(data: bytes) -> dict[str, Any]:
-    """安全地解开流程包：返回 {name, logic, inputs: [(文件名, 字节, kind)], outputs: [(文件名, 字节)]}。
-
-    只取标志文件登记过的文件；拒绝路径穿越、超大、过多的压缩包（压缩炸弹）。"""
-    try:
-        archive = zipfile.ZipFile(io.BytesIO(data))
-    except zipfile.BadZipFile as exc:
-        raise ServiceError("这个压缩包无法打开") from exc
-    with archive:
-        manifest = read_manifest(archive)
-        if manifest is None:
-            raise ServiceError("这不是 SheetMate 的流程包")
-        if manifest.get("action", ACTION_REBUILD) != ACTION_REBUILD:
-            raise ServiceError(f"这个流程包要求的操作「{manifest.get('action')}」当前版本不支持")
-        infos = {info.filename: info for info in archive.infolist()}
-        if len(infos) > MAX_PACKAGE_FILES + 4 or sum(info.file_size for info in infos.values()) > MAX_UNPACKED_BYTES:
-            raise ServiceError("流程包太大，无法导入")
-
-        def read(name: str) -> bytes | None:
-            pure = PurePosixPath(name)
-            if pure.is_absolute() or ".." in pure.parts or name not in infos or infos[name].is_dir():
-                return None
-            if infos[name].file_size > settings.max_upload_mb * 1024 * 1024:
-                raise ServiceError(f"包里的文件「{pure.name}」超过 {settings.max_upload_mb} MB")
-            return archive.read(name)
-
-        logic_bytes = read(str(manifest.get("logic") or LOGIC_FILE))
-        inputs = [(PurePosixPath(item["file"]).name, content, item.get("kind", "input")) for item in manifest.get("inputs", [])
-                  if isinstance(item, dict) and isinstance(item.get("file"), str) and (content := read(item["file"])) is not None]
-        outputs = [(PurePosixPath(item["file"]).name, content) for item in manifest.get("outputs", [])
-                   if isinstance(item, dict) and isinstance(item.get("file"), str) and (content := read(item["file"])) is not None]
-        return {"name": str(manifest.get("name") or "导入的流程"),
-                "logic": (logic_bytes or b"").decode("utf-8", errors="replace"),
-                "inputs": inputs, "outputs": outputs}
-
-
-def import_into_conversation(db: Session, *, data: bytes, user: Any, customer_id: str | None, conversation_id: str,
-                             recipe_id: str | None = None) -> tuple[FileRecord, list[FileRecord]]:
-    """把流程包解开放进会话：样例输入 → 输入文件，样例输出 → 期望结果，处理逻辑 → 会话里的 md 文档。
-
-    返回 (处理逻辑文档, 登记的表格文件)。AI 之后从文件列表读到处理逻辑，用 build_recipe 重新建立流程；
-    输入和期望结果正是 build_recipe 学习流程要用的材料。"""
-    package = unpack(data)
-    if not package["inputs"] and not package["outputs"]:
-        raise ServiceError("流程包里没有可用的样例文件")
-    records: list[FileRecord] = []
-
-    def register(name: str, content: bytes, kind: str) -> None:
-        try:
-            record = file_service.save_upload(db, data=content, filename=name, user=user, customer_id=customer_id,
-                                              conversation_id=conversation_id, kind=kind)
-        except ServiceError as exc:
-            raise ServiceError(f"流程包里的文件「{name}」无法导入：{exc}") from exc
-        if customer_id and recipe_id:
-            file_service.retain_for_recipe(db, record, customer_id, recipe_id)
-        records.append(record)
-
-    try:
-        for name, content, kind in package["inputs"]:
-            register(name, content, "expected" if kind == "expected" else "input")
-        for name, content in package["outputs"]:
-            register(name, content, "expected")  # 输出样例就是「人工做好的结果」，学习流程时用来对照
-        logic = file_service.save_doc(db, text=package["logic"] or f"# {package['name']}\n", filename=LOGIC_FILE, user=user,
-                                      conversation_id=conversation_id)
-    except Exception:
-        # 一次导入多个文件，中途失败时已经写到磁盘的不能留下：数据库那边随请求回滚，磁盘上的文件要自己清掉
-        for record in records:
-            Path(record.stored_path).unlink(missing_ok=True)
-        raise
-    return logic, records

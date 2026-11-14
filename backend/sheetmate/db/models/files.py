@@ -26,7 +26,7 @@ class FileRecord(Base):
     filename: Mapped[str] = mapped_column(String(255))
     stored_path: Mapped[str] = mapped_column(String(1024))
     size: Mapped[int] = mapped_column(Integer, default=0)
-    # input 输入文件 / expected 人工做好的期望结果 / output 系统生成的结果 / doc 处理说明
+    # input 输入文件 / expected 人工做好的期望结果 / output 系统生成的结果
     kind: Mapped[str] = mapped_column(String(16), default="input")
     profile: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)  # 文件画像（sheet、列、样本）
     created_by: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

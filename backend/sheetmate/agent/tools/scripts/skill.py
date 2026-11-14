@@ -132,7 +132,7 @@ def python_script_tools():
              "常规筛选、计算、匹配、汇总用公式或 SQL，普通分析结果用 export_excel，声明式建表能完成时用 create_workbook；不能仅因脚本灵活或需要保留格式就默认调用。明确超出能力范围时无需先试错；混合任务只为必要部分写脚本。"
              "成功脚本的实际代码、输入绑定、输出与校验可在用户明确要求时用 save_as_recipe 保存为重复流程。脚本中 pd/np/openpyxl 已加载；tables 是传入 DataFrame 副本，files 是按别名传入的文件副本路径；"
              "脚本表达可复用的业务规则，根据输入动态取得月份、分类和数据边界；只有用户明确指定时才能固定业务值，不把探测到的样例数据写死为下一次处理规则。"
-             "OUTPUT_DIR 是运行目录，写入文件不会自动交付。deliver_files 默认[]，只有明确列入的最终文件才提供下载，例如 deliver_files=[OUTPUT_DIR / '武汉行程.xlsx']；probe.xlsx 等测试文件留在临时目录。"
+             "OUTPUT_DIR 是运行目录，写入文件不会自动交付。deliver_files 默认[]，只有明确列入的最终文件才提供下载，例如 deliver_files=[OUTPUT_DIR / '武汉行程.xlsx']；probe.xlsx 等测试文件留在临时目录。交付文件按内容取有业务含义的名字，不要沿用空白模板的文件名。"
              "result_tables['结果名']=DataFrame 可回传内部数据继续用 SQL/公式；display_tables 默认[]，只把需要用户查看的最终结果表名列入，其他表不展示。"
              "result 可保存简短 JSON 摘要，check(condition,message) 记录校验，失败会阻止本次交付。"
              "使用 openpyxl.load_workbook(files['别名'], rich_text=True) 修改原格式副本并保留单元格内富文本，另存到 OUTPUT_DIR，不覆盖输入。"

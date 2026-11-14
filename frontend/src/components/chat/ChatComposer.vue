@@ -4,9 +4,12 @@
  * 中文输入法组字时按回车不会发送；支持选择、拖入和粘贴表格或图片。
  */
 import { ArrowUp, Brain, Eye, FileCheck2, FileSpreadsheet, Image, LoaderCircle, Plus, Square, X } from '@lucide/vue'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import { ATTACHMENT_ACCEPT, captureAttachmentPaste, filterAttachmentFiles, isImageFile } from '@/composables/attachmentFiles'
+import { expandPackages } from '@/composables/flowPackage'
+import { renderMarkdown } from '@/composables/markdown'
+import { fillChips, looksLikeMarkdown, markdownWithChips } from '@/composables/messageMarkdown'
 import { referenceSourceKey, type FileReference, type TableReference } from '@/composables/tableReferences'
 import ReferenceEditor from './ReferenceEditor.vue'
 
@@ -55,6 +58,22 @@ const emit = defineEmits<{
 }>()
 
 const editor = ref<InstanceType<typeof ReferenceEditor> | null>(null)
+const editorBox = ref<HTMLElement | null>(null)
+// 内容是 Markdown（比如导入的处理逻辑）时，不在编辑时显示渲染结果；点一下进入原文编辑，离开输入框后回到渲染结果。
+const editing = ref(false)
+const markdownPreview = computed(() => {
+  if (editing.value || !looksLikeMarkdown(props.modelValue)) return ''
+  const { source, chips } = markdownWithChips(props.modelValue, props.tableReferences, knownFiles.value)
+  return fillChips(renderMarkdown(source), chips)
+})
+async function editMarkdown() {
+  editing.value = true
+  await nextTick()
+  editor.value?.focus()
+}
+function leaveEditor(event: FocusEvent) {
+  if (!editorBox.value?.contains(event.relatedTarget as Node | null)) editing.value = false
+}
 const fileInput = ref<HTMLInputElement | null>(null)
 const pendingKind = ref<'input' | 'expected'>('input')
 const menuOpen = ref(false)
@@ -143,13 +162,18 @@ function onDrop(e: DragEvent) {
   addFiles(Array.from(e.dataTransfer?.files ?? []), 'input')
 }
 
-function addFiles(files: File[], kind: 'input' | 'expected') {
+async function addFiles(files: File[], kind: 'input' | 'expected') {
   if (props.busy) {
     attachmentError.value = '处理中可追加文字要求，文件请在本次处理结束后上传。'
     return
   }
-  const selected = filterAttachmentFiles(files, props.attachments.filter(image).length)
-  attachmentError.value = selected.error
+  // 流程包在这里解开：里面的表格和自己选的文件一样走上传，处理逻辑写进输入框，等同于重新输入一次。
+  const expanded = await expandPackages(files)
+  const selected = filterAttachmentFiles(expanded.files, props.attachments.filter(image).length)
+  attachmentError.value = [expanded.error, selected.error].filter(Boolean).join(' ')
+  if (expanded.texts.length && selected.files.length) {
+    emit('update:modelValue', [props.modelValue.trim(), ...expanded.texts].filter(Boolean).join('\n\n'))
+  }
   if (selected.files.length) emit('attach', selected.files, kind)
 }
 
@@ -219,6 +243,19 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
       </div>
     </div>
 
+    <div
+      v-if="markdownPreview"
+      class="prose-sm max-h-[240px] w-full cursor-text overflow-y-auto px-5 text-[15px]"
+      :class="large ? 'min-h-[84px] pt-3.5' : 'min-h-[56px] pt-3'"
+      role="textbox"
+      aria-readonly="true"
+      tabindex="0"
+      title="点击编辑"
+      @click="editMarkdown"
+      @keydown.enter.prevent="editMarkdown"
+      v-html="markdownPreview"
+    />
+    <div v-show="!markdownPreview" ref="editorBox" @focusout="leaveEditor">
     <ReferenceEditor
       ref="editor"
       :model-value="modelValue"
@@ -234,6 +271,7 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
       @update:model-value="emit('update:modelValue', $event)"
       @send="emit('send')"
     />
+    </div>
 
     <div class="flex items-center gap-1.5 px-3 pb-3 pt-1">
       <div class="relative">

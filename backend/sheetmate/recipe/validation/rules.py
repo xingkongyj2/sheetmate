@@ -148,7 +148,8 @@ def _check(rule: ValidationRule, status: str, expected: Any = None, actual: Any 
 def _unexecuted(rule: ValidationRule, *, message: str) -> dict[str, Any]:
     """规则本身写错或无法执行。必需规则（severity=error）记为未执行并阻断；可选规则只提示，不拖垮整次运行。"""
     if rule.severity == "error":
-        return _check(rule, "not_evaluated", message=message)
+        # defective：规则自己写错了（引用了不存在的表/列、参数缺失、执行报错），不是数据有问题。
+        return {**_check(rule, "not_evaluated", message=message), "defective": True}
     return _check(rule, "warn", message=f"（可选规则未执行）{message}")
 
 

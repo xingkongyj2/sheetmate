@@ -159,22 +159,6 @@ class ConversationHost:
                 result.append(item)
             return result
 
-    def imported_logic(self, limit: int = 30_000) -> str:
-        """这个会话里导入的流程包的处理逻辑（md 文档），没有就是空字符串。
-
-        不放进 list_files：它不是表格，AI 不该对它 load_file；每一轮都从这里读，导入之后无论聊多少轮都看得到。"""
-        with session_scope() as db:
-            records = file_service.list_files(db, conversation_id=self.conversation_id, kinds=("doc",))
-            texts = []
-            for record in reversed(records):  # 先导入的在前
-                try:
-                    text = Path(record.stored_path).read_text(encoding="utf-8")
-                except (OSError, UnicodeDecodeError):
-                    continue
-                texts.append(text)
-        joined = "\n\n---\n\n".join(texts)
-        return joined if len(joined) <= limit else joined[:limit] + "\n…（过长，已截断）"
-
     def file_path(self, file_id: str) -> Path | None:
         """供分析工具修改的临时副本；Recipe 模板使用 original_file_path。"""
         path = self.original_file_path(file_id)

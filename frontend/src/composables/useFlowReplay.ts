@@ -11,7 +11,7 @@ import type { RecipeFlowContext } from './recipeFlowInteraction'
 type InputMatch = Awaited<ReturnType<typeof recipeApi.match>>
 
 function uniqueFiles(items: FileInfo[]): FileInfo[] {
-  return [...new Map(items.filter((file) => file.kind !== 'doc').map((file) => [file.file_id, file])).values()]
+  return [...new Map(items.map((file) => [file.file_id, file])).values()]
 }
 
 function snapshot(value: unknown): RecipeJSON | null {

@@ -25,7 +25,7 @@ export interface SheetBrief {
 export interface FileInfo {
   file_id: string
   filename: string
-  kind: 'input' | 'expected' | 'output' | 'doc'
+  kind: 'input' | 'expected' | 'output'
   kind_label: string
   size: number
   customer_id: string | null

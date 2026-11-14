@@ -1,10 +1,10 @@
 /** Shared attachment rules for the picker, drag/drop, and clipboard. */
+/** 选择器额外放行 .zip：流程包由 flowPackage.ts 在加入附件前解开，不会作为压缩包上传。 */
 export const ATTACHMENT_ACCEPT = '.xlsx,.xlsm,.xls,.csv,.png,.jpg,.jpeg,.webp,.gif,.zip'
 export const MAX_IMAGE_ATTACHMENTS = 10
 
 const workbookExtension = /\.(xlsx|xlsm|xls|csv)$/i
 const imageExtension = /\.(png|jpe?g|webp|gif)$/i
-const packageExtension = /\.zip$/i  // 导出的流程包；是不是真的流程包由后端按里面的指令文件判断
 const imageMimeExtensions: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
@@ -21,7 +21,7 @@ export function isWorkbookFile(name: string): boolean {
 }
 
 export function isSupportedAttachment(file: Pick<File, 'name' | 'type'>): boolean {
-  return isWorkbookFile(file.name) || imageExtension.test(file.name) || packageExtension.test(file.name)
+  return isWorkbookFile(file.name) || imageExtension.test(file.name)
 }
 
 interface ClipboardFiles {
@@ -87,13 +87,9 @@ export function filterAttachmentFiles(files: File[], existingImages = 0): { file
   }
 }
 
-/** 导入流程包后，随消息发出的那份处理逻辑文档的文件名（和后端 package.LOGIC_FILE 一致）。 */
-const PACKAGE_LOGIC_FILE = '处理逻辑.md'
-
 export function attachmentMessage(text: string, attachments: { name: string; mediaType?: string }[]): string {
   const message = text.trim()
   if (message || !attachments.length) return message
-  if (attachments.some((file) => file.name === PACKAGE_LOGIC_FILE)) return '请根据流程包建立流程。'
   return attachments.every((file) => isImageFile(file.name, file.mediaType))
     ? '请查看并描述这些图片。' : '请分析这些附件。'
 }

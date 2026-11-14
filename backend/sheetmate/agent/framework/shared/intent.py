@@ -13,10 +13,6 @@ from sheetmate.agent.tools.contracts import AgentContext
 from sheetmate.agent.memory.short_term.task_state import task_projection
 
 _COMBINED_INTENT_POLICY = """
-flow_package_imported=true 表示用户在本会话里导入了导出的流程包（样例文件和处理逻辑已经在会话里），目的就是据此重新建立流程。
-  用户这一轮没有给出别的明确要求（比如只发了包、或说“请分析这些附件”“建立这个流程”）时，mode=modify、action=process、tool_groups 包含 workflow；
-  用户明确提出了别的需求（问数据、改别的东西）就按用户的需求判断，不要强行建流程。
-
 处理任务请同时返回 save_recipe（布尔值）和 task_relation（new 或 continue）：
 - save_recipe 默认 false。只有用户对当前任务明确要求保存/更新可重复执行流程，才为 true。
   “把这套规则留下，以后每月按这个执行”等明确保留复用规则的要求也属于保存授权；仅说以后还有数据要处理不属于授权。
@@ -78,7 +74,6 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
     context = {
         "customer": ctx.customer,
         "recipe_edit": ctx.recipe_edit or None,
-        "flow_package_imported": bool(callable(getattr(ctx.host, "imported_logic", None)) and ctx.host.imported_logic(1)),
         "task_state": task_projection(getattr(ctx, "task_state", None)),
         "history": [{"role": item["role"], "message_id": item.get("message_id", item.get("id")),
                      "content": str(item.get("content", ""))} for item in selected_history],

@@ -36,6 +36,23 @@ def _recipe_input(ctx: AgentContext, table: str) -> TableInfo:
     return info
 
 
+def _real_input_file(alias: str, file_id: str, available: dict[str, dict[str, Any]]) -> str:
+    """input_files 里的 file_id 必须是输入文件。模型常把期望结果（人工做好的结果）的 id 错填成空白模板，
+    脚本拿它当模板会把期望结果里的数据一起带进来，之后怎么修都对不上，所以在这里拦住。
+
+    别名正好是某个输入文件的名字（带不带扩展名都行）时直接换成那个文件；否则报错并列出可选的输入文件。"""
+    if available[file_id].get("kind") in (None, "input"):
+        return file_id
+    stem = alias.rsplit(".", 1)[0] if "." in alias else alias
+    named = [fid for fid, item in available.items()
+             if item.get("kind") == "input" and item.get("filename") in {alias, stem, f"{stem}.xlsx", f"{stem}.xlsm", f"{stem}.xls"}]
+    if len(named) == 1:
+        return named[0]
+    inputs = "；".join(f"{item['filename']}={fid}" for fid, item in available.items() if item.get("kind") == "input") or "（没有）"
+    raise ValueError(f"input_files 里的 {file_id}（{available[file_id].get('filename')}）是{available[file_id].get('kind_label') or '期望结果'}，"
+                     f"不是输入文件。请改用输入文件的 file_id：{inputs}")
+
+
 def _learn_context(ctx: AgentContext, requirement: str, inputs: dict[str, str], expected_tables: list[str],
                    recipe_name: str | None = None, mode: str = "learn", file_inputs: dict[str, str] | None = None) -> LearnContext:
     frames, meta = {}, {}
@@ -49,6 +66,7 @@ def _learn_context(ctx: AgentContext, requirement: str, inputs: dict[str, str], 
             raise ValueError(f"文件别名「{alias}」和输入表重名")
         if file_id not in available:
             raise ValueError("输入文件不属于当前客户或会话")
+        file_id = _real_input_file(alias, file_id, available)
         meta[alias] = InputMeta(kind="file", filename=available[file_id]["filename"], file_id=file_id,
                                 path=ctx.host.original_file_path(file_id))
     expected, sources = {}, []
@@ -107,6 +125,8 @@ def _recipe_result_text(result: dict[str, Any]) -> str:
         lines.append(f"处理未完成：{report_error}")
         if report_error.startswith("TemplatePreservationError:"):
             lines.append("原始文件未修改，未生成可交付文件。请依据具体错误修正执行方式，重新复制原件后按步骤处理；修改交付以保留原格式的副本为基础，去格式化副本只辅助分析定位。副本内的格式或结构变化不需要再次授权，不要把手动处理或放弃修改作为前置条件。")
+    if recipe.metadata.get("dropped_rules"):
+        lines.append("已去掉写错、无法执行的校验规则（它们没有校验任何数据，不是数据问题）：" + "；".join(recipe.metadata["dropped_rules"]))
     for warning in result["report"].get("output_warnings", []):
         lines.append(f"输出提示：{warning}")
     by_id = {s["step_id"]: s for s in result["report"]["steps"]}

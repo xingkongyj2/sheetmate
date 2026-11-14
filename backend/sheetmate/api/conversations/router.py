@@ -148,8 +148,6 @@ async def upload_file(conversation_id: str, file: UploadFile = File(...), kind: 
     """上传到会话并立即加载到工作区。绑定了客户的会话，文件同时进入客户资料库。"""
     conv = conv_service.get_conversation(db, user, conversation_id)
     data = await file.read()
-    if (file.filename or "").lower().endswith(".zip"):
-        return _import_package(db, user, conv, data)
     record = file_service.save_upload(db, data=data, filename=file.filename or "file", user=user,
                                       customer_id=conv.customer_id, conversation_id=conv.id, kind=kind)
     if conv.customer_id and conv.recipe_id:
@@ -157,22 +155,6 @@ async def upload_file(conversation_id: str, file: UploadFile = File(...), kind: 
     tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
     return {"ok": True, "file": file_service.file_dict(record),
             "tables": [conv_service._table_brief(t, conversation=conv) for t in tables]}
-
-
-def _import_package(db: Session, user: User, conv: Any, data: bytes) -> dict[str, Any]:
-    """流程包：解开后样例文件进会话，处理逻辑存成 md。不是流程包的压缩包不接受。
-
-    返回的 file 是处理逻辑文档（作为这条附件发出去），tables 是已加载进工作区的样例输入表。"""
-    from sheetmate.services.workflows import package as package_service
-
-    if not package_service.is_package(data):
-        raise ServiceError("不支持压缩包，请上传 xlsx / xlsm / xls / csv 或 PNG / JPG / JPEG / WebP / GIF 图片")
-    logic, records = package_service.import_into_conversation(
-        db, data=data, user=user, customer_id=conv.customer_id, conversation_id=conv.id, recipe_id=conv.recipe_id)
-    workspace = conv_service.workspace(conv.id)
-    tables = [table for record in records if record.kind == "input" for table in file_service.load_into_workspace(workspace, record)]
-    return {"ok": True, "file": file_service.file_dict(logic), "tables": [conv_service._table_brief(t, conversation=conv) for t in tables],
-            "files": [file_service.file_dict(record) for record in records]}
 
 
 @router.post("/{conversation_id}/load-file")
