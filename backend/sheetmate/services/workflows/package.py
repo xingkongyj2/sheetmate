@@ -222,6 +222,11 @@ def build_package(recipe: Recipe, inputs: list[FileRecord], outputs: list[FileRe
     declared = {str(item.get("name")) for item in recipe.flow().get("output_files", []) if item.get("name")}
     inputs, outputs = _distinct(inputs), _distinct(outputs, prefer=declared)
     input_items, output_items = _arc_names(inputs, INPUT_DIR), _arc_names(outputs, OUTPUT_DIR)
+    if len(output_items) == 1 and len(declared) == 1:
+        # 流程只交付一个文件：样例结果就用流程现在声明的文件名，和流程图上看到的一致（旧结果可能是改名之前生成的）。
+        (record, arc), name = output_items[0], next(iter(declared))
+        safe = re.sub(r"[\\/:*?\"<>|]+", "_", name).strip()
+        output_items = [(record, f"{OUTPUT_DIR}/{safe or PurePosixPath(arc).name}")]
     if len(input_items) + len(output_items) > MAX_PACKAGE_FILES:
         raise ServiceError(f"这个流程的样例文件太多（超过 {MAX_PACKAGE_FILES} 个），请先清理不再需要的文件再导出")
     readable = [(r, arc) for r, arc in (*input_items, *output_items) if Path(r.stored_path).is_file()]

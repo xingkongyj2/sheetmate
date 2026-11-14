@@ -87,9 +87,13 @@ export function filterAttachmentFiles(files: File[], existingImages = 0): { file
   }
 }
 
+/** 导入流程包后，随消息发出的那份处理逻辑文档的文件名（和后端 package.LOGIC_FILE 一致）。 */
+const PACKAGE_LOGIC_FILE = '处理逻辑.md'
+
 export function attachmentMessage(text: string, attachments: { name: string; mediaType?: string }[]): string {
   const message = text.trim()
   if (message || !attachments.length) return message
+  if (attachments.some((file) => file.name === PACKAGE_LOGIC_FILE)) return '请根据流程包建立流程。'
   return attachments.every((file) => isImageFile(file.name, file.mediaType))
     ? '请查看并描述这些图片。' : '请分析这些附件。'
 }
