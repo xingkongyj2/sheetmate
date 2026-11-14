@@ -3,7 +3,7 @@
  * 对话页：中间是消息流和输入框，右侧是工作区面板。
  * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和工作区面板开关。
  */
-import { LayoutDashboard, ListTree, LoaderCircle, MessageSquare, Pencil, Play, Save, X } from '@lucide/vue'
+import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Play, Save, X } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -761,9 +761,11 @@ function answer(option: string) {
         <div class="w-full">
           <div class="relative z-10">
           <RunSteeringQueue :items="visibleSteers" :withdrawing="withdrawingSteer" @withdraw="withdrawSteer" />
-          <div v-if="recipeEdit" class="mb-3 flex items-start gap-2.5 rounded-xl border border-[#6265dc]/20 bg-[#6265dc]/[0.05] px-3.5 py-3" aria-label="流程修改目标">
-            <MessageSquare class="mt-0.5 size-4 shrink-0 text-[#6265dc]" />
-            <div class="min-w-0 flex-1"><p class="text-xs font-medium text-[#6265dc]">{{ recipeEdit.title }} · v{{ recipeEdit.request.version }}</p><p class="mt-1 break-words text-xs text-ink">{{ recipeEditLabel(recipeEdit.request) }}</p><p class="mt-1 text-[11px] leading-5 text-mute">说明修改要求，可上传或引用文件。发送后重新执行流程并验证适配。</p></div>
+          <div v-if="recipeEdit" class="mb-3 flex items-center gap-2 rounded-xl bg-paper py-1.5 pl-3.5 pr-1.5 text-[13px]" aria-label="流程修改目标">
+            <span class="flex min-w-0 flex-1 items-center gap-2">
+              <span class="min-w-0 shrink truncate text-faint">{{ recipeEdit.title }}</span><span class="shrink-0 text-faint">v{{ recipeEdit.request.version }}</span><span class="shrink-0 text-line">|</span>
+              <span class="max-w-[70%] shrink-0 truncate font-medium text-ink">{{ recipeEditLabel(recipeEdit.request) }}</span>
+            </span>
             <button type="button" class="icon-btn size-6 shrink-0" aria-label="取消流程修改" @click="recipeEdit = null"><X class="size-3.5" /></button>
           </div>
           <div v-if="canResume" class="mb-3 flex flex-wrap items-center gap-3 rounded-xl border border-line bg-paper/50 px-3.5 py-3 text-xs" role="status">

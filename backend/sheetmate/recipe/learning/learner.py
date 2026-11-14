@@ -38,6 +38,7 @@ from sheetmate.recipe.definition.schema import (
     StepAssertion,
     ValidationRule,
     file_pattern_from_name,
+    shorten_recipe_name,
     step_output_tables,
     step_table_refs,
 )
@@ -269,7 +270,7 @@ def build_recipe(result: dict[str, Any], ctx: LearnContext, base: Recipe | None 
     )
     name = ctx.recipe_name or str(result.get("recipe_name") or (base.name if base else "未命名流程"))
     recipe = Recipe(
-        name=name[:80],
+        name=shorten_recipe_name(name),
         description=str(result.get("recipe_description") or (base.description if base else "")),
         customer_id=ctx.customer_id if base is None else base.customer_id,
         scope=base.scope if base else "customer",

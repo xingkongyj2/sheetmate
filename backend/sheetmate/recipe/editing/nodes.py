@@ -23,7 +23,8 @@ from typing import Any
 
 from sheetmate.engine.formulas import FormulaLibrary
 from sheetmate.engine.scripts.store import MAX_SCRIPT_BYTES, normalize_script_title, resolve_script_code, script_params
-from sheetmate.recipe.definition.schema import REMOVED_OUTPUT_REFS, Recipe, RecipeStep, check_recipe
+from sheetmate.recipe.definition.schema import MAX_RECIPE_NAME, REMOVED_OUTPUT_REFS, Recipe, RecipeStep, check_recipe
+from sheetmate.recipe.editing.references import describe, find_filename, replace_filename
 
 MAX_EDITS = 30
 _FORBIDDEN_NAME_CHARS = frozenset('/\\')
@@ -122,7 +123,7 @@ class _Collector:
 
 def _update_workflow(recipe: Recipe, edit: dict[str, Any], out: _Collector) -> None:
     _fields(edit, set(), {"name", "description"})
-    name, description = _text(edit, "name", limit=100), _text(edit, "description", limit=2000, allow_empty=True)
+    name, description = _text(edit, "name", limit=MAX_RECIPE_NAME), _text(edit, "description", limit=2000, allow_empty=True)
     if name is None and description is None:
         raise NodeEditError("update_workflow 至少要修改 name 或 description。")
     if name is not None and name != recipe.name:
@@ -163,6 +164,14 @@ def _rename_input_file(recipe: Recipe, edit: dict[str, Any], out: _Collector) ->
             listed = recipe.learned_from.get("input_files")
             if isinstance(listed, list):
                 recipe.learned_from["input_files"] = [source if item == previous else item for item in listed]
+            if previous and previous != source:
+                # 旧文件名还可能出现在脚本、SQL、说明里：整条流程一起改，再扫一遍确认没有遗漏
+                hits = replace_filename(recipe, previous, source, on_script=out.script_updated)
+                if hits:
+                    out.changes.append("已同步引用：" + describe(hits))
+                leftovers = find_filename(recipe, previous, ignore=source)
+                if leftovers:
+                    out.warnings.append(f"改完后仍有地方出现「{previous}」：{describe(leftovers)}。请检查是否还需要修改。")
             out.warnings.append(f"输入「{alias}」的来源文件名只是记录；运行时按文件规则 {inp.file_pattern or '（空）'} 匹配新文件。")
         else:
             out.unchanged.append(f"输入「{alias}」来源文件名已经是 {source}")
@@ -417,19 +426,17 @@ def _rename_output_file(recipe: Recipe, edit: dict[str, Any], out: _Collector) -
     if not touched:
         raise NodeEditError(f"在流程里没有找到「{old}」的声明，无法改名。")
     out.changes.append(f"输出文件名：「{old}」→「{new}」")
-    out.needs_rerun = True
-    if "workbook_export" not in producer.params:
-        # 脚本自己决定写出什么文件名，声明改了而代码没改，运行时就对不上。
-        code = resolve_script_code(producer.params)
-        count = code.count(old)
-        if count:
-            before = producer.params.get("script_id")
-            producer.params = script_params({**producer.params, "code": code.replace(old, new)})
-            out.script_updated(before, producer.params.get("script_id"))
-            out.changes.append(f"第 {producer.id} 步脚本里 {count} 处「{old}」已同步改为「{new}」")
-        else:
-            out.warnings.append(f"第 {producer.id} 步脚本代码里没有出现「{old}」原文，请用 edit_script 确认脚本实际写出的文件名已改成「{new}」，"
-                                "否则重跑会报“没有生成声明的输出文件”。")
+    # 只是改名：把整条流程里引用旧文件名的地方（所有步骤的脚本、SQL、参数、说明，流程说明，校验规则等）一起改掉，
+    # 然后再扫一遍确认没有遗漏。处理逻辑没变，不需要重跑；新名字在下一次运行生成文件时生效。
+    hits = replace_filename(recipe, old, new, on_script=out.script_updated)
+    if hits:
+        out.changes.append("已同步引用：" + describe(hits))
+    leftovers = find_filename(recipe, old, ignore=new)
+    if leftovers:
+        out.warnings.append(f"改完后仍有地方出现「{old}」：{describe(leftovers)}。请检查这些位置是否还需要修改（可用 edit_script / update_step）。")
+    elif "workbook_export" not in producer.params and not any(h.where == f"第 {producer.id} 步脚本" for h in hits):
+        out.warnings.append(f"第 {producer.id} 步脚本代码里没有出现「{old}」原文，请用 edit_script 确认脚本实际写出的文件名已改成「{new}」，"
+                            "否则下次运行会报“没有生成声明的输出文件”。")
 
 
 def _rename_output_sheet(recipe: Recipe, edit: dict[str, Any], out: _Collector) -> None:

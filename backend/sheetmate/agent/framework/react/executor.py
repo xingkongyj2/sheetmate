@@ -30,6 +30,7 @@ from sheetmate.agent.framework.react.completion import (
     check_completion,
     conflict_note,
     continuation,
+    needs_workflow_revision,
     text_content,
 )
 from sheetmate.agent.llm.content import model_history, user_content
@@ -715,7 +716,7 @@ class AgentExecutor:
                 else:
                     review = await review_progress(
                         self.llm, msgs, scope=scope, results=results, eligible_evidence_ids=eligible,
-                        require_workflow_revision=bool(ctx.recipe_edit and ctx.mode == "modify" and stop_scope != "step"),
+                        require_workflow_revision=needs_workflow_revision(ctx.recipe_edit, ctx.mode, stop_scope),
                     )
                     progress_review = {"key": review_key, "decision": asdict(review)}
                 record_event("agent.progress_review", "sheetmate.agent.framework.react.executor.AgentExecutor.agent_stream",
@@ -933,7 +934,7 @@ class AgentExecutor:
                     check = await check_completion(
                         self.llm, msgs, display, scope=scope, results=budget.evidence(ctx.branch_id),
                         eligible_evidence_ids=budget.eligible_evidence(ctx.branch_id, original_scope) if stop_scope == "step" else None,
-                        require_workflow_revision=bool(ctx.recipe_edit and ctx.mode == "modify" and stop_scope != "step"),
+                        require_workflow_revision=needs_workflow_revision(ctx.recipe_edit, ctx.mode, stop_scope),
                         previous_conflicts=conflict_history,
                     )
                     yield {**check.event(), "call_id": check_id}

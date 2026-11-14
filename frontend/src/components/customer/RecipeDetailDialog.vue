@@ -3,7 +3,7 @@
  * 流程详情：一个流程的全部信息收在这里——概览（说明、输入、步骤、输出、核对规则）、运行记录、版本历史，
  * 以及设为主流程、查看流程数据、删除这些低频操作。
  */
-import { Braces, ShieldCheck, Star, Trash2 } from '@lucide/vue'
+import { Braces, Check, LoaderCircle, Pencil, ShieldCheck, Star, Trash2, X } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 
 import { recipeApi } from '@/api'
@@ -31,6 +31,37 @@ const TABS: { key: Tab; label: string }[] = [
 ]
 const tab = ref<Tab>('overview')
 const showJson = ref(false)
+// 流程名称：点铅笔就地改成输入框，回车保存、Esc 取消
+const MAX_NAME = 30  // 与后端 MAX_RECIPE_NAME 一致
+const renaming = ref(false)
+const draftName = ref('')
+const savingName = ref(false)
+const renameError = ref('')
+const displayName = ref(props.recipe.name)
+watch(() => props.recipe.name, (name) => { displayName.value = name })
+
+function startRename() {
+  draftName.value = displayName.value
+  renameError.value = ''
+  renaming.value = true
+}
+async function saveName() {
+  const name = draftName.value.trim()
+  if (savingName.value) return
+  if (!name || name === displayName.value) { renaming.value = false; return }
+  savingName.value = true
+  renameError.value = ''
+  try {
+    const result = await recipeApi.rename(props.recipe.recipe_id, name)
+    displayName.value = result.name
+    renaming.value = false
+    if (result.saved) emit('changed')
+  } catch (err) {
+    renameError.value = errorText(err)
+  } finally {
+    savingName.value = false
+  }
+}
 const versions = ref<Awaited<ReturnType<typeof recipeApi.get>>['versions'] | null>(null)
 const versionError = ref('')
 
@@ -71,9 +102,21 @@ async function removeRecipe() {
 <template>
   <BaseModal width="max-w-3xl" @close="emit('close')">
     <template #title>
+      <div class="min-w-0" :class="renaming ? 'w-[min(34rem,calc(100vw-9rem))]' : ''">
       <div class="flex min-w-0 items-center gap-2">
-        <h3 class="truncate text-base font-bold" :title="recipe.name">{{ recipe.name }}</h3>
-        <span v-if="primary" class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[#6265DC]/8 px-2 py-1 text-[10px] text-[#6265DC]"><Star class="size-3 fill-current" />主流程</span>
+        <form v-if="renaming" class="flex min-w-0 flex-1 items-center gap-1.5" @submit.prevent="saveName">
+          <input v-model="draftName" class="input input-sm min-w-0 flex-1 rounded-xl" aria-label="流程名称" :maxlength="MAX_NAME" autofocus @keydown.esc.stop="renaming = false" />
+          <span class="shrink-0 text-[11px] tabular-nums" :class="draftName.length >= MAX_NAME ? 'text-[#b7770c]' : 'text-faint'" aria-live="polite">{{ draftName.length }}/{{ MAX_NAME }}</span>
+          <button type="submit" class="icon-btn shrink-0 !text-[#6265dc]" :disabled="savingName" aria-label="保存名称" title="保存"><LoaderCircle v-if="savingName" class="size-4 animate-spin" /><Check v-else class="size-4" /></button>
+          <button type="button" class="icon-btn shrink-0" aria-label="取消" title="取消" @click="renaming = false"><X class="size-4" /></button>
+        </form>
+        <template v-else>
+          <h3 class="truncate text-base font-bold" :title="displayName">{{ displayName }}</h3>
+          <button type="button" class="icon-btn size-7 shrink-0" aria-label="修改流程名称" title="修改名称" @click="startRename"><Pencil class="size-3.5" /></button>
+        </template>
+        <span v-if="primary && !renaming" class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[#6265DC]/8 px-2 py-1 text-[10px] text-[#6265DC]"><Star class="size-3 fill-current" />主流程</span>
+      </div>
+      <p v-if="renameError" class="mt-1 text-xs text-error" role="alert">{{ renameError }}</p>
       </div>
     </template>
 

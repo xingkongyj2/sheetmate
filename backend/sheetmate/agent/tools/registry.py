@@ -24,10 +24,12 @@ from sheetmate.agent.tools.interaction.builtin import _tool_ask_user, _tool_insp
 from sheetmate.agent.tools.memory.builtin import _tool_remember, _tool_save_field_mapping
 from sheetmate.agent.tools.workflows.node_edit import (
     EDIT_ITEM_SCHEMA,
+    FLOW_RENAME_ITEM_SCHEMA,
     RENAME_ITEM_SCHEMA,
     _tool_edit_recipe_nodes,
     _tool_inspect_recipe_nodes,
     _tool_rename_files,
+    _tool_rename_flow_files,
 )
 from sheetmate.agent.tools.workflows.builtin import (
     _stream_build_recipe,
@@ -124,11 +126,22 @@ def _static_tools() -> list[Tool]:
                    "kinds": {"type": "array", "items": {"type": "string", "enum": ["input", "expected", "output"]},
                              "description": "筛选多种文件类型；例如查看所有输入输出用 [input,output]，与 kind 互斥；单独提供时展示这些类型全部文件"}}),
              both, run=_tool_show_files, label=lambda a: "展示文件"),
-        Tool("rename_files", "修改已上传文件的文件名：输入文件、期望结果文件，以及流程输出和过程文件（只改显示名，内容和 ID 不变，扩展名不能改）。"
+        Tool("rename_flow_files", "改流程里输入文件、输出文件的名字，一次调用完成——改文件名的首选工具。每项写 {old_name 现在的文件名, new_name 新文件名}，"
+             "工具自己判断它是输入文件还是输出文件，并走对的路径：输入文件改已上传文件的真实名字，输出文件改流程里声明的名字；"
+             "然后自动扫描整条流程（所有步骤的脚本、SQL、参数、说明、流程说明、校验规则），把引用旧名字的地方一起改掉，并核对没有遗漏。"
+             "只是改名字，处理逻辑没变：不要用 run_recipe 重跑，不要用 revise_recipe，不要用 edit_script 手工替换，也不需要先 inspect_recipe_nodes——"
+             "文件名照用户说的或界面看到的原样写即可，写错了工具会列出流程里现有的输入、输出文件名。用户给的是命名规则（如“去掉文件名里的模拟数据”）时，"
+             "先用 list_files / inspect_recipe_nodes 看当前文件名，按规则给每个文件写出新名字，在一次调用里全部改完，并在回复里列出旧名→新名。"
+             "用户的改名要求就是授权，不需要另外确认；扩展名不能改。",
+             _obj({"renames": {"type": "array", "minItems": 1, "maxItems": 50, "items": FLOW_RENAME_ITEM_SCHEMA},
+                   "recipe_id": {**_STR, "description": "可选：不填表示本会话选中或最近的流程"}}, ["renames"]),
+             modify, run=_tool_rename_flow_files, label=lambda a: f"修改文件名 · {len(a.get('renames') or [])} 个"),
+        Tool("rename_files", "修改已上传文件的文件名：输入文件、期望结果文件（只改显示名，内容和 ID 不变，扩展名不能改）。"
+             "不能用它改流程的输出文件和过程文件：输出文件的名字由脚本里的声明决定，只改文件记录会和脚本对不上。改流程里的输入、输出文件名请直接用 rename_flow_files（一次搞定，不需要重跑）。"
              "用户直接给出新名字就原样使用；用户给的是命名规则（如“去掉文件名里的模拟数据”“统一成 客户-类型 格式”）时，先用 list_files 看当前文件名，"
              "按规则为每个文件给出规范的新名字再调用，并在回复里列出旧名→新名。重名时系统自动追加（1）。"
              "默认同步引用这些文件的流程（来源文件名、说明、已匹配不上新名字的文件规则，保存为新版本）；用户只想改文件名、不动流程时 sync_recipes=false。"
-             "这是用户明确的改名请求，不需要另外授权。流程图里“输入文件”显示的就是这里的文件名。",
+             "这是用户明确的改名请求，不需要另外授权。流程图里“输入文件”显示的就是这里的文件名；改完不需要重跑流程。",
              _obj({"renames": {"type": "array", "minItems": 1, "maxItems": 50, "items": RENAME_ITEM_SCHEMA},
                    "sync_recipes": {"type": "boolean", "description": "是否同步引用这些文件的流程，默认 true"}}, ["renames"]),
              both, run=_tool_rename_files, label=lambda a: f"修改文件名 · {len(a.get('renames') or [])} 个"),
@@ -145,7 +158,7 @@ def _static_tools() -> list[Tool]:
                    "input_tables": {**_STR_LIST, "description": "原始上传的输入表名；不填自动使用。辅助分析结果用于完善 requirement，不代替原始输入"},
                    "input_files": {"type": "object", "additionalProperties": {"type": "string"}, "description": "可选：{完整文件输入别名: file_id}，用于 Python 排版或读取原始工作簿；与 input_tables 可同时提供"},
                    "expected_tables": {**_STR_LIST, "description": "人工做好的期望结果表（如有）；不填会自动使用标记为期望结果的表"},
-                   "recipe_name": {**_STR, "description": "可选：本次处理名称，不构成保存授权"}}, ["requirement"]),
+                   "recipe_name": {**_STR, "description": "可选：本次处理名称，尽量控制在 30 字以内的名词短语（如「月度运费汇总」），不要写成一句话，不要加括号补充说明；不构成保存授权"}}, ["requirement"]),
              modify, stream=_stream_build_recipe, label=lambda a: "处理表格"),
         Tool("revise_recipe", "通过对话修改流程的输入、输出或指定步骤，并从输入开始重新执行完整流程、适配上下游依赖和验证。"
 "输入新增/删除/替换用 input_changes；单步修改用 step_ids；输出表增删改可提供完整 output_sheets。"
@@ -175,7 +188,7 @@ def _static_tools() -> list[Tool]:
              modify, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
         Tool("save_as_recipe", "仅用户明确要求保存重复流程时调用，直接保存正式流程。支持公式、SQL、Python 脚本和混合流程；保存实际执行的代码与依赖，不需要重新处理文件。"
              "若 build_recipe、revise_recipe 或 run_recipe 已返回 recipe_saved，则同一流程已经保存，不要再次调用本工具。保存后界面自动展示流程图，无需再调用 get_recipe。",
-             _obj({"output_tables": {**_STR_LIST, "description": "可选：公式、SQL 或脚本生成的最终结果表。不填则保存指定或最近已执行流程"}, "name": _STR,
+             _obj({"output_tables": {**_STR_LIST, "description": "可选：公式、SQL 或脚本生成的最终结果表。不填则保存指定或最近已执行流程"}, "name": {**_STR, "description": "流程名，尽量控制在 30 字以内的名词短语（如「月度运费汇总」），不要写成一句话，不要加括号补充说明"},
                    "run_id": {**_STR, "description": "可选：明确指定脚本或混合流程的运行 ID，优先于 recipe_id"},
                    "recipe_id": {**_STR, "description": "可选：指定本会话已执行的流程 ID，不填用最近的"},
                    "description": {**_STR, "description": "流程说明"}}),
@@ -189,10 +202,10 @@ def _static_tools() -> list[Tool]:
                    "line_end": {"type": "integer", "minimum": 1, "description": "可选：脚本结束行（含）"}}),
              both, run=_tool_inspect_recipe_nodes, label=lambda a: "查看流程节点"),
         Tool("edit_recipe_nodes", "直接修改已保存流程的指定节点并保存为新版本（不调用模型、不重跑整条流程）：改输入文件名规则（rename_input_file）、输入别名（rename_input_alias，即流程图里输入和步骤引用处显示的名字，如“订单表_模拟数据”，会同步改所有引用）、"
-             "脚本生成的输出/中间文件名（rename_output_file，同步改声明、后续步骤引用和脚本里的文件名）、输出工作表名（rename_output_sheet）、从流程移除输入（remove_input，仅限没有步骤在用的输入；在用的要用 revise_recipe 让模型改脚本）、从流程移除输出文件（remove_output，不能移除唯一的输出）、"
+             "脚本生成的输出/中间文件名（rename_output_file，会扫描整条流程——所有步骤的脚本、SQL、参数、说明——把引用旧文件名的地方一起改掉，并返回改了哪些位置、是否还有遗漏；只改名字不影响处理逻辑，不需要重跑）、输出工作表名（rename_output_sheet）、从流程移除输入（remove_input，仅限没有步骤在用的输入；在用的要用 revise_recipe 让模型改脚本）、从流程移除输出文件（remove_output，不能移除唯一的输出）、"
              "步骤名称/说明/启停/参数（update_step）、脚本名（rename_script）、脚本内容（edit_script，整段替换或精确查找替换）、流程名与说明（update_workflow）。"
              "用户直接给出新名字就原样使用；用户给的是命名规则（如“去掉文件名里的模拟数据”）时，先用 inspect_recipe_nodes 查看现有名字，"
-             "按规则为每个节点给出规范的新名字再调用，并在回复里列出旧名→新名。本工具只改流程定义里记录的名字；用户说的“输入文件名/输出文件名”若指界面上“输入文件”“输出与过程文件”列表里显示的已上传/已生成的文件，要用 rename_files 改真实文件名（会同步流程里记录的名字）。两者都要改时，先 rename_files，再用本工具改剩下的别名等。返回“目标值已经生效”表示已经改好了，不要重复提交。多项修改放进同一次调用，任一项不合法则整体不保存。"
+             "按规则为每个节点给出规范的新名字再调用，并在回复里列出旧名→新名。改输入/输出文件名请直接用 rename_flow_files；它们对应的 rename_input_file / rename_output_file 也一样，不要用 edit_script 手工拼查找替换——它们会自动扫描并同步脚本、SQL、说明里所有引用旧名字的地方（脚本里的原文空白、引号稍有不同，手工替换就会“找不到”）。本工具只改流程定义里记录的名字；用户说的“输入文件名/输出文件名”若指界面上“输入文件”“输出与过程文件”列表里显示的已上传/已生成的文件，要用 rename_files 改真实文件名（会同步流程里记录的名字）。两者都要改时，先 rename_files，再用本工具改剩下的别名等。返回“目标值已经生效”表示已经改好了，不要重复提交。多项修改放进同一次调用，任一项不合法则整体不保存。"
              "会影响执行行为的修改保存后必须用 run_recipe 重跑验证；这是用户明确的流程修改请求，不需要另外的保存授权。",
              _obj({"recipe_id": {**_STR, "description": "可选：不填表示本会话最近的流程"},
                    "base_version": {"type": "integer", "minimum": 1, "description": "可选：基于的流程版本；版本已变化时拒绝并提示刷新"},

@@ -25,7 +25,7 @@ from sheetmate.db.models import (
 )
 from sheetmate.engine.formulas import BUILTIN_FORMULAS, Formula, FormulaError, FormulaLibrary
 from sheetmate.engine.scripts.references import bind_script_references, externalize_script_references
-from sheetmate.recipe.definition.schema import Recipe, check_recipe
+from sheetmate.recipe.definition.schema import Recipe, check_recipe, shorten_recipe_name
 from sheetmate.services.identity.auth import require_customer
 from sheetmate.core.errors import Forbidden, NotFound, ServiceError
 
@@ -37,6 +37,7 @@ from sheetmate.core.errors import Forbidden, NotFound, ServiceError
 
 def save_recipe(db: Session, recipe: Recipe, *, conversation_id: str | None = None) -> RecipeRecord:
     """保存为新版本（recipe_id 不存在时就是第 1 版）。"""
+    recipe.name = shorten_recipe_name(recipe.name)  # 兜底：不管名字从哪条路径来，保存的流程名都不超过上限
     latest = db.scalar(select(func.max(RecipeRecord.version)).where(RecipeRecord.recipe_id == recipe.id)) or 0
     previous_mapping = (get_record(db, recipe.id).body or {}).get("field_mapping", {}) if latest else {}
     recipe.version = latest + 1

@@ -30,6 +30,7 @@ def _now() -> str:
 
 # 节点编辑删除的脚本交付文件：脚本仍可能写出它们，但不再作为流程输出交付。
 REMOVED_OUTPUT_REFS = "removed_output_refs"
+MAX_RECIPE_NAME = 30  # 流程名最多 30 个字：AI 起的名字常常写成一整句话，列表和标题里放不下
 
 
 def new_recipe_id() -> str:
@@ -136,6 +137,22 @@ class ValidationRule(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     severity: Literal["error", "warning", "info"] = "warning"
     requires_history: bool = False
+
+
+_TRAILING_NOTE = re.compile(r"\s*[（(][^（）()]*[）)]\s*$")
+
+
+def shorten_recipe_name(name: str, limit: int = MAX_RECIPE_NAME) -> str:
+    """把过长的流程名收短到 limit 字以内：先去掉末尾的括号补充说明，还长就按字数截断。
+
+    例：「多客户账单总表生成（订单+明细+重量+价格表）」→「多客户账单总表生成」。只改过长的名字。"""
+    text = " ".join(str(name or "").split())
+    while len(text) > limit:
+        trimmed = _TRAILING_NOTE.sub("", text).strip()
+        if not trimmed or trimmed == text:
+            break
+        text = trimmed
+    return text[:limit].rstrip(" ，,、；;：:-—_") or "未命名流程"
 
 
 class Recipe(BaseModel):

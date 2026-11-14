@@ -14,13 +14,14 @@ from sqlalchemy.orm import Session
 
 from sheetmate.core.errors import Forbidden, ServiceError
 from sheetmate.db.models import FileConversation, FileCustomer, FileRecord, RecipeRecord, User
+from sheetmate.engine.scripts.store import bind_script
 from sheetmate.recipe.editing import sync_renamed_files
 from sheetmate.services.files import service as file_service
 from sheetmate.services.workflows import service as recipe_service
 
 MAX_RENAMES = 50
 _SHEET_SUFFIXES = frozenset({".xlsx", ".xlsm", ".xls", ".csv"})
-_KINDS = frozenset({"input", "expected", "output"})
+_KINDS = frozenset({"input", "expected"})  # 输出文件的名字由脚本声明决定，不能只改文件记录（见 rename_files 里的提示）
 
 
 def save_edited_version(db: Session, user: User, record: RecipeRecord, body: dict[str, Any], note: str) -> RecipeRecord:
@@ -33,6 +34,18 @@ def save_edited_version(db: Session, user: User, record: RecipeRecord, body: dic
     if record.conversation_id:
         body.setdefault("learned_from", {}).setdefault("conversation_id", record.conversation_id)
     return recipe_service.update_recipe(db, user, record.recipe_id, body)
+
+
+def rename_in_place(db: Session, recipe_id: str, name: str) -> list[RecipeRecord]:
+    """只改流程名称：不新建版本，这个流程所有版本里的名字一起改，版本历史和版本号都不变。
+
+    名字不影响任何处理逻辑，所以不该让版本号增加；不走 save_recipe，也不会清掉流程总结。"""
+    records = list(db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id)))
+    for record in records:
+        record.name = name
+        record.body = {**(record.body or {}), "name": name}  # JSON 列要整体换新才会被识别为已修改
+    db.flush()
+    return records
 
 
 def requested_filename(old: str, requested: Any) -> str:
@@ -80,6 +93,10 @@ def rename_files(db: Session, user: User, renames: list[dict[str, Any]], *, acce
         record = file_service.get_file(db, file_id)
         if not accessible(record):
             raise Forbidden(f"文件「{record.filename}」不属于当前客户或会话。")
+        if record.kind == "output":
+            raise ServiceError(f"文件「{record.filename}」是流程输出，名字由脚本里的声明决定，不能只改文件记录。"
+                               "请用 edit_recipe_nodes 的 rename_output_file 改流程里声明的输出文件名（会同步脚本等所有引用，不需要重跑）；"
+                               "这批改名里的其他输入文件可以另外用 rename_files。")
         if record.kind not in _KINDS:
             raise ServiceError(f"文件「{record.filename}」的类型不支持改名。")
         try:
@@ -114,9 +131,15 @@ def rename_files(db: Session, user: User, renames: list[dict[str, Any]], *, acce
                 continue
             seen.add(record.recipe_id)
             recipe = recipe_service.record_to_recipe(record)
+            scripts_before = {step.id: step.params.get("script_id") for step in recipe.steps}
             changes = sync_renamed_files(recipe, renamed)
             if not changes:
                 continue
+            for step in recipe.steps:
+                # 同步引用时改过脚本里的文件名，就是新的脚本版本：保存前先登记归属，否则保存会因没有权限查看脚本失败
+                script_id = step.params.get("script_id")
+                if script_id and script_id != scripts_before.get(step.id):
+                    bind_script(script_id, user_id=user.id, customer_id=recipe.customer_id, conversation_id=record.conversation_id)
             try:
                 recipe_service.require_recipe_access(db, user, recipe)
             except ServiceError:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sheetmate.api.recipes.schemas import FileRenameBody, MatchBody, NodeEditBody, RunBody
+from sheetmate.api.recipes.schemas import MatchBody, NodeEditBody, RunBody
 
 from typing import Any
 
@@ -66,18 +66,6 @@ def edit_nodes(recipe_id: str, body: NodeEditBody, background: BackgroundTasks, 
     result = node_edit_service.edit_nodes(db, user, recipe_id, body.edits, base_version=body.base_version, note=body.note)
     _refresh_later(db, background, result["customer_id"])
     return {"ok": True, **result}
-
-
-@router.post("/recipes/files/rename")
-def rename_files(body: FileRenameBody, background: BackgroundTasks, db: Session = Depends(get_db),
-                 user: User = Depends(current_user)) -> dict[str, Any]:
-    """修改输入/输出文件的文件名，并默认同步引用这些文件的流程（保存为新版本）。"""
-    result = file_rename_service.rename_files(db, user, body.renames, sync_recipes=body.sync_recipes,
-                                              accessible=lambda record: file_service.can_access_file(db, user, record))
-    for customer_id in {item["customer_id"] for item in result["recipes"]}:
-        _refresh_later(db, background, customer_id)
-    return {"ok": True, **{key: [{k: v for k, v in item.items() if k not in {"flow", "description"}} for item in value]
-                           for key, value in result.items()}}
 
 
 @router.delete("/recipes/{recipe_id}")

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowDownToLine, ArrowLeft, Check, ChevronRight, Eye, FileSpreadsheet, LoaderCircle, Pencil, Sparkles, Trash2, TriangleAlert, X } from '@lucide/vue'
+import { ArrowDownToLine, ArrowLeft, Check, ChevronRight, Eye, FileSpreadsheet, LoaderCircle, Sparkles, Trash2, TriangleAlert } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { conversationApi, customerApi, fileApi, recipeApi, runApi, scriptApi } from '@/api'
@@ -25,7 +25,7 @@ const props = withDefaults(defineProps<{
   recipe?: RecipeJSON
   editable?: boolean
 }>(), { states: () => [], files: () => [] })
-const emit = defineEmits<{ close: []; preview: [file: FileInfo]; edit: [operation: RecipeEditRequest['operation'], options?: { focus?: 'sql' | 'python' | 'formula' }]; renamed: [] }>()
+const emit = defineEmits<{ close: []; preview: [file: FileInfo]; edit: [operation: RecipeEditRequest['operation'], options?: { focus?: 'sql' | 'python' | 'formula' | 'name' }] }>()
 
 const fetchedRecipe = ref<RecipeJSON>()
 const runRecipe = ref<RecipeJSON>()
@@ -56,7 +56,7 @@ const step = computed(() => props.selection.kind === 'step' ? inspectorStep(prop
 const fileNode = computed(() => props.selection.kind === 'file' ? props.selection.file : null)
 const selectionKey = computed(() => props.selection.kind === 'step' ? `step:${props.selection.id}` : `file:${props.selection.file.key}`)
 const referencedFileIds = computed(() => fileNode.value ? inspectorFileIds(fileNode.value, effectiveStates.value) : [])
-const title = computed(() => step.value?.name || renamedTo.value || fileNode.value?.name || '节点详情')
+const title = computed(() => step.value?.name || fileNode.value?.name || '节点详情')
 const scripts = computed(() => step.value ? scriptReferences([step.value.flowStep, step.value.planned, step.value.params, step.value.report?.result]) : [])
 const isFormula = computed(() => !!step.value?.formulaName && !!step.value && recipeToolKind(step.value.tool) === 'formula')
 const hasInlineCode = computed(() => !!code.value && !loadedScripts.value.some((script) => script.code.trim() === code.value.trim()))
@@ -272,38 +272,9 @@ watch([
   loadingFiles.value = false
 }, { immediate: true })
 
-// 输入 / 输出文件：在标题处直接改文件名，并同步引用它的流程
-const renaming = ref(false)
-const renamedTo = ref('')
-const draftName = ref('')
-const savingName = ref(false)
-const renameError = ref('')
-const boundFile = computed(() => matchedFiles.value[0])
+// 输入 / 输出文件：文件名不能在这里直接改，要用底部的「AI 改名」
 /** 输入文件的字段：优先必需列，没有时用录制时看到的列 */
 const fieldColumns = computed(() => [...new Set(inputSpecs.value.flatMap((input) => input.required_columns?.length ? input.required_columns : input.expected_columns ?? []))])
-watch(selectionKey, () => { renaming.value = false; renamedTo.value = ''; renameError.value = '' })
-
-function startRename() {
-  draftName.value = renamedTo.value || boundFile.value?.filename || fileNode.value?.name || ''
-  renameError.value = ''
-  renaming.value = true
-}
-async function saveName() {
-  const file = boundFile.value
-  const name = draftName.value.trim()
-  if (savingName.value) return
-  if (!file || !name || name === (renamedTo.value || file.filename)) { renaming.value = false; return }
-  savingName.value = true
-  renameError.value = ''
-  try {
-    const result = await recipeApi.renameFiles([{ file_id: file.file_id, new_name: name }])
-    if (!mounted) return
-    renamedTo.value = result.files[0]?.new ?? name
-    renaming.value = false
-    emit('renamed')
-  } catch (error) { if (mounted) renameError.value = errorText(error) }
-  finally { if (mounted) savingName.value = false }
-}
 
 async function preview(file: FileInfo) {
   if (openingFile.value) return
@@ -336,17 +307,10 @@ function paramValue(value: unknown): string {
     <header class="flow-inspector-header">
       <button type="button" class="flow-inspector-back" aria-label="返回流程" @click="emit('close')"><ArrowLeft class="size-4" /></button>
       <div class="min-w-0 flex-1">
-        <form v-if="renaming" class="flex items-center gap-1.5" @submit.prevent="saveName">
-          <input v-model="draftName" class="input input-sm min-w-0 flex-1 rounded-xl" aria-label="文件名" autofocus @keydown.esc="renaming = false" />
-          <button type="submit" class="icon-btn shrink-0 !text-[#6265dc]" :disabled="savingName" aria-label="保存文件名" title="保存"><LoaderCircle v-if="savingName" class="size-4 animate-spin" /><Check v-else class="size-4" /></button>
-          <button type="button" class="icon-btn shrink-0" aria-label="取消" title="取消" @click="renaming = false"><X class="size-4" /></button>
-        </form>
-        <div v-else class="flex items-center gap-1">
+        <div class="flex items-center gap-1">
           <h3 class="min-w-0 break-words text-base font-bold leading-snug">{{ step ? `步骤 ${step.id} · ${title}` : title }}</h3>
           <span v-if="step" class="inline-flex shrink-0 items-center rounded-md bg-[#6265DC]/10 px-2 py-0.5 text-[11px] font-semibold text-[#6265DC]">{{ recipeToolLabel(step.tool) }}</span>
-          <button v-if="fileNode && boundFile" type="button" class="icon-btn size-7 shrink-0" aria-label="修改文件名" title="修改文件名" @click="startRename"><Pencil class="size-3.5" /></button>
         </div>
-        <p v-if="renameError" class="mt-1 text-xs text-error" role="alert">{{ renameError }}</p>
       </div>
       <StatusPill v-if="step?.state" class="shrink-0" :status="step.state.status === 'repairing' ? 'running' : step.state.status" :label="statusLabel" />
     </header>
@@ -469,6 +433,7 @@ function paramValue(value: unknown): string {
         </section>
 
         <div v-if="editable" class="fi-footer">
+          <button type="button" class="btn-text gap-1.5 px-2 text-[13px] !text-[#6265dc]" title="用 AI 修改文件名" @click="emit('edit', 'modify', { focus: 'name' })"><Sparkles class="size-4" />AI 改名</button>
           <button type="button" class="btn-text gap-1.5 px-2 text-[13px] !text-error" title="从流程中删除" @click="emit('edit', 'remove')"><Trash2 class="size-4" />删除</button>
         </div>
       </template>

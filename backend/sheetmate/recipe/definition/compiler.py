@@ -23,6 +23,7 @@ from sheetmate.recipe.definition.schema import (
     RecipeStep,
     check_recipe,
     file_pattern_from_name,
+    shorten_recipe_name,
     step_table_refs,
 )
 
@@ -346,7 +347,7 @@ class _Compiler:
                                      header=self.inputs[alias].header) for alias in direct}
             ctx = LearnContext(requirement=description, library=self.library, input_frames=direct, input_meta=meta)
             self.inputs.update({inp.alias: inp for inp in build_inputs(ctx, self.steps, {}, None)})
-        recipe = Recipe(name=name[:80], description=description, customer_id=customer_id, created_by="ai",
+        recipe = Recipe(name=shorten_recipe_name(name), description=description, customer_id=customer_id, created_by="ai",
                         inputs=list(self.inputs.values()), steps=self.steps, output_spec=outputs,
                         field_mapping=dict(field_mapping or {}),
                         learned_from={"conversation_id": conversation_id, "from": "execution",

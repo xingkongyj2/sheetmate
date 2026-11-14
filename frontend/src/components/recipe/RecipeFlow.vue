@@ -131,7 +131,7 @@ function selectFile(file: FlowFileNode) {
   replay.closeSetup()
   selection.value = { kind: 'file', file }
 }
-async function editFlow(operation: RecipeEditRequest['operation'] = 'modify', target = recipeEditTarget(selection.value), focus?: 'sql' | 'python' | 'formula') {
+async function editFlow(operation: RecipeEditRequest['operation'] = 'modify', target = recipeEditTarget(selection.value), focus?: 'sql' | 'python' | 'formula' | 'name') {
   if (!canEdit.value || running.value || openingEdit.value) return
   openingEdit.value = true
   const current = context.value
@@ -153,7 +153,8 @@ async function editFlow(operation: RecipeEditRequest['operation'] = 'modify', ta
     // 节点里的「AI 修改」：带上步骤名和要改的是 SQL / 脚本 / 公式，聊天里据此显示和提示
     const stepName = target.kind === 'step' ? shownFlow.value.steps.find((item) => item.id === target.step_id)?.name : undefined
     const request: RecipeEditRequest = { recipe_id: recipeId, version, operation,
-      target: focus && target.kind === 'step' ? { ...target, focus, ...(stepName ? { name: stepName } : {}) } : target }
+      target: focus && target.kind === 'step' ? { ...target, focus, ...(stepName ? { name: stepName } : {}) }
+        : focus === 'name' && target.kind !== 'step' && target.kind !== 'workflow' ? { ...target, focus } : target }
     if (!conversationId) {
       if (savedRecipe && current.customerId) {
         const conversation = await conversationApi.create({ customer_id: current.customerId, recipe_id: recipeId })
@@ -311,12 +312,12 @@ onBeforeUnmount(() => {
             </div>
             <aside v-if="replay.setupOpen.value || selection" class="flow-side-panel" :aria-label="replay.setupOpen.value ? '执行设置' : '节点详情'">
               <RecipeFlowRunSetup v-if="replay.setupOpen.value" :controller="replay" @close="replay.closeSetup()" @started="runStarted" @preview="(file) => (preview = file)" />
-              <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @renamed="emit('changed')" @close="selection = null" @preview="(file) => (preview = file)" />
+              <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="selection = null" @preview="(file) => (preview = file)" />
             </aside>
           </div>
           <div v-if="replay.error.value && !replay.setupOpen.value" class="border-t border-error/10 bg-error/5 px-5 py-2 text-xs text-error" role="alert">{{ replay.error.value }}</div>
         </template>
-        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @renamed="emit('changed')" @close="closeDialog" @preview="(file) => (preview = file)" />
+        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="closeDialog" @preview="(file) => (preview = file)" />
       </section>
     </div>
   </Teleport>

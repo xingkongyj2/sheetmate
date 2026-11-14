@@ -112,6 +112,7 @@ def validate_recipe_edit(db: Session, user: User, conv: Conversation, payload: d
         raise Conflict(f"流程已更新到 v{recipe.version}，请刷新流程后重新选择要修改的对象。")
     target = data["target"]
     kind = target["kind"]
+    file_info: dict[str, Any] | None = None  # 改文件名时：这个文件当前在流程里的记录
     if kind == "workflow":
         if edit.operation != "modify" or set(target) != {"kind"}:
             raise ServiceError("整个流程请使用对话修改；新增或移除请选择具体输入、输出。")
@@ -132,6 +133,11 @@ def validate_recipe_edit(db: Session, user: User, conv: Conversation, payload: d
             inputs = [item for item in recipe.inputs if item.alias in aliases]
             target = {"kind": "input", "aliases": aliases,
                       "name": "、".join(dict.fromkeys(item.source_file or item.alias for item in inputs))}
+            if data["target"].get("focus") == "name":
+                target["focus"] = "name"
+                bindings = recipe.learned_from.get("input_bindings") or {}
+                file_info = {"inputs": [{"alias": item.alias, "source_file": item.source_file, "file_pattern": item.file_pattern,
+                                         "file_id": (bindings.get(item.alias) or {}).get("file_id")} for item in inputs]}
     elif edit.operation == "add":
         target = {"kind": "output"}
     else:
@@ -146,6 +152,9 @@ def validate_recipe_edit(db: Session, user: User, conv: Conversation, payload: d
         if len(matches) != 1:
             raise ServiceError("所选输出结果已变化，请刷新流程后重试。")
         target = {"kind": "output", **{key: matches[0][key] for key in ("name", "source", "sources") if matches[0].get(key)}}
+        if data["target"].get("focus") == "name":
+            target["focus"] = "name"
+            file_info = {"output": {key: matches[0][key] for key in ("name", "ref", "source", "sources") if matches[0].get(key)}}
     saved = (record is not None and record.version == recipe.version
              and service._definition(service.record_to_recipe(record)) == service._definition(recipe)
              and (record.body or {}).get("learned_from", {}).get("input_bindings", {}) == recipe.learned_from.get("input_bindings", {}))
@@ -153,4 +162,6 @@ def validate_recipe_edit(db: Session, user: User, conv: Conversation, payload: d
               "recipe_name": recipe.name, "base_run_id": run_id}
     if kind == "step":
         result["step_info"] = step_info(recipe, step)
+    if file_info:
+        result["file_info"] = file_info
     return result

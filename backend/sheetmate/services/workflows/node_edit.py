@@ -17,6 +17,7 @@ from sheetmate.db.session import session_scope
 from sheetmate.engine.scripts.store import bind_script, resolve_script_code
 from sheetmate.recipe.definition.schema import Recipe
 from sheetmate.recipe.editing import NodeEditError, apply_node_edits, declared_files
+from sheetmate.recipe.editing.references import find_filename
 from sheetmate.services.files import service as file_service
 from sheetmate.services.workflows import file_rename
 from sheetmate.services.workflows import service as recipe_service
@@ -96,20 +97,43 @@ def inspect_nodes(db: Session, user: User, recipe_id: str, *, version: int | Non
     return data
 
 
+def _only_renames_workflow(before: Recipe, after: Recipe) -> bool:
+    """除了流程名，改完的流程和原来完全一致（说明、输入、步骤、输出、脚本引用都没动）。"""
+    if before.name == after.name:
+        return False
+    return after.model_copy(update={"name": before.name}).model_dump(mode="json") == before.model_dump(mode="json")
+
+
+def _is_rename_only_request(edits: Any) -> bool:
+    """请求本身只是改流程名（每项都是 update_workflow 且只带 name）；版本落后时也允许，因为名字和版本内容无关。"""
+    return (isinstance(edits, list) and bool(edits)
+            and all(isinstance(item, dict) and item.get("op") == "update_workflow" and set(item) <= {"op", "name"} for item in edits))
+
+
 def edit_nodes(db: Session, user: User, recipe_id: str, edits: list[dict[str, Any]], *, base_version: int | None = None,
                note: str = "", conversation_id: str | None = None, customer_id: str | None = None) -> dict[str, Any]:
     """应用节点修改并保存为新版本；修改不合法时不保存任何内容。"""
     recipe, latest = _load(db, user, recipe_id, conversation_id=conversation_id, customer_id=customer_id)
-    if base_version is not None and base_version != latest.version:
+    stale = base_version is not None and base_version != latest.version
+    if stale and not _is_rename_only_request(edits):
         raise Conflict(f"流程已更新到 v{latest.version}，请基于最新版本重新修改。")
     try:
         result = apply_node_edits(recipe, edits, recipe_service.library_for(db, recipe.customer_id))
     except NodeEditError as exc:
         raise ServiceError(str(exc)) from exc
+    if stale and not _only_renames_workflow(recipe, result.recipe):
+        raise Conflict(f"流程已更新到 v{latest.version}，请基于最新版本重新修改。")  # 声称只改名、实际不止
     if not result.changed:
         return {"recipe_id": latest.recipe_id, "version": latest.version, "name": latest.name, "saved": False,
                 "customer_id": latest.customer_id, "changes": [], "unchanged": result.unchanged, "warnings": [],
                 "needs_rerun": False, "description": recipe.description, "flow": recipe.flow()}
+    if _only_renames_workflow(recipe, result.recipe):
+        # 只改了流程名：名字不影响处理逻辑，原地改名，不生成新版本
+        file_rename.rename_in_place(db, latest.recipe_id, result.recipe.name)
+        return {"recipe_id": latest.recipe_id, "version": latest.version, "name": result.recipe.name,
+                "customer_id": latest.customer_id, "saved": True, "changes": result.changes, "unchanged": result.unchanged,
+                "warnings": result.warnings, "needs_rerun": False,
+                "description": result.recipe.description, "flow": result.recipe.flow()}
     for script_id in result.new_script_ids:
         # 新脚本版本在保存前没有归属；先绑定，保存时的脚本权限检查才能通过。
         bind_script(script_id, user_id=user.id, customer_id=recipe.customer_id, conversation_id=latest.conversation_id)
@@ -164,6 +188,72 @@ class _ChatBackend:
                 if table.name not in item["tables"]:
                     item["tables"].append(table.name)
         return result
+
+
+    def rename_flow_files(self, host: Any, recipe_id: str, renames: list[dict[str, Any]]) -> dict[str, Any]:
+        """对话里改流程的输入 / 输出文件名，一次调用完成：自己判断每个旧名是输入还是输出，走对的路径，不重跑。
+
+        输出文件：改流程里声明的名字（rename_output_file，同步脚本等所有引用）；
+        输入文件：改已上传文件的真实名字，并同步流程里的来源文件名、匹配规则和所有引用。"""
+        pairs = _clean_pairs(renames)
+        with session_scope() as db:
+            user, scope = self._scope(db, host)
+            recipe, _latest = _load(db, user, recipe_id, **scope)
+            outputs = {item["name"] for item in declared_files(recipe)}
+            files_by_name = {record.filename: record for record in file_service.list_files(
+                db, customer_id=scope["customer_id"]) if record.kind in {"input", "expected"}}
+            bound_ids = {(recipe.learned_from.get("input_bindings") or {}).get(i.alias, {}).get("file_id") for i in recipe.inputs}
+            input_names = {i.source_file for i in recipe.inputs if i.source_file}
+            output_edits, input_renames, unknown = [], [], []
+            for old, new in pairs:
+                if old in outputs:
+                    output_edits.append({"op": "rename_output_file", "name": old, "new_name": new})
+                    continue
+                record = files_by_name.get(old)
+                if record is not None and (record.id in bound_ids or old in input_names):
+                    input_renames.append({"file_id": record.id, "new_name": new})
+                else:
+                    unknown.append(old)
+            if unknown:
+                raise ServiceError(
+                    f"流程里没有叫「{'」「'.join(unknown)}」的输入或输出文件。"
+                    f"输入文件：{'、'.join(sorted(input_names)) or '无'}；输出文件：{'、'.join(sorted(outputs)) or '无'}。")
+        result: dict[str, Any] = {"recipe_id": recipe_id, "outputs": None, "inputs": None, "leftovers": []}
+        if input_renames:
+            result["inputs"] = self.rename_files(host, input_renames)
+        if output_edits:
+            result["outputs"] = self.edit(host, recipe_id, output_edits)
+        # 不管走的是哪条路径，最后都按最新保存的流程再核对一遍：还有哪些地方出现旧文件名，原样告诉 AI（它再决定改不改）
+        with session_scope() as db:
+            latest = recipe_service.record_to_recipe(recipe_service.get_record(db, recipe_id))
+        new_names = {old: new for old, new in pairs}
+        for old, new in new_names.items():
+            final = result_new_name(result, old) or new
+            for hit in find_filename(latest, old, ignore=final):
+                result["leftovers"].append({"old": old, "where": hit.where, "count": hit.count})
+        return result
+
+
+def result_new_name(result: dict[str, Any], old: str) -> str | None:
+    """重名时系统会自动追加（1）：核对要用真正生效的新名字。"""
+    for item in (result.get("inputs") or {}).get("files", []):
+        if item["old"] == old and item["changed"]:
+            return item["new"]
+    return None
+
+
+def _clean_pairs(renames: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    for item in renames if isinstance(renames, list) else []:
+        old, new = str((item or {}).get("old_name") or "").strip(), str((item or {}).get("new_name") or "").strip()
+        if not old or not new:
+            raise ServiceError("每项都要写 old_name（现在的文件名）和 new_name（新文件名）。")
+        pairs.append((old, new))
+    if not pairs:
+        raise ServiceError("renames 至少要有一项：{old_name, new_name}。")
+    if len({old for old, _ in pairs}) != len(pairs):
+        raise ServiceError("同一个文件不能在一次调用里改两次。")
+    return pairs
 
 
 chat_tools.register_backend(_ChatBackend())

@@ -655,7 +655,7 @@ RECIPE_LEARN_PROMPT = """## 处理说明（用户的需求）
 ---
 请生成 Recipe，只返回 JSON：
 {{
-  "recipe_name": "简短的流程名",
+  "recipe_name": "流程名，尽量控制在 30 字以内的名词短语，如「月度运费汇总」；不要写成一句话，不要加括号补充说明",
   "recipe_description": "一段话说明这个流程从头到尾做什么",
   "steps": [
     {{

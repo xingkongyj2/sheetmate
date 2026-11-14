@@ -1,14 +1,15 @@
 <script setup lang="ts">
-import { Download, FileCheck2, FileSpreadsheet, LoaderCircle, Trash2, Upload } from '@lucide/vue'
+import { FileCheck2, FileSpreadsheet, LoaderCircle, Upload } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 
 import { customerApi, fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo } from '@/api/types'
-import { timeAgo } from '@/composables/chatModel'
 import { isDeliveredOutput } from '@/composables/deliveryFiles'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
+
+import WorkflowFileRow from './WorkflowFileRow.vue'
 
 const props = defineProps<{
   customerId: string
@@ -108,8 +109,8 @@ async function remove(file: FileInfo) {
 </script>
 
 <template>
-  <div class="space-y-4">
-    <div class="card-soft p-5">
+  <div class="card-soft p-5">
+    <div>
       <div class="mb-3 flex items-center gap-3">
         <h3 class="text-[15px] font-semibold">输入文件</h3>
         <div class="relative ml-auto shrink-0" @keydown.esc.stop.prevent="closeUploadMenu">
@@ -138,44 +139,19 @@ async function remove(file: FileInfo) {
           <input ref="uploadInput" type="file" class="hidden" multiple accept=".xlsx,.xlsm,.xls,.csv" @change="upload" />
         </div>
       </div>
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm">
-          <thead class="text-left text-xs text-faint">
-            <tr><th class="py-2 font-normal">文件</th><th class="font-normal">类型</th><th class="font-normal">上传</th><th /></tr>
-          </thead>
-          <tbody>
-            <tr v-for="file in files" :key="file.file_id" class="border-t border-line">
-              <td class="py-2.5 pr-3">
-                <button type="button" class="flex items-center gap-2 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :aria-label="`预览 ${file.filename}`" @click="emit('preview', file)">
-                  <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
-                  <FileSpreadsheet v-else class="size-4 shrink-0 text-fun-green" />{{ file.filename }}
-                </button>
-              </td>
-              <td class="pr-3"><span class="tag whitespace-nowrap" :class="file.kind === 'expected' ? '!bg-fun-yellow/20 !text-[#8a6400]' : ''">{{ file.kind_label }}</span></td>
-              <td class="whitespace-nowrap pr-2 text-xs text-faint">{{ timeAgo(file.created_at) }}</td>
-              <td class="whitespace-nowrap text-right">
-                <a :href="file.download_url" class="icon-btn" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>
-                <button type="button" class="icon-btn hover:text-error" title="删除" :aria-label="`删除 ${file.filename}`" @click="remove(file)"><Trash2 class="size-4" /></button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p v-if="!files.length" class="py-8 text-center text-sm text-faint">还没有文件</p>
-    </div>
+      <WorkflowFileRow
+        v-for="file in files" :key="file.file_id" :file="file"
+        :badge="file.kind === 'expected' ? file.kind_label : undefined" badge-class="!bg-fun-yellow/20 !text-[#8a6400]"
+        @preview="emit('preview', $event)" @remove="remove"
+      />
+      <p v-if="!files.length" class="py-6 text-center text-sm text-faint">还没有文件</p>
 
-    <div class="card-soft p-5">
-      <h3 class="mb-3 text-[15px] font-semibold">输出文件</h3>
-      <div v-for="file in results" :key="file.file_id" class="flex items-center gap-3 border-t border-line py-2.5 text-sm first:border-0">
-        <FileSpreadsheet class="size-4 shrink-0" />
-        <button type="button" class="min-w-0 flex-1 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :title="file.filename" :aria-label="`预览 ${file.filename}`" @click="emit('preview', file)">
-          <span class="block truncate">{{ file.filename }}</span>
-          <span v-if="file.delivery_status === 'candidate'" class="mt-0.5 block text-[10px] text-faint">待核验文件</span>
-        </button>
-        <span class="shrink-0 text-xs text-faint">{{ timeAgo(file.created_at) }}</span>
-        <a :href="file.download_url" class="icon-btn shrink-0" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>
-        <button type="button" class="icon-btn shrink-0 hover:text-error" title="删除" :aria-label="`删除 ${file.filename}`" @click="remove(file)"><Trash2 class="size-4" /></button>
-      </div>
+      <h3 class="mb-3 mt-6 border-t border-line pt-6 text-[15px] font-semibold">输出文件</h3>
+      <WorkflowFileRow
+        v-for="file in results" :key="file.file_id" :file="file"
+        :badge="file.delivery_status === 'candidate' ? '待核验文件' : undefined"
+        @preview="emit('preview', $event)" @remove="remove"
+      />
       <p v-if="!results.length" class="py-6 text-center text-sm text-faint">还没有输出文件</p>
     </div>
   </div>

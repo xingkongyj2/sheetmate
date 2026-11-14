@@ -240,6 +240,14 @@ def _usable_result(item: dict[str, Any]) -> bool:
             and execution.get("status") not in {"failed", "blocked", "rejected"})
 
 
+def needs_workflow_revision(recipe_edit: dict[str, Any] | None, mode: str, stop_scope: str | None) -> bool:
+    """选中了流程节点并要求修改时，必须真的修改并重跑流程才算完成；只是改输入/输出文件名（focus=name）除外：
+    那是改文件名和流程里记录的名字，不改处理逻辑，用 rename_files 等工具改完即可，不该要求整条流程重跑。"""
+    if not recipe_edit or mode != "modify" or stop_scope == "step":
+        return False
+    return (recipe_edit.get("target") or {}).get("focus") != "name"
+
+
 def workflow_revised(results: Any) -> bool:
     """所选流程已经改好并重跑：revise_recipe 成功；或用 edit_recipe_nodes 直接改好之后，又用 run_recipe 成功重跑。
 

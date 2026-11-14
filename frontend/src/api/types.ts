@@ -102,7 +102,7 @@ export interface RecipeEditRequest {
     source?: string
     sources?: string[]
     step_id?: number
-    focus?: 'sql' | 'python' | 'formula' // 只改这一步的 SQL / 脚本 / 公式
+    focus?: 'sql' | 'python' | 'formula' | 'name' // 只改这一步的 SQL / 脚本 / 公式，或只改这个输入/输出文件的名字
   }
   operation: 'modify' | 'add' | 'remove' | 'replace'
 }

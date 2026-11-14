@@ -149,7 +149,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
         </div>
         <button
           type="button"
-          class="recipe-flow-step group relative flex w-[212px] shrink-0 flex-col rounded-2xl border border-line bg-white p-3 text-left transition hover:-translate-y-0.5"
+          class="recipe-flow-step group relative flex w-[212px] shrink-0 flex-col rounded-2xl border border-line bg-white p-3 text-left"
           :class="[`is-${stepTone(step.id)}`, { 'is-selected': activeStep === step.id }]"
           :data-flow-step="step.id"
           :aria-label="stepLabel(step)"
@@ -281,8 +281,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
 
 <style scoped>
 .recipe-flow-row { width: max-content; margin-inline: auto; }
-.recipe-flow-file, .recipe-flow-step { cursor: pointer; transition: background-color .18s, border-color .18s, box-shadow .18s, transform .18s; }
-.recipe-flow-file:hover, .recipe-flow-step:hover { box-shadow: 0 5px 16px #34345212; }
+.recipe-flow-file, .recipe-flow-step { cursor: pointer; transition: border-color .25s ease, background-color .25s ease, box-shadow .25s ease; }
 .recipe-flow-file:focus-visible, .recipe-flow-step:focus-visible, .recipe-flow-canvas:focus-visible { outline: 2px solid #6265dc; outline-offset: 3px; }
 .recipe-flow-file-name { overflow-wrap: anywhere; }
 .recipe-flow-connector { color: #c9c9cf; }
@@ -306,7 +305,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
 .recipe-flow-compact { padding: 6px 2px 10px; }
 .recipe-flow-compact .recipe-flow-row { align-items: center; gap: 0; min-width: max-content; }
 .recipe-flow-compact .recipe-flow-step:not(.recipe-flow-step-vertical) { width: 76px; min-height: 102px; flex-shrink: 0; align-items: center; justify-content: center; padding: 12px 7px; border-color: transparent; background: #f8f8fc; text-align: center; box-shadow: 0 2px 8px #34345205; }
-.recipe-flow-compact .recipe-flow-step:hover { background: #f0effb; box-shadow: 0 5px 14px #6265dc12; }
+.recipe-flow-compact .recipe-flow-step:hover { background: #f0effb; }
 .recipe-flow-compact .recipe-flow-step-art { justify-content: center; }
 .recipe-flow-compact .recipe-flow-step-name { width: 100%; margin-top: 9px; overflow-wrap: anywhere; font-size: 12px; font-weight: 500; line-height: 1.5; }
 .recipe-flow-compact .recipe-flow-connector:not(.recipe-flow-connector-vertical) { width: 20px; flex: 0 0 20px; }
@@ -321,12 +320,19 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
 .recipe-flow-step.is-warning { border-color: #e5c273; }
 .recipe-flow-step.is-failed, .recipe-flow-file.is-failed { border-color: #ef7b7b; }
 .recipe-flow-step.is-selected, .recipe-flow-file.is-selected { border-color: #6265dc; box-shadow: 0 0 0 2px #6265dc33; }
+/* 悬浮：只让边框颜色渐变加深，不位移、不加阴影（流程图外层会裁剪溢出的内容）。放在各状态之后，按状态各给一条。 */
+.recipe-flow-step:hover, .recipe-flow-input:hover { border-color: #b4b5ee; }
+.recipe-flow-step.is-completed:hover { border-color: #5db98a; }
+.recipe-flow-step.is-warning:hover { border-color: #d9a43a; }
+.recipe-flow-step.is-failed:hover, .recipe-flow-file.is-failed:hover { border-color: #e65b5b; }
+.recipe-flow-step.is-active:hover { border-color: #4a4dc4; }
+.recipe-flow-step.is-selected:hover, .recipe-flow-file.is-selected:hover { border-color: #6265dc; }
+.recipe-flow-output:hover { background-color: #26262b; }
 .flow-spinner { animation: flow-spin 1s linear infinite; }
 @keyframes flow-travel { to { stroke-dashoffset: -16; } }
 @keyframes flow-spin { to { transform: rotate(360deg); } }
 @keyframes flow-node-pulse { 0%, 100% { box-shadow: 0 0 0 1px #6265dc18; } 50% { box-shadow: 0 0 0 4px #6265dc24; } }
 @media (prefers-reduced-motion: reduce) {
   .recipe-flow-step, .recipe-flow-file, .recipe-flow-connector .flow-line, .flow-spinner { animation: none !important; transition: none !important; }
-  .recipe-flow-step:hover { transform: none; }
 }
 </style>

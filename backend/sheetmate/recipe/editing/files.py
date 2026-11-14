@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 
 from sheetmate.recipe.definition.schema import Recipe, file_pattern_from_name
+from sheetmate.recipe.editing.references import describe, replace_filename
 
 
 def _matches(pattern: str, filename: str) -> bool:
@@ -43,4 +44,10 @@ def sync_renamed_files(recipe: Recipe, renamed: dict[str, tuple[str, str]]) -> l
     listed = recipe.learned_from.get("input_files")
     if touched and isinstance(listed, list):
         recipe.learned_from["input_files"] = [touched.get(item, item) for item in listed]
+    # 旧文件名还可能出现在脚本、SQL、步骤说明、流程说明里：一起改掉，免得名字对不上
+    for old, new in touched.items():
+        if old and old != new:
+            hits = replace_filename(recipe, old, new)
+            if hits:
+                changes.append(f"「{old}」→「{new}」已同步引用：{describe(hits)}")
     return changes

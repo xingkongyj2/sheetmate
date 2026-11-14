@@ -38,6 +38,11 @@ EDIT_ITEM_SCHEMA = _obj({
 }, ["op"])
 
 
+FLOW_RENAME_ITEM_SCHEMA = _obj({
+    "old_name": {**_STR, "description": "现在的文件名，原样照抄界面或 inspect_recipe_nodes 里看到的（带扩展名）"},
+    "new_name": {**_STR, "description": "新文件名，可不带扩展名；扩展名不能改"},
+}, ["old_name", "new_name"])
+
 RENAME_ITEM_SCHEMA = _obj({
     "file_id": {**_STR, "description": "list_files 里看到的准确文件 ID"},
     "new_name": {**_STR, "description": "新文件名，可不带扩展名；扩展名不能改"},
@@ -48,6 +53,7 @@ class NodeEditBackend(Protocol):
     def inspect(self, host: Any, recipe_id: str, **options: Any) -> dict[str, Any]: ...
     def edit(self, host: Any, recipe_id: str, edits: list[dict[str, Any]], **options: Any) -> dict[str, Any]: ...
     def rename_files(self, host: Any, renames: list[dict[str, Any]], **options: Any) -> dict[str, Any]: ...
+    def rename_flow_files(self, host: Any, recipe_id: str, renames: list[dict[str, Any]]) -> dict[str, Any]: ...
 
 
 _backend: NodeEditBackend | None = None
@@ -131,6 +137,52 @@ def _tool_edit_recipe_nodes(args: dict[str, Any], ctx: AgentContext) -> ToolResu
              "description": result["description"], "version": result["version"], "flow": result["flow"]}
     summary = f"已修改流程「{result['name']}」（v{result['version']}）"
     return ToolResult("\n".join(lines), summary=summary, public_text=summary, events=[event])
+
+
+def _tool_rename_flow_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
+    """改流程的输入 / 输出文件名：一次调用完成，自动同步所有引用，不重跑。"""
+    renames = args.get("renames")
+    if not isinstance(renames, list) or not renames:
+        raise ValueError("renames 必须是非空列表，每项 {old_name, new_name}。")
+    recipe_id = _recipe_id(args, ctx)
+    result = _service().rename_flow_files(ctx.host, recipe_id, renames)
+    lines: list[str] = []
+    events: list[dict[str, Any]] = []
+    count = 0
+    inputs, outputs = result.get("inputs"), result.get("outputs")
+    if inputs:
+        for item in [item for item in inputs["files"] if item["changed"]]:
+            lines.append(f"- 输入文件：「{item['old']}」→「{item['new']}」")
+            count += 1
+        for recipe in inputs["recipes"]:
+            _forget_stale_host_state(ctx.host, recipe["recipe_id"], recipe["version"], ctx)
+            lines.append(f"  流程「{recipe['name']}」已同步 → v{recipe['version']}：" + "；".join(recipe["changes"]))
+            if recipe.get("flow"):
+                events.append({"type": "recipe_view", "recipe_id": recipe["recipe_id"], "name": recipe["name"],
+                               "description": recipe["description"], "version": recipe["version"], "flow": recipe["flow"]})
+    if outputs and outputs.get("saved", True):
+        _forget_stale_host_state(ctx.host, outputs["recipe_id"], outputs["version"], ctx)
+        for change in outputs["changes"]:
+            lines.append(f"- {change}")
+            count += 1 if change.startswith("输出文件名") else 0
+        lines.extend(f"提醒：{warning}" for warning in outputs["warnings"])
+        events.append({"type": "recipe_view", "recipe_id": outputs["recipe_id"], "name": outputs["name"],
+                       "description": outputs["description"], "version": outputs["version"], "flow": outputs["flow"]})
+    elif outputs:
+        lines.append("- 输出文件名已经是目标名字，没有改动。")
+    leftovers = result.get("leftovers") or []
+    if leftovers:
+        places = "；".join(f"「{item['old']}」在{item['where']} {item['count']} 处" for item in leftovers)
+        check = (f"核对：整条流程里还有地方出现旧名字——{places}。这些位置紧贴着别的文字、不能确定是不是同一个文件名，所以没有自动改。"
+                 "请看这些位置的上下文：确实是在说这个文件，就用 update_step（步骤说明/参数）、edit_script（脚本）或 update_workflow（流程说明）改成新名字，"
+                 "改完再说一句结果；不是同一个文件就保持原样。不要为此重跑流程。")
+    else:
+        check = "核对：整条流程（脚本、SQL、参数、说明）里已经没有旧名字，没有遗漏。"
+    head = f"已改好 {count} 个文件名：" if count else "没有文件名被改动："
+    tail = "只是改名字，处理逻辑没有变，不需要重跑流程。输出文件的新名字会在下一次运行生成文件时生效。"
+    text = "\n".join([head, *lines, check, tail])
+    summary = f"改了 {count} 个文件名"
+    return ToolResult(text, summary=summary, public_text=summary, events=events)
 
 
 def _tool_rename_files(args: dict[str, Any], ctx: AgentContext) -> ToolResult:

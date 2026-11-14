@@ -19,6 +19,25 @@ _SCRIPT_TOOL = "run_python_script"
 _FOCUS_NAMES = {"sql": "SQL", "python": "脚本", "formula": "公式"}
 
 
+def _file_name_rule(edit: dict[str, Any]) -> str:
+    """输入/输出文件节点里点了「AI 改名」：只改这个文件的名字，不改处理逻辑。"""
+    target = edit.get("target") or {}
+    if target.get("focus") != "name" or target.get("kind") not in {"input", "output"}:
+        return ""
+    if target["kind"] == "input":
+        how = ("这是输入文件：先从 recipe_edit.file_info.inputs 找到它的 file_id，用 rename_files 改真实文件名（会同步流程里记录的来源文件名和匹配规则）；"
+               "没有 file_id 时只用 edit_recipe_nodes 的 rename_input_file 改流程里记录的名字。")
+    else:
+        how = ("这是输出文件：它的名字由脚本里的声明决定，用 edit_recipe_nodes 的 rename_output_file 改流程里声明的输出文件名，"
+               "不要用 rename_files 只改已生成文件的记录（会和脚本里的名字对不上）。")
+    return ("用户点了节点里的 AI 改名，只想改这个文件的名字，不改处理逻辑、不重新生成流程。" + how
+            + "改名工具会把整条流程里引用旧名字的地方（所有步骤的脚本、SQL、参数、说明、流程说明、校验规则等）一起改掉，并再核对一遍有没有遗漏："
+            "看工具返回的「已同步引用」确认改了哪些位置；如果返回里有「改完后仍有地方出现」，按提示用 edit_script / update_step 把剩下的位置也改掉，再看一次结果。"
+            "只改名字不影响处理逻辑，不要用 run_recipe 重跑流程，也不要用 revise_recipe。"
+            "用户给出新名字就原样使用；给的是命名规则（如“去掉括号里的说明”）时，先列出现有名字，按规则逐个给出新名字再改，并在回复里写清楚旧名→新名，以及哪些位置做了同步。"
+            "扩展名不能改。用户只是询问时，解释即可，不要修改。")
+
+
 def _step_code_rule(edit: dict[str, Any]) -> str:
     """节点里点了「AI 修改」：用户只想改这一步的 SQL / 脚本 / 公式，内容已经在 step_info 里。"""
     focus = (edit.get("target") or {}).get("focus")
@@ -183,7 +202,7 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
               "单步修改传 step_ids，输入变更传 input_changes；通过完整流程重跑适配依赖并核对结果后才能报告完成。"
               "移除输入或输出指解除流程绑定/交付声明，原文件与历史记录保留。用户上传的新输入必须实际绑定到重跑，不能只改名称。"
               "除用户要求及必要的依赖适配外保留原流程。重跑失败不得声称已更新。"
-              + _step_code_rule(ctx.recipe_edit)
+              + _step_code_rule(ctx.recipe_edit) + _file_name_rule(ctx.recipe_edit)
             if ctx.recipe_edit else ""), required=True),
         ContextBlock("customer", "## 客户\n" + build_customer_block(ctx), required=True),
         ContextBlock("business_memory", "## 客户与当前流程的长期记忆（用户维护的规则优先于 AI 参考）\n" + (ctx.host.memory_text(message) or "（没有）"), required=True),

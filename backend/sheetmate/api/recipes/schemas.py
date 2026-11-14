@@ -22,10 +22,3 @@ class NodeEditBody(BaseModel):
     edits: list[dict[str, Any]]
     base_version: int | None = None
     note: str = ""
-
-
-class FileRenameBody(BaseModel):
-    """修改文件名：每项 {file_id, new_name}；默认同步引用这些文件的流程。"""
-
-    renames: list[dict[str, Any]]
-    sync_recipes: bool = True

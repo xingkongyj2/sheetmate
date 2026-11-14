@@ -238,15 +238,13 @@ async function onEdited() {
       <!-- 处理逻辑 -->
       <section v-if="tab === 'logic'" class="mt-6">
         <div class="mx-auto max-w-3xl">
-          <div class="mb-2 flex justify-end">
-            <button class="btn-text" :disabled="summarizing" @click="regenerate">
+          <h2 v-if="primaryRecipe" class="mb-3 break-words px-1 text-[16px] font-semibold leading-relaxed [text-wrap:balance]">{{ primaryRecipe.name }}</h2>
+          <div class="rounded-[26px] bg-white px-6 py-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:px-9 sm:py-5">
+          <div v-if="customer.summary" class="mb-3 flex items-center gap-3">
+            <span v-if="customer.summary_updated_at" class="text-xs text-faint">{{ customer.summary_by === 'human' ? '更新于' : '自动更新于' }} {{ timeAgo(customer.summary_updated_at) }}</span>
+            <button class="btn-text ml-auto shrink-0" :disabled="summarizing" @click="regenerate">
               <LoaderCircle v-if="summarizing" class="size-3.5 animate-spin" /><Sparkles v-else class="size-3.5" />重新总结
             </button>
-          </div>
-          <div class="rounded-[26px] bg-white p-6 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-9">
-          <div class="mb-7 border-b border-line pb-5">
-            <h2 v-if="primaryRecipe" class="break-words text-[20px] font-bold leading-snug text-ink [text-wrap:balance]">{{ primaryRecipe.name }}</h2>
-            <p v-if="customer.summary_updated_at" class="mt-1.5 text-xs text-faint">{{ customer.summary_by === 'human' ? '更新于' : '自动更新于' }} {{ timeAgo(customer.summary_updated_at) }}</p>
           </div>
           <CustomerLogicSummary v-if="customer.summary" :source="customer.summary" />
           <div v-else class="py-10 text-center text-sm text-faint">

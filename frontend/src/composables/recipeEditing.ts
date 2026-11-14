@@ -1,7 +1,7 @@
 import type { ConversationDetail, RecipeEditRequest } from '../api/types.ts'
 import type { FlowSelection } from './recipeFlowInteraction.ts'
 
-const FOCUS_LABELS = { sql: 'SQL', python: '脚本', formula: '公式' } as const
+const FOCUS_LABELS = { sql: 'SQL', python: '脚本', formula: '公式', name: '文件名' } as const
 
 export interface RecipeEditDraft {
   title: string
@@ -37,7 +37,7 @@ export function storedRecipeEdit(value: unknown): RecipeEditRequest | null {
     !['modify', 'add', 'remove', 'replace'].includes(item.operation)) return null
   if (item.target.kind === 'step' && (!Number.isInteger(item.target.step_id) || item.target.step_id! < 1)) return null
   if (item.target.name !== undefined && typeof item.target.name !== 'string') return null
-  if (item.target.focus !== undefined && !['sql', 'python', 'formula'].includes(item.target.focus)) return null
+  if (item.target.focus !== undefined && !['sql', 'python', 'formula', 'name'].includes(item.target.focus)) return null
   if (item.target.source !== undefined && typeof item.target.source !== 'string') return null
   for (const key of ['aliases', 'sources'] as const) {
     if (item.target[key] !== undefined && (!Array.isArray(item.target[key]) || !item.target[key]!.every((name) => typeof name === 'string'))) return null
@@ -50,10 +50,18 @@ export function recipeEditLabel(edit: RecipeEditRequest): string {
   const target = edit.target
   if (target.kind === 'workflow') return '修改流程'
   if (target.kind === 'step') return target.focus ? `修改第 ${target.step_id} 步${target.name ? `「${target.name}」` : ''}的${FOCUS_LABELS[target.focus]}` : `修改第 ${target.step_id} 步`
-  return `${action}${target.kind === 'input' ? '输入' : '输出'}${target.name ? ` · ${target.name}` : ''}`
+  const noun = target.kind === 'input' ? '输入' : '输出'
+  if (target.focus === 'name') return `修改${noun}文件名${target.name ? ` · ${target.name}` : ''}`
+  return `${action}${noun}${target.name ? ` · ${target.name}` : ''}`
+}
+
+/** 这次修改发送后会不会重新执行流程：只改文件名不会（改的是名字和流程里的引用，不影响处理逻辑），其余修改都会 */
+export function recipeEditReruns(edit: RecipeEditRequest): boolean {
+  return edit.target.focus !== 'name'
 }
 
 export function recipeEditPlaceholder(edit: RecipeEditRequest): string {
+  if (edit.target.focus === 'name') return '说明新的文件名，或命名规则（如「去掉括号里的说明」）…'
   if (edit.target.kind === 'step' && edit.target.focus) return `描述这段${FOCUS_LABELS[edit.target.focus]}要怎么改…`
   if (edit.target.kind === 'step') return '描述这一步要怎么改，其他依赖步骤会重新适配…'
   if (edit.target.kind === 'input') return edit.operation === 'remove'
