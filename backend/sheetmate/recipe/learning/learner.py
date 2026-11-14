@@ -316,7 +316,7 @@ def parse_steps(result: dict[str, Any], library: FormulaLibrary) -> list[RecipeS
         steps.append(
             RecipeStep(
                 id=i,
-                name=str(raw.get("name") or f"第 {i} 步")[:40],
+                name=str(raw.get("name") or f"第 {i} 步"),
                 action=str(raw.get("action") or "custom"),
                 formula=formula,
                 kind="python" if formula == "python_script" else "sql" if formula == "custom_sql" else "formula",

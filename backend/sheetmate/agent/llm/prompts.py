@@ -660,7 +660,7 @@ RECIPE_LEARN_PROMPT = """## 处理说明（用户的需求）
   "steps": [
     {{
       "id": 1,
-      "name": "步骤名（短）",
+      "name": "步骤名（简短，不超过 30 个字，不要写成整句话；详细做法写在 description）",
       "action": "clean|filter|pivot|unpivot|lookup|merge|aggregate|calculate|sort|output|custom",
       "kind": "formula|sql|python",
       "formula": "公式 id；SQL 用 custom_sql；Python 用 python_script",

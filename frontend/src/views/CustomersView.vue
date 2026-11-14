@@ -68,6 +68,7 @@ async function onSaved(customer: CustomerCard) {
             </div>
             <p class="mt-1.5 line-clamp-2 min-h-[2.6em] text-[13px] leading-relaxed text-mute">{{ c.excerpt || '还没有处理逻辑说明，打开客户上传文件或新建对话' }}</p>
             <div class="mt-auto flex items-center gap-3 pt-3 text-xs text-faint">
+              <span><b class="font-semibold text-ink">{{ c.recipe_count }}</b> 流程</span>
               <span><b class="font-semibold text-ink">{{ c.file_count }}</b> 文件</span>
               <span><b class="font-semibold text-ink">{{ c.conversation_count }}</b> 对话</span>
               <span class="ml-auto">{{ timeAgo(c.last_activity) }}</span>

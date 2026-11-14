@@ -31,6 +31,7 @@ def _now() -> str:
 # 节点编辑删除的脚本交付文件：脚本仍可能写出它们，但不再作为流程输出交付。
 REMOVED_OUTPUT_REFS = "removed_output_refs"
 MAX_RECIPE_NAME = 30  # 流程名最多 30 个字：AI 起的名字常常写成一整句话，列表和标题里放不下
+MAX_STEP_NAME = 30  # 节点（步骤）名同样最多 30 个字；详细做法写在说明里，不放进名字
 
 
 def new_recipe_id() -> str:
@@ -105,6 +106,11 @@ class RecipeStep(BaseModel):
                     value["params"] = script_params(params, title=str(value.get("name") or "Python 脚本")[:20])
         return value
 
+    @field_validator("name")
+    @classmethod
+    def _short_name(cls, value: str) -> str:
+        return shorten_step_name(value)
+
     @field_validator("output")
     @classmethod
     def _clean_output(cls, value: str) -> str:
@@ -155,6 +161,25 @@ def shorten_recipe_name(name: str, limit: int = MAX_RECIPE_NAME) -> str:
     return text[:limit].rstrip(" ，,、；;：:-—_") or "未命名流程"
 
 
+_PHRASE_BREAKS = "，,、；;。：:"
+
+
+def shorten_step_name(name: str, limit: int = MAX_STEP_NAME) -> str:
+    """节点名收短到 limit 字以内：先去掉末尾的括号补充说明；还长就在 limit 字内最后一个标点处断开
+    （不留半句话），断不开再按字数截断。只改过长的名字，被截掉的细节仍在步骤说明里。"""
+    text = " ".join(str(name or "").split())
+    while len(text) > limit:
+        trimmed = _TRAILING_NOTE.sub("", text).strip()
+        if not trimmed or trimmed == text:
+            break
+        text = trimmed
+    if len(text) > limit:
+        window = text[:limit + 1]
+        cut = max(window.rfind(mark) for mark in _PHRASE_BREAKS)
+        text = window[:cut] if cut >= limit // 2 else text[:limit]
+    return text.rstrip(" " + _PHRASE_BREAKS + "-—_") or "未命名步骤"
+
+
 class Recipe(BaseModel):
     model_config = {"extra": "ignore"}
 
@@ -200,6 +225,7 @@ class Recipe(BaseModel):
     def to_dict(self) -> dict[str, Any]:
         # model_copy(update=...) 和断点重跑允许直接改参数，保存前同样转换为不可变脚本引用。
         for step in self.steps:
+            step.name = shorten_step_name(step.name)  # 保存前统一收短：改节点名等直接赋值的路径不经过校验
             if step.kind == "python":
                 try:
                     step.params = script_params(step.params, title=step.name[:20])

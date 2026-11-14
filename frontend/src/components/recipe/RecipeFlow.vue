@@ -1,8 +1,14 @@
+<script lang="ts">
+// 同一页面可能有好几个流程图（对话里每条消息一个）：地址栏要求打开全屏时，只让第一个匹配的打开。
+const openedFlows = new Set<symbol>()
+</script>
+
 <script setup lang="ts">
 /** A flow stays on its page: shared canvas, fullscreen layer, resource inspector and live replay. */
-import { Check, CircleAlert, Focus, LoaderCircle, LocateFixed, Maximize2, MessageSquare, Minus, Play, Plus, X } from '@lucide/vue'
+import { Check, CircleAlert, LoaderCircle, LocateFixed, Maximize2, MessageSquare, Minus, Play, Plus, RotateCcw } from '@lucide/vue'
+import { PhChatCircleDots, PhPlay, PhX } from '@phosphor-icons/vue'
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi, recipeApi } from '@/api'
 import { ApiError, errorText } from '@/api/http'
@@ -33,6 +39,7 @@ const props = withDefaults(defineProps<{
 }>(), { states: () => [], direction: 'horizontal', activeStep: null, compact: false, context: () => ({}), toolbarPlacement: 'inline' })
 const emit = defineEmits<{ changed: [] }>()
 const router = useRouter()
+const route = useRoute()
 const store = useWorkspaceStore()
 const toast = useToast()
 const openingEdit = ref(false)
@@ -100,14 +107,59 @@ function measure() {
 function fit() {
   measure()
   const d = dimensions.value
-  zoom.value = Math.max(0.25, Math.min(1, (d.viewportWidth - 96) / d.width, (d.viewportHeight - 96) / d.height))
+  // 上下多留一些：顶部有浮在画布上的标题和按钮。
+  zoom.value = Math.max(0.25, Math.min(1, (d.viewportWidth - 96) / d.width, (d.viewportHeight - 168) / d.height))
 }
-function changeZoom(value: number) {
-  zoom.value = Math.max(0.25, Math.min(1.6, value))
+/** 重置：回到刚打开时的样子——整张流程图缩放到刚好放得下，并位于画面正中。 */
+async function resetView() {
+  fit()
   follow.value = false
+  await nextTick()
+  const view = viewport.value
+  if (!view) return
+  view.scrollLeft = Math.max(0, (view.scrollWidth - view.clientWidth) / 2)
+  view.scrollTop = Math.max(0, (view.scrollHeight - view.clientHeight) / 2)
+}
+/** 缩放以画面正中为中心：缩放前画面中心下的那个流程图位置，缩放后仍在画面中心。 */
+async function changeZoom(value: number) {
+  const next = Math.max(0.25, Math.min(1.6, value))
+  follow.value = false
+  const view = viewport.value
+  if (!view || next === zoom.value) {
+    zoom.value = next
+    return
+  }
+  const d = dimensions.value
+  const before = { zoom: zoom.value, left: (stageSize.value.width - d.width * zoom.value) / 2, top: (stageSize.value.height - d.height * zoom.value) / 2 }
+  const centerX = view.clientWidth / 2
+  const centerY = view.clientHeight / 2
+  const contentX = (view.scrollLeft + centerX - before.left) / before.zoom
+  const contentY = (view.scrollTop + centerY - before.top) / before.zoom
+  zoom.value = next
+  await nextTick()  // 等画布按新的倍数撑开
+  const left = (stageSize.value.width - d.width * next) / 2
+  const top = (stageSize.value.height - d.height * next) / 2
+  view.scrollLeft = contentX * next + left - centerX
+  view.scrollTop = contentY * next + top - centerY
+}
+// 全屏流程图在地址栏里记一个 ?flow=流程ID：刷新、复制地址、前进后退都停在这个全屏页面。
+const FLOW_QUERY = 'flow'
+const flowKey = computed(() => props.context.recipeId || props.context.recipe?.id || (props.context.runId ? `run:${props.context.runId}` : ''))
+const flowInstance = Symbol('recipe-flow')
+let pushedHistory = false  // 这次全屏是我们 push 出来的历史记录：关闭时回退，而不是留下一条多余的记录
+
+function queryWithFlow(value?: string) {
+  const { [FLOW_QUERY]: _removed, ...rest } = route.query
+  return value ? { ...rest, [FLOW_QUERY]: value } : rest
 }
 async function openFullscreen() {
+  if (fullscreen.value) return
   fullscreen.value = true
+  openedFlows.add(flowInstance)
+  if (flowKey.value && route.query[FLOW_QUERY] !== flowKey.value) {
+    pushedHistory = true
+    void router.push({ query: queryWithFlow(flowKey.value) })
+  }
   follow.value = true
   await nextTick()
   measure()
@@ -117,11 +169,29 @@ async function openFullscreen() {
   if (viewport.value) observer.observe(viewport.value)
   if (canvas.value) observer.observe(canvas.value)
 }
-function closeDialog() {
+function closeLocal() {
   selection.value = null
   fullscreen.value = false
+  openedFlows.delete(flowInstance)
   replay.closeSetup()
   observer?.disconnect()
+}
+function closeDialog() {
+  const wasFullscreen = fullscreen.value
+  closeLocal()
+  if (!wasFullscreen || route.query[FLOW_QUERY] !== flowKey.value) return
+  if (pushedHistory) router.back()
+  else void router.replace({ query: queryWithFlow() })  // 刷新后进来的：没有可回退的记录，直接去掉参数
+  pushedHistory = false
+}
+/** 地址栏和全屏状态保持一致：地址里有这个流程就打开，后退去掉参数就关闭。 */
+function syncFromRoute() {
+  const wanted = route.query[FLOW_QUERY]
+  if (wanted && flowKey.value && wanted === flowKey.value && !fullscreen.value && openedFlows.size === 0) void openFullscreen()
+  else if (!wanted && fullscreen.value) {
+    pushedHistory = false
+    closeLocal()
+  }
 }
 function selectStep(id: number) {
   replay.closeSetup()
@@ -252,8 +322,13 @@ watch([() => props.context.recipeId || props.context.recipe?.id, () => props.con
 watch(() => props.context.running, (value) => {
   if (value && !replay.running.value) replay.progress.value = null
 })
-onMounted(() => window.addEventListener('keydown', onKey, true))
+watch([() => route.query[FLOW_QUERY], flowKey], syncFromRoute)
+onMounted(() => {
+  window.addEventListener('keydown', onKey, true)
+  syncFromRoute()
+})
 onBeforeUnmount(() => {
+  openedFlows.delete(flowInstance)
   observer?.disconnect()
   window.removeEventListener('keydown', onKey, true)
   if (locked) document.body.style.overflow = previousOverflow
@@ -275,20 +350,19 @@ onBeforeUnmount(() => {
     <div class="flow-layer" :class="{ 'flow-layer--detail': !fullscreen }" @click.self="closeDialog">
       <section ref="dialog" role="dialog" aria-modal="true" :aria-label="fullscreen ? `${context.title || '处理流程'} · 全屏流程图` : '流程节点详情'" tabindex="-1" class="flow-dialog" :class="fullscreen ? 'flow-dialog--full' : 'flow-dialog--detail'">
         <template v-if="fullscreen">
-          <header class="flow-header">
-            <div class="flow-header-title flex min-w-0 flex-1 items-center gap-2.5">
-              <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-[#6265DC]/10 text-[#6265DC]"><Focus class="size-4" /></span>
-              <h2 class="truncate text-[15px] font-semibold">{{ context.title || '处理流程' }}</h2>
-              <span v-if="context.version" class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ context.version }}</span>
-            </div>
-            <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 text-xs" :disabled="running || openingEdit" @click="editFlow('add', { kind: 'input' })"><Plus class="size-3.5" />输入</button>
-            <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 text-xs" :disabled="running || openingEdit" @click="editFlow('add', { kind: 'output' })"><Plus class="size-3.5" />输出</button>
-            <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 text-xs" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageSquare class="size-3.5" />对话修改</button>
-            <button v-if="canReplay" type="button" class="flow-run-button" :disabled="running || replay.loading.value" @click="prepareRun"><LoaderCircle v-if="running" class="size-3.5 animate-spin" /><Play v-else class="size-3.5" /><span>{{ running ? '执行中' : '重新执行' }}</span></button>
-            <button type="button" class="flow-header-close icon-btn ml-1 shrink-0" aria-label="退出全屏" title="退出全屏 · Esc" @click="closeDialog"><X class="size-5" /></button>
-          </header>
           <div class="flow-workspace">
             <div class="flow-canvas-area">
+              <header class="flow-header">
+                <div class="flow-header-title">
+                  <h2 class="truncate text-[22px] font-semibold leading-tight" :title="context.title || '处理流程'">{{ context.title || '处理流程' }}</h2>
+                  <span v-if="context.version" class="tag shrink-0 !bg-ink !px-2 !py-1 !text-xs !text-white">v{{ context.version }}</span>
+                </div>
+                <div class="flow-header-actions">
+                  <button v-if="canEdit" type="button" class="flow-action" aria-label="对话修改" title="对话修改" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><PhChatCircleDots :size="22" weight="duotone" /></button>
+                  <button v-if="canReplay" type="button" class="flow-action" :aria-label="running ? '执行中' : '重新执行'" :title="running ? '执行中' : '重新执行'" :disabled="running || replay.loading.value" @click="prepareRun"><LoaderCircle v-if="running" class="size-5 animate-spin" /><PhPlay v-else :size="20" weight="duotone" /></button>
+                  <button type="button" class="flow-action flow-header-close" aria-label="退出全屏" title="退出全屏 · Esc" @click="closeDialog"><PhX :size="20" weight="bold" /></button>
+                </div>
+              </header>
               <div ref="viewport" class="flow-viewport" tabindex="0" aria-label="流程画布，可滚动和拖动" @pointerdown="startPan" @pointermove="pan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan" @wheel="wheel">
                 <div class="flow-stage" :style="{ width: `${stageSize.width}px`, height: `${stageSize.height}px` }">
                   <div ref="canvas" class="flow-canvas" :style="canvasStyle">
@@ -301,7 +375,7 @@ onBeforeUnmount(() => {
                 <span class="w-11 text-center text-[11px] tabular-nums text-mute">{{ Math.round(zoom * 100) }}%</span>
                 <button class="icon-btn size-8" type="button" aria-label="放大流程图" :disabled="zoom >= 1.6" @click="changeZoom(zoom + 0.1)"><Plus class="size-4" /></button>
                 <span class="mx-1 h-4 w-px bg-line" />
-                <button class="icon-btn size-8" type="button" aria-label="适应画布" title="适应画布" @click="fit"><Maximize2 class="size-4" /></button>
+                <button class="icon-btn size-8" type="button" aria-label="重置视图" title="重置视图" @click="resetView"><RotateCcw class="size-4" /></button>
                 <button v-if="currentStep" class="icon-btn size-8" :class="{ '!text-[#6265DC] !bg-[#6265DC]/10': follow }" type="button" aria-label="跟随执行步骤" title="跟随执行" @click="locateCurrent"><LocateFixed class="size-4" /></button>
               </div>
               <div v-if="states.length || running || failed" class="flow-run-status" role="status" aria-live="polite">
@@ -331,12 +405,16 @@ onBeforeUnmount(() => {
 .flow-dialog { min-width: 0; background: white; outline: none; }
 .flow-dialog--full { display: flex; height: 100dvh; flex-direction: column; }
 .flow-dialog--detail { display: flex; flex-direction: column; width: clamp(360px, 42vw, 560px); max-width: 100%; max-height: 88dvh; overflow: hidden; border: 1px solid #ececef; border-radius: 24px; box-shadow: 0 24px 90px #22224225; }
-.flow-header { display: flex; min-height: 68px; flex: none; align-items: center; gap: 10px; border-bottom: 1px solid #ececef; padding: 12px 24px; }
-.flow-run-button { display: inline-flex; height: 34px; flex: none; align-items: center; justify-content: center; gap: 7px; border-radius: 10px; padding: 0 14px; background: #6265dc; color: white; font-size: 12px; font-weight: 500; transition: background .2s; }
-.flow-run-button:hover { background: #5356c6; }
-.flow-run-button:disabled { cursor: default; opacity: .55; }
+/* 没有顶栏：标题和按钮直接浮在画布上，点击穿透到画布（拖动不受影响），只有按钮自己接收点击。 */
+.flow-header { position: absolute; inset: 0 0 auto 0; z-index: 3; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 18px 20px; pointer-events: none; }
+.flow-header-title { display: flex; min-width: 0; max-width: min(60vw, 560px); grid-column: 2; align-items: center; justify-content: center; gap: 8px; }
+.flow-header-actions { display: flex; grid-column: 3; align-items: center; justify-content: flex-end; gap: 10px; }
+.flow-action { display: inline-flex; width: 42px; height: 42px; flex: none; align-items: center; justify-content: center; border: 1px solid #ececef; border-radius: 9999px; background: white; color: #0b0b0c; pointer-events: auto; transition: border-color .2s, color .2s; }
+.flow-action:hover { border-color: #0b0b0c4d; }
+.flow-action:focus-visible { outline: 2px solid #0b0b0c; outline-offset: 2px; }
+.flow-action:disabled { cursor: default; opacity: .45; }
 .flow-workspace { display: flex; min-height: 0; flex: 1; }
-.flow-canvas-area { position: relative; min-width: 0; min-height: 0; flex: 1; background-color: #fafafd; background-image: radial-gradient(#6265dc18 .8px, transparent .8px); background-size: 20px 20px; }
+.flow-canvas-area { position: relative; min-width: 0; min-height: 0; flex: 1; background-color: #fafafd; background-image: radial-gradient(#0b0b0c59 1.6px, transparent 1.7px); background-size: 24px 24px; }
 .flow-viewport { width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; cursor: grab; touch-action: pan-x pan-y; }
 .flow-viewport:active { cursor: grabbing; }
 .flow-viewport:focus-visible { outline: 2px solid #6265dc; outline-offset: -3px; }
@@ -347,9 +425,8 @@ onBeforeUnmount(() => {
 .flow-side-panel { width: 390px; min-height: 0; flex: none; overflow-y: auto; border-left: 1px solid #ececef; background: white; }
 @media (max-width: 760px) {
   .recipe-flow-toolbar--card { top: 10px; right: 10px; }
-  .flow-header { min-height: 60px; gap: 6px; padding: 10px 12px; }
-  .flow-run-button { padding: 0 10px; }
-  .flow-header h2 { font-size: 13px; }
+  .flow-header { padding: 12px; }
+  .flow-header h2 { font-size: 17px; }
   .flow-workspace { position: relative; }
   .flow-side-panel { position: absolute; inset: 0 0 0 auto; z-index: 2; width: min(390px, 100%); box-shadow: -12px 0 40px #22224210; }
   .flow-tools { left: 12px; bottom: 12px; }
@@ -358,9 +435,8 @@ onBeforeUnmount(() => {
 }
 @media (max-width: 640px) {
   .recipe-flow-toolbar--card { top: 46px; left: 12px; right: 12px; }
-  .flow-header { flex-wrap: wrap; }
-  .flow-header-title { flex-basis: calc(100% - 42px); }
-  .flow-header > button { order: 2; }
-  .flow-header > .flow-header-close { order: 1; }
+  .flow-header { grid-template-columns: 1fr auto; }
+  .flow-header-title { grid-column: 1; justify-content: flex-start; max-width: 100%; }
+  .flow-header-actions { grid-column: 2; gap: 6px; }
 }
 </style>

@@ -30,9 +30,30 @@ def _can_view(db: Session, user: User, record) -> bool:
     return isinstance(record, RecipeRecord) and record.scope == "global" and not record.customer_id
 
 
+def _viewable_reference(db: Session, user: User, script_id: str) -> bool:
+    """用户能看到的记录（运行、流程、消息）里是否引用了这个脚本。"""
+    for run in db.scalars(select(Run)):
+        if _references([run.steps, run.validation], script_id) and _can_view(db, user, run):
+            return True
+    for recipe in db.scalars(select(RecipeRecord)):
+        if _references(recipe.body, script_id) and _can_view(db, user, recipe):
+            return True
+    for message, conversation in db.execute(select(Message, Conversation).join(Conversation, Message.conversation_id == Conversation.id)):
+        if _references(message.events, script_id) and (user.role == "admin" or conversation.user_id == user.id or
+                bool(conversation.customer_id and can_access_customer(db, user, conversation.customer_id))):
+            return True
+    return False
+
+
 def require_script_access(db: Session, user: User, script_id: str) -> None:
     try:
         origin = script_origin(script_id)
+    except FileNotFoundError:
+        # 脚本文件已经不在了：不是权限问题。只对「本来就能看到引用它的记录」的人说明文件丢了，
+        # 其他人仍然得到「没有权限」，不借此探测别人的脚本 ID 是否存在。
+        if _viewable_reference(db, user, script_id):
+            raise NotFound("这个脚本的文件已经丢失，无法查看。请让 AI 重新生成这一步的脚本") from None
+        raise Forbidden("你没有权限查看这个脚本") from None
     except (OSError, ValueError, KeyError):
         raise Forbidden("你没有权限查看这个脚本") from None
     if origin:
@@ -46,16 +67,8 @@ def require_script_access(db: Session, user: User, script_id: str) -> None:
         if customer_allowed or conversation_allowed:
             return
         raise Forbidden("你没有权限查看这个脚本")
-    for run in db.scalars(select(Run)):
-        if _references([run.steps, run.validation], script_id) and _can_view(db, user, run):
-            return
-    for recipe in db.scalars(select(RecipeRecord)):
-        if _references(recipe.body, script_id) and _can_view(db, user, recipe):
-            return
-    for message, conversation in db.execute(select(Message, Conversation).join(Conversation, Message.conversation_id == Conversation.id)):
-        if _references(message.events, script_id) and (user.role == "admin" or conversation.user_id == user.id or
-                bool(conversation.customer_id and can_access_customer(db, user, conversation.customer_id))):
-            return
+    if _viewable_reference(db, user, script_id):
+        return
     raise Forbidden("你没有权限查看这个脚本")
 
 
