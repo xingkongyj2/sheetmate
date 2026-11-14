@@ -101,7 +101,7 @@ def test_step_repair_loop(samples, tmp_path):
 def test_repair_gives_up_after_max_attempts(samples, tmp_path):
     class Useless:
         async def repair(self, ctx):
-            return ctx.step  # 原样返回，永远修不好
+            return ctx.step  # 原样返回，永远修不好：修复器没有任何改动时直接放弃，不再空转到上限
 
     body = demo_recipe_body()
     body["steps"][2]["params"]["key"] = "不存在的列"
@@ -110,7 +110,7 @@ def test_repair_gives_up_after_max_attempts(samples, tmp_path):
     assert runner.report["status"] == "escalated"
     assert "卡在第 3 步" in runner.report["escalation"]
     failed = runner.report["steps"][-1]
-    assert failed["status"] == "failed" and len(failed["attempts"]) == 3
+    assert failed["status"] == "failed" and len(failed["attempts"]) == 1
 
 
 def test_differ_finds_pivot_sum_and_lookup_fill(samples):

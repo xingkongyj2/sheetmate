@@ -118,6 +118,12 @@ class StepRepairer(Protocol):
         """返回修好的步骤（可以换公式），修不了返回 None。"""
 
 
+def _same_step_content(left: RecipeStep, right: RecipeStep) -> bool:
+    """两个步骤的执行内容完全一样：同一个公式、同样的参数（脚本按内容登记，内容一样 script_id 就一样）、同样的断言。"""
+    return (left.formula == right.formula and left.kind == right.kind and left.params == right.params
+            and [a.model_dump() for a in left.assertions] == [a.model_dump() for a in right.assertions])
+
+
 @dataclass
 class _AssertionFailure(Exception):
     messages: list[str] = field(default_factory=list)
@@ -651,6 +657,14 @@ class RecipeRunner:
                     return
                 if fixed.kind == "python":
                     fixed.params = script_params(fixed.params, title=fixed.name[:20])
+                if _same_step_content(fixed, current):
+                    # 修复器交回来的步骤和刚才失败的完全一样：再执行一次只会得到同样的错误。
+                    # 继续循环是在白白烧模型调用（以前同一个错误会重复到上限 30 次）。
+                    attempts[-1]["repair_error"] = "修复没有改变这一步的内容，再试也会得到同样的错误"
+                    self._record_failure(step, current, attempts, started)
+                    yield {"type": "recipe_repair", "step_id": step.id, "attempt": len(attempts), "status": "gave_up"}
+                    yield {"type": "_step_failed"}
+                    return
                 attempts[-1]["explanation"] = fixed.explanation
                 yield {"type": "recipe_repair", "step_id": step.id, "attempt": len(attempts), "status": "retry",
                        "explanation": fixed.explanation, "formula": fixed.formula, "params": fixed.params}
@@ -947,7 +961,10 @@ class RecipeRunner:
         results: list[dict[str, Any]] = []
         if step.kind == "python" and outcome.notes.get("file_only"):
             if step.assertions:
-                raise ValueError("纯文件脚本不能使用表格行列断言，请在脚本内用 check(...) 校验文件内容")
+                # 纯文件脚本没有表格输出，行列断言无从检查。以前这里直接报错交给修复器，但修复器只会改脚本，
+                # 改不掉步骤上的断言：同一个错误重复 30 次（cv_7fdd9f0335，6 分钟）。这条断言本来就没有意义，
+                # 而且是 AI 自己加的、不是用户配的：忽略它，不让它把成功的步骤变成警告，只在诊断信息里留个记录。
+                outcome.notes["ignored_assertions"] = [a.type for a in step.assertions]
             return results
         if outcome.rows_out == 0:
             results.append({"type": "not_empty", "status": "fail", "severity": "warning", "message": "这一步的结果是空表"})

@@ -145,7 +145,10 @@ def validate_recipe_response(value: Any) -> None:
             if match:
                 source = step_outputs.get(int(match.group(1)), source)
             if source not in known_tables:
-                errors.append({"path": f"/{field}/{index}/source", "message": "必须引用步骤实际声明的输出表"})
+                # 把可选的表名直接告诉模型：只说「必须引用」时它常常改不对，要连着重试好几轮。
+                options = "、".join(sorted(known_tables)[:12]) or "（没有）"
+                errors.append({"path": f"/{field}/{index}/source",
+                               "message": f"「{source[:60]}」不是步骤声明的输出表；source 只能从这些里选：{options}"})
                 if len(errors) >= 6:
                     raise StructuredOutputError(errors)
     if errors:
