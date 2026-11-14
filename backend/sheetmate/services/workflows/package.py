@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import re
@@ -137,7 +138,7 @@ def build_logic(recipe: Recipe, *, summary: str, memories: list[str], mapping: d
         lines.append(f"- 工作表「{sheet.name}」{columns}" + (f"：{sheet.description.strip()}" if sheet.description.strip() else ""))
     for item in recipe.flow().get("output_files", []):
         if item.get("name") and item["name"] not in output_names:
-            lines.append(f"- 文件「{item['name']}」")
+            lines.append(f"- 流程当前声明的交付文件名：「{item['name']}」")
     lines.append("")
 
     if recipe.validation_rules:
@@ -156,6 +157,47 @@ def build_logic(recipe: Recipe, *, summary: str, memories: list[str], mapping: d
         if reference:
             lines += [f"### {index}. {step.name}", "", reference, ""]
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _content_digest(path: str) -> str | None:
+    """文件内容的指纹。Excel 只看各工作表里的值：重新保存会改写时间戳，字节不同但表格内容一样的两份算同一份。"""
+    try:
+        if Path(path).suffix.lower() in {".xlsx", ".xlsm"}:
+            import openpyxl
+
+            workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+            try:
+                digest = hashlib.sha256()
+                for sheet in workbook.worksheets:
+                    digest.update(f"\x00{sheet.title}\x00".encode())
+                    for row in sheet.iter_rows(values_only=True):
+                        digest.update(repr(row).encode())
+                return digest.hexdigest()
+            finally:
+                workbook.close()
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except Exception:  # noqa: BLE001 - 打不开的文件退回按字节比较，再不行就不去重
+        try:
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            return None
+
+
+def _distinct(records: list[FileRecord], prefer: set[str] = frozenset()) -> list[FileRecord]:
+    """内容完全一样的文件只留一份：流程每跑一次、改一次名都会多出一份同样的结果，打进包里只会让 AI 多读一遍。
+
+    留哪份：文件名是流程当前声明的交付文件名的优先，其次是最新的。顺序保持原来的排列。"""
+    best: dict[str, FileRecord] = {}
+    keys: dict[str, str] = {}
+    for record in records:
+        digest = _content_digest(record.stored_path) or f"unreadable:{record.id}"  # 读不到的文件不参与去重，交给后面的跳过逻辑
+        keys[record.id] = digest
+        kept = best.get(digest)
+        rank = (record.filename in prefer, str(record.created_at or ""))
+        if kept is None or rank > (kept.filename in prefer, str(kept.created_at or "")):
+            best[digest] = record
+    chosen = {record.id for record in best.values()}
+    return [record for record in records if record.id in chosen]
 
 
 def _arc_names(records: list[FileRecord], folder: str) -> list[tuple[FileRecord, str]]:
@@ -177,6 +219,8 @@ def _arc_names(records: list[FileRecord], folder: str) -> list[tuple[FileRecord,
 def build_package(recipe: Recipe, inputs: list[FileRecord], outputs: list[FileRecord], *, summary: str,
                   memories: list[str], mapping: dict[str, list[str]]) -> bytes:
     """打成 zip。文件读不到时跳过，不让一个坏文件挡住整个导出。"""
+    declared = {str(item.get("name")) for item in recipe.flow().get("output_files", []) if item.get("name")}
+    inputs, outputs = _distinct(inputs), _distinct(outputs, prefer=declared)
     input_items, output_items = _arc_names(inputs, INPUT_DIR), _arc_names(outputs, OUTPUT_DIR)
     if len(input_items) + len(output_items) > MAX_PACKAGE_FILES:
         raise ServiceError(f"这个流程的样例文件太多（超过 {MAX_PACKAGE_FILES} 个），请先清理不再需要的文件再导出")
