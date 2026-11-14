@@ -3,7 +3,7 @@
  * 流程详情：一个流程的全部信息收在这里——概览（说明、输入、步骤、输出、核对规则）、运行记录、版本历史，
  * 以及设为主流程、查看流程数据、删除这些低频操作。
  */
-import { Braces, Check, LoaderCircle, Pencil, ShieldCheck, Star, Trash2, X } from '@lucide/vue'
+import { Braces, Check, FolderDown, LoaderCircle, Pencil, ShieldCheck, Star, Trash2, X } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 
 import { recipeApi } from '@/api'
@@ -206,7 +206,8 @@ async function removeRecipe() {
     </div>
 
     <template #footer>
-      <button type="button" class="btn-text mr-auto text-xs" @click="showJson = true"><Braces class="size-3.5" />流程数据</button>
+      <button type="button" class="btn-text text-xs" @click="showJson = true"><Braces class="size-3.5" />流程数据</button>
+      <a :href="`/api/recipes/${recipe.recipe_id}/package`" class="btn-text mr-auto text-xs" download><FolderDown class="size-3.5" />流程导出</a>
       <button v-if="!primary" type="button" class="btn-line" :disabled="settingPrimary" @click="emit('setPrimary', recipe.recipe_id)"><Star class="size-4" />设为主流程</button>
       <button type="button" class="btn-line border-error/20 text-error hover:border-error/40 hover:bg-error/5" @click="removeRecipe"><Trash2 class="size-4" />删除流程</button>
     </template>
@@ -221,8 +222,8 @@ async function removeRecipe() {
 .sec { padding: 22px 0; border-top: 1px solid #ececf1; }
 .sec:first-child { padding-top: 0; border-top: 0; }
 .sec:last-child { padding-bottom: 0; }
-.sec-title { display: flex; align-items: baseline; gap: 8px; margin: 0 0 12px; color: #14141c; font-size: 15px; font-weight: 700; line-height: 24px; }
-.sec-title small { color: #a4a4b2; font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.sec-title { display: flex; align-items: baseline; gap: 8px; margin: 0 0 14px; color: #14141c; font-size: 18px; font-weight: 700; line-height: 28px; }
+.sec-title small { color: #a4a4b2; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
 .meta { display: flex; flex-wrap: wrap; gap: 6px 28px; margin: 14px 0 0; }
 .meta dt { color: #a4a4b2; font-size: 11px; }
 .meta dd { margin: 1px 0 0; color: #14141c; font-size: 13px; font-weight: 600; }

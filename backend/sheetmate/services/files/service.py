@@ -209,6 +209,29 @@ def save_upload(
     return record
 
 
+def save_doc(db: Session, *, text: str, filename: str, user: User, conversation_id: str) -> FileRecord:
+    """把一段文字存成会话里的 md 文档（类型「处理说明」），比如导入流程包时的处理逻辑。
+
+    它只属于这个会话，不进客户资料库：它只是给这次对话里的 AI 读的，放进客户文件页会被当成输入文件列出来。
+    它不是表格，不走表格解析；AI 通过提示里的文件列表读到它的内容。"""
+    name = unique_filename(db, safe_filename(filename), customer_id=None, conversation_id=conversation_id, user_id=user.id)
+    file_id = f"f_{uuid.uuid4().hex[:10]}"
+    folder = settings.uploads_dir / owner_dir(None, conversation_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{file_id}_{name}"
+    data = text.encode("utf-8")
+    path.write_bytes(data)
+    record = FileRecord(
+        id=file_id, customer_id=None, conversation_id=conversation_id, filename=name, stored_path=str(path),
+        size=len(data), kind="doc", profile={"doc": True, "media_type": "text/markdown", "original_filename": filename},
+        created_by=user.id,
+    )
+    db.add(record)
+    db.flush()
+    retain_for_conversation(db, record, conversation_id)
+    return record
+
+
 def register_output(db: Session, *, path: Path, filename: str, customer_id: str | None, conversation_id: str | None,
                     run_id: str | None, user_id: int | None, delivery_status: str = "final",
                     sheets: list[SheetData] | None = None) -> FileRecord:

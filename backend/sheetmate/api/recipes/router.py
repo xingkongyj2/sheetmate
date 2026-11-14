@@ -6,7 +6,9 @@ from sheetmate.api.recipes.schemas import MatchBody, NodeEditBody, RunBody
 
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from urllib.parse import quote
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Response
 from sqlalchemy.orm import Session
 
 from sheetmate.api.deps import current_user, sse_response
@@ -16,6 +18,7 @@ from sheetmate.services.customers import service as customer_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.workflows import file_rename as file_rename_service
 from sheetmate.services.workflows import node_edit as node_edit_service
+from sheetmate.services.workflows import package as package_service
 from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import replay as replay_service
 from sheetmate.services.workflows import runs as run_service
@@ -40,6 +43,16 @@ def get_recipe(recipe_id: str, version: int | None = None, db: Session = Depends
     runs = run_service.list_runs(db, recipe_id=recipe_id, limit=20)
     return {"ok": True, "recipe": recipe.to_dict(), "flow": recipe.flow(), "versions": recipe_service.versions(db, recipe_id),
             "runs": [run_service.run_dict(r, with_steps=False) for r in runs]}
+
+
+@router.get("/recipes/{recipe_id}/package")
+def export_package(recipe_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> Response:
+    """导出流程包（样例输入输出文件 + 处理逻辑）：在聊天里发回来，AI 就能据此重新建立这个流程。"""
+    recipe = recipe_service.get_recipe(db, recipe_id)
+    recipe_service.require_recipe_access(db, user, recipe)
+    filename, data = package_service.export_package(db, recipe)
+    return Response(data, media_type="application/zip",
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"})
 
 
 @router.put("/recipes/{recipe_id}")

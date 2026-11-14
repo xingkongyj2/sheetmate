@@ -19,6 +19,23 @@ _SCRIPT_TOOL = "run_python_script"
 _FOCUS_NAMES = {"sql": "SQL", "python": "脚本", "formula": "公式"}
 
 
+def _flow_package_block(ctx: AgentContext) -> str:
+    """用户在聊天里发来了导出的流程包：按里面的处理逻辑和样例文件重新建立流程。
+
+    样例输入已经是本会话的输入文件，样例输出是「期望结果」（人工做好的结果），正是 build_recipe 学习流程要用的材料；
+    处理逻辑就是它的 requirement。重新建立，不是还原：步骤、表名、脚本都按当前数据自己设计并验证。"""
+    reader = getattr(ctx.host, "imported_logic", None)
+    logic = reader() if callable(reader) and ctx.table_filter is None else ""
+    if not logic.strip():
+        return ""
+    return ("## 用户导入了一个流程包（根据下面的处理逻辑重新建立流程）\n"
+            "用户发来的是从 SheetMate 导出的流程包：里面的样例输入文件已经是本会话的输入文件，样例输出文件是「期望结果」（人工做好的结果）。"
+            "请用 load_file 加载这些文件，再用 build_recipe 重新建立这个流程：requirement 取自下面的处理逻辑，期望结果用于核对。"
+            "这是重新建立，不是还原：步骤、表名、脚本都按当前的数据自己设计，并确认生成的结果和期望结果一致；"
+            "「参考实现」只是帮助理解口径，不要求照搬。用户没有另外说明时，不要追问，直接开始建立。\n\n"
+            "### 处理逻辑\n" + logic)
+
+
 def _file_name_rule(edit: dict[str, Any]) -> str:
     """输入/输出文件节点里点了「AI 改名」：只改这个文件的名字，不改处理逻辑。"""
     target = edit.get("target") or {}
@@ -204,6 +221,7 @@ def build_system_prompt(ctx: AgentContext, message: str, *, thinking: bool = Fal
               "除用户要求及必要的依赖适配外保留原流程。重跑失败不得声称已更新。"
               + _step_code_rule(ctx.recipe_edit) + _file_name_rule(ctx.recipe_edit)
             if ctx.recipe_edit else ""), required=True),
+        ContextBlock("flow_package", _flow_package_block(ctx), required=True),
         ContextBlock("customer", "## 客户\n" + build_customer_block(ctx), required=True),
         ContextBlock("business_memory", "## 客户与当前流程的长期记忆（用户维护的规则优先于 AI 参考）\n" + (ctx.host.memory_text(message) or "（没有）"), required=True),
         ContextBlock("task_requirements", "## 当前任务状态\n" + task if task else "", required=True,

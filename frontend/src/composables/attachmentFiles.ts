@@ -1,9 +1,10 @@
 /** Shared attachment rules for the picker, drag/drop, and clipboard. */
-export const ATTACHMENT_ACCEPT = '.xlsx,.xlsm,.xls,.csv,.png,.jpg,.jpeg,.webp,.gif'
+export const ATTACHMENT_ACCEPT = '.xlsx,.xlsm,.xls,.csv,.png,.jpg,.jpeg,.webp,.gif,.zip'
 export const MAX_IMAGE_ATTACHMENTS = 10
 
 const workbookExtension = /\.(xlsx|xlsm|xls|csv)$/i
 const imageExtension = /\.(png|jpe?g|webp|gif)$/i
+const packageExtension = /\.zip$/i  // 导出的流程包；是不是真的流程包由后端按里面的指令文件判断
 const imageMimeExtensions: Record<string, string> = {
   'image/png': 'png',
   'image/jpeg': 'jpg',
@@ -20,7 +21,7 @@ export function isWorkbookFile(name: string): boolean {
 }
 
 export function isSupportedAttachment(file: Pick<File, 'name' | 'type'>): boolean {
-  return isWorkbookFile(file.name) || imageExtension.test(file.name)
+  return isWorkbookFile(file.name) || imageExtension.test(file.name) || packageExtension.test(file.name)
 }
 
 interface ClipboardFiles {
