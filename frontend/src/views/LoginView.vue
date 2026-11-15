@@ -90,6 +90,6 @@ async function submit() {
       </p>
     </div>
 
-    <p class="mt-8 text-center text-xs text-faint">本地部署 · 数据只存在你的电脑上 · 默认管理员 admin / admin123</p>
+    <p class="mt-8 text-center text-xs text-faint">默认管理员 admin / admin123</p>
   </AuthStage>
 </template>
