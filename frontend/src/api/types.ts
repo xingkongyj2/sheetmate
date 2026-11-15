@@ -318,6 +318,17 @@ export interface CustomerFormula extends FormulaInfo {
   updated_at: string | null
 }
 
+/** 建议整理成内置公式：多个流程里反复出现的同一段自定义 SQL */
+export interface FormulaSuggestion {
+  id: string
+  name: string
+  description: string
+  count: number // 出现在几个流程里
+  customers: string[]
+  flows: string[]
+  sql: string
+}
+
 export interface FormulaGenerationResult {
   formula: Record<string, unknown>
   explanation: string

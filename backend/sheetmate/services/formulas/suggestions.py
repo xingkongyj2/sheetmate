@@ -32,7 +32,8 @@ def normalize(sql: str) -> str:
     text = _COMMENT.sub(" ", sql)
     text = _STRING.sub("?", text)
     text = _NUMBER.sub("?", text)
-    return re.sub(r"\s+", " ", text).strip().rstrip(";").strip().lower()
+    text = re.sub(r"\s+", " ", text).strip().rstrip(";").strip().lower()
+    return re.sub(r" ?([,()]) ?", r"\1", text)
 
 
 def fingerprint(sql: str) -> str:

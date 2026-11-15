@@ -14,6 +14,7 @@ import type {
   FileInfo,
   FormulaGenerationResult,
   FormulaInfo,
+  FormulaSuggestion,
   FormulaTrialInput,
   FormulaTrialResult,
   LLMConfigUpdate,
@@ -226,6 +227,8 @@ export const recipeApi = {
   generateGlobalFormula: async (payload: { description: string; file_ids?: string[]; tables?: { file_id: string; sheet?: string }[]; formula?: Record<string, unknown> }) =>
     (await http.post<FormulaGenerationResult>('/formulas/generate', payload, { timeout: 0 })).data,
   checkGlobalFormula: async (body: Record<string, unknown>) => (await http.post<{ problems: string[] }>('/formulas/check', body)).data.problems,
+  formulaSuggestions: async () => (await http.get<{ suggestions: FormulaSuggestion[] }>('/formulas/suggestions')).data.suggestions,
+  dismissFormulaSuggestion: async (id: string) => http.post(`/formulas/suggestions/${id}/dismiss`),
   /** 删除内置公式：自己添加的彻底删除，自带的不再可用 */
   removeGlobalFormula: async (id: string) => http.delete(`/formulas/${id}`),
   /** 哪些客户的流程用到了这个公式 */

@@ -13,13 +13,13 @@ import { useToast } from '@/composables/useToast'
  * formula 给了就是修改这个已有公式（保留原 id，保存成新版本）；没给就是新增。
  * takenIds：新增时已被占用的 id（客户已有的、内置的、系统保留的），AI 起的 id 撞了就自动加序号，不会悄悄覆盖。
  */
-const props = defineProps<{ customerId?: string; files: FileInfo[]; formula?: Record<string, unknown> | null; takenIds?: string[]; scope?: 'customer' | 'global' }>()
+const props = defineProps<{ customerId?: string; files: FileInfo[]; formula?: Record<string, unknown> | null; takenIds?: string[]; scope?: 'customer' | 'global'; initialDescription?: string }>()
 const emit = defineEmits<{ close: []; saved: [formula: CustomerFormula | FormulaInfo]; uploaded: [file: FileInfo] }>()
 const toast = useToast()
 /** 内置公式不绑定客户：参考表直接上传 */
 const global = computed(() => props.scope === 'global')
 
-const description = ref('')
+const description = ref(props.initialDescription ?? '')
 const initialRequest = ref('')
 const supplements = ref<string[]>([])
 const uploadedFiles = ref<FileInfo[]>([])

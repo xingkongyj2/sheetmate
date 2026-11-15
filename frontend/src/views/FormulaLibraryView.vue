@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { ChevronRight, FlaskConical, LoaderCircle, Pencil, Search, Sparkles, Trash2, TriangleAlert, WandSparkles } from '@lucide/vue'
+import { ChevronRight, FlaskConical, Lightbulb, X, LoaderCircle, Pencil, Search, Sparkles, Trash2, TriangleAlert, WandSparkles } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { CustomerCard, CustomerDetail, CustomerFormula, FormulaInfo } from '@/api/types'
+import type { CustomerCard, CustomerDetail, CustomerFormula, FormulaInfo, FormulaSuggestion } from '@/api/types'
 import FormulaLibraryIcon from '@/components/brand/FormulaLibraryIcon.vue'
 import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -18,7 +18,7 @@ import { useToast } from '@/composables/useToast'
 
 type LibraryFormula = CustomerFormula & { customerId: string; customerName: string }
 type EditorState = { customer: CustomerDetail; formula: CustomerFormula; trial: boolean }
-type AIState = { customer: CustomerDetail | null; formula: CustomerFormula | null; scope: 'customer' | 'global' }
+type AIState = { customer: CustomerDetail | null; formula: CustomerFormula | null; scope: 'customer' | 'global'; suggestion?: FormulaSuggestion }
 
 const router = useRouter()
 const toast = useToast()
@@ -36,6 +36,8 @@ const editor = ref<EditorState | null>(null)
 const ai = ref<AIState | null>(null)
 const reservedIds = ref<string[]>([])
 const selectedBuiltin = ref<FormulaInfo | null>(null)
+const suggestions = ref<FormulaSuggestion[]>([])
+const suggestionText = ref('')
 
 // 客户公式按客户分组，用标题分隔；客户顺序沿用客户列表的顺序，搜索后没有结果的客户不显示
 const customerGroups = computed(() => {
@@ -59,6 +61,10 @@ const builtinGroups = computed(() => {
   }
   return [...groups].map(([category, formulas]) => ({ category, formulas }))
 })
+const shownSuggestions = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  return suggestions.value.filter((s) => !q || `${s.name} ${s.description} ${s.sql}`.toLowerCase().includes(q))
+})
 const idsFor = (customerId: string) => custom.value.filter((f) => f.customerId === customerId).map((f) => f.id)
 /** 新增公式时不能用的 id：客户公式是这个客户已有的 + 内置的 + 系统保留的；内置公式没有客户的 */
 const takenIds = (customerId: string | undefined, scope: 'customer' | 'global') => [...(scope === 'customer' && customerId ? idsFor(customerId) : []), ...builtin.value.map((f) => f.id), ...reservedIds.value]
@@ -75,6 +81,7 @@ async function load() {
     const lists = await Promise.all(people.map(async (c) => (await customerApi.formulas(c.id))
       .map((f) => ({ ...f, customerId: c.id, customerName: c.name }))))
     custom.value = lists.flat()
+    suggestions.value = await recipeApi.formulaSuggestions().catch(() => []) // 只有管理员能看到建议
   } catch (err) {
     error.value = errorText(err)
   } finally {
@@ -133,7 +140,28 @@ async function openAI(f: LibraryFormula) {
   }
 }
 
+/** 把一条建议交给 AI 整理成通用的内置公式：SQL 里会变的部分抽成参数，确认后才保存 */
+function organize(s: FormulaSuggestion) {
+  const note = s.description ? `（${s.description}）` : ''
+  ai.value = {
+    customer: null, formula: null, scope: 'global', suggestion: s,
+    // 弹窗里可以继续改这段话
+  }
+  suggestionText.value = `把下面这段在 ${s.count} 个流程里重复出现的 SQL，整理成通用的内置公式：表名、列名、阈值这些会变的部分抽成参数。\n步骤：${s.name}${note}\nSQL：\n${s.sql}`
+}
+
+async function ignore(s: FormulaSuggestion) {
+  try {
+    await recipeApi.dismissFormulaSuggestion(s.id)
+    suggestions.value = suggestions.value.filter((x) => x.id !== s.id)
+  } catch (err) {
+    toast.error(errorText(err))
+  }
+}
+
 async function onAISaved(formula: CustomerFormula | FormulaInfo) {
+  const done = ai.value?.suggestion
+  if (done) await recipeApi.dismissFormulaSuggestion(done.id).catch(() => undefined) // 整理好了，建议不再出现
   const revised = !!ai.value?.formula
   const global = ai.value?.scope === 'global'
   ai.value = null
@@ -235,6 +263,23 @@ async function remove(f: LibraryFormula) {
         </div>
       </template>
       <template v-else>
+        <section v-if="shownSuggestions.length" class="mt-7" aria-label="建议整理成内置公式">
+          <h2 class="flex items-baseline gap-2 px-1 text-lg font-semibold tracking-tight">可整理<span class="text-xs font-normal tabular-nums text-faint">{{ shownSuggestions.length }}</span></h2>
+          <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+            <article v-for="s in shownSuggestions" :key="s.id" class="formula-card flex min-w-0 flex-col rounded-[20px] bg-white p-4" data-testid="formula-suggestion">
+              <div class="flex items-center gap-2.5">
+                <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-[#fff6e6] text-[#b7770c]"><Lightbulb class="size-4" /></span>
+                <h3 class="min-w-0 flex-1 break-words text-[15px] font-semibold">{{ s.name }}</h3>
+                <div class="-mr-1.5 flex shrink-0 items-center">
+                  <button class="icon-btn size-7" :title="`整理成内置公式 ${s.name}`" :aria-label="`整理成内置公式 ${s.name}`" @click="organize(s)"><Sparkles class="size-4" /></button>
+                  <button class="icon-btn size-7" :title="`忽略 ${s.name}`" :aria-label="`忽略 ${s.name}`" @click="ignore(s)"><X class="size-4" /></button>
+                </div>
+              </div>
+              <p class="mt-2.5 line-clamp-2 break-all font-mono text-[11px] leading-5 text-mute">{{ s.sql }}</p>
+              <p class="mt-auto pt-3 text-[11px] text-faint" :title="s.flows.join('、')">{{ s.count }} 个流程用到<template v-if="s.customers.length"> · {{ s.customers.join('、') }}</template></p>
+            </article>
+          </div>
+        </section>
         <div v-if="builtinGroups.length" class="mt-7 space-y-9">
           <section v-for="group in builtinGroups" :key="group.category" :aria-label="group.category">
             <h2 class="flex items-baseline gap-2 px-1 text-lg font-semibold tracking-tight">{{ group.category }}<span class="text-xs font-normal tabular-nums text-faint">{{ group.formulas.length }}</span></h2>
@@ -271,7 +316,7 @@ async function remove(f: LibraryFormula) {
 
     <FormulaAIGeneratorDialog
       v-if="ai" :key="ai.formula?.id ?? 'new'" :customer-id="ai.customer?.id" :files="ai.customer?.files ?? []"
-      :formula="ai.formula ? bodyFromFormula(ai.formula) : null" :taken-ids="takenIds(ai.customer?.id, ai.scope)" :scope="ai.scope"
+      :formula="ai.formula ? bodyFromFormula(ai.formula) : null" :taken-ids="takenIds(ai.customer?.id, ai.scope)" :scope="ai.scope" :initial-description="ai.suggestion ? suggestionText : ''"
       @close="ai = null" @saved="onAISaved"
     />
     <FormulaEditorDialog v-if="editor" :customer-id="editor.customer.id" :formula="editor.formula" :existing-ids="idsFor(editor.customer.id)" :files="editor.customer.files" :field-mapping="editor.customer.field_mapping" :focus-trial="editor.trial" @close="editor = null" @saved="onSaved" />
