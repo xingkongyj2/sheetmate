@@ -267,8 +267,10 @@ onBeforeUnmount(() => {
             <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
             <FileSpreadsheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-fun-green'" />
             <button type="button" class="min-w-0 flex-1 truncate rounded text-left text-[13px] font-medium underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink/40" :title="file.filename" :aria-label="`查看 ${file.filename}`" @click="emit('openFile', file)">{{ file.filename }}</button>
-            <a :href="file.download_url" class="icon-btn" :aria-label="`下载 ${file.filename}`" title="下载"><Download class="size-4" /></a>
-            <button type="button" class="icon-btn hover:text-error" :aria-label="`删除 ${file.filename}`" title="删除" @click="removeFile(file)"><Trash2 class="size-4" /></button>
+            <div class="-mr-1.5 flex shrink-0 items-center">
+              <a :href="file.download_url" class="icon-btn size-7" :aria-label="`下载 ${file.filename}`" title="下载"><Download class="size-4" /></a>
+              <button type="button" class="icon-btn size-7 hover:text-error" :aria-label="`删除 ${file.filename}`" title="删除" @click="removeFile(file)"><Trash2 class="size-4" /></button>
+            </div>
           </div>
         </div>
       </template>
