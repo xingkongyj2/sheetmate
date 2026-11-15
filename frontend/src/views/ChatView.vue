@@ -730,10 +730,10 @@ function answer(option: string) {
             <p class="mt-2 max-w-md text-sm leading-relaxed text-mute">
               {{ customer ? '我会按这个客户的处理逻辑、流程和业务规则来处理。' : '直接说你的需求，我会自动判断处理方式。' }}
             </p>
-            <div class="mt-6 flex gap-6 opacity-90">
-              <FunObject kind="sheet" :size="40" class="animate-float" />
-              <FunObject kind="magnet" :size="40" class="animate-float [animation-delay:.6s]" />
-              <FunObject kind="sigma" :size="40" class="animate-float [animation-delay:1.2s]" />
+            <div class="mt-6 flex gap-6">
+              <FunObject kind="sheet" face="smile" :size="40" class="animate-float" />
+              <FunObject kind="magnet" face="wink" :size="40" class="animate-float [animation-delay:.6s]" />
+              <FunObject kind="cheese" face="happy" :size="40" class="animate-float [animation-delay:1.2s]" />
             </div>
           </div>
 

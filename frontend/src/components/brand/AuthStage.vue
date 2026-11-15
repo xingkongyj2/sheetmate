@@ -29,7 +29,7 @@ withDefaults(defineProps<{ headline?: string[]; mood?: 'idle' | 'thinking' | 'ha
         <div class="headline-ghost absolute inset-x-0 top-12 text-center text-[34px]">
           <div v-for="line in headline" :key="line">{{ line }}</div>
         </div>
-        <FloatingObjects preset="auth" />
+        <FloatingObjects preset="auth" :mood="mood" />
         <div class="absolute bottom-0 left-1/2 h-[200px] w-[330px] -translate-x-1/2 overflow-hidden">
           <div class="absolute left-0 top-0">
             <Mascot variant="blob" :size="330" :mood="mood" :shadow="false" />
