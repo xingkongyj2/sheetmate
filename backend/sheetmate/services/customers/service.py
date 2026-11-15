@@ -31,7 +31,11 @@ from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import runs as run_service
 from sheetmate.core.errors import ServiceError
 
-MASCOTS = ["blob", "rocket", "briefcase", "megaphone", "folder", "puzzle", "crown", "book", "beret"]
+# 与前端 components/brand/mascots.ts 一致：黑色系 + 彩色系
+MASCOTS = [
+    "blob", "ink-cat", "ink-glasses", "ink-headphones", "ink-ninja", "ink-party", "ink-halo", "ink-flower", "ink-bowtie",
+    "briefcase", "beret", "folder", "book", "mint", "puzzle", "megaphone", "crown", "rocket",
+]
 SUMMARY_POLICY_VERSION = 1  # 用户可见说明只使用流程资料和用户维护的记忆。
 
 

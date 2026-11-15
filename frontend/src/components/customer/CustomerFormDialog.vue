@@ -7,7 +7,7 @@ import { customerApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerCard } from '@/api/types'
 import Mascot from '@/components/brand/Mascot.vue'
-import { MASCOT_KEYS, MASCOTS } from '@/components/brand/mascots'
+import { MASCOT_GROUPS, MASCOT_KEYS, MASCOTS } from '@/components/brand/mascots'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { useToast } from '@/composables/useToast'
 
@@ -41,17 +41,19 @@ async function save() {
   <BaseModal :title="customer ? '编辑客户' : '新建客户'" width="max-w-lg" @close="emit('close')">
     <div class="space-y-4">
       <div class="flex justify-center"><Mascot :variant="mascot" :size="96" mood="happy" /></div>
-      <div class="flex flex-wrap justify-center gap-1.5">
-        <button
-          v-for="key in MASCOT_KEYS"
-          :key="key"
-          class="flex size-11 items-center justify-center overflow-hidden rounded-full border-2 bg-paper transition"
-          :class="mascot === key ? 'border-ink' : 'border-transparent hover:border-line'"
-          :title="MASCOTS[key].name"
-          @click="mascot = key"
-        >
-          <Mascot :variant="key" :size="44" :shadow="false" :track="false" />
-        </button>
+      <div class="space-y-1.5">
+        <div v-for="(group, i) in MASCOT_GROUPS" :key="i" class="flex flex-wrap justify-center gap-1.5">
+          <button
+            v-for="key in group"
+            :key="key"
+            class="flex size-11 items-center justify-center overflow-hidden rounded-full border-2 bg-paper transition"
+            :class="mascot === key ? 'border-ink' : 'border-transparent hover:border-line'"
+            :title="MASCOTS[key].name"
+            @click="mascot = key"
+          >
+            <Mascot :variant="key" :size="44" :shadow="false" :track="false" />
+          </button>
+        </div>
       </div>
       <label class="block">
         <span class="mb-1.5 block text-xs font-medium text-mute">客户名称 <span class="text-error" aria-hidden="true">*</span></span>
