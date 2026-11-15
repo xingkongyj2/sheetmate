@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from sheetmate.api.customers.schemas import FormulaGenerateBody
-from sheetmate.api.recipes.schemas import MatchBody, NodeEditBody, RunBody
+from sheetmate.api.recipes.schemas import GlobalTrialBody, MatchBody, NodeEditBody, RunBody
 
 from typing import Any
 
@@ -174,3 +174,11 @@ async def generate_global_formula(body: FormulaGenerateBody, db: Session = Depen
         db, None, description=body.description, file_ids=body.file_ids, formula=body.formula,
         tables=[item.model_dump() for item in body.tables], user=user, require_tables=False)  # 内置公式不针对某张表，参考表可选
     return {"ok": True, **result}
+
+
+@router.post("/formulas/trial")
+def trial_global_formula(body: GlobalTrialBody, db: Session = Depends(get_db), user: User = Depends(admin_user)) -> dict[str, Any]:
+    """内置公式试运行：在临时工作区里用直接上传的表跑一遍，返回结果预览。失败也返回 200，原因在 result.error。"""
+    result = formula_service.trial_formula(db, None, None, body.params, [i.model_dump() for i in body.inputs],
+                                           formula_id=body.formula_id, user=user)
+    return {"ok": True, "result": result}

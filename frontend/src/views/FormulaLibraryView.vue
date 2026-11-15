@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ChevronRight, FlaskConical, Lightbulb, X, LoaderCircle, Pencil, Search, Sparkles, Trash2, TriangleAlert, WandSparkles } from '@lucide/vue'
-import { computed, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
@@ -11,8 +11,9 @@ import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import FormulaAIGeneratorDialog from '@/components/customer/FormulaAIGeneratorDialog.vue'
 import FormulaEditorDialog from '@/components/customer/FormulaEditorDialog.vue'
+import FormulaTrialPanel from '@/components/customer/FormulaTrialPanel.vue'
 import { formulaArt, timeAgo } from '@/composables/chatModel'
-import { bodyFromFormula, paramTypeLabel } from '@/composables/formulaDraft'
+import { bodyFromFormula, draftFromBody, paramTypeLabel } from '@/composables/formulaDraft'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
@@ -21,6 +22,7 @@ type EditorState = { customer: CustomerDetail; formula: CustomerFormula; trial: 
 type AIState = { customer: CustomerDetail | null; formula: CustomerFormula | null; scope: 'customer' | 'global'; suggestion?: FormulaSuggestion }
 
 const router = useRouter()
+const route = useRoute()
 const toast = useToast()
 const { confirmDelete } = useConfirm()
 const customers = ref<CustomerCard[]>([])
@@ -29,7 +31,22 @@ const builtin = ref<FormulaInfo[]>([])
 const loading = ref(true)
 const error = ref('')
 const query = ref('')
-const tab = ref<'customer' | 'builtin'>('customer')
+// 当前页签记在地址里（?tab=）并存一份在浏览器里：刷新、离开再回来都还在原来的页签
+const TAB_KEY = 'sheetmate.formula-tab'
+function savedTab(): 'customer' | 'builtin' {
+  const fromUrl = route.query.tab
+  if (fromUrl === 'builtin' || fromUrl === 'customer') return fromUrl
+  try {
+    return localStorage.getItem(TAB_KEY) === 'builtin' ? 'builtin' : 'customer'
+  } catch {
+    return 'customer'
+  }
+}
+const tab = ref<'customer' | 'builtin'>(savedTab())
+watch(tab, (value) => {
+  try { localStorage.setItem(TAB_KEY, value) } catch { /* 存不了就只靠地址 */ }
+  void router.replace({ query: { ...route.query, tab: value } })
+}, { immediate: true })
 const choosing = ref(false)
 const opening = ref(false)
 const editor = ref<EditorState | null>(null)
@@ -38,6 +55,8 @@ const reservedIds = ref<string[]>([])
 const selectedBuiltin = ref<FormulaInfo | null>(null)
 const suggestions = ref<FormulaSuggestion[]>([])
 const suggestionText = ref('')
+const trialing = ref<FormulaInfo | null>(null) // 正在试运行的内置公式
+const trialDraft = computed(() => (trialing.value ? draftFromBody(bodyFromFormula(trialing.value as unknown as Record<string, unknown>)) : null))
 
 // 客户公式按客户分组，用标题分隔；客户顺序沿用客户列表的顺序，搜索后没有结果的客户不显示
 const customerGroups = computed(() => {
@@ -51,11 +70,13 @@ const customerGroups = computed(() => {
   }
   return [...groups.values()]
 })
+// 「自定义处理（SQL）」是系统给 AI 用的兜底公式，不在公式库里展示（id 仍然算被占用）
+const shownBuiltin = computed(() => builtin.value.filter((f) => f.id !== 'custom_sql'))
 // 内置公式按类别分组，用标题分隔；类别顺序沿用目录里的顺序，搜索后没有结果的类别不显示
 const builtinGroups = computed(() => {
   const q = query.value.trim().toLowerCase()
   const groups = new Map<string, FormulaInfo[]>()
-  for (const f of builtin.value) {
+  for (const f of shownBuiltin.value) {
     if (q && !`${f.name} ${f.id} ${f.intent} ${f.category}`.toLowerCase().includes(q)) continue
     groups.set(f.category, [...(groups.get(f.category) ?? []), f])
   }
@@ -143,11 +164,11 @@ async function openAI(f: LibraryFormula) {
 /** 把一条建议交给 AI 整理成通用的内置公式：SQL 里会变的部分抽成参数，确认后才保存 */
 function organize(s: FormulaSuggestion) {
   const note = s.description ? `（${s.description}）` : ''
-  ai.value = {
-    customer: null, formula: null, scope: 'global', suggestion: s,
-    // 弹窗里可以继续改这段话
-  }
-  suggestionText.value = `把下面这段在 ${s.count} 个流程里重复出现的 SQL，整理成通用的内置公式：表名、列名、阈值这些会变的部分抽成参数。\n步骤：${s.name}${note}\nSQL：\n${s.sql}`
+  ai.value = { customer: null, formula: null, scope: 'global', suggestion: s }
+  const examples = (s.variants.length ? s.variants : [{ customer: '', flow: '', sql: s.sql }])
+    .map((v, i) => `写法 ${i + 1}${v.customer || v.flow ? `（${[v.customer, v.flow].filter(Boolean).join(' · ')}）` : ''}：\n${v.sql}`).join('\n\n')
+  // 弹窗里可以继续改这段话
+  suggestionText.value = `下面是在 ${s.count} 个流程里做法相同的 SQL（表名、列名、取值各不相同），请整理成一个通用的内置公式：表名、列名、阈值这些不同的部分抽成参数。\n步骤：${s.name}${note}\n\n${examples}`
 }
 
 async function ignore(s: FormulaSuggestion) {
@@ -228,7 +249,7 @@ async function remove(f: LibraryFormula) {
       <div class="mt-7 flex shrink-0 flex-wrap items-center gap-3">
         <div class="flex rounded-full bg-paper/80 p-1" role="tablist" aria-label="公式类型">
           <button role="tab" :aria-selected="tab === 'customer'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'customer' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'customer'">客户公式 <span class="ml-1 text-xs text-faint">{{ custom.length }}</span></button>
-          <button role="tab" :aria-selected="tab === 'builtin'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'builtin' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'builtin'">内置公式 <span class="ml-1 text-xs text-faint">{{ builtin.length }}</span></button>
+          <button role="tab" :aria-selected="tab === 'builtin'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'builtin' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'builtin'">内置公式 <span class="ml-1 text-xs text-faint">{{ shownBuiltin.length }}</span></button>
         </div>
       </div>
 
@@ -288,6 +309,7 @@ async function remove(f: LibraryFormula) {
                 <div class="flex w-full items-center gap-2.5">
                   <FunObject :kind="formulaArt(f.id) as FunKind" :size="28" />
                   <h3 class="min-w-0 flex-1 text-[15px] font-semibold"><button type="button" class="text-left after:absolute after:inset-0 after:rounded-[22px] after:content-['']" :aria-label="`查看详情 ${f.name}`" @click="selectedBuiltin = f">{{ f.name }}</button></h3>
+                  <button class="icon-btn relative z-10 size-7 shrink-0" :title="`试运行 ${f.name}`" :aria-label="`试运行 ${f.name}`" @click="trialing = f"><FlaskConical class="size-4" /></button>
                   <button class="icon-btn relative z-10 -mr-1.5 size-7 shrink-0 hover:text-error" :title="`删除公式 ${f.name}`" :aria-label="`删除公式 ${f.name}`" @click="removeBuiltin(f)"><Trash2 class="size-4" /></button>
                 </div>
                 <p class="mt-3 line-clamp-3 text-[13px] leading-7 text-mute">{{ f.intent }}</p>
@@ -320,6 +342,10 @@ async function remove(f: LibraryFormula) {
       @close="ai = null" @saved="onAISaved"
     />
     <FormulaEditorDialog v-if="editor" :customer-id="editor.customer.id" :formula="editor.formula" :existing-ids="idsFor(editor.customer.id)" :files="editor.customer.files" :field-mapping="editor.customer.field_mapping" :focus-trial="editor.trial" @close="editor = null" @saved="onSaved" />
+
+    <BaseModal v-if="trialing" :title="`试运行 · ${trialing.name}`" width="max-w-xl" @close="trialing = null">
+      <FormulaTrialPanel :key="trialing.id" :formula-id="trialing.id" :draft="trialDraft" blocked="" />
+    </BaseModal>
 
     <BaseModal v-if="selectedBuiltin" :title="selectedBuiltin.name" width="max-w-lg" @close="selectedBuiltin = null">
       <p class="text-sm leading-7 text-mute">{{ selectedBuiltin.intent }}</p><p class="mt-2 text-xs text-faint">内置公式 · {{ selectedBuiltin.category }}</p>

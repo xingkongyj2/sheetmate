@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import re
 import secrets
 import time
 
@@ -84,15 +85,49 @@ def register(db: Session, account: str, password: str, display_name: str = "") -
     return user
 
 
+ROLE_LABELS = {"admin": "管理员", "member": "成员"}
+
+
 def user_dict(user: User) -> dict:
+    profile = dict(user.profile or {})
+    avatar = str(profile.pop("avatar", "") or "")  # 头像单独给，不混在引导页回答里
     return {
         "id": user.id,
         "account": user.account,
-        "display_name": user.display_name or user.account,
+        # 早期管理员账号的默认名字就是「管理员」（和角色重复），当作没设置，显示用户名
+        "display_name": user.display_name if user.display_name not in {"", "管理员"} else user.account,
+        "avatar": avatar,
         "role": user.role,
-        "profile": user.profile or {},
-        "onboarded": bool((user.profile or {}).get("onboarded")),
+        "role_label": ROLE_LABELS.get(user.role, user.role),
+        "profile": profile,
+        "onboarded": bool(profile.get("onboarded")),
     }
+
+
+MAX_AVATAR_CHARS = 200_000  # 前端会裁成 256 像素的小图（通常 20KB 左右），这里只是兜底
+_AVATAR = re.compile(r"^data:image/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$")
+
+
+def set_avatar(user: User, avatar: str) -> None:
+    """头像存在用户资料里；空字符串 = 清除。"""
+    profile = dict(user.profile or {})
+    if not avatar:
+        profile.pop("avatar", None)
+    else:
+        if len(avatar) > MAX_AVATAR_CHARS or not _AVATAR.fullmatch(avatar):
+            raise Conflict("头像图片不合适，请换一张 PNG / JPG / WebP 图片")
+        profile["avatar"] = avatar
+    user.profile = profile
+
+
+def change_password(user: User, current: str, new: str) -> None:
+    if not verify_password(current, user.password_hash):
+        raise Conflict("当前密码不对")
+    if len(new) < 6:
+        raise Conflict("新密码至少 6 位")
+    if new == current:
+        raise Conflict("新密码和当前密码一样")
+    user.password_hash = hash_password(new)
 
 
 def ensure_admin(db: Session) -> User:
@@ -100,7 +135,7 @@ def ensure_admin(db: Session) -> User:
     user = db.scalar(select(User).where(User.account == settings.admin_account))
     if user is None:
         user = User(account=settings.admin_account, password_hash=hash_password(settings.admin_password),
-                    display_name="管理员", role="admin")
+                    display_name=settings.admin_account, role="admin")
         db.add(user)
         db.flush()
     return user

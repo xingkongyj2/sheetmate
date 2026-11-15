@@ -10,7 +10,7 @@
 import { Check, CircleAlert, CircleCheck, ChevronDown, FlaskConical, LoaderCircle, Paperclip, Plus, Trash2, X } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { customerApi } from '@/api'
+import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo, FormulaTrialResult } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -22,13 +22,15 @@ import { applyMapping, draftToBody, paramTypeLabel, splitList, type FormulaDraft
 interface Slot { fileId: string; sheet: string }
 interface SlotTable extends Slot { param: string; name: string; label: string; columns: string[]; rows: number | null }
 
-const props = defineProps<{
-  customerId: string
+/** 不给 customerId 就是内置公式试运行：不绑定客户，表直接上传；formulaId 给了就按 id 取已保存的公式来跑 */
+const props = withDefaults(defineProps<{
+  customerId?: string
+  formulaId?: string
   draft: FormulaDraft | null // 公式有问题时是 null
   blocked: string // draft 为 null 时给用户看的原因
-  files: FileInfo[]
-  fieldMapping: Record<string, string[]>
-}>()
+  files?: FileInfo[]
+  fieldMapping?: Record<string, string[]>
+}>(), { customerId: undefined, formulaId: undefined, files: () => [], fieldMapping: () => ({}) })
 
 const STAGES: Record<string, string> = {
   definition: '公式定义有问题',
@@ -191,7 +193,7 @@ async function upload(param: string, event: Event) {
   if (!chosen || uploading.value) return
   uploading.value = param
   try {
-    const info = await customerApi.uploadFile(props.customerId, chosen, 'input')
+    const info = props.customerId ? await customerApi.uploadFile(props.customerId, chosen, 'input') : await recipeApi.uploadGlobalFormulaFile(chosen)
     pool.value.unshift(info)
     if (info.sheets[0]) choose(param, info.file_id, info.sheets[0].sheet)
     else toast.error('这个文件里没有可读取的数据')
@@ -254,6 +256,13 @@ function collectParams(): Record<string, unknown> {
       } catch {
         out[k] = text
       }
+    } else if (p.type === 'any' && /^[[{]/.test(text)) {
+      // 任意类型（内置公式里常见：排序字段、条件列表）写成 JSON，能解析就按结构化的值传
+      try {
+        out[k] = JSON.parse(text)
+      } catch {
+        out[k] = text
+      }
     } else out[k] = text
   }
   return out
@@ -267,7 +276,9 @@ async function run() {
   result.value = null
   try {
     const inputs = slotTables.value.map((t) => ({ table: t.name, file_id: t.fileId, sheet: t.sheet }))
-    const r = await customerApi.trialFormula(props.customerId, { formula: draftToBody(props.draft), params: collectParams(), inputs })
+    const r = props.customerId
+      ? await customerApi.trialFormula(props.customerId, { formula: draftToBody(props.draft), params: collectParams(), inputs })
+      : await recipeApi.trialGlobalFormula({ formula_id: props.formulaId ?? props.draft.id, params: collectParams(), inputs })
     for (const info of r.inputs ?? []) {
       const t = slotTables.value.find((x) => x.name === info.table)
       if (t) corrected[`${t.fileId}::${t.sheet}`] = { columns: info.columns, rows: info.rows } // 用后端读到的真实列名校正

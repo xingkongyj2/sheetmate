@@ -3,6 +3,16 @@ from __future__ import annotations
 from typing import Any, Literal
 from pydantic import BaseModel
 
+from sheetmate.api.customers.schemas import TrialInput
+
+
+class GlobalTrialBody(BaseModel):
+    """内置公式试运行：按 id 取公式，表是直接上传的文件。"""
+
+    formula_id: str
+    params: dict[str, Any] = {}
+    inputs: list[TrialInput] = []
+
 
 class MatchBody(BaseModel):
     file_ids: list[str]

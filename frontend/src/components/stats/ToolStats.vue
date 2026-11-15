@@ -105,12 +105,10 @@ const dash = '—'
       <div class="sm:pr-5">
         <dt class="text-xs text-mute">调用次数</dt>
         <dd class="mt-1.5 text-2xl font-semibold leading-none tabular-nums">{{ integer(summary.calls) }}</dd>
-        <dd class="mt-1.5 text-xs text-faint">用到 {{ usedKinds }} / {{ totalKinds }} 种工具</dd>
       </div>
       <div class="sm:px-5">
         <dt class="text-xs text-mute">成功率</dt>
         <dd class="mt-1.5 text-2xl font-semibold leading-none tabular-nums">{{ percent(summary.rate) }}</dd>
-        <dd class="mt-1.5 text-xs text-faint">只算已结束的调用</dd>
       </div>
       <div class="sm:px-5">
         <dt class="text-xs text-mute">失败次数</dt>
@@ -120,7 +118,6 @@ const dash = '—'
       <div class="sm:pl-5">
         <dt class="text-xs text-mute">平均耗时</dt>
         <dd class="mt-1.5 text-2xl font-semibold leading-none tabular-nums">{{ duration(summary.average) }}</dd>
-        <dd class="mt-1.5 text-xs text-faint">不含经过恢复的调用</dd>
       </div>
     </dl>
 
@@ -155,7 +152,6 @@ const dash = '—'
       <div v-for="group in visibleGroups" :key="group.name" class="mt-4">
         <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-0.5 border-b border-line px-2 pb-1.5">
           <h4 class="text-[13px] font-semibold">{{ group.name }}</h4>
-          <p class="text-xs text-faint">{{ group.rows.length }} 个工具 · {{ group.used }} 个用过 · 共 {{ integer(group.calls) }} 次</p>
         </div>
         <ul>
           <li
@@ -168,7 +164,6 @@ const dash = '—'
               <p class="truncate text-sm" :class="row.used ? '' : 'text-mute'">
                 {{ row.label }}<span v-if="!row.used" class="ml-2 text-[11px] text-faint sm:hidden">未使用</span>
               </p>
-              <p class="text-[11px] leading-snug text-faint sm:truncate">{{ row.purpose }}</p>
             </div>
             <template v-if="row.used">
               <!-- 调用次数：条 + 数字（条的长度按用得最多的工具归一） -->

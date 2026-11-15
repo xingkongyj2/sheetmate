@@ -3,7 +3,7 @@
 import { Download, Eye, FileCheck2, FileSpreadsheet, Maximize2, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { conversationApi } from '@/api'
+import { conversationApi, fileApi } from '@/api'
 import type { ConversationDetail, FileInfo, RecipeBrief, RecipeFlowData, TableBrief } from '@/api/types'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import type { RecipeProgress, UiMessage } from '@/composables/chatModel'
@@ -128,6 +128,17 @@ async function drop(table: TableBrief) {
     description: `这张计算结果表将从「${sourceLabel(table)}」的工作区删除，上传的源文件会保留。`,
     confirmText: '删除表格',
     action: () => conversationApi.dropTable(conversationId, table.name, table.conversation_id ?? undefined),
+  })) return
+  emit('refresh')
+}
+async function removeFile(file: FileInfo) {
+  if (!props.detail) return
+  const conversationId = props.detail.id
+  if (!await confirmDelete({
+    title: '删除这个文件？', target: file.filename,
+    description: '删除后，这个文件不再出现在工作区里。',
+    confirmText: '删除文件',
+    action: () => fileApi.remove(file.file_id, undefined, undefined, conversationId),
   })) return
   emit('refresh')
 }
@@ -257,6 +268,7 @@ onBeforeUnmount(() => {
             <FileSpreadsheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-fun-green'" />
             <button type="button" class="min-w-0 flex-1 truncate rounded text-left text-[13px] font-medium underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink/40" :title="file.filename" :aria-label="`查看 ${file.filename}`" @click="emit('openFile', file)">{{ file.filename }}</button>
             <a :href="file.download_url" class="icon-btn" :aria-label="`下载 ${file.filename}`" title="下载"><Download class="size-4" /></a>
+            <button type="button" class="icon-btn hover:text-error" :aria-label="`删除 ${file.filename}`" title="删除" @click="removeFile(file)"><Trash2 class="size-4" /></button>
           </div>
         </div>
       </template>

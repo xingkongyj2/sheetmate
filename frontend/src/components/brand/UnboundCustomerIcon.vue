@@ -1,6 +1,5 @@
 <template>
-  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false">
-    <circle cx="13" cy="11" r="9.5" fill="#C5C8FA" />
+  <svg width="24" height="24" viewBox="1.5 3.5 19 19" fill="none" aria-hidden="true" focusable="false">
     <circle cx="11" cy="13" r="9.5" fill="#6265DC" />
     <path d="M1.5 13a9.5 9.5 0 0 1 19 0Z" fill="#7578EA" />
     <circle cx="11" cy="10.5" r="2.65" fill="#fff" />

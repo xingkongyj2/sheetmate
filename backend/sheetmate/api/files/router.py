@@ -90,7 +90,7 @@ def delete_file(file_id: str, customer_id: str | None = None, conversation_id: s
             raise ServiceError("流程文件需要指定客户")
         deleted = file_service.remove_from_recipe(db, record, user, scope, recipe_id)
     elif conversation_id:
-        deleted = file_service.remove_from_conversation(db, record, user, conversation_id)
+        deleted = file_service.remove_from_workspace(db, record, user, conversation_id)
     elif scope:
         deleted = file_service.remove_from_customer(db, record, user, scope)
     elif record.conversation_id:

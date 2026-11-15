@@ -51,8 +51,6 @@ const NEUTRAL = 'var(--chart-neutral)'
 const INPUT = 'var(--chart-input)'
 const OUTPUT = 'var(--chart-output)'
 
-const range = computed(() => metrics.value ? `${metrics.value.from.slice(0, 10)} 至 ${metrics.value.to.slice(0, 10)}` : '')
-
 const taskSeries = [
   { key: 'completed', label: '完成', color: DONE },
   { key: 'failed', label: '失败或未完成', color: FAIL },
@@ -101,14 +99,11 @@ const usageIncomplete = computed(() => !!metrics.value &&
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[960px] px-5 py-8 sm:px-8 sm:py-10">
+    <div class="mx-auto max-w-[760px] px-5 py-8 sm:px-8 sm:py-10">
       <!-- 标题与时间范围 -->
       <header class="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
         <div>
           <h1 class="text-[28px] font-semibold tracking-tight">统计</h1>
-          <p class="mt-1 text-sm text-mute">
-            近 {{ metrics?.days ?? days }} 天的任务与模型使用情况<span v-if="range" class="whitespace-nowrap text-faint"> · {{ range }}</span>
-          </p>
         </div>
         <div class="flex items-center gap-2">
           <div class="flex gap-0.5 rounded-xl bg-paper p-1 text-sm" role="group" aria-label="统计时间范围">
@@ -140,7 +135,6 @@ const usageIncomplete = computed(() => !!metrics.value &&
       <div v-else-if="metrics.tasks === 0" class="card-soft mt-8 flex flex-col items-center gap-3 px-6 py-16 text-center">
         <span class="flex size-12 items-center justify-center rounded-2xl bg-paper text-mute"><ChartColumn class="size-6" /></span>
         <p class="font-medium">这段时间还没有任务记录</p>
-        <p class="max-w-sm text-sm text-mute">开始一次对话处理表格后，这里会显示任务数、成功率、耗时和 Token 用量。</p>
       </div>
 
       <div v-else class="mt-8 space-y-5 transition-opacity" :class="loading ? 'opacity-60' : ''" :aria-busy="loading">
@@ -154,7 +148,7 @@ const usageIncomplete = computed(() => !!metrics.value &&
             <div class="lg:pr-6">
               <dt class="text-xs text-mute">任务数</dt>
               <dd class="mt-2 text-[32px] font-semibold leading-none tracking-tight tabular-nums">{{ integer(metrics.tasks) }}</dd>
-              <dd class="mt-2 text-xs text-faint">{{ metrics.recovered_tasks ? `其中 ${integer(metrics.recovered_tasks)} 个曾恢复执行` : '全部一次跑完' }}</dd>
+              <dd v-if="metrics.recovered_tasks" class="mt-2 text-xs text-faint">其中 {{ integer(metrics.recovered_tasks) }} 个曾恢复执行</dd>
             </div>
             <div class="lg:px-6">
               <dt class="text-xs text-mute">成功率</dt>
@@ -162,7 +156,6 @@ const usageIncomplete = computed(() => !!metrics.value &&
               <dd class="mt-3 h-1.5 overflow-hidden rounded-full bg-paper" aria-hidden="true">
                 <div class="h-full rounded-full" :style="{ width: `${(metrics.success_rate ?? 0) * 100}%`, backgroundColor: DONE }" />
               </dd>
-              <dd class="mt-2 text-xs text-faint">按 {{ integer(metrics.success_rate_tasks) }} 个已结束任务计算</dd>
             </div>
             <div class="lg:px-6">
               <dt class="text-xs text-mute">耗时中位数</dt>
@@ -182,7 +175,6 @@ const usageIncomplete = computed(() => !!metrics.value &&
         <!-- 趋势 -->
         <StackedBarChart
           title="每日任务"
-          subtitle="每天结束的任务数，按结果分色"
           :series="taskSeries"
           :columns="taskColumns"
           :format="integer"
@@ -190,7 +182,6 @@ const usageIncomplete = computed(() => !!metrics.value &&
         />
         <StackedBarChart
           title="每日 Token 用量"
-          subtitle="每天模型消耗的 Token，输入与输出分开看"
           :series="tokenSeries"
           :columns="tokenColumns"
           :format="integer"
@@ -199,10 +190,9 @@ const usageIncomplete = computed(() => !!metrics.value &&
 
         <!-- 构成 -->
         <div class="grid gap-5 lg:grid-cols-2">
-          <RankBars title="任务状态" subtitle="范围内全部任务" :rows="statusRows" :format="integer" />
+          <RankBars title="任务状态" :rows="statusRows" :format="integer" />
           <RankBars
             title="失败与未完成的原因"
-            subtitle="同一个任务只记一个主要原因"
             :rows="failureRows"
             :format="integer"
             empty-text="没有失败或未完成的任务"
@@ -213,7 +203,6 @@ const usageIncomplete = computed(() => !!metrics.value &&
         <section aria-labelledby="tool-stats-heading" class="pt-3">
           <div class="mb-3 px-1">
             <h2 id="tool-stats-heading" class="text-[18px] font-semibold tracking-tight">工具调用</h2>
-            <p class="mt-0.5 text-sm text-mute">AI 处理表格时可以使用的全部工具：每个工具做什么、用了多少次、成不成功、花了多久</p>
           </div>
           <ToolStats :tools="metrics.tools" :catalog="metrics.catalog" />
         </section>
@@ -221,7 +210,6 @@ const usageIncomplete = computed(() => !!metrics.value &&
         <!-- 模型调用 -->
         <RankBars
           title="模型调用阶段"
-          subtitle="各环节消耗的 Token"
           :rows="stageRows"
           :format="compact"
           :legend="[{ label: '输入', color: INPUT }, { label: '输出', color: OUTPUT }]"

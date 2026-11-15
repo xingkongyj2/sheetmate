@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sheetmate.api.auth.schemas import LoginBody, RegisterBody, ProfileBody
+from sheetmate.api.auth.schemas import LoginBody, PasswordBody, RegisterBody, ProfileBody
 
 from typing import Any
 
@@ -53,6 +53,15 @@ def update_profile(body: ProfileBody, user: User = Depends(current_user)) -> dic
     """引导页（你的岗位 / 主要场景）和昵称。"""
     if body.display_name is not None and body.display_name.strip():
         user.display_name = body.display_name.strip()[:40]
+    if body.avatar is not None:
+        auth_service.set_avatar(user, body.avatar)
     if body.profile is not None:
-        user.profile = {**(user.profile or {}), **body.profile}
+        user.profile = {**(user.profile or {}), **{k: v for k, v in body.profile.items() if k != "avatar"}}
     return {"ok": True, "user": auth_service.user_dict(user)}
+
+
+@router.put("/password")
+def change_password(body: PasswordBody, user: User = Depends(current_user)) -> dict[str, Any]:
+    """修改自己的密码：要先输对当前密码。"""
+    auth_service.change_password(user, body.current_password, body.new_password)
+    return {"ok": True}

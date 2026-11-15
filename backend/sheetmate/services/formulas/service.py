@@ -188,9 +188,11 @@ def _failed(stage: str, error: str, **extra: Any) -> dict[str, Any]:
     return {"status": "failed", "stage": stage, "error": error, **extra}
 
 
-def _load_inputs(db: Session, ws: Workspace, customer_id: str, inputs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """把试运行用的数据放进临时工作区：客户的文件（按客户字段映射统一列名）或粘贴的表格文本。"""
-    mapping = memory_service.field_mapping_for(db, customer_id)
+def _load_inputs(db: Session, ws: Workspace, customer_id: str | None, inputs: list[dict[str, Any]],
+                 user: Any = None) -> list[dict[str, Any]]:
+    """把试运行用的数据放进临时工作区：客户的文件（按客户字段映射统一列名）或粘贴的表格文本。
+    没有客户（内置公式）时用直接上传的文件：不做字段映射，文件要是当前用户能访问的。"""
+    mapping = memory_service.field_mapping_for(db, customer_id) if customer_id else {}
     loaded: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in inputs:
@@ -204,8 +206,10 @@ def _load_inputs(db: Session, ws: Workspace, customer_id: str, inputs: list[dict
         info: dict[str, Any] = {"table": name}
         if file_id:
             record = file_service.get_file(db, str(file_id))
-            if not file_service.can_access_in_customer(db, record, customer_id):
-                raise Forbidden("这个文件不属于当前客户，不能用来试运行")
+            allowed = (file_service.can_access_in_customer(db, record, customer_id) if customer_id
+                       else user is not None and file_service.can_access_file(db, user, record))
+            if not allowed:
+                raise Forbidden("这个文件不属于当前客户，不能用来试运行" if customer_id else "这个文件不能用来试运行")
             sheets = read_workbook(Path(record.stored_path))
             wanted = item.get("sheet")
             sheet = next((s for s in sheets if s.name == wanted), None) if wanted else sheets[0]
@@ -225,25 +229,32 @@ def _load_inputs(db: Session, ws: Workspace, customer_id: str, inputs: list[dict
     return loaded
 
 
-def trial_formula(db: Session, customer_id: str, body: dict[str, Any], params: dict[str, Any],
-                  inputs: list[dict[str, Any]]) -> dict[str, Any]:
+def trial_formula(db: Session, customer_id: str | None, body: dict[str, Any] | None, params: dict[str, Any],
+                  inputs: list[dict[str, Any]], *, formula_id: str | None = None, user: Any = None) -> dict[str, Any]:
     """用 body 描述的公式（可以是还没保存的）在临时工作区里跑一遍，返回结果预览。
 
     - 数据来自客户的文件（会按客户的字段映射统一列名）或粘贴的几行；文件必须是这个客户的
     - 临时工作区是内存里的 DuckDB（沙箱：不能读写本机文件、不能联网），用完即丢，不会动任何客户数据
     - 超过 TRIAL_TIMEOUT 秒自动中止，免得一条写坏的 SQL 把机器拖住
     """
-    try:
-        formula = recipe_service.build_formula(customer_id, body)
-    except FormulaError as exc:
-        return _failed("definition", str(exc))
+    if formula_id:
+        # 已保存的公式（含代码自带的内置公式）：按 id 取，和流程里用的是同一个
+        library = recipe_service.library_for(db, customer_id)
+        if not library.has(formula_id):
+            return _failed("definition", f"没有公式「{formula_id}」")
+        formula = library.resolve(formula_id).spec
+    else:
+        try:
+            formula = recipe_service.build_formula(customer_id, body or {})
+        except FormulaError as exc:
+            return _failed("definition", str(exc))
+        library = FormulaLibrary([formula])  # 只有这一个公式；即使 id 和内置公式相同也用它
     ws = Workspace(None)
     try:
         try:
-            loaded = _load_inputs(db, ws, customer_id, inputs)
+            loaded = _load_inputs(db, ws, customer_id, inputs, user)
         except ReadError as exc:
             return _failed("data", str(exc))
-        library = FormulaLibrary([formula])  # 只有这一个公式；即使 id 和内置公式相同也用它
         sql = ""
         timer = threading.Timer(TRIAL_TIMEOUT, ws.interrupt)
         timer.daemon = True

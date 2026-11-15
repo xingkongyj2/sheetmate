@@ -15,5 +15,11 @@ class RegisterBody(LoginBody):
 
 class ProfileBody(BaseModel):
     display_name: str | None = None
+    avatar: str | None = None  # 头像：data URL；空字符串 = 清除
     profile: dict[str, Any] | None = None
 
+
+
+class PasswordBody(BaseModel):
+    current_password: str
+    new_password: str

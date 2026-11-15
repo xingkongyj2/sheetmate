@@ -1,11 +1,13 @@
 <script setup lang="ts">
 /** 设置：多服务商模型配置 */
-import { ArrowUpRight, Eye, EyeOff, LoaderCircle, Save, Zap } from '@lucide/vue'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { ArrowUpRight, Eye, EyeOff, LoaderCircle, Zap } from '@lucide/vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { settingsApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { LLMAdvancedConfig, LLMConfig, LLMProviderConfig, LLMProviderId } from '@/api/types'
+import BaseSelect from '@/components/common/BaseSelect.vue'
+import ProfileCard from '@/components/settings/ProfileCard.vue'
 import { useToast } from '@/composables/useToast'
 
 const toast = useToast()
@@ -27,6 +29,19 @@ interface ProviderDraft extends LLMAdvancedConfig {
   model: string
   thinking_enabled: boolean
 }
+
+const STRUCTURED_OPTIONS = [
+  { value: 'auto', label: '自动兼容' },
+  { value: 'json_schema', label: '优先 JSON Schema' },
+  { value: 'json_object', label: '优先 JSON 模式' },
+  { value: 'prompt', label: '仅提示词' },
+] as const
+const THINKING_OPTIONS = [
+  { value: 'auto', label: '自动识别' },
+  { value: 'deepseek', label: 'DeepSeek' },
+  { value: 'qwen', label: '千问' },
+  { value: 'none', label: '不自动发送思考参数' },
+] as const
 
 const PROVIDER_ORDER: LLMProviderId[] = ['deepseek', 'qwen', 'custom']
 const PROVIDER_LABELS: Record<LLMProviderId, string> = { deepseek: 'DeepSeek', qwen: '千问', custom: '自定义' }
@@ -122,10 +137,47 @@ function onModelChanged(provider: LLMProviderConfig) {
   resetTestResult(provider.id)
 }
 
+// ---- 自动保存：改动停下 0.7 秒后保存（开关、下拉也一样），离开输入框或页面时马上保存
+const AUTOSAVE_DELAY = 700
+const timers = new Map<LLMProviderId, ReturnType<typeof setTimeout>>()
+const failedAt = new Map<LLMProviderId, string>() // 保存失败时的内容：内容没再改就不重试
+
+const snapshot = (id: LLMProviderId) => JSON.stringify(drafts[id])
+const serverProvider = (id: LLMProviderId) => config.value?.providers.find((item) => item.id === id)
+function isDirty(id: LLMProviderId) {
+  const saved = serverProvider(id)
+  return !!saved && !!drafts[id] && snapshot(id) !== JSON.stringify(draftFrom(saved))
+}
+
+function schedule(id: LLMProviderId, delay = AUTOSAVE_DELAY) {
+  clearTimeout(timers.get(id))
+  timers.delete(id)
+  const provider = serverProvider(id)
+  if (!provider || !isDirty(id) || failedAt.get(id) === snapshot(id) || !canSave(provider)) return
+  timers.set(id, setTimeout(() => { timers.delete(id); void save(provider) }, delay))
+}
+
+/** 马上保存还在等待的改动（离开输入框、离开页面时） */
+function flush(id: LLMProviderId) {
+  if (!timers.has(id)) return
+  clearTimeout(timers.get(id))
+  timers.delete(id)
+  const provider = serverProvider(id)
+  if (provider) void save(provider)
+}
+
+watch(drafts, () => { for (const id of PROVIDER_ORDER) schedule(id) }, { deep: true })
+onBeforeUnmount(() => { for (const id of [...timers.keys()]) flush(id) })
+
 async function save(provider: LLMProviderConfig) {
-  if (anyBusy.value || !canSave(provider)) return
+  if (loading.value || !canSave(provider) || !isDirty(provider.id)) return
+  if (savingProvider.value || testingProvider.value) { // 正在保存或测试：稍后再试
+    schedule(provider.id, 300)
+    return
+  }
   const draft = drafts[provider.id]
   if (!draft) return
+  const sent = snapshot(provider.id)
   savingProvider.value = provider.id
   try {
     const next = await settingsApi.saveLLM({
@@ -137,13 +189,17 @@ async function save(provider: LLMProviderConfig) {
       thinking_enabled: draft.thinking_enabled,
       capabilities: { ...draft.capabilities },
     })
-    applyConfig(next, provider.id)
+    failedAt.delete(provider.id)
+    // 保存期间又改了的话，保留正在改的内容，只更新已保存的状态
+    if (snapshot(provider.id) === sent) applyConfig(next, provider.id)
+    else config.value = next
     resetTestResult(provider.id)
-    toast.success('已保存')
   } catch (err) {
+    failedAt.set(provider.id, sent)
     toast.error(errorText(err))
   } finally {
     savingProvider.value = null
+    schedule(provider.id)
   }
 }
 
@@ -177,14 +233,19 @@ async function test(provider: LLMProviderConfig) {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[760px] px-5 py-8 sm:px-8 sm:py-10">
+    <div class="mx-auto max-w-[760px] px-5 py-8 pb-44 sm:px-8 sm:py-10 sm:pb-44">
       <h1 class="text-[28px] font-semibold tracking-tight">设置</h1>
 
+      <section class="mt-8" aria-labelledby="profile-heading">
+        <h2 id="profile-heading" class="mb-3 text-lg font-semibold tracking-tight">资料</h2>
+        <ProfileCard />
+      </section>
+
       <section class="mt-8" aria-labelledby="providers-heading">
-        <h2 id="providers-heading" class="mb-3 text-[16px] font-semibold">大模型提供商</h2>
+        <h2 id="providers-heading" class="mb-3 text-lg font-semibold tracking-tight">大模型</h2>
         <div class="card-soft overflow-hidden">
           <div class="px-5 pt-5 sm:px-6 sm:pt-6">
-            <div class="flex gap-1 rounded-xl bg-paper p-1" role="tablist" aria-label="大模型提供商" @keydown="onTabKeydown">
+            <div class="flex gap-1 rounded-xl bg-paper p-1" role="tablist" aria-label="大模型" @keydown="onTabKeydown">
               <button
                 v-for="id in PROVIDER_ORDER"
                 :id="`provider-tab-${id}`"
@@ -239,8 +300,9 @@ async function test(provider: LLMProviderConfig) {
                       :type="keyVisible[provider.id] ? 'text' : 'password'"
                       class="field pr-11 font-mono"
                       autocomplete="off"
-                      :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                      :disabled="testingProvider === provider.id"
                       @input="resetTestResult(provider.id)"
+                      @blur="flush(provider.id)"
                     />
                     <button
                       type="button"
@@ -248,7 +310,7 @@ async function test(provider: LLMProviderConfig) {
                       :title="keyVisible[provider.id] ? '隐藏 API Key' : '显示 API Key'"
                       :aria-label="keyVisible[provider.id] ? '隐藏 API Key' : '显示 API Key'"
                       :aria-pressed="keyVisible[provider.id]"
-                      :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                      :disabled="testingProvider === provider.id"
                       @click="keyVisible[provider.id] = !keyVisible[provider.id]"
                     >
                       <EyeOff v-if="keyVisible[provider.id]" class="size-4" />
@@ -263,8 +325,9 @@ async function test(provider: LLMProviderConfig) {
                     <input
                       v-model="drafts[provider.id]!.base_url"
                       class="field font-mono text-[13px]"
-                      :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                      :disabled="testingProvider === provider.id"
                       @input="resetTestResult(provider.id)"
+                      @blur="flush(provider.id)"
                     />
                   </label>
                   <label class="block">
@@ -273,8 +336,9 @@ async function test(provider: LLMProviderConfig) {
                       v-model="drafts[provider.id]!.model"
                       class="field font-mono text-[13px]"
                       autocomplete="off"
-                      :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                      :disabled="testingProvider === provider.id"
                       @input="onModelChanged(provider)"
+                      @blur="flush(provider.id)"
                     />
                   </label>
                 </div>
@@ -287,7 +351,7 @@ async function test(provider: LLMProviderConfig) {
                       type="checkbox"
                       role="switch"
                       class="toggle toggle-xs shrink-0 sm:toggle-sm"
-                      :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                      :disabled="testingProvider === provider.id"
                     />
                   </label>
                   <label v-if="isThinkingSupported(provider)" class="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap text-xs font-medium sm:gap-2.5 sm:text-sm">
@@ -297,7 +361,7 @@ async function test(provider: LLMProviderConfig) {
                       type="checkbox"
                       role="switch"
                       class="toggle toggle-xs shrink-0 sm:toggle-sm"
-                      :disabled="savingProvider === provider.id || testingProvider === provider.id"
+                      :disabled="testingProvider === provider.id"
                       @change="resetTestResult(provider.id)"
                     />
                   </label>
@@ -322,38 +386,30 @@ async function test(provider: LLMProviderConfig) {
         <template v-for="provider in orderedProviders" :key="provider.id">
           <div v-if="drafts[provider.id]" v-show="selectedProviderId === provider.id">
             <section class="mt-7" :aria-labelledby="`${provider.id}-protocol-heading`">
-              <h2 :id="`${provider.id}-protocol-heading`" class="mb-3 text-[16px] font-semibold">结构协议</h2>
+              <h2 :id="`${provider.id}-protocol-heading`" class="mb-3 text-lg font-semibold tracking-tight">结构协议</h2>
               <div class="card-soft space-y-4 p-5 sm:p-6">
-                <p class="text-xs leading-relaxed text-mute">系统会修复常见格式问题，并自动恢复断流。超时、重试次数、输出 Token 上限、任务预算等运行参数都放在后端 .env 环境变量里，默认值很大，一般无需调整。</p>
-                <label class="block">
+                <div>
                   <span class="mb-1.5 block text-xs font-medium text-mute">结构输出协议</span>
-                  <select v-model="drafts[provider.id]!.capabilities.structured_output" class="field"
-                    :disabled="anyBusy" @change="resetTestResult(provider.id)">
-                    <option value="auto">自动兼容</option>
-                    <option value="json_schema">优先 JSON Schema</option>
-                    <option value="json_object">优先 JSON 模式</option>
-                    <option value="prompt">仅提示词</option>
-                  </select>
-                </label>
-                <label class="block">
+                  <BaseSelect
+                    v-model="drafts[provider.id]!.capabilities.structured_output"
+                    :options="[...STRUCTURED_OPTIONS]"
+                    :disabled="!!testingProvider"
+                    aria-label="结构输出协议"
+                    @change="resetTestResult(provider.id)"
+                  />
+                </div>
+                <div>
                   <span class="mb-1.5 block text-xs font-medium text-mute">思考参数协议</span>
-                  <select v-model="drafts[provider.id]!.capabilities.thinking_protocol" class="field"
-                    :disabled="anyBusy" @change="resetTestResult(provider.id)">
-                    <option value="auto">自动识别</option>
-                    <option value="deepseek">DeepSeek</option>
-                    <option value="qwen">千问</option>
-                    <option value="none">不自动发送思考参数</option>
-                  </select>
-                  <span class="mt-1.5 block text-xs leading-relaxed text-mute">自动识别仅适用于已知官方模型或已有手工参数；中转服务和模型别名可按服务文档指定协议。辅助判断默认关闭思考。</span>
-                </label>
+                  <BaseSelect
+                    v-model="drafts[provider.id]!.capabilities.thinking_protocol"
+                    :options="[...THINKING_OPTIONS]"
+                    :disabled="!!testingProvider"
+                    aria-label="思考参数协议"
+                    @change="resetTestResult(provider.id)"
+                  />
+                </div>
               </div>
             </section>
-
-            <div class="mt-7 flex flex-col items-center gap-3">
-              <button type="button" class="btn-ink min-w-32" :disabled="anyBusy || !canSave(provider)" @click="save(provider)">
-                <LoaderCircle v-if="savingProvider === provider.id" class="size-4 animate-spin" /><Save v-else class="size-4" />保存
-              </button>
-            </div>
           </div>
         </template>
       </template>

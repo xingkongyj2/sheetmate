@@ -36,7 +36,8 @@ const stopTrackingSettings = router.afterEach((to, from, failure) => {
   }
 })
 
-const username = computed(() => auth.user?.account || '')
+const username = computed(() => auth.user?.display_name || auth.user?.account || '')
+const avatar = computed(() => auth.user?.avatar || '')
 const initial = computed(() => (username.value || '?').slice(0, 1).toUpperCase())
 
 function collapseOnNarrowScreen(event: MediaQueryListEvent) {
@@ -160,7 +161,7 @@ async function logout() {
     <!-- 账号 -->
     <div class="relative p-3">
       <div v-if="!collapsed" class="flex min-w-0 items-center gap-2 py-1 pl-3 pr-1.5">
-        <span aria-hidden="true" class="flex size-8 shrink-0 items-center justify-center rounded-full bg-ink text-sm font-semibold text-white">{{ initial }}</span>
+        <span aria-hidden="true" class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-sm font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
         <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="username">{{ username }}</span>
         <div class="flex shrink-0 items-center gap-1">
           <RouterLink
@@ -195,7 +196,7 @@ async function logout() {
         :aria-expanded="menuOpen"
         @click="menuOpen = !menuOpen"
       >
-        <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-ink text-sm font-semibold text-white">{{ initial }}</span>
+        <span class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-sm font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
       </button>
       <div
         v-if="collapsed && menuOpen"

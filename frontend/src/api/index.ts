@@ -44,8 +44,10 @@ export const authApi = {
   register: async (account: string, password: string, display_name = '') =>
     (await http.post<{ user: User }>('/auth/register', { account, password, display_name })).data.user,
   logout: async () => http.post('/auth/logout'),
-  updateProfile: async (payload: { display_name?: string; profile?: Record<string, unknown> }) =>
+  updateProfile: async (payload: { display_name?: string; avatar?: string; profile?: Record<string, unknown> }) =>
     (await http.put<{ user: User }>('/auth/profile', payload)).data.user,
+  changePassword: async (current_password: string, new_password: string) =>
+    http.put('/auth/password', { current_password, new_password }),
 }
 
 // ---------------------------------------------------------------- 设置
@@ -191,8 +193,8 @@ export const fileApi = {
       params: { sheet, offset, limit, raw: true }, signal,
     })).data.preview
   },
-  remove: async (id: string, customerId?: string, recipeId?: string) =>
-    http.delete(`/files/${id}`, { params: { customer_id: customerId, recipe_id: recipeId } }),
+  remove: async (id: string, customerId?: string, recipeId?: string, conversationId?: string) =>
+    http.delete(`/files/${id}`, { params: { customer_id: customerId, recipe_id: recipeId, conversation_id: conversationId } }),
   downloadUrl: (id: string) => `/api/files/${id}/download`,
 }
 
@@ -229,6 +231,9 @@ export const recipeApi = {
   checkGlobalFormula: async (body: Record<string, unknown>) => (await http.post<{ problems: string[] }>('/formulas/check', body)).data.problems,
   formulaSuggestions: async () => (await http.get<{ suggestions: FormulaSuggestion[] }>('/formulas/suggestions')).data.suggestions,
   dismissFormulaSuggestion: async (id: string) => http.post(`/formulas/suggestions/${id}/dismiss`),
+  /** 内置公式试运行：按 id 取公式，表是直接上传的文件 */
+  trialGlobalFormula: async (payload: { formula_id: string; params: Record<string, unknown>; inputs: FormulaTrialInput[] }) =>
+    (await http.post<{ result: FormulaTrialResult }>('/formulas/trial', payload, { timeout: 60_000 })).data.result,
   /** 删除内置公式：自己添加的彻底删除，自带的不再可用 */
   removeGlobalFormula: async (id: string) => http.delete(`/formulas/${id}`),
   /** 哪些客户的流程用到了这个公式 */

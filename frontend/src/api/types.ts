@@ -4,7 +4,9 @@ export interface User {
   id: number
   account: string
   display_name: string
+  avatar?: string // 头像（data URL），没设置是空
   role: 'admin' | 'member'
+  role_label?: string
   profile: Record<string, unknown>
   onboarded: boolean
 }
@@ -327,6 +329,7 @@ export interface FormulaSuggestion {
   customers: string[]
   flows: string[]
   sql: string
+  variants: { customer: string; flow: string; sql: string }[] // 不同客户 / 流程里的写法，让 AI 看出哪些部分会变
 }
 
 export interface FormulaGenerationResult {

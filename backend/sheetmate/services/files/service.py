@@ -658,6 +658,19 @@ def remove_from_conversation(db: Session, record: FileRecord, user: User, conver
     return delete_if_unowned(db, record)
 
 
+def remove_from_workspace(db: Session, record: FileRecord, user: User, conversation_id: str) -> bool:
+    """聊天工作区里删除一个文件：这个会话不再有它。
+
+    会话绑了客户、文件也在客户的文件里时，同时从客户文件里移除（和客户页的删除一样）；
+    客户的其他会话各自保留自己的引用，不受影响。"""
+    conv = db.get(Conversation, conversation_id)
+    if conv is None or (conv.user_id != user.id and user.role != "admin"):
+        raise Forbidden("你没有权限修改这个会话的文件")
+    if conv.customer_id and can_access_in_customer(db, record, conv.customer_id):
+        remove_from_customer(db, record, user, conv.customer_id)  # 里面会先给客户的每个会话（含这个）留好引用
+    return remove_from_conversation(db, record, user, conversation_id)
+
+
 def preview(record: FileRecord, sheet: str | None = None, offset: int = 0, limit: int = 50) -> dict[str, Any]:
     if Path(record.stored_path).suffix.lower() in IMAGE_SUFFIXES:
         raise ServiceError("图片不支持表格预览，请使用图片预览")
