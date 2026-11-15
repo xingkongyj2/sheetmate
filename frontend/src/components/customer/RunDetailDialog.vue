@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /** 一次运行的详情：每一步的输入输出、提示、修复记录；可以查看中间表、修改参数后从某一步重跑（断点续跑） */
 import { Download, Eye, LoaderCircle } from '@lucide/vue'
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { fileApi, runApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { FileInfo, RunDetail, StepReport } from '@/api/types'
+import type { RunDetail, StepReport } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import ScriptFile from '@/components/common/ScriptFile.vue'
@@ -14,10 +14,10 @@ import { duration, percent, type UiMessage } from '@/composables/chatModel'
 import { runDeliveryFiles } from '@/composables/deliveryFiles'
 import { readExecutionState } from '@/composables/executionStatus'
 import { scriptReferences } from '@/composables/scriptPresentation'
+import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 import ExecutionStatusNotice from '@/components/chat/ExecutionStatusNotice.vue'
 
-const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const props = defineProps<{ runId: string }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
@@ -29,22 +29,13 @@ const tables = ref<{ name: string; rows: number }[]>([])
 const selected = ref<StepReport | null>(null)
 const rerunning = ref(false)
 const log = ref<string[]>([])
-const preview = ref<FileInfo | null>(null)
-const loadingPreview = ref(false)
+const openFilePreview = useFilePreview()
 let loadVersion = 0
 let mounted = true
 onBeforeUnmount(() => { mounted = false; loadVersion++ })
 
-async function previewOutput(fileId: string) {
-  if (loadingPreview.value) return
-  loadingPreview.value = true
-  try {
-    preview.value = await fileApi.get(fileId)
-  } catch (err) {
-    toast.error(errorText(err))
-  } finally {
-    loadingPreview.value = false
-  }
+function previewOutput(fileId: string) {
+  openFilePreview(fileId)
 }
 
 async function load() {
@@ -139,7 +130,7 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
           <ScriptFile v-for="script in scriptReferences(s.params)" :key="script.script_id" :script="script" compact />
           <div v-for="file in (s.output_files ?? []).filter((item) => item.file_id)" :key="file.file_id" class="ml-9 flex items-center gap-2 rounded-lg bg-paper/60 px-3 py-2 text-xs">
             <span class="min-w-0 flex-1 truncate" :title="file.filename || file.name">{{ file.filename || file.name }}</span>
-            <button type="button" class="shrink-0 text-[#6265dc] disabled:opacity-50" :disabled="loadingPreview" :aria-label="`查看环节文件 ${file.filename || file.name}`" @click="previewOutput(file.file_id!)">查看</button>
+            <button type="button" class="shrink-0 text-[#6265dc]" :aria-label="`查看环节文件 ${file.filename || file.name}`" @click="previewOutput(file.file_id!)">查看</button>
             <a :href="file.download_url || fileApi.downloadUrl(file.file_id!)" class="shrink-0 text-mute hover:text-[#6265dc]" :aria-label="`下载环节文件 ${file.filename || file.name}`"><Download class="size-3.5" /></a>
           </div>
           </div>
@@ -154,7 +145,7 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
         <div class="label-mini">结果文件</div>
         <div v-for="file in outputFiles" :key="file.id" class="flex items-center gap-2 rounded-xl border border-line px-3 py-2">
           <span class="min-w-0 flex-1 truncate text-sm">{{ file.name }}</span>
-          <button class="btn-text text-xs" :disabled="loadingPreview" @click="previewOutput(file.id)"><Eye class="size-3.5" />查看</button>
+          <button class="btn-text text-xs" @click="previewOutput(file.id)"><Eye class="size-3.5" />查看</button>
           <a :href="fileApi.downloadUrl(file.id)" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
         </div>
       </div>
@@ -178,6 +169,5 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
       @close="selected = null"
       @rerun="(params) => rerun(selected!, params)"
     />
-    <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </BaseModal>
 </template>

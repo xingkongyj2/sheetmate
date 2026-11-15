@@ -163,6 +163,7 @@ async def generate_formula(customer_id: str, body: FormulaGenerateBody, db: Sess
     customer = require_customer(db, user, customer_id)
     result = await customer_service.generate_customer_formula(
         db, customer, description=body.description, file_ids=body.file_ids, formula=body.formula,
+        tables=[item.model_dump() for item in body.tables], user=user,
     )
     return {"ok": True, **result}
 

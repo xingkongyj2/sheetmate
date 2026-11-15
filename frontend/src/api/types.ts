@@ -279,6 +279,7 @@ export interface FormulaParam {
   values: unknown[] | null
   of?: string | null // column / columns 属于哪个表参数
   item_type?: string | null
+  sample?: { file?: string; sheet?: string } | null // 表参数在生成公式时对应的参考数据，试运行默认放它
 }
 
 export interface FormulaInfo {
@@ -295,6 +296,8 @@ export interface FormulaInfo {
   example: Record<string, unknown> | null
   triggers?: string[]
   overrides_builtin?: boolean
+  custom?: boolean // 内置公式里用户自己添加的（可以看 SQL）；false = 代码自带
+  updated_at?: string | null
 }
 
 /** 公式被哪个流程的哪几步用到；problems 是这些步骤现在会遇到的问题（比如公式改了参数） */

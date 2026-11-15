@@ -385,12 +385,39 @@ def latest_formula_records(db: Session, customer_id: str | None) -> list[Formula
 
 
 def record_to_formula(record: FormulaRecord) -> Formula | None:
-    """库里的记录 → 公式；存的 JSON 不合法（比如被手动改坏）时返回 None。"""
+    """库里的记录 → 公式；存的 JSON 不合法（比如被手动改坏）时返回 None。customer_id 为空的是全局（内置）公式。"""
     try:
-        return Formula(**{**record.body, "version": record.version, "status": record.status, "scope": "customer",
+        return Formula(**{**record.body, "version": record.version, "status": record.status,
+                          "scope": "customer" if record.customer_id else "global",
                           "customer_id": record.customer_id, "type": "sql"})
     except ValueError:
         return None
+
+
+def _latest_global_records(db: Session) -> list[FormulaRecord]:
+    """全局公式（所有客户共用，界面上叫「内置公式」）的每个 id 取最新版本，含「已删除的内置公式」标记。"""
+    sub = (select(FormulaRecord.formula_id, func.max(FormulaRecord.version).label("v"))
+           .where(FormulaRecord.customer_id.is_(None)).group_by(FormulaRecord.formula_id).subquery())
+    stmt = (select(FormulaRecord).join(sub, (FormulaRecord.formula_id == sub.c.formula_id) & (FormulaRecord.version == sub.c.v))
+            .where(FormulaRecord.customer_id.is_(None)).order_by(FormulaRecord.formula_id))
+    return list(db.scalars(stmt))
+
+
+def _is_tombstone(record: FormulaRecord) -> bool:
+    return bool((record.body or {}).get("deleted_builtin"))
+
+
+def global_formula_records(db: Session) -> list[FormulaRecord]:
+    return [r for r in _latest_global_records(db) if not _is_tombstone(r)]
+
+
+def global_formulas(db: Session) -> list[Formula]:
+    return [f for f in (record_to_formula(r) for r in global_formula_records(db)) if f is not None]
+
+
+def hidden_builtin_ids(db: Session) -> set[str]:
+    """被删掉的代码内置公式的 id。"""
+    return {r.formula_id for r in _latest_global_records(db) if _is_tombstone(r)}
 
 
 def customer_formulas(db: Session, customer_id: str | None) -> list[Formula]:
@@ -399,7 +426,10 @@ def customer_formulas(db: Session, customer_id: str | None) -> list[Formula]:
 
 
 def library_for(db: Session, customer_id: str | None) -> FormulaLibrary:
-    return FormulaLibrary(customer_formulas(db, customer_id))
+    """客户公式 > 全局（内置）公式 > 代码内置公式；被删掉的内置公式不再可用。"""
+    merged = {f.id: f for f in global_formulas(db)}
+    merged.update({f.id: f for f in customer_formulas(db, customer_id)})
+    return FormulaLibrary(list(merged.values()), hidden_builtin_ids(db))
 
 
 def reserved_tool_names() -> set[str]:
@@ -427,12 +457,13 @@ def _validation_message(exc: ValidationError) -> str:
     return "公式格式不对：" + "；".join(parts)
 
 
-def build_formula(customer_id: str, body: dict[str, Any], *, created_by: str = "human") -> Formula:
+def build_formula(customer_id: str | None, body: dict[str, Any], *, created_by: str = "human") -> Formula:
     """把提交的公式 JSON 变成客户公式并做完整的定义检查（保存、试运行、实时检查共用）。不合法时抛 FormulaError，消息是人话。"""
     if not isinstance(body, dict):
         raise FormulaError("公式格式不对：应该是一个对象")
     try:
-        formula = Formula(**{**body, "scope": "customer", "customer_id": customer_id, "type": "sql", "created_by": created_by})
+        formula = Formula(**{**body, "scope": "customer" if customer_id else "global", "customer_id": customer_id,
+                             "type": "sql", "created_by": created_by})
     except ValidationError as exc:
         raise FormulaError(_validation_message(exc)) from exc
     formula.check_definition()
@@ -456,13 +487,30 @@ def save_formula(db: Session, customer_id: str, body: dict[str, Any], *, created
     return record
 
 
+def save_global_formula(db: Session, body: dict[str, Any], *, created_by: str = "human") -> FormulaRecord:
+    """新增 / 升级全局（内置）公式：所有客户共用；同一个 id 每保存一次升一个版本。不能覆盖仍在用的代码内置公式。"""
+    formula = build_formula(None, body, created_by=created_by)
+    if formula.id in BUILTIN_FORMULAS and formula.id not in hidden_builtin_ids(db):
+        raise FormulaError(f"公式 id「{formula.id}」已是内置公式，请换一个")
+    latest = db.scalar(select(func.max(FormulaRecord.version)).where(
+        FormulaRecord.customer_id.is_(None), FormulaRecord.formula_id == formula.id)) or 0
+    formula = formula.model_copy(update={"version": latest + 1})
+    record = FormulaRecord(
+        formula_id=formula.id, version=formula.version, scope="global", customer_id=None, name=formula.name,
+        status=formula.status, created_by=created_by, body=formula.model_dump(mode="json", by_alias=True),
+    )
+    db.add(record)
+    db.flush()
+    return record
+
+
 def formula_dict(spec: Formula, kind: str) -> dict[str, Any]:
     return {
         "id": spec.id, "name": spec.name, "category": spec.category, "intent": spec.intent, "kind": kind,
-        "kind_label": "客户独有" if kind == "customer" else "内置",
+        "kind_label": "客户独有" if kind == "customer" else "内置", "custom": kind == "global",
         "version": spec.version, "status": spec.status,
         "params": {k: {"type": p.type, "required": p.required, "default": p.default, "desc": p.desc, "values": p.values,
-                       "of": p.of, "item_type": p.item_type}
+                       "of": p.of, "item_type": p.item_type, "sample": p.sample}
                    for k, p in spec.params.items()},
         "sql": spec.sql, "example": spec.example, "triggers": spec.triggers,
         "overrides_builtin": kind == "customer" and spec.id in BUILTIN_FORMULAS,
@@ -501,5 +549,11 @@ def formula_catalog(db: Session, user: User, customer_id: str | None = None) -> 
         require_customer(db, user, customer_id)
         customer = [formula_dict(formula, "customer") for formula in customer_formulas(db, customer_id)
                     if formula.status != "deprecated"]
-    builtin = [formula_dict(item.spec, "builtin") for item in BUILTIN_FORMULAS.values()]
+    hidden = hidden_builtin_ids(db)
+    builtin = [formula_dict(item.spec, "builtin") for fid, item in BUILTIN_FORMULAS.items() if fid not in hidden]
+    for record in global_formula_records(db):
+        spec = record_to_formula(record)
+        if spec is not None and spec.status != "deprecated":
+            builtin.append({**formula_dict(spec, "global"), "kind": "builtin", "created_by": record.created_by,
+                            "updated_at": record.created_at.isoformat() if record.created_at else None})
     return {"builtin": builtin, "customer": customer, "reserved_ids": sorted(reserved_tool_names())}

@@ -1,32 +1,27 @@
 <script setup lang="ts">
 /** 一个流程的运行记录列表（嵌在流程详情页里）；点开查看每一步的详情或结果。 */
 import { ChevronRight, Download, Eye, LoaderCircle } from '@lucide/vue'
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { fileApi, runApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { FileInfo, RunBrief } from '@/api/types'
+import type { RunBrief } from '@/api/types'
 import StatusPill from '@/components/common/StatusPill.vue'
 import { duration, percent } from '@/composables/chatModel'
 import { primaryRunDeliveryId } from '@/composables/deliveryFiles'
-import { useToast } from '@/composables/useToast'
 
+import { useFilePreview } from '@/composables/useFilePreview'
 import RunDetailDialog from './RunDetailDialog.vue'
-
-const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const props = defineProps<{ recipeId: string; recipeName: string; customerId?: string | null }>()
 const emit = defineEmits<{ changed: [] }>()
-const toast = useToast()
 const runs = ref<RunBrief[]>([])
 const visibleRuns = computed(() => runs.value.map((run) => ({ ...run, output_file_id: primaryRunDeliveryId(run) })))
 const loading = ref(true)
 const loadError = ref('')
 const selectedRun = ref<string | null>(null)
-const preview = ref<FileInfo | null>(null)
-const loadingPreview = ref<string | null>(null)
+const openFilePreview = useFilePreview()
 let requestVersion = 0
-let active = true
 
 async function load() {
   const version = ++requestVersion
@@ -42,17 +37,8 @@ async function load() {
   }
 }
 
-async function previewOutput(fileId: string) {
-  if (loadingPreview.value) return
-  loadingPreview.value = fileId
-  try {
-    const file = await fileApi.get(fileId)
-    if (active) preview.value = file
-  } catch (error) {
-    if (active) toast.error(errorText(error))
-  } finally {
-    if (active) loadingPreview.value = null
-  }
+function previewOutput(fileId: string) {
+  openFilePreview(fileId)
 }
 
 async function onChanged() {
@@ -66,7 +52,6 @@ function runTime(run: RunBrief): string {
 
 onMounted(load)
 onBeforeUnmount(() => {
-  active = false
   requestVersion++
 })
 </script>
@@ -84,7 +69,6 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="-mx-2 block w-[calc(100%+1rem)] rounded-xl px-2 py-2 text-left transition hover:bg-paper focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink disabled:cursor-wait"
-          :disabled="!!loadingPreview"
           :aria-label="`查看 ${recipeName} 在 ${runTime(run)} 的运行详情`"
           @click="selectedRun = run.run_id"
         >
@@ -98,14 +82,13 @@ onBeforeUnmount(() => {
           <span class="mt-1 block text-xs text-faint">比对 {{ run.verification ? percent(run.verification.overall_match_rate) : '—' }} · 耗时 {{ duration(run.duration_ms) || '—' }}</span>
         </button>
         <div v-if="run.output_file_id" class="mt-1 flex items-center gap-1">
-          <button type="button" class="btn-text text-xs" :disabled="!!loadingPreview" :aria-busy="loadingPreview === run.output_file_id" @click="previewOutput(run.output_file_id)">
-            <LoaderCircle v-if="loadingPreview === run.output_file_id" class="size-3.5 animate-spin" /><Eye v-else class="size-3.5" />查看结果
+          <button type="button" class="btn-text text-xs" @click="previewOutput(run.output_file_id)">
+            <Eye class="size-3.5" />查看结果
           </button>
           <a :href="fileApi.downloadUrl(run.output_file_id)" class="btn-text text-xs"><Download class="size-3.5" />下载结果</a>
         </div>
       </li>
     </ul>
     <RunDetailDialog v-if="selectedRun" :run-id="selectedRun" @close="selectedRun = null" @changed="onChanged" />
-    <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </div>
 </template>

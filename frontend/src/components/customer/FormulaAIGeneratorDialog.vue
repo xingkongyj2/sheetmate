@@ -1,24 +1,33 @@
 <script setup lang="ts">
-import { ArrowRight, CircleCheck, FileSpreadsheet, LoaderCircle, Paperclip, Sparkles, TriangleAlert } from '@lucide/vue'
+import { Check, CircleCheck, LoaderCircle, Paperclip, Sparkles, TriangleAlert } from '@lucide/vue'
 import { computed, ref } from 'vue'
 
-import { customerApi } from '@/api'
+import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { FileInfo, FormulaGenerationResult } from '@/api/types'
+import type { CustomerFormula, FileInfo, FormulaGenerationResult, FormulaInfo } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { useToast } from '@/composables/useToast'
 
-const props = defineProps<{ customerId: string; files: FileInfo[] }>()
-const emit = defineEmits<{ close: []; generated: [formula: Record<string, unknown>]; uploaded: [file: FileInfo] }>()
+/**
+ * AI 生成 / 修改公式：描述 → 生成 → 检查 → 保存，一个弹窗做完。
+ * formula 给了就是修改这个已有公式（保留原 id，保存成新版本）；没给就是新增。
+ * takenIds：新增时已被占用的 id（客户已有的、内置的、系统保留的），AI 起的 id 撞了就自动加序号，不会悄悄覆盖。
+ */
+const props = defineProps<{ customerId?: string; files: FileInfo[]; formula?: Record<string, unknown> | null; takenIds?: string[]; scope?: 'customer' | 'global' }>()
+const emit = defineEmits<{ close: []; saved: [formula: CustomerFormula | FormulaInfo]; uploaded: [file: FileInfo] }>()
 const toast = useToast()
+/** 内置公式不绑定客户：参考表直接上传 */
+const global = computed(() => props.scope === 'global')
 
 const description = ref('')
 const initialRequest = ref('')
 const supplements = ref<string[]>([])
 const uploadedFiles = ref<FileInfo[]>([])
-const selectedIds = ref<string[]>([])
+/** 选中的表：`文件id::工作表名`，按选择先后排序（第几张就是公式里第几个表参数的默认表） */
+const selectedKeys = ref<string[]>(initialKeys())
 const result = ref<FormulaGenerationResult | null>(null)
-const latestValidDraft = ref<Record<string, unknown> | null>(null)
+const latestValidDraft = ref<Record<string, unknown> | null>(props.formula ?? null)
+const saving = ref(false)
 const generating = ref(false)
 const uploading = ref(false)
 const error = ref('')
@@ -30,15 +39,50 @@ const files = computed(() => {
   const all = [...props.files, ...uploadedFiles.value]
   return [...new Map(all.filter((file) => /\.(xlsx|xlsm|xls|csv)$/i.test(file.filename)).map((file) => [file.file_id, file])).values()]
 })
-const busy = computed(() => generating.value || uploading.value)
-const canGenerate = computed(() => !!description.value.trim() && selectedIds.value.length <= 5 && !busy.value)
+const busy = computed(() => generating.value || uploading.value || saving.value)
+const tableOptions = computed(() => files.value.flatMap((file) => file.sheets.map((sheet) => ({
+  key: keyOf(file.file_id, sheet.sheet), file, sheet: sheet.sheet,
+  label: file.sheets.length > 1 ? `${file.filename} · ${sheet.sheet}` : file.filename,
+}))))
+const canGenerate = computed(() => !!description.value.trim() && !busy.value)
 const canUse = computed(() => validated.value && !!result.value && !result.value.questions.length && requestUnchanged.value && !busy.value)
 const formulaName = computed(() => String(result.value?.formula.name ?? '生成的公式'))
 const formulaIntent = computed(() => String(result.value?.formula.intent ?? ''))
 const requestUnchanged = computed(() => requestKey() === lastRequest.value)
+const placeholder = computed(() => result.value?.questions.length ? '回答上面的问题'
+  : result.value ? '继续补充，或说说哪里要调整'
+  : props.formula ? `说说要怎么改「${String(props.formula.name ?? '')}」，例如：改成大于等于`
+  : '说说你想怎样处理表格，例如：只保留金额大于阈值的行，按金额从大到小排')
+
+function keyOf(fileId: string, sheet: string) { return `${fileId}::${sheet}` }
+function splitKey(key: string) {
+  const at = key.indexOf('::')
+  return { file_id: key.slice(0, at), sheet: key.slice(at + 2) }
+}
+
+/** 修改已有公式：预选它原来默认的表（参数里记着的 sample），找不到就留空让用户选 */
+function initialKeys(): string[] {
+  const params = (props.formula?.params ?? {}) as Record<string, { sample?: { file?: string; sheet?: string } | null }>
+  const keys: string[] = []
+  for (const param of Object.values(params)) {
+    const sample = param?.sample
+    if (!sample?.file) continue
+    for (const file of props.files) {
+      if (file.filename !== sample.file) continue
+      const sheet = file.sheets.find((item) => item.sheet === sample.sheet) ?? file.sheets[0]
+      if (sheet && !keys.includes(keyOf(file.file_id, sheet.sheet))) keys.push(keyOf(file.file_id, sheet.sheet))
+      break
+    }
+  }
+  return keys.slice(0, 5)
+}
+
+function toggle(key: string) {
+  selectedKeys.value = selectedKeys.value.includes(key) ? selectedKeys.value.filter((item) => item !== key) : [...selectedKeys.value, key]
+}
 
 function requestKey() {
-  return JSON.stringify({ description: description.value.trim(), files: [...selectedIds.value].sort() })
+  return JSON.stringify({ description: description.value.trim(), tables: selectedKeys.value })
 }
 
 function fullDescription(input: string) {
@@ -58,8 +102,8 @@ async function upload(event: Event) {
   const chosen = Array.from(input.files ?? [])
   input.value = ''
   if (!chosen.length) return
-  if (chosen.length + selectedIds.value.length > 5) {
-    error.value = '最多选择 5 个参考文件，请减少文件后再上传。'
+  if (selectedKeys.value.length >= 5) {
+    error.value = '最多选择 5 张表，请先取消一些再上传。'
     toast.error(error.value)
     return
   }
@@ -67,9 +111,12 @@ async function upload(event: Event) {
   error.value = ''
   try {
     for (const file of chosen) {
-      const saved = await customerApi.uploadFile(props.customerId, file, 'input')
+      const saved = global.value ? await recipeApi.uploadGlobalFormulaFile(file) : await customerApi.uploadFile(props.customerId!, file, 'input')
       uploadedFiles.value.push(saved)
-      selectedIds.value.push(saved.file_id)
+      // 新上传的文件，它的每张工作表直接选上（超过 5 张就停）
+      for (const sheet of saved.sheets) {
+        if (selectedKeys.value.length < 5) selectedKeys.value.push(keyOf(saved.file_id, sheet.sheet))
+      }
       emit('uploaded', saved)
     }
   } catch (err) {
@@ -82,17 +129,24 @@ async function upload(event: Event) {
 
 async function generate() {
   if (!canGenerate.value) return
+  // 客户公式一张表都没选就不生成，也就没有可保存的公式：弹个提示；内置公式不针对某张表，参考表可选
+  if (!selectedKeys.value.length && !global.value) {
+    toast.error(tableOptions.value.length ? '请先选择要处理的表' : '请先上传要处理的表')
+    return
+  }
   generating.value = true
   validated.value = false
   error.value = ''
   problems.value = []
   const input = description.value.trim()
   try {
-    const generated = await customerApi.generateFormula(props.customerId, {
+    const request = {
       description: fullDescription(input),
-      file_ids: [...selectedIds.value],
+      tables: selectedKeys.value.map(splitKey),
+      file_ids: [...new Set(selectedKeys.value.map((key) => splitKey(key).file_id))],
       ...(latestValidDraft.value ? { formula: latestValidDraft.value } : {}),
-    })
+    }
+    const generated = global.value ? await recipeApi.generateGlobalFormula(request) : await customerApi.generateFormula(props.customerId!, request)
     result.value = {
       formula: generated.formula ?? {},
       explanation: generated.explanation ?? '',
@@ -108,7 +162,7 @@ async function generate() {
       problems.value = ['还没有生成完整的公式，请补充处理规则后再试。']
       return
     }
-    problems.value = await customerApi.checkFormula(props.customerId, result.value.formula)
+    problems.value = global.value ? await recipeApi.checkGlobalFormula(result.value.formula) : await customerApi.checkFormula(props.customerId!, result.value.formula)
     validated.value = !problems.value.length
     if (validated.value) latestValidDraft.value = result.value.formula
   } catch (err) {
@@ -119,82 +173,105 @@ async function generate() {
   }
 }
 
-function useFormula() {
-  if (canUse.value && result.value) emit('generated', result.value.formula)
+/** 修改：固定用原来的 id。新增：id 被占用就加序号 */
+function finalId(id: string): string {
+  if (props.formula) return String(props.formula.id)
+  const taken = new Set(props.takenIds ?? [])
+  if (!taken.has(id)) return id
+  let n = 2
+  while (taken.has(`${id.slice(0, 60)}_${n}`)) n++
+  return `${id.slice(0, 60)}_${n}`
+}
+
+async function save() {
+  if (!canUse.value || !result.value) return
+  saving.value = true
+  error.value = ''
+  try {
+    const body = { ...result.value.formula, id: finalId(String(result.value.formula.id)) }
+    emit('saved', global.value ? await recipeApi.saveGlobalFormula(body) : await customerApi.saveFormula(props.customerId!, body))
+  } catch (err) {
+    error.value = errorText(err)
+    toast.error(error.value)
+  } finally {
+    saving.value = false
+  }
 }
 </script>
 
 <template>
-  <BaseModal title="AI 配置公式" width="max-w-3xl" @close="busy ? undefined : emit('close')">
+  <BaseModal :title="formula ? 'AI 修改公式' : scope === 'global' ? 'AI 生成内置公式' : 'AI 生成公式'" width="max-w-2xl" @close="busy ? undefined : emit('close')">
     <div class="space-y-5" data-testid="formula-ai-generator">
-      <label class="block">
-        <span class="mb-2 block text-sm font-medium">{{ result?.questions.length ? '补充回答' : result ? '继续补充或调整要求' : '描述你想怎样处理表格' }}</span>
+      <!-- 描述 + 参考文件放在同一个输入区里：写在上面，文件标签在下面 -->
+      <div class="rounded-2xl border border-line bg-white transition focus-within:border-ink/30">
         <textarea
           v-model="description"
-          class="field min-h-32 resize-y text-sm leading-7"
+          class="block min-h-32 w-full resize-y rounded-t-2xl bg-transparent px-4 pb-1 pt-3.5 text-sm leading-7 outline-none placeholder:text-faint"
+          :placeholder="placeholder"
+          :aria-label="placeholder"
           :disabled="busy"
           :maxlength="initialRequest ? 3000 : 6000"
           data-testid="formula-ai-description"
         />
-      </label>
-
-      <details v-if="initialRequest" class="rounded-xl bg-paper/60 px-4 py-3 text-xs leading-6 text-mute">
-        <summary class="cursor-pointer font-medium">最初的处理要求</summary>
-        <p class="mt-2 whitespace-pre-wrap break-words">{{ initialRequest }}</p>
-      </details>
-
-      <section class="rounded-2xl bg-paper/70 p-4">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <h4 class="text-[13px] font-medium">参考文件<span class="ml-2 text-xs font-normal text-faint">{{ selectedIds.length }}/5</span></h4>
-          <label class="btn-text cursor-pointer !py-1 text-xs" :class="busy ? 'pointer-events-none opacity-50' : ''">
-            <LoaderCircle v-if="uploading" class="size-3.5 animate-spin" /><Paperclip v-else class="size-3.5" />上传文件
+        <div class="flex flex-wrap items-center gap-2 px-3 pb-3 pt-1">
+          <label class="inline-flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full border border-line text-mute transition hover:border-ink/30 hover:text-ink" :class="busy ? 'pointer-events-none opacity-50' : ''" title="上传参考文件，让 AI 看到真实的列名和数据" aria-label="上传参考文件">
+            <LoaderCircle v-if="uploading" class="size-4 animate-spin" /><Paperclip v-else class="size-4" />
             <input type="file" multiple accept=".xlsx,.xlsm,.xls,.csv" class="hidden" :disabled="busy" data-testid="formula-ai-upload" @change="upload" />
           </label>
+          <button
+            v-for="item in tableOptions"
+            :key="item.key"
+            type="button"
+            class="max-w-[16rem] truncate rounded-full border px-3 py-1 text-xs transition disabled:opacity-40"
+            :class="selectedKeys.includes(item.key) ? 'border-ink bg-ink text-white' : 'border-line text-mute hover:border-ink/30'"
+            :title="item.label"
+            :aria-pressed="selectedKeys.includes(item.key)"
+            :disabled="busy || (selectedKeys.length >= 5 && !selectedKeys.includes(item.key))"
+            data-testid="formula-ai-table"
+            @click="toggle(item.key)"
+          >{{ item.label }}</button>
         </div>
-        <p v-if="!files.length" class="mt-2 text-xs leading-6 text-faint">可以上传表格，让 AI 参考实际列名和数据。文件也会加入该客户的文件列表。</p>
-        <div v-else class="mt-3 max-h-40 space-y-1.5 overflow-y-auto">
-          <label v-for="file in files" :key="file.file_id" class="flex cursor-pointer items-center gap-2.5 rounded-xl bg-white px-3 py-2.5 text-xs">
-            <input v-model="selectedIds" type="checkbox" class="checkbox checkbox-xs" :value="file.file_id" :disabled="busy || (selectedIds.length >= 5 && !selectedIds.includes(file.file_id))" />
-            <FileSpreadsheet class="size-4 shrink-0 text-[#3a9a86]" />
-            <span class="min-w-0 flex-1 break-all">{{ file.filename }}</span>
-          </label>
-        </div>
-      </section>
+      </div>
+
+      <details v-if="initialRequest" class="px-1 text-xs leading-6 text-mute">
+        <summary class="cursor-pointer">最初的要求</summary>
+        <p class="mt-1.5 whitespace-pre-wrap break-words">{{ initialRequest }}</p>
+      </details>
 
       <p v-if="error" class="rounded-xl bg-error/5 px-4 py-3 text-[13px] leading-6 text-error" role="alert">{{ error }}</p>
 
-      <section v-if="result" class="space-y-4 rounded-2xl bg-[#f0f8f5] p-4 sm:p-5" data-testid="formula-ai-result">
+      <section v-if="result" class="space-y-3 rounded-2xl bg-[#f0f8f5] p-4 sm:p-5" data-testid="formula-ai-result">
         <div class="flex items-start gap-3">
           <span class="flex size-9 shrink-0 items-center justify-center rounded-xl bg-white text-[#318b76]"><Sparkles class="size-4" /></span>
           <div class="min-w-0 flex-1">
             <h4 class="break-words text-sm font-semibold">{{ formulaName }}</h4>
             <p v-if="formulaIntent" class="mt-1 break-words text-[13px] leading-6 text-mute">{{ formulaIntent }}</p>
           </div>
+          <CircleCheck v-if="validated" class="mt-1 size-4 shrink-0 text-[#318b76]" title="公式检查通过" aria-label="公式检查通过" />
         </div>
-        <p v-if="result.explanation" class="whitespace-pre-wrap break-words text-[13px] leading-7 text-mute">{{ result.explanation }}</p>
+        <details v-if="result.explanation" class="text-[13px] leading-7 text-mute">
+          <summary class="cursor-pointer text-xs">AI 的说明</summary>
+          <p class="mt-1.5 whitespace-pre-wrap break-words">{{ result.explanation }}</p>
+        </details>
         <div v-if="result.questions.length" class="rounded-xl bg-white/80 p-3 text-[13px] leading-7">
-          <div class="mb-1 font-medium text-ink">还需要你确认</div>
-          <ul class="list-disc space-y-1 pl-4 text-mute"><li v-for="question in result.questions" :key="question">{{ question }}</li></ul>
+          <ul class="list-disc space-y-1 pl-4 text-ink"><li v-for="question in result.questions" :key="question">{{ question }}</li></ul>
         </div>
         <ul v-if="result.warnings.length" class="space-y-1 text-xs leading-6 text-[#8b6a39]">
           <li v-for="warning in result.warnings" :key="warning" class="flex items-start gap-2"><TriangleAlert class="mt-1 size-3.5 shrink-0" />{{ warning }}</li>
         </ul>
         <ul v-if="problems.length" class="space-y-1 rounded-xl bg-error/5 px-3 py-2 text-xs leading-6 text-error"><li v-for="problem in problems" :key="problem">{{ problem }}</li></ul>
-        <p v-if="validated" class="flex items-center gap-1.5 text-xs text-[#318b76]"><CircleCheck class="size-3.5" />公式检查通过</p>
       </section>
     </div>
 
     <template #footer>
-      <div class="flex w-full flex-wrap justify-end gap-2">
-        <button class="btn-line" :disabled="busy" @click="emit('close')">取消</button>
-        <button
-          class="btn-ink !bg-[#278675] disabled:opacity-40"
-          :disabled="!canGenerate || (!!result && requestUnchanged && !error)"
-          data-testid="formula-ai-generate"
-          @click="generate"
-        ><LoaderCircle v-if="generating" class="size-4 animate-spin" /><Sparkles v-else class="size-4" />{{ generating ? '正在生成' : result ? '继续调整' : '生成公式' }}</button>
-        <button v-if="result" class="btn-ink" :disabled="!canUse" data-testid="formula-ai-use" @click="useFormula">检查并保存<ArrowRight class="size-4" /></button>
-      </div>
+      <button class="btn-line" :disabled="busy" @click="emit('close')">取消</button>
+      <button
+        class="btn-ink !bg-[#278675] disabled:opacity-40"
+        :disabled="!canGenerate || (!!result && requestUnchanged && !error)"
+        data-testid="formula-ai-generate"
+        @click="generate"
+      ><LoaderCircle v-if="generating" class="size-4 animate-spin" /><Sparkles v-else class="size-4" />{{ generating ? '生成中' : result ? '再调整' : '生成' }}</button>
+      <button v-if="result" class="btn-ink" :disabled="!canUse" data-testid="formula-ai-use" @click="save"><LoaderCircle v-if="saving" class="size-4 animate-spin" /><Check v-else class="size-4" />保存</button>
     </template>
   </BaseModal>
 </template>

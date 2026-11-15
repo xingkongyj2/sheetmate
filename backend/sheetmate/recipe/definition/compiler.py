@@ -355,7 +355,29 @@ class _Compiler:
                                       "input_bindings": self.bindings},
                         metadata={"requirement": description, "confidence_overall": 0.9, "explicit_outputs": True,
                                   "validation_checkpoints": self.checkpoints})
-        return clean_dependency_names(recipe, self.library)
+        recipe = clean_dependency_names(recipe, self.library)
+        drop_file_backed_outputs(recipe)
+        return recipe
+
+
+def drop_file_backed_outputs(recipe: Recipe) -> list[str]:
+    """去掉和「脚本交付文件」重复的输出表，返回被去掉的表名。
+
+    脚本把结果写成文件交付后，这个文件会被读回工作区成为一张表。保存流程时如果把这张表又当成输出表，
+    重放就会交付两份：脚本自己的文件，加上按输出表另外导出的工作簿。文件已经是交付物，输出表就不需要了。"""
+    backed: set[str] = set()
+    for step in recipe.steps:
+        if step.kind != "python":
+            continue
+        declared = step.params.get("output_files")
+        delivered = ({item.get("ref") for item in declared if isinstance(item, dict)} if isinstance(declared, list)
+                     else {spec.get("ref") for spec in (step.params.get("file_tables") or {}).values() if isinstance(spec, dict)})
+        backed.update(table for table, spec in (step.params.get("file_tables") or {}).items()
+                      if isinstance(spec, dict) and spec.get("ref") in delivered)
+    dropped = [output.source for output in recipe.output_spec if output.source in backed]
+    if dropped:
+        recipe.output_spec = [output for output in recipe.output_spec if output.source not in backed]
+    return dropped
 
 
 def compile_from_workspace(ws: Workspace, targets: list[str], library: FormulaLibrary, *, name: str,

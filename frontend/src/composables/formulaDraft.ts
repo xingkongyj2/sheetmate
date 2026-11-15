@@ -64,21 +64,6 @@ export function emptyDraft(): FormulaDraft {
   return { id: '', name: '', intent: '', sql: '', params: [], extra: {} }
 }
 
-/** 新建时「填入示例」用：筛出金额大于阈值的行 */
-export function exampleDraft(): FormulaDraft {
-  const table = { ...newParam('table', 'table'), required: true, desc: '要筛选的表' }
-  const col = { ...newParam('amount_col', 'column'), required: true, desc: '金额所在的列', of: 'table' }
-  const threshold = { ...newParam('threshold', 'number'), desc: '金额大于这个数才保留', default: '10' }
-  return {
-    id: 'big_amount',
-    name: '筛出大额行',
-    intent: '只保留金额大于阈值的行，按金额从大到小排',
-    sql: 'SELECT * FROM {{table}}\nWHERE {{amount_col}} > {{threshold}}\nORDER BY {{amount_col}} DESC',
-    params: [table, col, threshold],
-    extra: {},
-  }
-}
-
 // ---------------------------------------------------------------- 默认值：文本 ⇄ 按类型的值
 
 export function splitList(text: string): string[] {

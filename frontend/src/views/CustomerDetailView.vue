@@ -2,12 +2,12 @@
 import {
   ArrowLeft, ArrowRight, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Sparkles, Star, Trash2,
 } from '@lucide/vue'
-import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi, customerApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { CustomerDetail, FileInfo } from '@/api/types'
+import type { CustomerDetail } from '@/api/types'
 import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -21,10 +21,10 @@ import { timeAgo } from '@/composables/chatModel'
 import { primaryFirst, workflowFiles } from '@/composables/customerWorkflow'
 import { isDeliveredOutput } from '@/composables/deliveryFiles'
 import { useConfirm } from '@/composables/useConfirm'
+import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 import { useWorkspaceStore } from '@/stores/conversations'
 
-const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const props = defineProps<{ id: string }>()
 const route = useRoute()
@@ -49,7 +49,7 @@ const settingPrimary = ref(false)
 const editing = ref(false)
 const runDialog = ref<{ recipeId: string | null } | null>(null)
 const runRecipe = computed(() => customer.value?.recipes.find((recipe) => recipe.recipe_id === runDialog.value?.recipeId) ?? null)
-const preview = ref<FileInfo | null>(null)
+const openFilePreview = useFilePreview()
 const conversationsOpen = ref(false)
 let loadVersion = 0
 let active = true
@@ -78,7 +78,6 @@ watch(() => props.id, () => {
   customer.value = null
   const nextTab = route.query.tab === 'runs' ? 'recipes' : route.query.tab
   tab.value = TABS.find((item) => item.key === nextTab)?.key ?? 'logic'
-  preview.value = null
   runDialog.value = null
   editing.value = false
   conversationsOpen.value = false
@@ -279,9 +278,9 @@ async function onEdited() {
             <h2 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h2>
             <span v-if="recipe.recipe_id === primaryRecipe?.recipe_id" class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[#6265DC]/8 px-2 py-1 text-[10px] text-[#6265DC]"><Star class="size-3 fill-current" />主流程</span>
           </header>
-          <WorkflowFiles :customer-id="customer.id" :recipe-id="recipe.recipe_id" :files="recipe.files" :outputs="recipe.output_files" :refresh="load" @preview="preview = $event" />
+          <WorkflowFiles :customer-id="customer.id" :recipe-id="recipe.recipe_id" :files="recipe.files" :outputs="recipe.output_files" :refresh="load" @preview="openFilePreview" />
         </section>
-        <WorkflowFiles v-if="!orderedRecipes.length" :key="customer.id" :customer-id="customer.id" :files="customer.files" :outputs="customer.outputs" :refresh="load" @preview="preview = $event" />
+        <WorkflowFiles v-if="!orderedRecipes.length" :key="customer.id" :customer-id="customer.id" :files="customer.files" :outputs="customer.outputs" :refresh="load" @preview="openFilePreview" />
       </section>
 
       <!-- 记忆 -->
@@ -325,6 +324,5 @@ async function onEdited() {
       @close="runDialog = null"
       @done="load"
     />
-    <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </div>
 </template>

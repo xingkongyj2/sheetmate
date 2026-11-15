@@ -5,9 +5,9 @@
  * 正常情况下不调用 AI；出错时可选让 AI 自动修复。
  */
 import { Check, ChevronDown, Download, Eye, FileSpreadsheet, LoaderCircle, Play, TriangleAlert, Upload, X } from '@lucide/vue'
-import { computed, defineAsyncComponent, reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
 
-import { conversationApi, customerApi, fileApi, recipeApi } from '@/api'
+import { conversationApi, customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerWorkflow, FileInfo } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -16,9 +16,9 @@ import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { addProgressFile, applyRecipeEvent, newProgress, timeAgo, type FileArtifact, type RecipeProgress } from '@/composables/chatModel'
 import { progressFlow } from '@/composables/recipeFlow'
 import { inputKey, missingColumns, pickSheet, sampleFile, type RunInput } from '@/composables/runInputs'
+import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 
-const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 // customerId / conversationId：新上传的文件放到哪里（客户页传客户；对话里的流程传会话；都没有就只能选已有文件）。
 // recipe 只用到这几项，客户页的 CustomerWorkflow 和全屏流程图里现取的流程都能直接传进来。
@@ -47,8 +47,7 @@ const allowRepair = true  // 出错时让 AI 自动修复，始终开启
 const progress = reactive<RecipeProgress>(newProgress('replay'))
 const outputFiles = ref<FileArtifact[]>([])
 const running = ref(false)
-const preview = ref<FileInfo | null>(null)
-const loadingPreview = ref(false)
+const openFilePreview = useFilePreview()
 
 const fileOf = (alias: string) => pool.value.find((file) => file.file_id === choice[alias]?.fileId) ?? null
 const keyOf = (input: RunInput) => inputKey(input, fileOf(input.alias), choice[input.alias]?.sheet ?? '')
@@ -104,16 +103,8 @@ async function upload(input: RunInput, file: File) {
   }
 }
 
-async function previewOutput(file: FileArtifact) {
-  if (loadingPreview.value) return
-  loadingPreview.value = true
-  try {
-    preview.value = await fileApi.get(file.file_id)
-  } catch (err) {
-    toast.error(errorText(err))
-  } finally {
-    loadingPreview.value = false
-  }
+function previewOutput(file: FileArtifact) {
+  openFilePreview(file.file_id)
 }
 
 async function run() {
@@ -159,7 +150,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
           <template v-if="fileOf(input.alias)">
             <Check class="size-4 shrink-0 text-success" />
             <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ fileOf(input.alias)!.filename }}</span>
-            <button type="button" class="icon-btn shrink-0" title="查看文件" :aria-label="`查看文件 ${fileOf(input.alias)!.filename}`" @click="preview = fileOf(input.alias)"><Eye class="size-4" /></button>
+            <button type="button" class="icon-btn shrink-0" title="查看文件" :aria-label="`查看文件 ${fileOf(input.alias)!.filename}`" @click="openFilePreview(fileOf(input.alias)!)"><Eye class="size-4" /></button>
             <button type="button" class="icon-btn shrink-0" title="清除选择" :aria-label="`清除 ${input.alias} 的选择`" @click="clear(input)"><X class="size-4" /></button>
           </template>
           <p v-else class="min-w-0 flex-1 text-sm text-mute">请上传新的文件：<span class="break-all font-medium text-ink">{{ expectedName(input) }}</span></p>
@@ -204,7 +195,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
         <div v-for="file in outputFiles" :key="file.file_id" class="flex items-center gap-2 rounded-xl border border-line px-3 py-2">
           <FileSpreadsheet class="size-4 shrink-0 text-fun-green" />
           <span class="min-w-0 flex-1 truncate text-sm">{{ file.filename }}</span>
-          <button class="btn-text text-xs" :disabled="loadingPreview" @click="previewOutput(file)"><Eye class="size-3.5" />查看</button>
+          <button class="btn-text text-xs" @click="previewOutput(file)"><Eye class="size-3.5" />查看</button>
           <a :href="file.download_url" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
         </div>
       </div>
@@ -234,6 +225,5 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
         </li>
       </ul>
     </BaseModal>
-    <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
   </BaseModal>
 </template>

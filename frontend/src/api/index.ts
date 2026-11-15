@@ -87,7 +87,7 @@ export const customerApi = {
 
   // ---- 客户独有公式（参数声明 + {{参数}} SQL 模板）
   formulas: async (id: string) => (await http.get<{ formulas: CustomerFormula[] }>(`/customers/${id}/formulas`)).data.formulas,
-  generateFormula: async (id: string, payload: { description: string; file_ids?: string[]; formula?: Record<string, unknown> }) =>
+  generateFormula: async (id: string, payload: { description: string; file_ids?: string[]; tables?: { file_id: string; sheet?: string }[]; formula?: Record<string, unknown> }) =>
     (await http.post<FormulaGenerationResult>(`/customers/${id}/formulas/generate`, payload, { timeout: 0 })).data,
   /** 新增 / 升级：同一个 id 每保存一次升一个版本。返回保存后的公式，used_by[].problems 是它让哪些流程的哪一步出了问题 */
   saveFormula: async (id: string, body: Record<string, unknown>) =>
@@ -215,6 +215,22 @@ export const recipeApi = {
       { edits: [{ op: 'update_workflow', name }] })).data,
   formulas: async (customerId?: string) =>
     (await http.get<{ builtin: FormulaInfo[]; customer: FormulaInfo[]; reserved_ids: string[] }>('/formulas', { params: { customer_id: customerId } })).data,
+  /** 新增 / 升级内置公式（所有客户共用） */
+  saveGlobalFormula: async (body: Record<string, unknown>) => (await http.post<{ formula: FormulaInfo }>('/formulas', body)).data.formula,
+  /** 内置公式不绑定客户：参考表直接上传，生成和检查都不带客户 */
+  uploadGlobalFormulaFile: async (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return (await http.post<{ file: FileInfo }>('/formulas/files', form)).data.file
+  },
+  generateGlobalFormula: async (payload: { description: string; file_ids?: string[]; tables?: { file_id: string; sheet?: string }[]; formula?: Record<string, unknown> }) =>
+    (await http.post<FormulaGenerationResult>('/formulas/generate', payload, { timeout: 0 })).data,
+  checkGlobalFormula: async (body: Record<string, unknown>) => (await http.post<{ problems: string[] }>('/formulas/check', body)).data.problems,
+  /** 删除内置公式：自己添加的彻底删除，自带的不再可用 */
+  removeGlobalFormula: async (id: string) => http.delete(`/formulas/${id}`),
+  /** 哪些客户的流程用到了这个公式 */
+  formulaReferences: async (id: string) =>
+    (await http.get<{ references: { recipe_id: string; name: string; customer_name: string }[] }>(`/formulas/${id}/references`)).data.references,
 }
 
 export const runApi = {

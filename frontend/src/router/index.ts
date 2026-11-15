@@ -25,6 +25,8 @@ const router = createRouter({
         { path: 'stats', name: 'stats', component: () => import('@/views/StatsView.vue') },
       ],
     },
+    // 文件预览：新标签页里整页展示，不带侧边栏
+    { path: '/preview/:fileId', name: 'preview', component: () => import('@/views/FilePreviewView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

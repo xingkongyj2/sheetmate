@@ -188,7 +188,7 @@ def _static_tools() -> list[Tool]:
              modify, stream=_stream_run_recipe, label=lambda a: "执行已有流程"),
         Tool("save_as_recipe", "仅用户明确要求保存重复流程时调用，直接保存正式流程。支持公式、SQL、Python 脚本和混合流程；保存实际执行的代码与依赖，不需要重新处理文件。"
              "若 build_recipe、revise_recipe 或 run_recipe 已返回 recipe_saved，则同一流程已经保存，不要再次调用本工具。保存后界面自动展示流程图，无需再调用 get_recipe。",
-             _obj({"output_tables": {**_STR_LIST, "description": "可选：公式、SQL 或脚本生成的最终结果表。不填则保存指定或最近已执行流程"}, "name": {**_STR, "description": "流程名，尽量控制在 30 字以内的名词短语（如「月度运费汇总」），不要写成一句话，不要加括号补充说明"},
+             _obj({"output_tables": {**_STR_LIST, "description": "可选：公式、SQL 或脚本生成的最终结果表。不填则保存指定或最近已执行流程。脚本已经把结果交付成文件（deliver_files）时，不要再把这个文件读回来的表填进来——文件本身就是输出，再填会多出第二个输出文件"}, "name": {**_STR, "description": "流程名，尽量控制在 30 字以内的名词短语（如「月度运费汇总」），不要写成一句话，不要加括号补充说明"},
                    "run_id": {**_STR, "description": "可选：明确指定脚本或混合流程的运行 ID，优先于 recipe_id"},
                    "recipe_id": {**_STR, "description": "可选：指定本会话已执行的流程 ID，不填用最近的"},
                    "description": {**_STR, "description": "流程说明"}}),

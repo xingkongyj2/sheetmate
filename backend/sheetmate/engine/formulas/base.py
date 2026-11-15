@@ -67,6 +67,9 @@ class ParamSpec(BaseModel):
     values: list[Any] | None = None  # enum 的可选值
     item_type: str | None = None  # list 的元素类型
     of: str | None = None  # column / columns 属于哪个表参数
+    # table / tables 参数在生成公式时对应的是哪份参考数据：{"file": 文件名, "sheet": 工作表名}。
+    # 只用来在试运行时默认放这份数据，不影响公式本身怎么执行。
+    sample: dict[str, Any] | None = None
     schema_: dict[str, Any] | None = Field(default=None, alias="schema")  # 可选：覆盖生成工具时的 JSON Schema
 
 

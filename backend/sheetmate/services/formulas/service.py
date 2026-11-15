@@ -13,10 +13,10 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from sheetmate.db.models import FormulaRecord
+from sheetmate.db.models import Customer, FormulaRecord
 from sheetmate.engine.tables.field_mapping import apply_field_mapping
 from sheetmate.engine.formulas import BUILTIN_FORMULAS, FormulaError, FormulaLibrary
 from sheetmate.engine.workbooks.reader import ReadError, read_pasted_table, read_workbook
@@ -130,11 +130,46 @@ def delete_formula(db: Session, customer_id: str, formula_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 全局（内置）公式：所有客户共用。界面上叫「内置公式」，和代码里写死的内置公式放在一起
+# ---------------------------------------------------------------------------
+
+
+def references(db: Session, formula_id: str) -> list[dict[str, Any]]:
+    """所有客户的流程（最新版本）里哪些用了这个公式：删除前给用户看影响范围。"""
+    names = {c.id: c.name for c in db.scalars(select(Customer))}
+    found: list[dict[str, Any]] = []
+    for record in recipe_service.latest_records(db):
+        recipe = recipe_service.record_to_recipe(record)
+        steps = [s for s in recipe.ordered_steps() if s.formula == formula_id]
+        if steps:
+            found.append({"recipe_id": record.recipe_id, "name": record.name,
+                          "customer_id": record.customer_id, "customer_name": names.get(record.customer_id or "", ""),
+                          "steps": [{"id": s.id, "name": s.name} for s in steps]})
+    return found
+
+
+def delete_global(db: Session, formula_id: str) -> None:
+    """删除一个内置公式。用户自己添加的：所有版本都删掉；代码里自带的：标记为已删除，公式库和流程里都不再可用。"""
+    records = [r for r in recipe_service.global_formula_records(db) if r.formula_id == formula_id]
+    if records:
+        db.execute(delete(FormulaRecord).where(FormulaRecord.customer_id.is_(None), FormulaRecord.formula_id == formula_id))
+        return
+    builtin = BUILTIN_FORMULAS.get(formula_id)
+    if builtin is None or formula_id in recipe_service.hidden_builtin_ids(db):
+        raise NotFound("没有这个内置公式")
+    db.add(FormulaRecord(
+        formula_id=formula_id, version=1, scope="global", customer_id=None, name=builtin.spec.name, status="deprecated",
+        created_by="human", body={"id": formula_id, "name": builtin.spec.name, "deleted_builtin": True, "status": "deprecated"},
+    ))
+    db.flush()
+
+
+# ---------------------------------------------------------------------------
 # 实时检查
 # ---------------------------------------------------------------------------
 
 
-def check_formula(customer_id: str, body: dict[str, Any]) -> list[str]:
+def check_formula(customer_id: str | None, body: dict[str, Any]) -> list[str]:
     """表单里边写边检查：返回问题列表（空 = 通过）。和保存时的检查完全一样。"""
     try:
         recipe_service.build_formula(customer_id, body)

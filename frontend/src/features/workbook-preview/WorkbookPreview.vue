@@ -11,7 +11,8 @@ import { isImageFile } from '@/composables/attachmentFiles'
 
 import { parseInWorker } from './worker-client'
 
-const props = defineProps<{ file?: FileInfo; localFile?: File }>()
+// page：作为独立页面整页展示（新标签页里的预览页）；否则是盖在当前页面上的弹层
+const props = defineProps<{ file?: FileInfo; localFile?: File; page?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
 const panel = ref<HTMLElement>()
 const host = ref<HTMLElement>()
@@ -33,7 +34,6 @@ const legacySheets = ref<string[]>([])
 const legacyPage = ref<{ columns: string[]; rows: unknown[][]; total: number; has_more?: boolean; total_exact?: boolean } | null>(null)
 const legacyOffset = ref(0)
 const legacyBusy = ref(false)
-const stats = ref<{ sheetCount: number; cellCount: number } | null>(null)
 const busyText = computed(() => dataMode.value ? '正在读取当前页数据…' : ({ download: '正在读取文件…', parse: '正在解析表格和样式…', render: '正在打开表格…', ready: '' })[phase.value])
 const hasNextPage = computed(() => legacyPage.value?.has_more ?? (legacyOffset.value + 100 < (legacyPage.value?.total ?? 0)))
 let controller: AbortController | null = null
@@ -97,7 +97,6 @@ async function load(preferData = false) {
   error.value = ''
   warnings.value = []
   showWarnings.value = false
-  stats.value = null
   legacyPage.value = null
   legacySheets.value = []
   legacySheet.value = ''
@@ -130,7 +129,6 @@ async function load(preferData = false) {
     const parsed = await parseInWorker(buffer, filename.value, signal)
     if (signal.aborted || id !== loadId) return
     warnings.value = parsed.warnings
-    stats.value = parsed.stats
     phase.value = 'render'
     await nextTick()
     const { mountWorkbook } = await import('./viewer')
@@ -147,7 +145,6 @@ async function load(preferData = false) {
       viewer?.dispose()
       viewer = null
       host.value?.replaceChildren()
-      stats.value = null
       dataMode.value = true
       phase.value = 'parse'
       await loadLegacy()
@@ -181,7 +178,8 @@ watch([() => props.file?.file_id, () => props.localFile], () => load())
 onMounted(() => {
   previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
   previousOverflow = document.body.style.overflow
-  document.body.style.overflow = 'hidden'
+  if (!props.page) document.body.style.overflow = 'hidden'
+  else document.title = filename.value
   window.addEventListener('keydown', onKey, true)
   panel.value?.focus()
   void load()
@@ -192,25 +190,24 @@ onBeforeUnmount(() => {
   viewer?.dispose()
   if (localImageUrl) URL.revokeObjectURL(localImageUrl)
   window.removeEventListener('keydown', onKey, true)
-  document.body.style.overflow = previousOverflow
+  if (!props.page) document.body.style.overflow = previousOverflow
   if (previousFocus?.isConnected) previousFocus.focus()
 })
 </script>
 
 <template>
-  <Teleport to="body">
-    <div class="fixed inset-0 z-[6000] flex items-center justify-center bg-black/35 backdrop-blur-sm" @click.self="emit('close')">
-      <section ref="panel" role="dialog" aria-modal="true" aria-labelledby="workbook-preview-title" tabindex="-1" class="workbook-preview flex min-h-0 flex-col overflow-hidden border border-line bg-white shadow-2xl outline-none" :class="expanded ? 'h-[100dvh] w-full' : 'h-[90dvh] w-[96vw] max-w-[1600px] rounded-2xl'">
-        <header class="flex shrink-0 items-center gap-3 border-b border-line px-4 py-3 sm:px-5">
-          <span class="rounded-xl bg-fun-green/10 p-2 text-fun-green"><Image v-if="image" class="size-5" /><FileSpreadsheet v-else class="size-5" /></span>
+  <Teleport to="body" :disabled="page">
+    <div :class="page ? 'h-dvh w-full' : 'fixed inset-0 z-[6000] flex items-center justify-center bg-black/35 backdrop-blur-sm'" @click.self="!page && emit('close')">
+      <section ref="panel" :role="page ? 'main' : 'dialog'" :aria-modal="page ? undefined : 'true'" aria-labelledby="workbook-preview-title" tabindex="-1" class="workbook-preview flex min-h-0 flex-col overflow-hidden bg-white outline-none" :class="page ? 'h-dvh w-full' : ['border border-line shadow-2xl', expanded ? 'h-[100dvh] w-full' : 'h-[90dvh] w-[96vw] max-w-[1600px] rounded-2xl']">
+        <header class="flex shrink-0 items-center gap-2.5 border-b border-line px-4 py-1.5 sm:px-5">
+          <span class="rounded-lg bg-fun-green/10 p-1.5 text-fun-green"><Image v-if="image" class="size-4" /><FileSpreadsheet v-else class="size-4" /></span>
           <div class="min-w-0 flex-1">
             <h2 id="workbook-preview-title" class="truncate text-sm font-semibold" :title="filename">{{ filename }}</h2>
-            <p class="mt-0.5 text-xs text-mute">{{ dataMode ? '分页数据预览' : '只读预览' }}<span v-if="stats"> · {{ stats.sheetCount }} 个工作表</span></p>
           </div>
-          <a v-if="file && !localFile" :href="file.download_url || fileApi.downloadUrl(file.file_id)" class="btn-line shrink-0 py-1.5 text-xs" title="下载原始文件"><Download class="size-4" /><span class="hidden sm:inline">下载</span></a>
-          <button v-if="supportsDataPreview && !legacy && (!dataMode || size <= 25 * 1024 * 1024)" type="button" class="btn-line shrink-0 py-1.5 text-xs" @click="load(!dataMode)">{{ dataMode ? '原样式预览' : '分页预览' }}</button>
-          <button type="button" class="icon-btn" :aria-label="expanded ? '还原窗口' : '放大窗口'" :title="expanded ? '还原窗口' : '放大窗口'" @click="expanded = !expanded"><Minimize2 v-if="expanded" class="size-4" /><Maximize2 v-else class="size-4" /></button>
-          <button type="button" class="icon-btn" aria-label="关闭文件预览" title="关闭（Esc）" @click="emit('close')"><X class="size-5" /></button>
+          <a v-if="file && !localFile" :href="file.download_url || fileApi.downloadUrl(file.file_id)" class="btn-line shrink-0 !h-8 py-0 text-xs" title="下载原始文件"><Download class="size-4" /><span class="hidden sm:inline">下载</span></a>
+          <button v-if="supportsDataPreview && !legacy && (!dataMode || size <= 25 * 1024 * 1024)" type="button" class="btn-line shrink-0 !h-8 py-0 text-xs" @click="load(!dataMode)">{{ dataMode ? '原样式预览' : '分页预览' }}</button>
+          <button v-if="!page" type="button" class="icon-btn" :aria-label="expanded ? '还原窗口' : '放大窗口'" :title="expanded ? '还原窗口' : '放大窗口'" @click="expanded = !expanded"><Minimize2 v-if="expanded" class="size-4" /><Maximize2 v-else class="size-4" /></button>
+          <button type="button" class="icon-btn" aria-label="关闭文件预览" :title="page ? '关闭此页（Esc）' : '关闭（Esc）'" @click="emit('close')"><X class="size-4" /></button>
         </header>
 
         <div v-if="warnings.length" class="shrink-0 border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-800">

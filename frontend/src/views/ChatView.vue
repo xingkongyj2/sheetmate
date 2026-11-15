@@ -5,8 +5,8 @@
  */
 import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Play, Save, X } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi, runApi } from '@/api'
 import { ApiError, errorText } from '@/api/http'
@@ -26,6 +26,7 @@ import DataTable from '@/components/common/DataTable.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { attachmentMessage } from '@/composables/attachmentFiles'
 import { applyDeliveryManifest, applyEvent, finishMessage, restoreConversationMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
+import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
 import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
@@ -39,10 +40,10 @@ import { pendingStarts } from '@/stores/pending'
 import { pendingRecipeEdits } from '@/stores/recipeEdits'
 import { recipeEditLabel, recipeEditPlaceholder, type RecipeEditDraft } from '@/composables/recipeEditing'
 
-const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const props = defineProps<{ id: string }>()
 const router = useRouter()
+const route = useRoute()
 const store = useWorkspaceStore()
 const toast = useToast()
 
@@ -69,10 +70,16 @@ const checklistOpen = ref(true) // 任务目录默认显示，可用顶部图标
 const panelOpen = ref(false) // 工作区面板默认关闭，需要时点右上角打开
 const panelWidth = ref(320)
 const panelTab = ref<'recipes' | 'files' | 'data' | 'usage'>('recipes')
+// 地址里带 ?flow=（全屏流程图）：流程图在工作区面板的「流程」标签里，刷新后要先把面板打开，全屏才能恢复。
+watch(() => route.query.flow, (flow) => {
+  if (!flow) return
+  panelTab.value = 'recipes'
+  panelOpen.value = true
+}, { immediate: true })
 const refreshingUsage = ref(false)
 const selectedKey = ref<string | null>(null)
 const viewing = ref<TableBrief | null>(null)
-const viewingFile = ref<FileInfo | null>(null)
+const openFilePreview = useFilePreview()
 const saveOpen = ref(false)
 const editingTitle = ref(false)
 const titleDraft = ref('')
@@ -165,7 +172,7 @@ function previewAttachment(key: string) {
   const file = messageFiles.value.find((item) => item.file_id === key)
   if (!file) return
   composer.value?.captureSelection()
-  viewingFile.value = file
+  openFilePreview(file)
 }
 
 function acknowledgeUploads(files: FileInfo[]) {
@@ -732,7 +739,7 @@ function answer(option: string) {
 
           <div v-else class="space-y-8">
             <template v-for="m in messages" :key="m.key">
-              <UserMessage v-if="m.role === 'user'" :message="m" :files="messageFiles" @preview="(file) => (viewingFile = file)" />
+              <UserMessage v-if="m.role === 'user'" :message="m" :files="messageFiles" @preview="openFilePreview" />
               <AssistantMessage
                 v-else
                 :message="m"
@@ -744,7 +751,7 @@ function answer(option: string) {
                 :conversation-id="props.id"
                 :mascot="customer?.mascot"
                 @answer="answer"
-                @preview-file="(file) => (viewingFile = file)"
+                @preview-file="openFilePreview"
                 @refresh="refreshSide"
               />
             </template>
@@ -813,7 +820,7 @@ function answer(option: string) {
       v-model:width="panelWidth"
       @close="panelOpen = false"
       @open-table="openTable"
-      @open-file="(file) => (viewingFile = file)"
+      @open-file="openFilePreview"
       @refresh="refreshSide"
     />
 
@@ -822,12 +829,6 @@ function answer(option: string) {
       <DataTable :columns="viewing.columns" :rows="viewing.preview ?? []" max-height="62vh" />
     </BaseModal>
     <TableViewer v-else-if="viewing" :key="executionTableKey(viewing)" :title="viewing.label || viewing.name" :subtitle="viewing.run_title || viewing.conversation_title" :loader="loadTable" @close="viewing = null" />
-    <WorkbookPreview
-      v-if="viewingFile"
-      :key="viewingFile.file_id"
-      :file="viewingFile"
-      @close="viewingFile = null"
-    />
     <SaveToCustomerDialog v-if="saveOpen" :conversation-id="id" @close="saveOpen = false" @saved="onSaved" />
   </div>
 </template>

@@ -15,6 +15,7 @@ import type { CustomerWorkflow, FileInfo, RecipeEditRequest, RecipeFlowData, Rec
 import type { StepState } from '@/composables/chatModel'
 import type { FlowFileNode, FlowSelection, RecipeFlowContext } from '@/composables/recipeFlowInteraction'
 import { conversationMatchesRecipeEdit, recipeEditTarget } from '@/composables/recipeEditing'
+import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { pendingRecipeEdits } from '@/stores/recipeEdits'
@@ -22,7 +23,6 @@ import { pendingRecipeEdits } from '@/stores/recipeEdits'
 import RecipeFlowCanvas from './RecipeFlowCanvas.vue'
 import RecipeFlowInspector from './RecipeFlowInspector.vue'
 
-const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 // 用新文件执行：和客户页里的「执行」是同一个弹窗。弹窗里又会放流程图，所以延迟加载，避免组件互相引用。
 const RunRecipeDialog = defineAsyncComponent(() => import('@/components/customer/RunRecipeDialog.vue'))
 const props = withDefaults(defineProps<{
@@ -33,7 +33,8 @@ const props = withDefaults(defineProps<{
   compact?: boolean
   context?: RecipeFlowContext
   toolbarPlacement?: 'inline' | 'card' | 'hidden'
-}>(), { states: () => [], direction: 'horizontal', activeStep: null, compact: false, context: () => ({}), toolbarPlacement: 'inline' })
+  inlineCanvas?: boolean  // false：不在页面里画流程图，只提供全屏（由外面的按钮调用 openFullscreen 打开）
+}>(), { states: () => [], direction: 'horizontal', activeStep: null, compact: false, context: () => ({}), toolbarPlacement: 'inline', inlineCanvas: true })
 const emit = defineEmits<{ changed: [] }>()
 const router = useRouter()
 const route = useRoute()
@@ -42,7 +43,7 @@ const toast = useToast()
 const openingEdit = ref(false)
 const fullscreen = ref(false)
 const selection = ref<FlowSelection | null>(null)
-const preview = ref<FileInfo | null>(null)
+const openFilePreview = useFilePreview()
 const dialog = ref<HTMLElement | null>(null)
 const viewport = ref<HTMLElement | null>(null)
 const canvas = ref<HTMLElement | null>(null)
@@ -215,7 +216,9 @@ async function editFlow(operation: RecipeEditRequest['operation'] = 'modify', ta
       }
     }
     pendingRecipeEdits.set(conversationId, { title: current.title || '处理流程', request })
-    closeDialog()
+    // 只在本地关掉全屏：这里要整页跳去对话页，不能再让 closeDialog 去回退或改写地址栏，否则两次导航互相抢，停在原页面
+    pushedHistory = false
+    closeLocal()
     await router.push({ name: 'chat', params: { id: conversationId } })
   } catch (err) {
     toast.error(errorText(err))
@@ -280,7 +283,7 @@ function wheel(event: WheelEvent) {
   changeZoom(zoom.value + (event.deltaY > 0 ? -0.1 : 0.1))
 }
 function onKey(event: KeyboardEvent) {
-  if (!dialogOpen.value || preview.value || !dialog.value) return
+  if (!dialogOpen.value || !dialog.value) return
   const dialogs = document.querySelectorAll('[role="dialog"]')
   if (dialogs[dialogs.length - 1] !== dialog.value) return
   if (event.key === 'Escape' && (event.target as HTMLElement | null)?.tagName === 'INPUT') return
@@ -331,11 +334,12 @@ onBeforeUnmount(() => {
   <div class="recipe-flow-viewer min-w-0">
     <div v-if="toolbarPlacement !== 'hidden'" class="recipe-flow-toolbar flex min-h-6 items-center justify-end gap-1" :class="toolbarPlacement === 'inline' ? 'mb-2' : 'recipe-flow-toolbar--card'">
       <span v-if="running && toolbarPlacement === 'inline'" class="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-[#6265DC]" role="status"><LoaderCircle class="size-3 shrink-0 animate-spin" /><span class="truncate">{{ currentStep?.name || '执行中' }}</span></span>
-      <button v-if="canEdit" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageSquare class="size-3.5" />对话修改</button>
-      <button v-if="canReplay" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running" @click="prepareRun"><Play class="size-3.5" />重新执行</button>
+      <!-- 对话消息里的流程卡片只留全屏，修改和执行都在全屏里 -->
+      <button v-if="canEdit && toolbarPlacement !== 'card'" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageSquare class="size-3.5" />对话修改</button>
+      <button v-if="canReplay && toolbarPlacement !== 'card'" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running" @click="prepareRun"><Play class="size-3.5" />重新执行</button>
       <button type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="openFullscreen"><Maximize2 class="size-3.5" />全屏</button>
     </div>
-    <RecipeFlowCanvas :flow="shownFlow" :states="states" :direction="direction" :compact="compact" :active-step="selection?.kind === 'step' ? selection.id : activeStep" :selected-file-key="selection?.kind === 'file' ? selection.file.key : null" :busy="running" :failed="failed" @select="selectStep" @select-file="selectFile" />
+    <RecipeFlowCanvas v-if="inlineCanvas" :flow="shownFlow" :states="states" :direction="direction" :compact="compact" :active-step="selection?.kind === 'step' ? selection.id : activeStep" :selected-file-key="selection?.kind === 'file' ? selection.file.key : null" :busy="running" :failed="failed" @select="selectStep" @select-file="selectFile" />
   </div>
 
   <Teleport v-if="dialogOpen" to="body">
@@ -377,11 +381,11 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <aside v-if="selection" class="flow-side-panel" aria-label="节点详情">
-              <RecipeFlowInspector v-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="selection = null" @preview="(file) => (preview = file)" />
+              <RecipeFlowInspector v-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="selection = null" @preview="openFilePreview" />
             </aside>
           </div>
         </template>
-        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="closeDialog" @preview="(file) => (preview = file)" />
+        <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="closeDialog" @preview="openFilePreview" />
       </section>
     </div>
   </Teleport>
@@ -390,7 +394,6 @@ onBeforeUnmount(() => {
     :customer-id="context.customerId" :conversation-id="context.conversationId" :recipe="runRecipe" elevated
     @close="runRecipe = null" @done="emit('changed')"
   />
-  <WorkbookPreview v-if="preview" :key="preview.file_id" :file="preview" @close="preview = null" />
 </template>
 
 <style scoped>

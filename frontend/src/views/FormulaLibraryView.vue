@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { FlaskConical, LoaderCircle, Pencil, Plus, Power, Search, Sparkles, Trash2, TriangleAlert } from '@lucide/vue'
+import { ChevronRight, FlaskConical, LoaderCircle, Pencil, Search, Sparkles, Trash2, TriangleAlert, WandSparkles } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 
 import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
@@ -9,18 +9,17 @@ import type { CustomerCard, CustomerDetail, CustomerFormula, FormulaInfo } from 
 import FormulaLibraryIcon from '@/components/brand/FormulaLibraryIcon.vue'
 import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
-import StatusPill from '@/components/common/StatusPill.vue'
 import FormulaAIGeneratorDialog from '@/components/customer/FormulaAIGeneratorDialog.vue'
 import FormulaEditorDialog from '@/components/customer/FormulaEditorDialog.vue'
 import { formulaArt, timeAgo } from '@/composables/chatModel'
-import { paramTypeLabel } from '@/composables/formulaDraft'
+import { bodyFromFormula, paramTypeLabel } from '@/composables/formulaDraft'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
 type LibraryFormula = CustomerFormula & { customerId: string; customerName: string }
-type EditorState = { customer: CustomerDetail; formula: CustomerFormula | null; trial: boolean; initialBody?: Record<string, unknown> }
+type EditorState = { customer: CustomerDetail; formula: CustomerFormula; trial: boolean }
+type AIState = { customer: CustomerDetail | null; formula: CustomerFormula | null; scope: 'customer' | 'global' }
 
-const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const { confirmDelete } = useConfirm()
@@ -31,29 +30,38 @@ const loading = ref(true)
 const error = ref('')
 const query = ref('')
 const tab = ref<'customer' | 'builtin'>('customer')
-const customerFilter = ref(typeof route.query.customer === 'string' ? route.query.customer : '')
-const statusFilter = ref('')
-const categoryFilter = ref('')
-const choosing = ref<'manual' | 'ai' | null>(null)
-const targetCustomer = ref('')
+const choosing = ref(false)
 const opening = ref(false)
 const editor = ref<EditorState | null>(null)
-const aiCustomer = ref<CustomerDetail | null>(null)
+const ai = ref<AIState | null>(null)
+const reservedIds = ref<string[]>([])
 const selectedBuiltin = ref<FormulaInfo | null>(null)
 
-const filteredCustom = computed(() => {
+// 客户公式按客户分组，用标题分隔；客户顺序沿用客户列表的顺序，搜索后没有结果的客户不显示
+const customerGroups = computed(() => {
   const q = query.value.trim().toLowerCase()
-  return custom.value.filter((f) => (!customerFilter.value || f.customerId === customerFilter.value)
-    && (!statusFilter.value || f.status === statusFilter.value)
-    && (!q || `${f.name} ${f.id} ${f.intent} ${f.customerName}`.toLowerCase().includes(q)))
+  const groups = new Map<string, { customerId: string; customerName: string; formulas: LibraryFormula[] }>()
+  for (const f of custom.value) {
+    if (q && !`${f.name} ${f.id} ${f.intent} ${f.customerName}`.toLowerCase().includes(q)) continue
+    const group = groups.get(f.customerId) ?? { customerId: f.customerId, customerName: f.customerName, formulas: [] }
+    group.formulas.push(f)
+    groups.set(f.customerId, group)
+  }
+  return [...groups.values()]
 })
-const categories = computed(() => [...new Set(builtin.value.map((f) => f.category))])
-const filteredBuiltin = computed(() => {
+// 内置公式按类别分组，用标题分隔；类别顺序沿用目录里的顺序，搜索后没有结果的类别不显示
+const builtinGroups = computed(() => {
   const q = query.value.trim().toLowerCase()
-  return builtin.value.filter((f) => (!categoryFilter.value || f.category === categoryFilter.value)
-    && (!q || `${f.name} ${f.id} ${f.intent} ${f.category}`.toLowerCase().includes(q)))
+  const groups = new Map<string, FormulaInfo[]>()
+  for (const f of builtin.value) {
+    if (q && !`${f.name} ${f.id} ${f.intent} ${f.category}`.toLowerCase().includes(q)) continue
+    groups.set(f.category, [...(groups.get(f.category) ?? []), f])
+  }
+  return [...groups].map(([category, formulas]) => ({ category, formulas }))
 })
 const idsFor = (customerId: string) => custom.value.filter((f) => f.customerId === customerId).map((f) => f.id)
+/** 新增公式时不能用的 id：客户公式是这个客户已有的 + 内置的 + 系统保留的；内置公式没有客户的 */
+const takenIds = (customerId: string | undefined, scope: 'customer' | 'global') => [...(scope === 'customer' && customerId ? idsFor(customerId) : []), ...builtin.value.map((f) => f.id), ...reservedIds.value]
 const problemsOf = (f: CustomerFormula) => f.used_by.flatMap((u) => u.problems.map((p) => `「${u.name}」${p}`))
 
 async function load() {
@@ -63,10 +71,10 @@ async function load() {
     const [people, catalog] = await Promise.all([customerApi.list(), recipeApi.formulas()])
     customers.value = people
     builtin.value = catalog.builtin
+    reservedIds.value = catalog.reserved_ids
     const lists = await Promise.all(people.map(async (c) => (await customerApi.formulas(c.id))
       .map((f) => ({ ...f, customerId: c.id, customerName: c.name }))))
     custom.value = lists.flat()
-    if (customerFilter.value && !people.some((c) => c.id === customerFilter.value)) customerFilter.value = ''
   } catch (err) {
     error.value = errorText(err)
   } finally {
@@ -75,20 +83,23 @@ async function load() {
 }
 onMounted(load)
 
-async function start(mode: 'manual' | 'ai') {
-  targetCustomer.value = customerFilter.value || (customers.value.length === 1 ? customers.value[0]!.id : '')
-  choosing.value = mode
-  if (targetCustomer.value) await proceed()
+/** AI 新增：只有一个客户就直接进；有多个就先列出来，点哪个用哪个 */
+async function start() {
+  // 内置公式不绑定客户：直接进，参考表在弹窗里上传
+  if (tab.value === 'builtin') {
+    ai.value = { customer: null, formula: null, scope: 'global' }
+    return
+  }
+  choosing.value = true
+  if (customers.value.length === 1) await proceed(customers.value[0]!.id)
 }
 
-async function proceed() {
-  if (!targetCustomer.value || !choosing.value || opening.value) return
+async function proceed(customerId: string) {
+  if (!choosing.value || opening.value) return
   opening.value = true
   try {
-    const customer = await customerApi.get(targetCustomer.value)
-    if (choosing.value === 'ai') aiCustomer.value = customer
-    else editor.value = { customer, formula: null, trial: false }
-    choosing.value = null
+    ai.value = { customer: await customerApi.get(customerId), formula: null, scope: tab.value === 'builtin' ? 'global' : 'customer' }
+    choosing.value = false
   } catch (err) {
     toast.error(errorText(err))
   } finally {
@@ -109,15 +120,12 @@ async function openEditor(f: LibraryFormula, trial = false) {
   }
 }
 
-async function reviewGenerated(body: Record<string, unknown>) {
-  const customer = aiCustomer.value
-  if (!customer) return
-  // Refresh after reference uploads so the editor can also use those files for a trial.
+/** 继续用对话修改一个已有的公式：带着它进 AI 弹窗，保存成新版本 */
+async function openAI(f: LibraryFormula) {
+  if (opening.value) return
   opening.value = true
   try {
-    const fresh = await customerApi.get(customer.id)
-    editor.value = { customer: fresh, formula: null, trial: false, initialBody: body }
-    aiCustomer.value = null
+    ai.value = { customer: await customerApi.get(f.customerId), formula: f, scope: 'customer' }
   } catch (err) {
     toast.error(errorText(err))
   } finally {
@@ -125,20 +133,43 @@ async function reviewGenerated(body: Record<string, unknown>) {
   }
 }
 
+async function onAISaved(formula: CustomerFormula | FormulaInfo) {
+  const revised = !!ai.value?.formula
+  const global = ai.value?.scope === 'global'
+  ai.value = null
+  tab.value = global ? 'builtin' : 'customer'
+  const broken = 'used_by' in formula ? formula.used_by.flatMap((u) => u.problems).length : 0
+  if (broken) toast.error(`已保存「${formula.name}」，但有 ${broken} 处流程步骤需要调整`)
+  else toast.success(revised ? `已更新「${formula.name}」` : `已添加「${formula.name}」`)
+  await load()
+}
+
+async function removeBuiltin(f: FormulaInfo) {
+  if (opening.value) return
+  let refs: { name: string; customer_name: string }[] = []
+  try {
+    refs = await recipeApi.formulaReferences(f.id)
+  } catch (err) {
+    toast.error(errorText(err))
+    return
+  }
+  const used = [...new Set(refs.map((r) => `${r.customer_name ? `${r.customer_name} · ` : ''}「${r.name}」`))].join('、')
+  const impact = used ? `正在使用它的流程：${used}。删除后这些流程里用到它的步骤将无法执行。` : ''
+  if (!await confirmDelete({
+    title: '删除这个内置公式？', target: f.name,
+    description: `${f.custom ? '这个公式的所有版本都会删除，删除后无法恢复。' : '这是系统自带的内置公式，删除后所有客户都不能再使用。'}${impact}`,
+    confirmText: '删除公式', action: () => recipeApi.removeGlobalFormula(f.id),
+  })) return
+  if (selectedBuiltin.value?.id === f.id) selectedBuiltin.value = null
+  toast.success('已删除')
+  await load()
+}
+
 async function onSaved(formula: CustomerFormula) {
   editor.value = null
   tab.value = 'customer'
   toast.success(`已保存「${formula.name}」`)
   await load()
-}
-
-async function toggle(f: LibraryFormula) {
-  try {
-    await customerApi.setFormulaStatus(f.customerId, f.id, f.status === 'deprecated' ? 'active' : 'deprecated')
-    await load()
-  } catch (err) {
-    toast.error(errorText(err))
-  }
 }
 
 async function remove(f: LibraryFormula) {
@@ -163,8 +194,7 @@ async function remove(f: LibraryFormula) {
           <Search class="size-4 shrink-0 text-faint" />
           <input v-model="query" aria-label="搜索公式" class="w-full min-w-0 bg-transparent text-sm outline-none" />
         </label>
-        <button class="btn-line shrink-0" :disabled="loading || opening" @click="start('manual')"><Plus class="size-4" />手动新增</button>
-        <button class="btn-ink shrink-0 !bg-[#298c7a] hover:!bg-[#227867]" :disabled="loading || opening" @click="start('ai')"><Sparkles class="size-4" />AI 生成</button>
+        <button class="btn-ink size-10 shrink-0 !bg-[#298c7a] !p-0 hover:!bg-[#227867]" title="AI 新增" aria-label="AI 新增公式" :disabled="loading || opening" @click="start"><Sparkles class="size-5" /></button>
       </header>
 
       <div class="mt-7 flex shrink-0 flex-wrap items-center gap-3">
@@ -172,35 +202,32 @@ async function remove(f: LibraryFormula) {
           <button role="tab" :aria-selected="tab === 'customer'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'customer' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'customer'">客户公式 <span class="ml-1 text-xs text-faint">{{ custom.length }}</span></button>
           <button role="tab" :aria-selected="tab === 'builtin'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'builtin' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'builtin'">内置公式 <span class="ml-1 text-xs text-faint">{{ builtin.length }}</span></button>
         </div>
-        <template v-if="tab === 'customer'">
-          <select v-model="customerFilter" aria-label="按客户筛选" class="select ml-auto w-auto rounded-full bg-white text-xs">
-            <option value="">全部客户</option><option v-for="c in customers" :key="c.id" :value="c.id">{{ c.name }}</option>
-          </select>
-          <select v-model="statusFilter" aria-label="按状态筛选" class="select w-auto rounded-full bg-white text-xs"><option value="">全部状态</option><option value="active">已启用</option><option value="deprecated">已停用</option></select>
-        </template>
-        <select v-else v-model="categoryFilter" aria-label="按类别筛选" class="select ml-auto w-auto rounded-full bg-white text-xs"><option value="">全部类别</option><option v-for="c in categories" :key="c" :value="c">{{ c }}</option></select>
       </div>
 
       <div v-if="error" class="mt-6 rounded-2xl bg-error/5 p-4 text-sm text-error" role="alert">{{ error }}<button class="btn-text ml-3" @click="load">重试</button></div>
       <div v-else-if="loading" class="flex justify-center py-20"><LoaderCircle class="size-5 animate-spin text-faint" /></div>
       <template v-else-if="tab === 'customer'">
-        <div v-if="filteredCustom.length" class="mt-6 grid gap-4 md:grid-cols-2">
-          <article v-for="f in filteredCustom" :key="`${f.customerId}:${f.id}`" class="formula-card flex min-w-0 flex-col rounded-[22px] bg-white p-5" :class="f.status === 'deprecated' ? 'opacity-65' : ''">
-            <div class="flex items-start gap-3">
-              <span class="flex size-10 shrink-0 items-center justify-center rounded-[14px] bg-[#eef8f5]"><FormulaLibraryIcon /></span>
-              <div class="min-w-0 flex-1"><h2 class="break-words text-[15px] font-semibold">{{ f.name }}</h2><p class="mt-1 text-xs text-faint">{{ f.customerName }}</p></div>
-              <StatusPill :status="f.status" :label="f.status_label" />
+        <div v-if="customerGroups.length" class="mt-7 space-y-9">
+          <section v-for="group in customerGroups" :key="group.customerId" :aria-label="group.customerName">
+            <h2 class="flex items-baseline gap-2 px-1 text-lg font-semibold tracking-tight">{{ group.customerName }}<span class="text-xs font-normal tabular-nums text-faint">{{ group.formulas.length }}</span></h2>
+            <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <article v-for="f in group.formulas" :key="`${f.customerId}:${f.id}`" class="formula-card group flex min-w-0 flex-col rounded-[20px] bg-white p-4">
+                <div class="flex items-center gap-2.5">
+                  <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-[#eef8f5]"><FormulaLibraryIcon class="size-5" /></span>
+                  <h3 class="min-w-0 flex-1 break-words text-[15px] font-semibold">{{ f.name }}</h3>
+                  <div class="-mr-1.5 flex shrink-0 items-center">
+                    <button class="icon-btn size-7" :title="`试运行 ${f.name}`" :aria-label="`试运行 ${f.name}`" :disabled="opening" @click="openEditor(f, true)"><FlaskConical class="size-4" /></button>
+                    <button class="icon-btn size-7" :title="`AI 修改 ${f.name}`" :aria-label="`AI 修改 ${f.name}`" :disabled="opening" @click="openAI(f)"><WandSparkles class="size-4" /></button>
+                    <button class="icon-btn size-7" :title="`编辑公式 ${f.name}`" :aria-label="`编辑公式 ${f.name}`" :disabled="opening" @click="openEditor(f)"><Pencil class="size-4" /></button>
+                    <button class="icon-btn size-7 hover:text-error" :title="`删除公式 ${f.name}`" :aria-label="`删除公式 ${f.name}`" @click="remove(f)"><Trash2 class="size-4" /></button>
+                  </div>
+                </div>
+                <p class="mt-2.5 line-clamp-2 text-[13px] leading-6 text-mute">{{ f.intent || '暂未填写用途' }}</p>
+                <div v-if="problemsOf(f).length" class="mt-2.5 rounded-xl bg-error/5 px-3 py-2 text-xs leading-6 text-error"><p v-for="p in problemsOf(f)" :key="p" class="flex gap-1.5"><TriangleAlert class="mt-1 size-3.5 shrink-0" />{{ p }}</p></div>
+                <div class="mt-auto flex items-center gap-2 pt-3 text-[11px] text-faint"><span>{{ f.used_by.length ? `${f.used_by.length} 个流程使用` : '未用于流程' }}</span><span class="ml-auto">{{ timeAgo(f.updated_at) }}</span></div>
+              </article>
             </div>
-            <p class="mt-4 line-clamp-3 text-[13px] leading-7 text-mute">{{ f.intent || '暂未填写用途' }}</p>
-            <div v-if="problemsOf(f).length" class="mt-3 rounded-xl bg-error/5 px-3 py-2 text-xs leading-6 text-error"><p v-for="p in problemsOf(f)" :key="p" class="flex gap-1.5"><TriangleAlert class="mt-1 size-3.5 shrink-0" />{{ p }}</p></div>
-            <div class="mt-auto flex flex-wrap items-center gap-2 pt-5 text-[11px] text-faint"><span>{{ f.used_by.length ? `${f.used_by.length} 个流程使用` : '尚未用于流程' }}</span><span>· v{{ f.version }}</span><span class="ml-auto">{{ timeAgo(f.updated_at) }}</span></div>
-            <div class="mt-3 flex items-center gap-1 border-t border-line/60 pt-3">
-              <button class="btn-text mr-auto text-xs" :disabled="opening" @click="openEditor(f, true)"><FlaskConical class="size-3.5" />试运行</button>
-              <button class="icon-btn" :title="`编辑公式 ${f.name}`" :disabled="opening" @click="openEditor(f)"><Pencil class="size-4" /></button>
-              <button class="icon-btn disabled:opacity-35" :title="f.status !== 'deprecated' && f.used_by.length ? '正在被流程使用，暂不能停用' : f.status === 'deprecated' ? '启用公式' : '停用公式'" :disabled="f.status !== 'deprecated' && f.used_by.length > 0" @click="toggle(f)"><Power class="size-4" /></button>
-              <button class="icon-btn hover:text-error" :title="`删除公式 ${f.name}`" @click="remove(f)"><Trash2 class="size-4" /></button>
-            </div>
-          </article>
+          </section>
         </div>
         <div v-else class="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center text-sm text-faint" role="status">
           <FormulaLibraryIcon class="size-12 opacity-65" />
@@ -208,11 +235,20 @@ async function remove(f: LibraryFormula) {
         </div>
       </template>
       <template v-else>
-        <div v-if="filteredBuiltin.length" class="mt-6 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-          <button v-for="f in filteredBuiltin" :key="f.id" class="formula-card flex min-w-0 flex-col rounded-[22px] bg-white p-5 text-left" @click="selectedBuiltin = f">
-            <div class="flex w-full items-center gap-2.5"><FunObject :kind="formulaArt(f.id) as FunKind" :size="28" /><h2 class="min-w-0 flex-1 text-[15px] font-semibold">{{ f.name }}</h2><span class="text-[11px] text-faint">{{ f.category }}</span></div>
-            <p class="mt-3 line-clamp-3 text-[13px] leading-7 text-mute">{{ f.intent }}</p>
-          </button>
+        <div v-if="builtinGroups.length" class="mt-7 space-y-9">
+          <section v-for="group in builtinGroups" :key="group.category" :aria-label="group.category">
+            <h2 class="flex items-baseline gap-2 px-1 text-lg font-semibold tracking-tight">{{ group.category }}<span class="text-xs font-normal tabular-nums text-faint">{{ group.formulas.length }}</span></h2>
+            <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
+              <article v-for="f in group.formulas" :key="f.id" class="formula-card group relative flex min-w-0 flex-col rounded-[22px] bg-white p-5">
+                <div class="flex w-full items-center gap-2.5">
+                  <FunObject :kind="formulaArt(f.id) as FunKind" :size="28" />
+                  <h3 class="min-w-0 flex-1 text-[15px] font-semibold"><button type="button" class="text-left after:absolute after:inset-0 after:rounded-[22px] after:content-['']" :aria-label="`查看详情 ${f.name}`" @click="selectedBuiltin = f">{{ f.name }}</button></h3>
+                  <button class="icon-btn relative z-10 -mr-1.5 size-7 shrink-0 hover:text-error" :title="`删除公式 ${f.name}`" :aria-label="`删除公式 ${f.name}`" @click="removeBuiltin(f)"><Trash2 class="size-4" /></button>
+                </div>
+                <p class="mt-3 line-clamp-3 text-[13px] leading-7 text-mute">{{ f.intent }}</p>
+              </article>
+            </div>
+          </section>
         </div>
         <div v-else class="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center text-sm text-faint" role="status">
           <FormulaLibraryIcon class="size-12 opacity-65" />
@@ -221,17 +257,29 @@ async function remove(f: LibraryFormula) {
       </template>
     </div>
 
-    <BaseModal v-if="choosing" :title="choosing === 'ai' ? 'AI 生成公式' : '手动新增公式'" width="max-w-md" @close="!opening && (choosing = null)">
-      <template v-if="customers.length"><label class="block text-sm font-medium">所属客户<span class="ml-1 text-error">*</span><select v-model="targetCustomer" class="select mt-3 w-full rounded-xl" aria-label="公式所属客户" :disabled="opening"><option disabled value="">请选择客户</option><option v-for="c in customers" :key="c.id" :value="c.id">{{ c.name }}</option></select></label><div class="mt-5 flex justify-end"><button class="btn-ink" :disabled="!targetCustomer || opening" @click="proceed"><LoaderCircle v-if="opening" class="size-4 animate-spin" />继续</button></div></template>
-      <div v-else class="space-y-5 text-sm text-mute"><p>先添加一个客户，再为它配置公式。</p><button class="btn-ink" @click="router.push({ name: 'customers' })">前往客户库</button></div>
+    <BaseModal v-if="choosing" :title="customers.length ? '选择客户' : '还没有客户'" width="max-w-sm" @close="!opening && (choosing = false)">
+      <ul v-if="customers.length" class="-mx-2 space-y-0.5" aria-label="客户">
+        <li v-for="c in customers" :key="c.id">
+          <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-paper focus-visible:bg-paper focus-visible:outline-none disabled:opacity-50" :disabled="opening" @click="proceed(c.id)">
+            <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ c.name }}</span>
+            <LoaderCircle v-if="opening" class="size-4 shrink-0 animate-spin text-faint" /><ChevronRight v-else class="size-4 shrink-0 text-faint" />
+          </button>
+        </li>
+      </ul>
+      <button v-else class="btn-ink w-full" @click="router.push({ name: 'customers' })">前往客户库</button>
     </BaseModal>
 
-    <FormulaAIGeneratorDialog v-if="aiCustomer" :customer-id="aiCustomer.id" :files="aiCustomer.files" @close="aiCustomer = null" @generated="reviewGenerated" />
-    <FormulaEditorDialog v-if="editor" :customer-id="editor.customer.id" :formula="editor.formula" :existing-ids="idsFor(editor.customer.id)" :files="editor.customer.files" :field-mapping="editor.customer.field_mapping" :focus-trial="editor.trial" :initial-body="editor.initialBody" @close="editor = null" @saved="onSaved" />
+    <FormulaAIGeneratorDialog
+      v-if="ai" :key="ai.formula?.id ?? 'new'" :customer-id="ai.customer?.id" :files="ai.customer?.files ?? []"
+      :formula="ai.formula ? bodyFromFormula(ai.formula) : null" :taken-ids="takenIds(ai.customer?.id, ai.scope)" :scope="ai.scope"
+      @close="ai = null" @saved="onAISaved"
+    />
+    <FormulaEditorDialog v-if="editor" :customer-id="editor.customer.id" :formula="editor.formula" :existing-ids="idsFor(editor.customer.id)" :files="editor.customer.files" :field-mapping="editor.customer.field_mapping" :focus-trial="editor.trial" @close="editor = null" @saved="onSaved" />
 
     <BaseModal v-if="selectedBuiltin" :title="selectedBuiltin.name" width="max-w-lg" @close="selectedBuiltin = null">
       <p class="text-sm leading-7 text-mute">{{ selectedBuiltin.intent }}</p><p class="mt-2 text-xs text-faint">内置公式 · {{ selectedBuiltin.category }}</p>
       <dl class="mt-5 space-y-3"><div v-for="(p, name) in selectedBuiltin.params" :key="name" class="rounded-xl bg-paper/70 px-4 py-3"><dt class="text-[13px] font-medium">{{ p.desc || name }}<span v-if="p.required" class="ml-1 text-error">*</span></dt><dd class="mt-1 text-xs text-faint">{{ name }} · {{ paramTypeLabel(p.type) }}</dd></div></dl>
+      <pre v-if="selectedBuiltin.sql" class="mt-4 max-h-56 overflow-auto whitespace-pre-wrap break-words rounded-xl bg-paper/70 px-4 py-3 font-mono text-[11px] leading-relaxed">{{ selectedBuiltin.sql }}</pre>
     </BaseModal>
   </div>
 </template>

@@ -44,7 +44,7 @@ async function onSaved(customer: CustomerCard) {
             <Search class="size-4 shrink-0 text-faint" />
             <input v-model="query" aria-label="搜索客户" class="w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-faint" placeholder="搜索客户" />
           </label>
-          <button class="btn-ink shrink-0 whitespace-nowrap px-3 sm:px-5" @click="creating = true"><Plus class="size-4" />新建客户</button>
+          <button class="btn-ink size-10 shrink-0 !p-0" title="新建客户" aria-label="新建客户" @click="creating = true"><Plus class="size-5" /></button>
         </div>
       </div>
 

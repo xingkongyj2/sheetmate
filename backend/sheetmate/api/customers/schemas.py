@@ -23,8 +23,18 @@ class FormulaStatusBody(BaseModel):
     status: str  # active / deprecated
 
 
+class FormulaTableRef(BaseModel):
+    """公式要处理的一张表：客户文件里的一张工作表。"""
+
+    file_id: str
+    sheet: str | None = None  # 不写就是这个文件的第一张工作表
+
+
 class FormulaGenerateBody(BaseModel):
     description: str = Field(min_length=1, max_length=12_000)
+    # 公式要处理的表格（按选择的先后顺序）：至少要有一张，可以是一张或多张。
+    # tables 能精确到工作表；只给 file_ids 时，每个文件取它的全部工作表（兼容旧调用）。
+    tables: list[FormulaTableRef] = Field(default_factory=list, max_length=5)
     file_ids: list[str] = Field(default_factory=list, max_length=5)
     formula: dict[str, Any] | None = None
 

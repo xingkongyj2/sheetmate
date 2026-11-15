@@ -32,6 +32,15 @@ class FormulaRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 
+class FormulaSuggestionDismissal(Base):
+    """用户忽略（或已整理成内置公式）的「建议整理成内置公式」，按重复 SQL 的指纹记。"""
+
+    __tablename__ = "formula_suggestion_dismissals"
+
+    fingerprint: Mapped[str] = mapped_column(String(32), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
 class RecipeRecord(Base):
     """Recipe 的一个版本。同一个 recipe_id 的多个版本并存，旧版本保留，历史任务可追溯。"""
 

@@ -1,13 +1,11 @@
 <script setup lang="ts">
 /** 客户/会话资源与单次回答的处理流程；表名按来源工作区定位。 */
-import { Download, Eye, FileCheck2, FileSpreadsheet, Trash2 } from '@lucide/vue'
+import { Download, Eye, FileCheck2, FileSpreadsheet, Maximize2, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { conversationApi } from '@/api'
 import type { ConversationDetail, FileInfo, RecipeBrief, RecipeFlowData, TableBrief } from '@/api/types'
-import StatusPill from '@/components/common/StatusPill.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
-import VerifyBadge from '@/components/recipe/VerifyBadge.vue'
 import type { RecipeProgress, UiMessage } from '@/composables/chatModel'
 import { executionFileGroups, executionRecipeSections, executionTableKey, executionTables } from '@/composables/executionPresentation'
 import { progressFlow } from '@/composables/recipeFlow'
@@ -133,6 +131,12 @@ async function drop(table: TableBrief) {
   })) return
   emit('refresh')
 }
+// 每个流程的全屏入口：行里的按钮调用对应 RecipeFlow 的 openFullscreen
+const flows = new Map<string, { openFullscreen: () => Promise<void> }>()
+function setFlow(key: string, el: unknown) {
+  if (el) flows.set(key, el as { openFullscreen: () => Promise<void> })
+  else flows.delete(key)
+}
 function stepFlow(recipe: RecipeBrief): RecipeFlowData {
   return recipe.flow ?? {
     inputs: recipe.input_patterns.map((input) => ({ alias: input.alias, kind: input.kind, description: input.description, file_pattern: input.file_pattern })),
@@ -208,49 +212,40 @@ onBeforeUnmount(() => {
       </div>
       <ExecutionUsage v-else-if="tab === 'usage'" :message="message" :messages="messages" :refreshing="refreshingUsage" @refresh="emit('refresh')" />
       <template v-else-if="tab === 'recipes'">
-        <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="mb-6 min-w-0 space-y-3">
-          <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
-            <div class="flex min-w-0 flex-1 items-center gap-2">
-              <h3 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ recipe?.name || progress.saved?.name || progress.recipeName || '处理流程' }}</h3>
-              <span v-if="version != null" class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ version }}</span>
-            </div>
-            <StatusPill class="shrink-0" :status="progressStatus(progress)" />
-            <span v-if="progress.round > 1" class="tag">第 {{ progress.round }} 轮</span>
-          </header>
-          <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
-            <p v-if="recipe?.description ?? progress.recipe?.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe?.description ?? progress.recipe?.description }}</p>
-            <RecipeFlow
-              v-if="progress.flow || progress.saved?.flow || progress.steps.length || recipe"
-              :flow="progressRecipeFlow(progress, recipe)"
-              :states="progress.steps"
-              :context="{
-                title: recipe?.name || progress.saved?.name || progress.recipeName,
-                recipeId: progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id,
-                version, recipe: recipe?.recipe || progress.recipe, runId: progress.runId,
-                customerId: recipe?.customer_id || detail?.customer?.id, conversationId: detail?.id,
-                files: detail?.files, resultFiles: progress.files || (progress.file ? [progress.file] : []),
-                running: !['done', 'failed'].includes(progress.status), failed: progressStatus(progress) === 'failed', deleted: progress.deleted,
-              }"
-              @changed="emit('refresh')"
-            />
-            <div v-if="progress.verify || progress.validation || progress.failed" class="mt-4 space-y-3">
-              <VerifyBadge v-if="progress.verify" :report="progress.verify" :rounds="progress.verifyHistory.length" />
-              <p v-if="progress.validation" class="break-words text-xs leading-5 text-mute">运行校验：{{ progress.validation.summary }}</p>
-              <p v-if="progress.failed" class="break-words text-xs leading-5 text-error">{{ progress.failed }}</p>
-            </div>
-            <RouterLink v-if="recipe?.customer_id && !progress.deleted" :to="{ name: 'customer', params: { id: recipe.customer_id }, query: { tab: 'recipes' } }" class="btn-text -ml-2 mt-3 text-xs">在客户页查看与重复执行 →</RouterLink>
+        <!-- 每个流程只留一行：标题和全屏按钮；版本、状态、流程图、说明都在全屏里看 -->
+        <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="mb-2 min-w-0">
+          <div class="flex min-w-0 items-center gap-2 rounded-xl border border-line px-3 py-2.5">
+            <h3 class="min-w-0 flex-1 truncate text-[15px] font-semibold" :title="recipe?.name || progress.saved?.name || progress.recipeName || '处理流程'">{{ recipe?.name || progress.saved?.name || progress.recipeName || '处理流程' }}</h3>
+            <button type="button" class="icon-btn shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" :disabled="!(progress.flow || progress.saved?.flow || progress.steps.length || recipe)" @click="flows.get(progress.key)?.openFullscreen()"><Maximize2 class="size-4" /></button>
           </div>
+          <RecipeFlow
+            v-if="progress.flow || progress.saved?.flow || progress.steps.length || recipe"
+            :ref="(el) => setFlow(progress.key, el)"
+            toolbar-placement="hidden" :inline-canvas="false"
+            :flow="progressRecipeFlow(progress, recipe)"
+            :states="progress.steps"
+            :context="{
+              title: recipe?.name || progress.saved?.name || progress.recipeName,
+              recipeId: progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id,
+              version, recipe: recipe?.recipe || progress.recipe, runId: progress.runId,
+              customerId: recipe?.customer_id || detail?.customer?.id, conversationId: detail?.id,
+              files: detail?.files, resultFiles: progress.files || (progress.file ? [progress.file] : []),
+              running: !['done', 'failed'].includes(progress.status), failed: progressStatus(progress) === 'failed', deleted: progress.deleted,
+            }"
+            @changed="emit('refresh')"
+          />
         </article>
-        <article v-for="recipe in recipeSections.saved" :key="recipe.recipe_id" class="mb-6 min-w-0 space-y-3">
-          <header class="flex flex-wrap items-center gap-x-3 gap-y-2 px-1">
-            <h3 class="min-w-0 flex-1 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h3>
-            <span class="tag shrink-0 !bg-[#6265DC]/10 !text-[#6265DC]">v{{ recipe.version }}</span>
-          </header>
-          <div class="min-w-0 rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
-            <p v-if="recipe.description" class="mb-5 break-words text-[13px] leading-[1.8] text-mute">{{ recipe.description }}</p>
-            <RecipeFlow :flow="stepFlow(recipe)" :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id || detail?.id, recipe: recipe.recipe, files: detail?.files }" @changed="emit('refresh')" />
-            <RouterLink v-if="recipe.customer_id" :to="{ name: 'customer', params: { id: recipe.customer_id }, query: { tab: 'recipes' } }" class="btn-text -ml-2 mt-3 text-xs">在客户页查看与重复执行 →</RouterLink>
+        <article v-for="recipe in recipeSections.saved" :key="recipe.recipe_id" class="mb-2 min-w-0">
+          <div class="flex min-w-0 items-center gap-2 rounded-xl border border-line px-3 py-2.5">
+            <h3 class="min-w-0 flex-1 truncate text-[15px] font-semibold" :title="recipe.name">{{ recipe.name }}</h3>
+            <button type="button" class="icon-btn shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="flows.get(`saved:${recipe.recipe_id}`)?.openFullscreen()"><Maximize2 class="size-4" /></button>
           </div>
+          <RecipeFlow
+            :ref="(el) => setFlow(`saved:${recipe.recipe_id}`, el)" toolbar-placement="hidden" :inline-canvas="false"
+            :flow="stepFlow(recipe)"
+            :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id || detail?.id, recipe: recipe.recipe, files: detail?.files }"
+            @changed="emit('refresh')"
+          />
         </article>
       </template>
 

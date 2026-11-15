@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
+from sheetmate.api.customers.schemas import FormulaGenerateBody
 from sheetmate.api.recipes.schemas import MatchBody, NodeEditBody, RunBody
 
 from typing import Any
 
 from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, Response, UploadFile
 from sqlalchemy.orm import Session
 
-from sheetmate.api.deps import current_user, sse_response
+from sheetmate.api.deps import admin_user, current_user, sse_response
 from sheetmate.db.session import get_db
 from sheetmate.db.models import User
 from sheetmate.services.customers import service as customer_service
+from sheetmate.services.formulas import service as formula_service
+from sheetmate.services.formulas import suggestions as suggestion_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.workflows import file_rename as file_rename_service
 from sheetmate.services.workflows import node_edit as node_edit_service
@@ -113,3 +116,61 @@ async def run_recipe(recipe_id: str, body: RunBody, user: User = Depends(current
 def list_formulas(customer_id: str | None = None, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     """当前用户可以访问的内置与客户公式目录。"""
     return {"ok": True, **recipe_service.formula_catalog(db, user, customer_id)}
+
+
+@router.post("/formulas")
+def save_global_formula(body: dict[str, Any], db: Session = Depends(get_db), user: User = Depends(admin_user)) -> dict[str, Any]:
+    """新增 / 升级内置公式（所有客户共用，SQL 模板；同一个 id 每保存一次升一个版本）。"""
+    record = recipe_service.save_global_formula(db, body, created_by="human")
+    item = next(f for f in recipe_service.formula_catalog(db, user)["builtin"] if f["id"] == record.formula_id)
+    return {"ok": True, "formula": item}
+
+
+@router.get("/formulas/suggestions")
+def formula_suggestions(db: Session = Depends(get_db), user: User = Depends(admin_user)) -> dict[str, Any]:
+    """建议整理成内置公式：多个流程里反复出现的同一段自定义 SQL。只发现，不保存。"""
+    return {"ok": True, "suggestions": suggestion_service.suggestions(db)}
+
+
+@router.post("/formulas/suggestions/{suggestion_id}/dismiss")
+def dismiss_formula_suggestion(suggestion_id: str, db: Session = Depends(get_db), user: User = Depends(admin_user)) -> dict[str, Any]:
+    """忽略一条建议（整理成内置公式之后也用它，建议不再出现）。"""
+    suggestion_service.dismiss(db, suggestion_id)
+    return {"ok": True}
+
+
+@router.get("/formulas/{formula_id}/references")
+def formula_references(formula_id: str, db: Session = Depends(get_db), user: User = Depends(admin_user)) -> dict[str, Any]:
+    """哪些客户的哪些流程用到了这个公式（删除前确认影响）。"""
+    return {"ok": True, "references": formula_service.references(db, formula_id)}
+
+
+@router.delete("/formulas/{formula_id}")
+def delete_global_formula(formula_id: str, db: Session = Depends(get_db), user: User = Depends(admin_user)) -> dict[str, Any]:
+    """删除内置公式：自己添加的彻底删除；自带的标记为不可用。"""
+    formula_service.delete_global(db, formula_id)
+    return {"ok": True}
+
+
+@router.post("/formulas/files")
+async def upload_formula_file(file: UploadFile = File(...), db: Session = Depends(get_db),
+                              user: User = Depends(admin_user)) -> dict[str, Any]:
+    """生成内置公式时上传的参考表：不属于任何客户。"""
+    record = file_service.save_upload(db, data=await file.read(), filename=file.filename or "file", user=user, kind="input")
+    return {"ok": True, "file": file_service.file_dict(record)}
+
+
+@router.post("/formulas/check")
+def check_global_formula(body: dict[str, Any], user: User = Depends(admin_user)) -> dict[str, Any]:
+    """内置公式边写边检查：和保存时的检查一样，不保存。"""
+    return {"ok": True, "problems": formula_service.check_formula(None, body)}
+
+
+@router.post("/formulas/generate")
+async def generate_global_formula(body: FormulaGenerateBody, db: Session = Depends(get_db),
+                                  user: User = Depends(admin_user)) -> dict[str, Any]:
+    """根据描述和上传的参考表生成内置公式草稿；不保存、不执行，也不绑定客户。"""
+    result = await customer_service.generate_customer_formula(
+        db, None, description=body.description, file_ids=body.file_ids, formula=body.formula,
+        tables=[item.model_dump() for item in body.tables], user=user, require_tables=False)  # 内置公式不针对某张表，参考表可选
+    return {"ok": True, **result}

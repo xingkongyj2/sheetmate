@@ -63,7 +63,7 @@ class ResolvedFormula:
 class FormulaLibrary:
     """某个上下文（某客户 / 无客户）下可用的全部公式。查找优先级：客户专属 > 内置。"""
 
-    def __init__(self, customer_formulas: list[Formula] | None = None):
+    def __init__(self, customer_formulas: list[Formula] | None = None, hidden_builtin: set[str] | None = None):
         latest: dict[str, Formula] = {}
         for f in customer_formulas or []:
             current = latest.get(f.id)
@@ -71,25 +71,27 @@ class FormulaLibrary:
                 latest[f.id] = f
         # 以最新版本为准：最新版本被停用，这个公式就整个不可用（不会退回旧版本继续生效）
         self._customer: dict[str, Formula] = {fid: f for fid, f in latest.items() if f.status != "deprecated"}
+        # 被用户从公式库里删掉的内置公式：不再可用（客户 / 全局公式同 id 的仍然优先）
+        self._hidden: set[str] = set(hidden_builtin or ())
 
     def resolve(self, formula_id: str) -> ResolvedFormula:
         fid = str(formula_id or "").strip()
         if fid in self._customer:
             return ResolvedFormula(self._customer[fid])
-        if fid in BUILTIN_FORMULAS:
+        if fid in BUILTIN_FORMULAS and fid not in self._hidden:
             item = BUILTIN_FORMULAS[fid]
             return ResolvedFormula(item.spec, item)
         available = "、".join(self.ids())
         raise FormulaError(f"没有公式「{fid}」。可用公式：{available}")
 
     def has(self, formula_id: str) -> bool:
-        return formula_id in self._customer or formula_id in BUILTIN_FORMULAS
+        return formula_id in self._customer or (formula_id in BUILTIN_FORMULAS and formula_id not in self._hidden)
 
     def ids(self) -> list[str]:
-        return list(self._customer) + [i for i in BUILTIN_FORMULAS if i not in self._customer]
+        return list(self._customer) + [i for i in BUILTIN_FORMULAS if i not in self._customer and i not in self._hidden]
 
     def builtin_specs(self) -> list[Formula]:
-        return [item.spec for fid, item in BUILTIN_FORMULAS.items() if fid not in self._customer]
+        return [item.spec for fid, item in BUILTIN_FORMULAS.items() if fid not in self._customer and fid not in self._hidden]
 
     def customer_specs(self) -> list[Formula]:
         return list(self._customer.values())
@@ -98,7 +100,7 @@ class FormulaLibrary:
         """给 LLM 的公式目录：每个公式一段（id、用途、参数声明）。"""
         lines: list[str] = []
         for spec in self.customer_specs():
-            lines.append(_spec_text(spec, "客户独有公式"))
+            lines.append(_spec_text(spec, "客户独有公式" if spec.scope == "customer" else "内置公式"))
         for spec in self.builtin_specs():
             lines.append(_spec_text(spec, "内置公式"))
         return "\n".join(lines)

@@ -386,10 +386,13 @@ async def refresh_customer_summary(db: Session, customer: Customer, *, only_if_o
     return {"summary": summary, "by_ai": llm is not None}
 
 
-async def generate_customer_formula(db: Session, customer: Customer, *, description: str,
-                                    file_ids: list[str], formula: dict[str, Any] | None = None) -> dict[str, Any]:
+async def generate_customer_formula(db: Session, customer: Customer | None, *, description: str,
+                                    file_ids: list[str], formula: dict[str, Any] | None = None,
+                                    tables: list[dict[str, Any]] | None = None, user: Any = None,
+                                    require_tables: bool = True) -> dict[str, Any]:
     """以当前模型生成客户公式，API 层只处理请求和权限。"""
     from sheetmate.agent.llm import get_llm
     from sheetmate.services.formulas.generation import generate_formula
 
-    return await generate_formula(db, customer, get_llm(), description=description, file_ids=file_ids, formula=formula)
+    return await generate_formula(db, customer, get_llm(), description=description, file_ids=file_ids, formula=formula,
+                                  tables=tables, user=user, require_tables=require_tables)

@@ -4,7 +4,7 @@
  * 选客户相当于 Qoder 里「选择目录」，可以不选。发送时：建会话 → 上传附件 → 跳到对话页继续。
  */
 import { storeToRefs } from 'pinia'
-import { computed, defineAsyncComponent, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import { isNavigationFailure, useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
@@ -17,13 +17,13 @@ import { attachmentMessage } from '@/composables/attachmentFiles'
 import { uid } from '@/composables/chatModel'
 import { useLocalFileReferences } from '@/composables/localFileReferences'
 import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
+import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
 import { useHomeDraftStore } from '@/stores/homeDraft'
 import { pendingStarts } from '@/stores/pending'
 
-const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 
 const store = useWorkspaceStore()
 const auth = useAuthStore()
@@ -34,7 +34,7 @@ const toast = useToast()
 
 const { text, thinking, customerId, files, attachments, busy, ready, savingFiles, cacheError } = storeToRefs(draft)
 const composer = ref<InstanceType<typeof ChatComposer> | null>(null)
-const viewingFile = ref<File | null>(null)
+const openFilePreview = useFilePreview()
 let active = true
 onBeforeUnmount(() => { active = false })
 
@@ -72,7 +72,7 @@ function preview(key: string) {
   const item = files.value.find((file) => file.key === key)
   if (!item) return
   composer.value?.captureSelection()
-  viewingFile.value = item.file
+  openFilePreview(item.file)  // 还没上传的本地文件：新标签页通过 blob 地址读取
 }
 
 async function send() {
@@ -206,6 +206,5 @@ async function send() {
         <p v-else-if="ready && savingFiles" class="mt-3 text-center text-xs text-slate-400" role="status">正在保存附件…</p>
       </div>
     </div>
-    <WorkbookPreview v-if="viewingFile" :local-file="viewingFile" @close="viewingFile = null" />
   </div>
 </template>
