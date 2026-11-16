@@ -131,7 +131,6 @@ const LABELS: Record<string, string> = {
 <style scoped>
 .task-checklist-list {
   max-height: min(420px, 44vh);
-  scrollbar-width: thin;
 }
 @media (max-width: 767px) {
   .task-checklist-list { max-height: 160px; }

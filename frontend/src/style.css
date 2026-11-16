@@ -122,10 +122,28 @@ body {
   color: #fff;
 }
 
-/* 细滚动条 */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: #d9d9de transparent;
+/* 细滚动条：透明轨道、没有箭头，只剩一条 4px 的圆角滑块（外面留 3px 透明边，好抓取）。
+   注意：Chrome/Edge 里只要设了 scrollbar-width / scrollbar-color，下面的 ::-webkit-scrollbar 就会失效，
+   所以标准属性只给不支持 ::-webkit-scrollbar 的浏览器（Firefox）用，页面里别再单独写 scrollbar-width。 */
+::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+::-webkit-scrollbar-button { display: none; width: 0; height: 0; }
+::-webkit-scrollbar-thumb {
+  min-width: 36px;
+  min-height: 36px;
+  border: 3px solid transparent;
+  border-radius: 9999px;
+  background-color: #d9d9de;
+  background-clip: padding-box;
+  transition: background-color .2s;
+}
+::-webkit-scrollbar-thumb:hover { background-color: #b6b6be; }
+::-webkit-scrollbar-thumb:active { background-color: #a1a1aa; }
+@supports not selector(::-webkit-scrollbar) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #d9d9de transparent;
+  }
 }
 
 @layer components {
