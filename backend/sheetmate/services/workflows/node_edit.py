@@ -6,6 +6,7 @@ HTTP 接口直接调用本模块；聊天工具通过 agent.tools.workflows.node
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -143,6 +144,58 @@ def edit_nodes(db: Session, user: User, recipe_id: str, edits: list[dict[str, An
             "customer_id": saved.customer_id, "saved": True, "changes": result.changes, "unchanged": result.unchanged,
             "warnings": result.warnings, "needs_rerun": result.needs_rerun,
             "description": result.recipe.description, "flow": result.recipe.flow()}
+
+
+_EDIT_PREFIX = re.compile(r"^第 \d+ 项修改（[^）]*）：")
+
+
+def _is_auto_export(db: Session, user: User, recipe_id: str, name: str) -> bool:
+    """这个输出文件是不是系统按流程名自动生成的（流程名_结果.xlsx）：它没有脚本声明，名字跟着流程名走。"""
+    recipe, _ = _load(db, user, recipe_id)
+    if any(item["name"] == name for item in declared_files(recipe)):
+        return False
+    return any(item["name"] == name and not item["ref"] for item in recipe.flow()["output_files"])
+
+
+def rename_file(db: Session, user: User, file_id: str, new_name: str, *, customer_id: str | None = None,
+                recipe_id: str | None = None) -> dict[str, Any]:
+    """文件页里直接改文件名（只改名字，不重跑流程，扩展名不能变）。
+
+    输入 / 人工做好的文件：改文件记录，并同步流程里记录的来源文件名（保存为新版本）。
+    输出文件：名字由脚本声明决定，所以先改流程里声明的名字（同步脚本等所有引用，保存为新版本），
+    再把已经生成的这个文件一起改名，页面上马上就是新名字；不然要等下次运行才会变。
+    """
+    record = file_service.get_file(db, file_id)
+    if not file_service.can_access_file(db, user, record):
+        raise Forbidden("你没有权限访问这个文件")
+    if record.kind != "output":
+        result = file_rename.rename_files(
+            db, user, [{"file_id": file_id, "new_name": new_name}],
+            accessible=lambda item: file_service.can_access_file(db, user, item), customer_id=customer_id)
+        return {"old": result["files"][0]["old"], "filename": result["files"][0]["new"], "changed": result["files"][0]["changed"],
+                "recipes": [{"recipe_id": item["recipe_id"], "version": item["version"], "customer_id": item["customer_id"]}
+                            for item in result["recipes"]]}
+    if not recipe_id:
+        raise ServiceError("输出文件的名字由流程决定，请在流程下的文件页里修改。")
+    old = record.filename
+    try:
+        final = file_rename.requested_filename(old, new_name)
+    except ValueError as exc:
+        raise ServiceError(str(exc)) from exc
+    if final == old:
+        return {"old": old, "filename": old, "changed": False, "recipes": []}
+    if _is_auto_export(db, user, recipe_id, old):
+        raise ServiceError("这个文件名是按流程名称自动生成的，请修改流程名称；新名字会在下次运行时生效。")
+    try:
+        saved = edit_nodes(db, user, recipe_id, [{"op": "rename_output_file", "name": old, "new_name": final}], customer_id=customer_id)
+    except ServiceError as exc:
+        exc.message = _EDIT_PREFIX.sub("", exc.message)  # 去掉「第 1 项修改（rename_output_file）：」这类内部说明
+        exc.args = (exc.message,)
+        raise
+    record.filename = final
+    db.flush()
+    return {"old": old, "filename": final, "changed": True,
+            "recipes": [{"recipe_id": saved["recipe_id"], "version": saved["version"], "customer_id": saved["customer_id"]}]}
 
 
 class _ChatBackend:

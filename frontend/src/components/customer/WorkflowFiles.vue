@@ -91,6 +91,22 @@ async function upload(event: Event) {
   }
 }
 
+/** 改文件名：输入文件同步流程里记录的名字；输出文件改的是流程里声明的名字，所以只有在具体流程下才能改。
+ * 失败时抛出错误，由这一行显示原因；改成功后才刷新页面，刷新失败不算改名失败。 */
+async function rename(file: FileInfo, filename: string) {
+  const refresh = props.refresh
+  const result = await fileApi.rename(file.file_id, filename, { customerId: props.customerId, recipeId: props.recipeId })
+  if (active && result.changed) {
+    const version = result.recipes[0]?.version
+    toast.success(version ? `已改名，流程已更新到 v${version}` : '已改名')
+  }
+  try {
+    await refresh()
+  } catch (err) {
+    if (active) toast.error(errorText(err))
+  }
+}
+
 async function remove(file: FileInfo) {
   const customerId = props.customerId
   const recipeId = props.recipeId
@@ -141,7 +157,7 @@ async function remove(file: FileInfo) {
       </div>
       <WorkflowFileRow
         v-for="file in files" :key="file.file_id" :file="file"
-        :badge="file.kind === 'expected' ? file.kind_label : undefined" badge-class="!bg-fun-yellow/20 !text-[#8a6400]"
+        :badge="file.kind === 'expected' ? file.kind_label : undefined" badge-class="!bg-fun-yellow/20 !text-[#8a6400]" :rename-file="rename"
         @preview="emit('preview', $event)" @remove="remove"
       />
       <p v-if="!files.length" class="py-6 text-center text-sm text-faint">还没有文件</p>
@@ -149,7 +165,7 @@ async function remove(file: FileInfo) {
       <h3 class="mb-3 mt-6 border-t border-line pt-6 text-[15px] font-semibold">输出文件</h3>
       <WorkflowFileRow
         v-for="file in results" :key="file.file_id" :file="file"
-        :badge="file.delivery_status === 'candidate' ? '待核验文件' : undefined"
+        :badge="file.delivery_status === 'candidate' ? '待核验文件' : undefined" :rename-file="recipeId ? rename : undefined"
         @preview="emit('preview', $event)" @remove="remove"
       />
       <p v-if="!results.length" class="py-6 text-center text-sm text-faint">还没有输出文件</p>

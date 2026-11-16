@@ -171,6 +171,10 @@ export interface DataPreviewPage {
 
 export const fileApi = {
   get: async (id: string) => (await http.get<{ file: FileInfo }>(`/files/${id}`)).data.file,
+  /** 改文件名（只改名字，不重跑，扩展名不能变）：输入文件同步流程里记录的名字；输出文件必须带 recipeId，同步流程里声明的名字。 */
+  rename: async (id: string, filename: string, scope: { customerId?: string; recipeId?: string } = {}) =>
+    (await http.patch<{ old: string; filename: string; changed: boolean; recipes: { recipe_id: string; version: number; customer_id: string | null }[] }>(
+      `/files/${id}`, { filename, customer_id: scope.customerId, recipe_id: scope.recipeId })).data,
   content: async (id: string, signal?: AbortSignal) =>
     (await http.get<ArrayBuffer>(`/files/${id}/download`, { responseType: 'arraybuffer', signal })).data,
   preview: async (id: string, sheet?: string, offset = 0, limit = 50) =>

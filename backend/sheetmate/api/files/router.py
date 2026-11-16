@@ -5,18 +5,27 @@ from __future__ import annotations
 from typing import Any
 from urllib.parse import quote
 
-from fastapi import APIRouter, Depends, File, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from sheetmate.api.deps import current_user
 from sheetmate.db.session import get_db
 from sheetmate.db.models import FileRecord, User
+from sheetmate.services.customers import service as customer_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.files import inspection
+from sheetmate.services.workflows import node_edit as node_edit_service
 from sheetmate.core.errors import Forbidden, NotFound, ServiceError
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+
+
+class RenameFileBody(BaseModel):
+    filename: str
+    customer_id: str | None = None
+    recipe_id: str | None = None  # 改输出文件的名字时必填：名字记录在这个流程里
 
 
 @router.post("/preview-upload")
@@ -40,6 +49,19 @@ def file_info(file_id: str, db: Session = Depends(get_db), user: User = Depends(
     record = file_service.get_file(db, file_id)
     _check(db, user, record)
     return {"ok": True, "file": file_service.file_dict(record)}
+
+
+@router.patch("/{file_id}")
+def rename_file(file_id: str, body: RenameFileBody, background: BackgroundTasks, db: Session = Depends(get_db),
+                user: User = Depends(current_user)) -> dict[str, Any]:
+    """改文件名：输入文件同步流程里记录的名字，输出文件同步流程里声明的名字；只改名字，不重跑。"""
+    result = node_edit_service.rename_file(db, user, file_id, body.filename, customer_id=body.customer_id, recipe_id=body.recipe_id)
+    owners = {item["customer_id"] for item in result["recipes"] if item["customer_id"]}
+    if owners:
+        db.commit()  # 后台任务要读到刚保存的新版本
+        for owner in owners:
+            background.add_task(customer_service.auto_refresh_summary, owner)
+    return {"ok": True, **result}
 
 
 @router.get("/{file_id}/preview")
