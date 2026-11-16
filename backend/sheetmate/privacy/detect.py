@@ -8,7 +8,7 @@ from typing import Iterable
 from sheetmate.privacy.address import looks_like_address
 from sheetmate.privacy.rules import (
     EMAIL_RE, KIND_LABELS, LANDLINE_RE, MOBILE_RE, cell_text, header_kind, is_email, is_id_like_header, is_landline,
-    is_mobile,
+    is_landline_number, is_mobile,
 )
 
 ACTIONS = {"phone": "tokenize", "landline": "tokenize", "email": "tokenize", "im": "tokenize",
@@ -33,13 +33,13 @@ class Finding:
         return ACTIONS[self.kind]
 
 
-def _rates(texts: list[str]) -> tuple[dict[str, float], int]:
+def _rates(items: list[tuple[str, object]]) -> tuple[dict[str, float], int]:
     counts = {"phone": 0, "landline": 0, "email": 0, "address": 0}
     embedded = 0
-    for text in texts:
+    for text, value in items:
         if is_mobile(text):
             counts["phone"] += 1
-        elif is_landline(text):
+        elif is_landline(text) or is_landline_number(value):
             counts["landline"] += 1
         elif is_email(text):
             counts["email"] += 1
@@ -47,14 +47,15 @@ def _rates(texts: list[str]) -> tuple[dict[str, float], int]:
             counts["address"] += 1
         elif MOBILE_RE.search(text) or EMAIL_RE.search(text) or LANDLINE_RE.search(text):
             embedded += 1
-    total = len(texts) or 1
+    total = len(items) or 1
     return {kind: count / total for kind, count in counts.items()}, embedded
 
 
 def classify_column(name: object, values: Iterable[object]) -> Finding | None:
     """只用内置规则判断一列；没有发现联系方式或地址时返回 None。"""
-    texts = [text for text in (cell_text(value) for value in list(values)[:MAX_VALUES]) if text]
-    rates, embedded = _rates(texts)
+    items = [(text, value) for value in list(values)[:MAX_VALUES] if (text := cell_text(value))]
+    texts = [text for text, _ in items]
+    rates, embedded = _rates(items)
     best_kind, best_rate = max(rates.items(), key=lambda item: item[1])
     header = header_kind(name)
 

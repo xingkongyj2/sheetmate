@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import numbers
 import re
 import unicodedata
 
@@ -123,6 +124,26 @@ def is_mobile(text: str) -> bool:
 def is_landline(text: str) -> bool:
     # 400/800 是企业热线，不是个人号码
     return bool(_LANDLINE_FULL.fullmatch(_compact(text)))
+
+
+# Excel 把 057188888888 存成数字会吃掉前导 0：变成 57188888888（11 位）或 1088888888（10 位）。
+# 这里认「去掉 0 之后的座机」：2 位区号（10、20～29）+ 8 位，或 3 位区号（3xx～9xx）+ 7～8 位。
+# 只用于数字类型的单元格；日期时间戳样式的整数（2024010112）排除，其余宁可多遮。
+_BARE_LANDLINE = re.compile(r"(?:10|2\d)\d{8}|[3-9]\d{9,10}")
+_DATE_STAMP = re.compile(r"(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{2}")
+
+
+def is_numeric_cell(value: object) -> bool:
+    """数字类型的单元格（含 numpy 数字）；布尔不算。"""
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)   # numpy 的整数、小数也是 numbers.Real
+
+
+def is_landline_number(value: object) -> bool:
+    """数字单元格是不是被吃掉前导 0 的座机；字符串、布尔、带小数的数都不算。"""
+    if not is_numeric_cell(value):
+        return False
+    text = cell_text(value)
+    return text.isdigit() and bool(_BARE_LANDLINE.fullmatch(text)) and not _DATE_STAMP.fullmatch(text)
 
 
 def is_email(text: str) -> bool:

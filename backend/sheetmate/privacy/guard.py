@@ -23,10 +23,10 @@ from sheetmate.privacy.address import find_addresses, split_address
 from sheetmate.privacy.detect import classify_column
 from sheetmate.privacy.events import PrivacyLog
 from sheetmate.privacy.rules import (
-    ADDR_CTX_RE, EMAIL_OBF_RE, EMAIL_RE, IM_CTX_RE, LANDLINE_COMPACT_RE, LANDLINE_RE, MOBILE_RE, PHONE_CTX_RE,
-    address_context_ok, cell_text, fold, header_kind, is_label, is_mobile, normalize_header, phone_context_ok,
+    ADDR_CTX_RE, EMAIL_OBF_RE, EMAIL_RE, IM_CTX_RE, KIND_PREFIX, LANDLINE_COMPACT_RE, LANDLINE_RE, MOBILE_RE, PHONE_CTX_RE,
+    address_context_ok, cell_text, fold, header_kind, is_label, is_landline_number, is_mobile, normalize_header, phone_context_ok,
 )
-from sheetmate.privacy.vault import TOKEN_RE, Vault
+from sheetmate.privacy.vault import MIN_KNOWN_CHARS, TOKEN_RE, Vault
 
 _JSON_START = re.compile(r"(?:^|(?<=[\s:：=]))[\[{]", re.M)      # 一段 JSON 可能的起点：行首，或前面是空白、冒号、等号
 _CACHE_MIN_CHARS = 200
@@ -139,6 +139,7 @@ class Guard:
         self._cache_lock = threading.Lock()
         self._cache_costs: dict[tuple[int, int, str], int] = {}
         self._cache_bytes = 0
+        self._snippets: tuple[int, tuple[dict[str, str], str, list[int]]] | None = None
 
     # ------------------------------------------------------------------ 单元格
 
@@ -236,7 +237,9 @@ class Guard:
             return obj
         if isinstance(obj, (int, float)):
             # JSON 里以数字存的手机号：换成字符串令牌，保证 JSON 仍然有效
-            return self._token_cell("phone", obj, stats, "json_number") if is_mobile(cell_text(obj)) else obj
+            if is_mobile(cell_text(obj)):
+                return self._token_cell("phone", obj, stats, "json_number")
+            return self._token_cell("landline", obj, stats, "json_number") if is_landline_number(obj) else obj
         if isinstance(obj, list):
             return [self._walk(item, stats, depth) for item in obj]
         if not isinstance(obj, dict):
@@ -368,14 +371,55 @@ class Guard:
 
     def _scan_learned(self, text: str, stats: Stats) -> str:
         """脱敏模型事先判断出来的：
-        逐个检查过的单元格——整段文字正好是那个单元格，里面摘出的片段全部替换。
+        1. 逐个检查过的单元格——整段文字正好是那个单元格，里面摘出的片段全部替换；
+        2. 摘出的片段本身——不管后面嵌在多长的文字里（历史消息引用「客户备注：放菜鸟驿站旁边小卖部」），都要替换。
         这是规则不好覆盖的部分（没有路名门牌的地点、各种写法的联系方式），交给私部署的模型来判断。"""
         hits = self.vault.cell_hits().get(text)
         if hits:
             for snippet, kind in sorted(hits, key=lambda item: len(item[0]), reverse=True):
                 if snippet in text and not TOKEN_RE.search(snippet) and not is_label(snippet):   # 模型曾把列头当成地址摘出来过：不理它
                     text = text.replace(snippet, self._pattern_token(kind, snippet, stats, "learned"))
-        return text
+        return self._scan_snippets(text, stats)
+
+    def _snippet_index(self) -> tuple[dict[str, str], str, list[int]]:
+        """所有学到的片段 → 类型。登记新发现时 known_version 会变，索引随之重建。
+        太短的（不足 MIN_KNOWN_CHARS）、令牌、列头标签、只有行政区的地址不进索引：它们会误伤普通文字。"""
+        version = self.vault.known_version
+        cached = self._snippets
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        index: dict[str, str] = {}
+        for items in self.vault.cell_hits().values():
+            for snippet, kind in items:
+                snippet = str(snippet).strip()
+                if (len(snippet) < MIN_KNOWN_CHARS or kind not in KIND_PREFIX or TOKEN_RE.search(snippet) or is_label(snippet)
+                        or kind == "address" and not split_address(snippet)[1].strip()):
+                    continue
+                index.setdefault(snippet, kind)
+        built = (index, "".join({snippet[0] for snippet in index}), sorted({len(snippet) for snippet in index}, reverse=True))
+        self._snippets = (version, built)
+        return built
+
+    def _scan_snippets(self, text: str, stats: Stats) -> str:
+        index, firsts, lengths = self._snippet_index()
+        if not index or len(text) < MIN_KNOWN_CHARS:
+            return text
+        out: list[str] = []
+        position, size, last = 0, len(text), 0
+        while position < size:
+            if text[position] in firsts:
+                for length in lengths:                       # 从长到短：同一处有长短两个片段时遮长的
+                    kind = index.get(text[position:position + length]) if position + length <= size else None
+                    if kind:
+                        out += [text[last:position], self._pattern_token(kind, text[position:position + length], stats, "learned")]
+                        position += length
+                        last = position
+                        break
+                else:
+                    position += 1
+            else:
+                position += 1
+        return text if not out else "".join(out) + text[last:]
 
     def _scan_known(self, text: str, stats: Stats) -> str:
         known = self.vault.known()
@@ -500,6 +544,8 @@ class Guard:
             return self._scan(self._scan_known(self._scan_learned(value, stats), stats), stats)
         if isinstance(value, (int, float)) and is_mobile(cell_text(value)):
             return self._token_cell("phone", value, stats, "copy")   # 数字格式的手机号：发给 AI 时同样会换
+        if is_landline_number(value):
+            return self._token_cell("landline", value, stats, "copy")   # 被吃掉前导 0 的数字座机
         return value
 
     def protect_message(self, message: dict[str, Any], stats: Stats) -> dict[str, Any]:
