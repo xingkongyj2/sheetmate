@@ -27,6 +27,7 @@ import { useToast } from '@/composables/useToast'
 import { useProgressiveReply } from '@/composables/useProgressiveReply'
 import { useReplyTimer } from '@/composables/useReplyTimer'
 
+import PrivacyReportCard from './PrivacyReportCard.vue'
 import RecipeStageDetails from './RecipeStageDetails.vue'
 import RecipeViewCard from './RecipeViewCard.vue'
 import TimelineList from './TimelineList.vue'
@@ -89,7 +90,7 @@ function isFollowedByProcess(index: number): boolean {
 }
 const typing = computed(() => props.message.streaming || revealing.value)
 const activity = computed(() => {
-  if (!props.message.streaming || revealing.value) return ''
+  if (!props.message.streaming || revealing.value || props.message.privacyRunning) return ''
   const loading = displayGroups.value.some((group) => group.kind === 'process'
     ? processHeaders.value.get(group.key)?.status === 'running'
     : !group.closed && !!group.text.trim())
@@ -165,6 +166,8 @@ onBeforeUnmount(() => {
     </div>
     <div class="assistant-content w-full min-w-0 space-y-3">
       <p v-if="replyTime" class="text-xs leading-5 text-faint tabular-nums" data-testid="reply-timer">{{ replyTime }}</p>
+      <!-- 每轮对话先脱敏再交给模型：脱敏结果永远是回复的第一块内容。 -->
+      <PrivacyReportCard v-if="message.privacy || message.privacyRunning" class="assistant-privacy" :report="message.privacy" :running="message.privacyRunning" />
       <!-- 按发生顺序只合并相邻同类步骤，正文保持原位。 -->
       <template v-for="(group, index) in displayGroups" :key="group.key">
         <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :class="{ 'assistant-stage--before-process': isFollowedByProcess(index) }" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">
@@ -299,6 +302,7 @@ onBeforeUnmount(() => {
 
 /* 首行文字中心与头像中心对齐；多行内容的后续行自然向下排。 */
 .assistant-content > .assistant-activity:first-child,
+.assistant-content > .assistant-privacy:first-child,
 .assistant-stage:first-child > .assistant-process > summary,
 .assistant-content > :deep(.prose-sm:first-child) {
   padding-top: max(0px, calc((var(--assistant-avatar-size) - 1lh) / 2));

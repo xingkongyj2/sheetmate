@@ -574,6 +574,107 @@ export interface DeliveryManifestEvent extends AgentEvent {
   summary: string
 }
 
+// ---------------------------------------------------------------- 脱敏
+export type PrivacyKind = 'phone' | 'landline' | 'email' | 'im' | 'address' | 'mixed'
+export type PrivacyAction = 'tokenize' | 'address_detail' | 'cell_scan'
+export type PrivacySource = 'rules' | 'model' | 'both'
+
+export interface PrivacyColumn {
+  name: string
+  kind: PrivacyKind
+  kind_label: string
+  action: PrivacyAction
+  action_label: string
+  source: PrivacySource
+  reason: string
+  values: number
+}
+
+export interface PrivacySheet {
+  sheet: string
+  rows: number
+  columns: PrivacyColumn[]
+}
+
+export interface PrivacyFile {
+  file_id: string
+  filename: string
+  /** 沿用之前的识别结果 */
+  cached?: boolean
+  /** 识别发生在上传文件时（upload）还是用到它的那轮对话里（chat） */
+  source?: 'upload' | 'chat' | null
+  sheets: PrivacySheet[]
+}
+
+/** 文件列表里每个表格文件的脱敏状态：已识别 / 识别中 / 识别没有完成 / 还没识别 */
+export interface PrivacyFileStatus {
+  state: 'ready' | 'running' | 'failed' | 'none'
+  /** 被保护的列数（只有 ready 才有） */
+  columns: number
+  mode: 'model_rules' | 'rules' | null
+  model: string | null
+  source: 'upload' | 'chat' | null
+  updated_at: string | null
+  error: string | null
+}
+
+/** 每轮对话开始时的脱敏结果（privacy_report 事件）；blocked 表示没有完成，本轮没有任何数据发给 AI */
+export interface PrivacyReport {
+  status: 'ok' | 'blocked'
+  mode: 'model_rules' | 'rules'
+  model: string | null
+  headline: string
+  files: PrivacyFile[]
+  totals: { files: number; columns: number; values: number }
+  notes: string[]
+  reason: string | null
+}
+
+export interface PrivacyFileState extends PrivacyFile {
+  status: 'ready' | 'pending' | 'failed'
+  updated_at: string | null
+  error: string | null
+}
+
+export interface PrivacyEventItem {
+  id: number
+  time: string
+  level: 'info' | 'warn' | 'error'
+  kind: '识别' | '发送检查' | '还原' | '拦截' | '错误' | '导出'
+  text: string
+  detail: Record<string, unknown> | null
+}
+
+/** 脱敏副本预览里的一列：被保护的列带类型和处理方式 */
+export interface PrivacyCopyColumn {
+  name: string
+  protected: boolean
+  kind_label: string | null
+  action_label: string | null
+}
+
+/** 「AI 实际看到的样子」：被保护的格子已经是令牌 */
+export interface PrivacyCopyPreview {
+  filename: string
+  sheets: { sheet: string; rows: number }[]
+  sheet: string
+  total: number
+  offset: number
+  limit: number
+  columns: PrivacyCopyColumn[]
+  rows: (string | number | null)[][]
+}
+
+/** 详情面板「脱敏」tab：当前会话的整体情况 */
+export interface PrivacyOverview {
+  mode: 'model_rules' | 'rules'
+  model: string | null
+  model_configured: boolean
+  totals: { files: number; columns: number; values: number; requests: number; blocked: number; restored: number }
+  files: PrivacyFileState[]
+  events: PrivacyEventItem[]
+}
+
 export type LLMProviderId = 'deepseek' | 'qwen' | 'custom'
 
 export interface LLMCapabilities {

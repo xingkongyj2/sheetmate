@@ -33,7 +33,9 @@ from sheetmate.agent.llm.cache import reported_cache_usage, request_prefix_profi
 from sheetmate.agent.llm.structured import StructuredOutputError, complete_structured, validate_payload
 from sheetmate.agent.llm.protocol import LanguageModel
 from sheetmate.agent.framework.shared.watchdog import Phase, WatchdogTimeout, phase, wait_owned
-from sheetmate.core.config.settings import AUTO_MAX_TOKENS, LLMSettings, get_llm_settings, is_deepseek_url
+from sheetmate.core.config.settings import (
+    AUTO_MAX_TOKENS, LLMSettings, get_llm_settings, get_privacy_llm_settings, is_deepseek_url,
+)
 from sheetmate.core.observability.conversation_log import record_event
 
 
@@ -48,6 +50,29 @@ _ACCEPTED_MAX_TOKENS: dict[tuple[str, str], int] = {}
 _MAX_TOKENS_ERROR = re.compile(r"max_(?:completion_)?tokens|output tokens|completion tokens|maximum context|context length|上下文", re.I)
 _MAX_TOKENS_PARAM = re.compile(r"max_(?:completion_)?tokens", re.I)
 _CONTEXT_BOUND = re.compile(r"context|input|prompt|上下文|输入", re.I)
+_NUM = r"(\d[\d,]*)"
+_CONTEXT_LENGTH = re.compile(rf"(?:context length|context window|上下文(?:长度|窗口)?)\D{{0,12}}{_NUM}", re.I)
+_INPUT_TOKENS = [re.compile(pattern, re.I) for pattern in (
+    rf"{_NUM}\s*tokens?\s*from the (?:input|prompt|messages)",
+    rf"(?:has|contains|with)\s*{_NUM}\s*(?:input|prompt)\s*tokens?",
+    rf"{_NUM}\s*(?:input|prompt)\s*tokens?",
+    rf"(?:input|prompt)\s*tokens?\D{{0,12}}{_NUM}",
+    rf"输入\D{{0,6}}{_NUM}",
+)]
+
+
+def _context_headroom(message: str) -> int:
+    """报错同时给出上下文窗口和输入 Token 数时，算出输出还能用多少（留 2% 余量）；读不出返回 0。"""
+    window = _CONTEXT_LENGTH.search(message)
+    if not window:
+        return 0
+    size = int(window.group(1).replace(",", ""))
+    for pattern in _INPUT_TOKENS:
+        found = pattern.search(message)
+        if found:
+            used = int(found.group(1).replace(",", ""))
+            return max(0, size - used - max(256, size // 50)) if used < size else 0
+    return 0
 
 
 def lower_max_tokens(kwargs: dict[str, Any], message: str, key: tuple[str, str]) -> bool:
@@ -57,6 +82,11 @@ def lower_max_tokens(kwargs: dict[str, Any], message: str, key: tuple[str, str])
     current = int(kwargs.get("max_tokens") or 0)
     if current <= 0 or not _MAX_TOKENS_ERROR.search(message):
         return False
+    accepted = _context_headroom(message)
+    if 256 <= accepted < current:
+        # 上下文窗口减输入后的剩余额度；与本次输入长度有关，不缓存为模型固定上限。
+        kwargs["max_tokens"] = accepted
+        return True
     numbers = [int(item.replace(",", "")) for item in re.findall(r"\d[\d,]*", message)]
     candidates = [number for number in numbers if 256 <= number < current]
     accepted = max(candidates) if candidates else 0
@@ -367,7 +397,12 @@ class LLMClient:
 
     def _auto_output_tokens(self) -> int:
         """未开启上限时请求的输出 Token：先试最大值，服务端拒绝后用它记住的真实上限（0 表示不传）。"""
-        return _ACCEPTED_MAX_TOKENS.get(self._accepted_key(), AUTO_MAX_TOKENS)
+        default = AUTO_MAX_TOKENS
+        window = self.cfg.runtime_policy.context_window_tokens
+        if window:
+            # 已知上下文容量时，最多拿四分之一给输出，避免「输入 + 输出」超出窗口。
+            default = max(1024, min(default, window // 4))
+        return _ACCEPTED_MAX_TOKENS.get(self._accepted_key(), default)
 
     def _default_output_tokens(self) -> int:
         return self.cfg.output_limit or self._auto_output_tokens()
@@ -687,9 +722,10 @@ class LLMClient:
                             finish_reason = reason
                             if reason == "length":
                                 limit = self.cfg.output_limit
-                                auto = self._auto_output_tokens()
+                                auto = int(kwargs.get("max_tokens") or 0)
                                 hint = (f"当前固定的输出 Token 上限为 {limit}（环境变量 LLM_MAX_TOKENS），可调大后重启重试。" if limit else
-                                        f"当前未设置输出上限，已按模型可接受的最大值（{auto}）请求，已到该模型的输出上限；可尝试精简任务或分步处理。"
+                                        f"当前未设置输出上限，本次请求的输出上限为 {auto}（受模型窗口和输入长度限制），已写满；"
+                                        "可在环境变量 LLM_MAX_TOKENS 设置更大的固定值，或精简任务、分步处理。"
                                         if auto else
                                         "当前未设置输出上限，且该模型不接受输出上限参数，长度由模型服务自身决定；可尝试精简任务或分步处理。")
                                 raise LLMError(f"模型输出达到长度上限，本轮响应不完整。{hint}",
@@ -942,6 +978,7 @@ async def aux_json(llm: Any, prompt: str, *, system: str | None = None, timeout:
 # ---------------------------------------------------------------------------
 
 _factory: Callable[[], LanguageModel] | None = None
+_privacy_factory: Callable[[], LanguageModel] | None = None
 
 
 def set_llm_factory(factory: Callable[[], LanguageModel] | None) -> None:
@@ -949,10 +986,34 @@ def set_llm_factory(factory: Callable[[], LanguageModel] | None) -> None:
     _factory = factory
 
 
+def set_privacy_llm_factory(factory: Callable[[], LanguageModel] | None) -> None:
+    """测试时替换脱敏模型。"""
+    global _privacy_factory
+    _privacy_factory = factory
+
+
 def get_llm() -> LanguageModel:
-    if _factory is not None:
-        return _factory()
-    return LLMClient(get_llm_settings())
+    """所有「正常模型」调用的唯一入口：返回的模型外面包了一层脱敏拦截器（发出去先脱敏，回来在本机还原）。"""
+    from sheetmate.agent.llm.guarded import GuardedLLM
+
+    inner = _factory() if _factory is not None else LLMClient(get_llm_settings())
+    return GuardedLLM(inner)
+
+
+def privacy_llm_configured() -> bool:
+    return _privacy_factory is not None or get_privacy_llm_settings().configured
+
+
+def get_privacy_llm() -> LanguageModel:
+    """脱敏模型：设置页里单独配置，专门给脱敏模块识别联系方式和地址用。
+
+    它必须读到真实数据才能判断，所以不经过拦截器；建议使用内网私有部署的模型，地址由使用者自己决定。"""
+    if _privacy_factory is not None:
+        return _privacy_factory()
+    cfg = get_privacy_llm_settings()
+    if not cfg.configured:
+        raise LLMError("还没有配置脱敏模型。", code="privacy_llm_not_configured")
+    return LLMClient(cfg)
 
 
 async def test_connection(cfg: LLMSettings) -> dict[str, Any]:

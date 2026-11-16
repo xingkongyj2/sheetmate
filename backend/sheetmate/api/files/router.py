@@ -6,7 +6,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -16,10 +16,16 @@ from sheetmate.db.models import FileRecord, User
 from sheetmate.services.customers import service as customer_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.files import inspection
+from sheetmate.services.privacy import masked_copy
+from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.workflows import node_edit as node_edit_service
 from sheetmate.core.errors import Forbidden, NotFound, ServiceError
 
 router = APIRouter(prefix="/api/files", tags=["files"])
+
+
+class PrivacyStatusBody(BaseModel):
+    ids: list[str]
 
 
 class RenameFileBody(BaseModel):
@@ -37,6 +43,12 @@ def preview_upload(file: UploadFile = File(...), sheet: str | None = None,
     preview = inspection.preview_upload(file.file, filename=file.filename, sheet=sheet,
                                         offset=offset, limit=limit, raw=raw)
     return {"ok": True, "preview": preview}
+
+
+@router.post("/privacy-status")
+def privacy_status(body: PrivacyStatusBody, user: User = Depends(current_user)) -> dict[str, Any]:
+    """文件列表里每个文件的脱敏状态（已识别 / 识别中 / 识别失败 / 还没识别）；只返回当前用户能访问的表格文件。"""
+    return {"ok": True, "status": privacy_service.file_statuses(user, body.ids[:200])}
 
 
 def _check(db: Session, user: User, record: FileRecord) -> None:
@@ -62,6 +74,27 @@ def rename_file(file_id: str, body: RenameFileBody, background: BackgroundTasks,
         for owner in owners:
             background.add_task(customer_service.auto_refresh_summary, owner)
     return {"ok": True, **result}
+
+
+@router.get("/{file_id}/privacy-preview")
+async def privacy_preview(file_id: str, sheet: str | None = None, offset: int = Query(0, ge=0),
+                          limit: int = Query(50, ge=1, le=200), conversation_id: str | None = None,
+                          db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """脱敏副本的在线查看：AI 实际看到的样子（被保护的列显示为令牌）。"""
+    _check(db, user, file_service.get_file(db, file_id))
+    preview = await masked_copy.masked_preview(user, file_id, sheet=sheet, offset=offset, limit=limit,
+                                               conversation_id=conversation_id)
+    return {"ok": True, "preview": preview}
+
+
+@router.get("/{file_id}/privacy-copy")
+async def privacy_copy(file_id: str, conversation_id: str | None = None, db: Session = Depends(get_db),
+                       user: User = Depends(current_user)) -> Response:
+    """下载脱敏副本（xlsx）：和在线查看是同一份内容，每次下载都会写进脱敏日志。"""
+    _check(db, user, file_service.get_file(db, file_id))
+    filename, content = await masked_copy.masked_xlsx(user, file_id, conversation_id=conversation_id)
+    return Response(content, media_type=masked_copy.XLSX,
+                    headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}", "Cache-Control": "no-store"})
 
 
 @router.get("/{file_id}/preview")

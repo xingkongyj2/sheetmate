@@ -33,6 +33,7 @@ from sheetmate.core.observability.conversation_log import (
 from sheetmate.services.conversations import chat as chat_service
 from sheetmate.services.conversations import service as conv_service
 from sheetmate.services.customers import service as customer_service
+from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.identity.auth import COOKIE_NAME, require_customer
 from sheetmate.core.errors import Conflict, ServiceError
@@ -143,8 +144,9 @@ def bind_customer(conversation_id: str, body: BindBody, background: BackgroundTa
 
 
 @router.post("/{conversation_id}/files")
-async def upload_file(conversation_id: str, file: UploadFile = File(...), kind: str = Form("input"),
-                      db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+async def upload_file(conversation_id: str, background: BackgroundTasks, file: UploadFile = File(...),
+                      kind: str = Form("input"), db: Session = Depends(get_db),
+                      user: User = Depends(current_user)) -> dict[str, Any]:
     """上传到会话并立即加载到工作区。绑定了客户的会话，文件同时进入客户资料库。"""
     conv = conv_service.get_conversation(db, user, conversation_id)
     data = await file.read()
@@ -153,6 +155,8 @@ async def upload_file(conversation_id: str, file: UploadFile = File(...), kind: 
     if conv.customer_id and conv.recipe_id:
         file_service.retain_for_recipe(db, record, conv.customer_id, conv.recipe_id)
     tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
+    db.commit()   # 后台识别要读到刚保存的文件
+    background.add_task(privacy_service.identify_uploaded, record.id)   # 上传后自动识别敏感列，发第一条消息时直接用结果
     return {"ok": True, "file": file_service.file_dict(record),
             "tables": [conv_service._table_brief(t, conversation=conv) for t in tables]}
 
@@ -195,6 +199,13 @@ def set_table_role(conversation_id: str, name: str, body: RoleBody, source_conve
         raise ServiceError("role 只能是 input 或 expected")
     info = conv_service.workspace(source.id).update_meta(name, role=body.role)
     return {"ok": True, "table": conv_service._table_brief(info, conversation=source)}
+
+
+@router.get("/{conversation_id}/privacy")
+def privacy_overview(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """详情面板「脱敏」tab：这个会话的文件脱敏情况和最近的处理记录。"""
+    conv_service.get_conversation(db, user, conversation_id)
+    return {"ok": True, "privacy": privacy_service.overview(user, conversation_id)}
 
 
 @router.post("/{conversation_id}/chat")

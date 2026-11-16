@@ -19,6 +19,9 @@ import type {
   FormulaTrialResult,
   LLMConfigUpdate,
   MemoryItem,
+  PrivacyCopyPreview,
+  PrivacyFileStatus,
+  PrivacyOverview,
   RecipeBrief,
   RecipeEditRequest,
   RecipeFlowData,
@@ -58,6 +61,13 @@ export const settingsApi = {
   testLLM: async (payload: LLMConfigUpdate) =>
     (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/llm/test', payload,
       // 后端测试连接最多等 300 秒，这里多留 10 秒接收超时说明，避免被前端的默认超时提前中断。
+      { timeout: 310_000, validateStatus: () => true })).data,
+  // 脱敏模型：与对话模型同构的一套独立配置，只给脱敏模块用
+  getPrivacyLLM: async () => parseLLMConfig((await http.get<unknown>('/settings/privacy-llm')).data),
+  savePrivacyLLM: async (payload: LLMConfigUpdate) =>
+    parseLLMConfig((await http.put<unknown>('/settings/privacy-llm', payload)).data),
+  testPrivacyLLM: async (payload: LLMConfigUpdate) =>
+    (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/privacy-llm/test', payload,
       { timeout: 310_000, validateStatus: () => true })).data,
 }
 
@@ -120,6 +130,8 @@ export const conversationApi = {
   create: async (payload: { customer_id?: string | null; recipe_id?: string | null; title?: string }) =>
     (await http.post<{ conversation: ConversationBrief }>('/conversations', payload)).data.conversation,
   get: async (id: string) => (await http.get<{ conversation: ConversationDetail & { running: boolean } }>(`/conversations/${id}`)).data.conversation,
+  /** 脱敏情况：处理了哪些文件和列、发送检查与还原的次数、最近的处理记录 */
+  privacy: async (id: string) => (await http.get<{ privacy: PrivacyOverview }>(`/conversations/${id}/privacy`)).data.privacy,
   update: async (id: string, payload: Partial<{ title: string; customer_id: string | null }>) =>
     (await http.put<{ conversation: ConversationBrief }>(`/conversations/${id}`, payload)).data.conversation,
   remove: async (id: string) => http.delete(`/conversations/${id}`),
@@ -177,6 +189,24 @@ export const fileApi = {
       `/files/${id}`, { filename, customer_id: scope.customerId, recipe_id: scope.recipeId })).data,
   content: async (id: string, signal?: AbortSignal) =>
     (await http.get<ArrayBuffer>(`/files/${id}/download`, { responseType: 'arraybuffer', signal })).data,
+  /** 文件列表里每个表格文件的脱敏状态；不是表格文件、或没有权限的文件不在返回里。 */
+  privacyStatus: async (ids: string[]) =>
+    (await http.post<{ status: Record<string, PrivacyFileStatus> }>('/files/privacy-status', { ids: ids.slice(0, 200) })).data.status ?? {},
+  /** 脱敏副本预览：AI 实际看到的样子（被保护的格子是令牌）。conversationId 用来把查看记到该会话的处理记录里。 */
+  privacyPreview: async (id: string, options: { sheet?: string; offset?: number; limit?: number; conversationId?: string } = {}) =>
+    (await http.get<{ preview: PrivacyCopyPreview }>(`/files/${id}/privacy-preview`, {
+      params: { sheet: options.sheet, offset: options.offset ?? 0, limit: options.limit ?? 50, conversation_id: options.conversationId },
+    })).data.preview,
+  /** 下载脱敏副本（xlsx）。文件名取响应头 Content-Disposition，取不到时返回 null，由调用方用「原名_脱敏.xlsx」。 */
+  privacyCopy: async (id: string, conversationId?: string) => {
+    const response = await http.get<Blob>(`/files/${id}/privacy-copy`, { params: { conversation_id: conversationId }, responseType: 'blob' })
+    const disposition = String(response.headers['content-disposition'] ?? '')
+    const encoded = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition)?.[1]
+    const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(disposition)?.[1]
+    let filename: string | null = null
+    try { filename = encoded ? decodeURIComponent(encoded) : plain ?? null } catch { filename = plain ?? null }
+    return { blob: response.data, filename }
+  },
   preview: async (id: string, sheet?: string, offset = 0, limit = 50) =>
     (await http.get<{ preview: { filename: string; sheet: string; sheets: string[]; total: number; columns: string[]; rows: unknown[][] } }>(
       `/files/${id}/preview`, { params: { sheet, offset, limit } })).data.preview,

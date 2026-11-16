@@ -24,6 +24,7 @@ from sheetmate.recipe.definition.schema import Recipe
 from sheetmate.services.customers import service as customer_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.memory import long_term as memory_service
+from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import runs as run_service
 from sheetmate.services.identity.auth import require_customer
@@ -131,8 +132,20 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
         history = run_service.history_metrics(db, recipe.id)
 
     async def work(job: Job) -> None:
-        repairer = None
+        # 执行时自动修复会把输入表格的样例行发给模型：先给这次用到的文件脱敏。
+        # 脱敏没通过就关掉自动修复，流程本身仍在本机照常执行（它不需要模型）。
         if allow_repair:
+            try:
+                async with privacy_service.protecting(list(records), user_id=user.id):
+                    await _replay(job, repair=True)
+                return
+            except privacy_service.PrivacyPrepareError as exc:
+                await job.emit({"type": "activity", "text": f"自动修复已关闭：{exc}"})
+        await _replay(job, repair=False)
+
+    async def _replay(job: Job, *, repair: bool) -> None:
+        repairer = None
+        if repair:
             try:
                 repairer = LLMStepRepairer(get_llm())
             except LLMError:

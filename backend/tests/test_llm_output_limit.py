@@ -181,9 +181,27 @@ def test_context_bound_rejection_is_not_cached_as_model_limit():
     message = ("'max_tokens' is too large: 131072. This model's maximum context length is 32768 tokens "
                "and your request has 200 input tokens (131072 > 32768 - 200)")
     sent, _ = _chat_with(_cfg(), [message])
-    assert sent == [AUTO_MAX_TOKENS, 32768]
+    assert sent == [AUTO_MAX_TOKENS, 32768 - 200 - 655]  # 窗口 − 输入 − 2% 余量，不能再超出窗口
     from sheetmate.agent.llm import client as llm_client
     assert not llm_client._ACCEPTED_MAX_TOKENS  # 与输入长度有关，不能当成模型固定上限
+
+
+def test_context_overflow_uses_window_minus_input_not_the_input_count():
+    message = ("Requested token count exceeds the model's maximum context length of 163840 tokens. "
+               "You requested a total of 165999 tokens: 34927 tokens from the input messages and "
+               "131072 tokens for the completion.")
+    sent, _ = _chat_with(_cfg(), [message])
+    assert sent == [AUTO_MAX_TOKENS, 163840 - 34927 - 3276]
+
+
+def test_known_context_window_keeps_auto_output_inside_it():
+    from sheetmate.agent.llm.client import LLMClient
+
+    cfg = _cfg()
+    policy = cfg.runtime_policy.model_copy(update={"context_window_tokens": 163840})
+    from dataclasses import replace
+    client = LLMClient(replace(cfg, runtime_policy=policy))
+    assert client._kwargs([{"role": "user", "content": "hi"}], None)["max_tokens"] == 163840 // 4
 
 
 def test_fixed_limit_is_never_lowered_silently():

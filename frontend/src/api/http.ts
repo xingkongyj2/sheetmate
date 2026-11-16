@@ -30,11 +30,17 @@ http.interceptors.response.use(
     }
     return resp
   },
-  (err: AxiosError<{ error?: { message?: string; type?: string } }>) => {
+  async (err: AxiosError<{ error?: { message?: string; type?: string } }>) => {
     const status = err.response?.status ?? 0
-    const message = err.response?.data?.error?.message ?? (status ? `请求失败（${status}）` : '连接不上服务，请确认后端已经启动')
+    let body: unknown = err.response?.data
+    // 以 blob 下载文件时，出错的 JSON 也会被包成 Blob：先转成文本，才读得到后端写给用户看的原因
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      try { body = JSON.parse(await body.text()) } catch { body = undefined }
+    }
+    const info = (body as { error?: { message?: string; type?: string } } | undefined)?.error
+    const message = info?.message ?? (status ? `请求失败（${status}）` : '连接不上服务，请确认后端已经启动')
     if (status === 401 && onUnauthorized) onUnauthorized()
-    return Promise.reject(new ApiError(message, status, err.response?.data?.error?.type))
+    return Promise.reject(new ApiError(message, status, info?.type))
   },
 )
 

@@ -7,7 +7,8 @@
  * - artifacts 产物：结果表、文件、处理流程卡片、澄清问题
  * 刷新页面时用数据库里存的事件重新归并，得到同样的界面。
  */
-import type { AgentEvent, DiffCard, ExecutionState, PublicOperationDetail, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
+import type { AgentEvent, DiffCard, ExecutionState, PrivacyReport, PublicOperationDetail, RecipeFlowData, RecipeJSON, RecipeToolKind, ScriptReference, StepReport, VerifyReport } from '@/api/types'
+import { readPrivacyReport, readPrivacyStart } from './privacyPresentation.ts'
 import { scriptReferences } from './scriptPresentation.ts'
 import { recipeProcessDetails, type RecipeProcessDetail } from './recipeProcessDetails'
 import { mergeExecutionStop, readExecutionState } from './executionStatus.ts'
@@ -197,6 +198,10 @@ export interface UiMessage {
   checklist?: boolean
   /** 思考模式：回答核对的结果。 */
   audit?: AuditResult
+  /** 脱敏：每轮对话最开始、调用正常模型之前的结果；显示在整条回复的最前面。 */
+  privacy?: PrivacyReport
+  /** 脱敏进行中（privacy_start 到 privacy_report 之间），值是正在处理的文件名。 */
+  privacyRunning?: string[]
   /** 整体完成状态由后端汇总，流结束本身不代表业务已完成。 */
   execution?: ExecutionState
   error?: string
@@ -724,6 +729,16 @@ function mergeEvent(msg: UiMessage, e: AgentEvent, suppressCompletionDraft = fal
     case 'activity':
       msg.activity = typeof e.text === 'string' ? e.text : ''
       break
+    // 脱敏发生在任何模型调用之前，卡片固定显示在回复最前面，不进入过程记录。
+    case 'privacy_start':
+      msg.privacyRunning = readPrivacyStart(e)
+      break
+    case 'privacy_report': {
+      const report = readPrivacyReport(e)
+      if (report) msg.privacy = report
+      msg.privacyRunning = undefined
+      break
+    }
     case 'completion_check_start':
       msg.activity = '正在确认任务完成情况'
       break
@@ -932,6 +947,7 @@ export function finishMessage(msg: UiMessage): void {
   }
   msg.streaming = false
   msg.activity = ''
+  msg.privacyRunning = undefined
   if (msg.execution?.status === 'running') {
     msg.execution = { ...msg.execution, status: 'incomplete', code: 'missing_execution_status',
       summary: '处理连接已经结束，但没有收到任务完成确认。' }

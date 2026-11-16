@@ -7,6 +7,7 @@ import { errorText } from '@/api/http'
 import type { FileInfo } from '@/api/types'
 import { isDeliveredOutput } from '@/composables/deliveryFiles'
 import { useConfirm } from '@/composables/useConfirm'
+import { usePrivacyStatus } from '@/composables/usePrivacyStatus'
 import { useToast } from '@/composables/useToast'
 
 import WorkflowFileRow from './WorkflowFileRow.vue'
@@ -21,6 +22,8 @@ const props = defineProps<{
 const emit = defineEmits<{ preview: [file: FileInfo] }>()
 // 只展示最终的输出文件，各环节的过程文件不在这里列出
 const results = computed(() => props.outputs.filter(isDeliveredOutput))
+// 每个表格文件有没有做过脱敏识别（上传后会在后台自动识别；刚上传的文件会自己更新状态）
+const privacy = usePrivacyStatus(() => [...props.files, ...results.value].map((file) => file.file_id))
 const toast = useToast()
 const { confirmDelete } = useConfirm()
 const uploading = ref(false)
@@ -156,7 +159,7 @@ async function remove(file: FileInfo) {
         </div>
       </div>
       <WorkflowFileRow
-        v-for="file in files" :key="file.file_id" :file="file"
+        v-for="file in files" :key="file.file_id" :file="file" :privacy="privacy[file.file_id]"
         :badge="file.kind === 'expected' ? file.kind_label : undefined" badge-class="!bg-fun-yellow/20 !text-[#8a6400]" :rename-file="rename"
         @preview="emit('preview', $event)" @remove="remove"
       />
@@ -164,7 +167,7 @@ async function remove(file: FileInfo) {
 
       <h3 class="mb-3 mt-6 border-t border-line pt-6 text-[15px] font-semibold">输出文件</h3>
       <WorkflowFileRow
-        v-for="file in results" :key="file.file_id" :file="file"
+        v-for="file in results" :key="file.file_id" :file="file" :privacy="privacy[file.file_id]"
         :badge="file.delivery_status === 'candidate' ? '待核验文件' : undefined" :rename-file="recipeId ? rename : undefined"
         @preview="emit('preview', $event)" @remove="remove"
       />

@@ -10,10 +10,13 @@ import type { RecipeProgress, UiMessage } from '@/composables/chatModel'
 import { executionFileGroups, executionRecipeSections, executionTableKey, executionTables } from '@/composables/executionPresentation'
 import { progressFlow } from '@/composables/recipeFlow'
 import { useConfirm } from '@/composables/useConfirm'
+import { usePrivacyStatus } from '@/composables/usePrivacyStatus'
+import ExecutionPrivacy from './ExecutionPrivacy.vue'
+import PrivacyStatusIcon from './PrivacyStatusIcon.vue'
 import ExecutionStatusNotice from './ExecutionStatusNotice.vue'
 import ExecutionUsage from './ExecutionUsage.vue'
 
-type Tab = 'recipes' | 'files' | 'data' | 'usage'
+type Tab = 'recipes' | 'files' | 'data' | 'usage' | 'privacy'
 const props = withDefaults(defineProps<{
   detail: ConversationDetail | null
   message: UiMessage | null
@@ -31,12 +34,14 @@ const { confirmDelete } = useConfirm()
 const tab = computed({ get: () => props.activeTab, set: (value: Tab) => emit('update:activeTab', value) })
 const tabs = [
   { key: 'recipes', label: '流程' }, { key: 'files', label: '文件' },
-  { key: 'data', label: '数据' }, { key: 'usage', label: '消耗' },
+  { key: 'data', label: '数据' }, { key: 'usage', label: '消耗' }, { key: 'privacy', label: '脱敏' },
 ] as const
 const progresses = computed(() => (props.message?.artifacts ?? []).flatMap((artifact) => artifact.kind === 'recipe' ? [artifact.progress] : []))
 const recipeSections = computed(() => executionRecipeSections(props.detail?.recipes ?? [], progresses.value))
 const tables = computed(() => executionTables(props.detail?.tables ?? []))
 const fileGroups = computed(() => executionFileGroups(props.detail?.files ?? []).filter((group) => group.files.length))
+// 每个表格文件有没有做过脱敏识别：打开「文件」tab 时才取，刚上传的文件会自己更新状态
+const privacy = usePrivacyStatus(() => (tab.value === 'files' ? fileGroups.value.flatMap((group) => group.files.map((file) => file.file_id)) : []))
 const emptyState = computed(() => {
   if (tab.value === 'recipes' && !recipeSections.value.saved.length && !recipeSections.value.progresses.length) {
     return { emoji: '🙃', text: '暂无已保存的流程' }
@@ -207,7 +212,7 @@ onBeforeUnmount(() => {
         role="tab"
         :aria-selected="tab === item.key"
         aria-controls="execution-content"
-        class="rounded-full px-3 py-1 transition"
+        class="shrink-0 rounded-full px-2.5 py-1 transition"
         :class="tab === item.key ? 'bg-ink text-white' : 'text-mute hover:bg-paper hover:text-ink'"
         @click="tab = item.key"
       >
@@ -222,6 +227,7 @@ onBeforeUnmount(() => {
         <p>{{ emptyState.text }}</p>
       </div>
       <ExecutionUsage v-else-if="tab === 'usage'" :message="message" :messages="messages" :refreshing="refreshingUsage" @refresh="emit('refresh')" />
+      <ExecutionPrivacy v-else-if="tab === 'privacy'" :detail="detail" :message="message" />
       <template v-else-if="tab === 'recipes'">
         <!-- 每个流程只留一行：标题和全屏按钮；版本、状态、流程图、说明都在全屏里看 -->
         <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="mb-2 min-w-0">
@@ -267,6 +273,7 @@ onBeforeUnmount(() => {
             <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
             <FileSpreadsheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-fun-green'" />
             <button type="button" class="min-w-0 flex-1 truncate rounded text-left text-[13px] font-medium underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink/40" :title="file.filename" :aria-label="`查看 ${file.filename}`" @click="emit('openFile', file)">{{ file.filename }}</button>
+            <PrivacyStatusIcon :status="privacy[file.file_id]" />
             <div class="-mr-1.5 flex shrink-0 items-center">
               <a :href="file.download_url" class="icon-btn size-7" :aria-label="`下载 ${file.filename}`" title="下载"><Download class="size-4" /></a>
               <button type="button" class="icon-btn size-7 hover:text-error" :aria-label="`删除 ${file.filename}`" title="删除" @click="removeFile(file)"><Trash2 class="size-4" /></button>

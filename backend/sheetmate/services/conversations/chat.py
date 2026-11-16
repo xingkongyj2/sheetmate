@@ -88,6 +88,8 @@ from sheetmate.services.conversations.file_view import file_references, file_vie
 from sheetmate.services.execution.workspace import AnalysisWorkspace, analysis_workspace
 from sheetmate.core.errors import Conflict, ServiceError
 from sheetmate.services.conversations.host import ConversationHost
+from sheetmate.privacy import PrivacyBlocked, Scope as PrivacyScope, bind as privacy_bind, current_scope as privacy_scope
+from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.memory.table_profiles import file_memories_text, restore_workspace_memories
 from sheetmate.services.execution.jobs import Job, jobs
 from sheetmate.services.execution import state as execution_state
@@ -106,6 +108,7 @@ _MAX_MESSAGE_IMAGES = 10
 _MAX_HISTORY_IMAGES = 8
 _MAX_IMAGE_REQUEST_BYTES = 20 * 1024 * 1024
 _KEEP_EVENTS = {
+    "privacy_report",  # 每轮对话的第一步：脱敏结果，要随助手消息保存，刷新后还能看到
     "model_call_start", "model_call_done", "completion_check_start", "completion_check", "execution_stop", "execution_status",
     "note", "reply", "tool_call", "tool_result", "table", "file", "delivery_manifest", "script", "clarify", "memory_saved", "field_mapping_saved", "plan_start", "step_start", "step_done",
     "reflect_start", "reflect_done", "think_start", "plan_review", "plan_repair", "step_check", "audit_start", "audit_done", "agent_pool_start", "agent_start", "agent_done", "aggregate_start", "error", "compacted",
@@ -334,6 +337,14 @@ def resume_chat(user: User, conversation_id: str) -> Job:
 
 async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
                     message_id: int, thinking: bool = False, *, resumed: bool = False) -> None:
+    """每一轮对话先脱敏、后处理：在脱敏完成之前，任何调用正常模型的请求都会被拦下（见 GuardedLLM）。"""
+    scope = PrivacyScope(conversation_id=conversation_id, user_id=user_id, required=True, ready=False)
+    with privacy_bind(scope):
+        await _run_chat_body(job, user_id, conversation_id, message, plan_steps, message_id, thinking, resumed=resumed)
+
+
+async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: str, plan_steps: list[dict[str, Any]] | None,
+                         message_id: int, thinking: bool = False, *, resumed: bool = False) -> None:
     started_at = time.monotonic()
     first_reply_at: float | None = None
     control = ExecutionControl(job, user_id) if job.execution_id else None
@@ -724,6 +735,17 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
                     base, _, _ = resolve_edit_recipe(db, user, conv, edit["recipe_id"])
                     host._edit_base_recipe = base.model_copy(deep=True)
                 host.recipe_edit = dict(ctx.recipe_edit)
+        # 第一步：先给这一轮涉及的表格文件脱敏。失败会抛出 PrivacyBlocked，下面的一切（包括任何模型调用）都不会执行。
+        # 断点续跑时，上一段已经展示过脱敏结果，这里只重新确认，不重复展示。
+        async def _already_shown(_: dict[str, Any]) -> None:
+            return None
+
+        shown = resumed and any(item.get("type") == "privacy_report" for item in stored)
+        await privacy_service.prepare_files(conversation_id=conversation_id, files=host.list_files(),
+                                            emit=_already_shown if shown else emit, workspace=ctx.ws)
+        current = privacy_scope()
+        if current is not None:
+            current.ready = True
         history = await _history(conversation_id, llm, emit, current_message_id=message_id)
         _limit_history_images(history, ctx.image_parts)
         ctx.runtime_image_parts = [part for item in history for part in item.get("image_parts", [])] + ctx.image_parts
@@ -942,7 +964,10 @@ async def _run_chat(job: Job, user_id: int, conversation_id: str, message: str, 
         raise
     except Exception as exc:
         record_event("chat.error", "sheetmate.services.conversations.chat._run_chat.execute", error_data(exc))
-        await emit({"type": "error", "content": f"处理出错：{exc}", "code": getattr(exc, "code", "execution_error")})
+        blocked = isinstance(exc, PrivacyBlocked) or getattr(exc, "code", None) == "privacy_blocked"
+        # 脱敏没完成不是「处理出错」，原因本身就是要告诉用户的话
+        await emit({"type": "error", "content": str(exc) if blocked else f"处理出错：{exc}",
+                    "code": "privacy_blocked" if blocked else getattr(exc, "code", "execution_error")})
 
     answer = await guard_creation_delivery()
     if not answer:
@@ -1833,8 +1858,11 @@ async def clarify(user: User, conversation_id: str, message: str, *, http_reques
         status = "failed"
         try:
             llm = get_llm()
-            ctx, _ = build_context(user.id, conversation_id, llm)
-            result = await check_clarification(llm, ctx, message)
+            ctx, host = build_context(user.id, conversation_id, llm)
+            # 澄清判断要看这个会话里的文件：同样先脱敏，成功了才放行
+            files = [item["file_id"] for item in host.list_files() if item.get("file_id")]
+            async with privacy_service.protecting(files, workspace=ctx.ws, conversation_id=conversation_id, user_id=user.id):
+                result = await check_clarification(llm, ctx, message)
             record_event("chat.output", "sheetmate.services.conversations.chat.clarify", result)
             status = "completed"
             return result

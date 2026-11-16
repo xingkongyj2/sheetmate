@@ -15,7 +15,7 @@ from sheetmate.api.customers.schemas import (
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
@@ -24,6 +24,7 @@ from sheetmate.api.deps import current_user
 from sheetmate.db.session import get_db
 from sheetmate.db.models import Conversation, Run, User
 from sheetmate.services.customers import service as customer_service
+from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.formulas import service as formula_service
 from sheetmate.services.memory import long_term as memory_service
@@ -86,8 +87,8 @@ async def refresh_summary(customer_id: str, only_if_outdated: bool = False, reci
 
 
 @router.post("/{customer_id}/files")
-async def upload_customer_file(customer_id: str, file: UploadFile = File(...), kind: str = Form("input"),
-                               recipe_id: str | None = None,
+async def upload_customer_file(customer_id: str, background: BackgroundTasks, file: UploadFile = File(...),
+                               kind: str = Form("input"), recipe_id: str | None = None,
                                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     require_customer(db, user, customer_id)
     recipe = recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
@@ -95,6 +96,8 @@ async def upload_customer_file(customer_id: str, file: UploadFile = File(...), k
                                       customer_id=customer_id, kind=kind)
     if recipe:
         file_service.retain_for_recipe(db, record, customer_id, recipe.recipe_id)
+    db.commit()   # 后台识别要读到刚保存的文件
+    background.add_task(privacy_service.identify_uploaded, record.id)   # 上传后自动识别敏感列，对话时直接用结果
     return {"ok": True, "file": file_service.file_dict(record)}
 
 

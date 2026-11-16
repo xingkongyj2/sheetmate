@@ -37,7 +37,8 @@ export function parseLLMConfig(value: unknown): LLMConfig {
     typeof value.thinking_enabled !== 'boolean' || typeof value.thinking_supported !== 'boolean' ||
     typeof value.key_hint !== 'string' || typeof value.default_model !== 'string' ||
     !(value.active_provider_id === null || PROVIDER_IDS.includes(String(value.active_provider_id))) ||
-    !Array.isArray(value.providers) || value.providers.length !== PROVIDER_IDS.length) {
+    // 对话模型有 3 个服务商；脱敏模型只有一个配置项（形式和「自定义」一样），所以是 1 到 3 个。缺少 providers 数组的是旧版接口，仍然拒绝。
+    !Array.isArray(value.providers) || value.providers.length < 1 || value.providers.length > PROVIDER_IDS.length) {
     throw new Error(VERSION_ERROR)
   }
   const ids = new Set<string>()

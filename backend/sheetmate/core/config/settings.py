@@ -431,14 +431,18 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
     return cfg
 
 
-def get_llm_provider_settings(provider_id: str) -> LLMSettings:
+# settings.json 里的两套模型配置：对话用的 llm，和专门给脱敏模块用的 privacy_llm（字段、行为完全一样，单独保存）。
+PRIVACY_LLM_ROOT = "privacy_llm"
+
+
+def get_llm_provider_settings(provider_id: str, root: str = "llm") -> LLMSettings:
     """Read one provider config from disk so changes apply without a restart."""
-    providers = _provider_overrides(_read_settings_file().get("llm", {}))
+    providers = _provider_overrides(_read_settings_file().get(root, {}))
     return _build_provider_settings(provider_id, providers.get(provider_id, {}))
 
 
-def get_all_llm_settings() -> dict[str, LLMSettings]:
-    providers = _provider_overrides(_read_settings_file().get("llm", {}))
+def get_all_llm_settings(root: str = "llm") -> dict[str, LLMSettings]:
+    providers = _provider_overrides(_read_settings_file().get(root, {}))
     return {provider_id: _build_provider_settings(provider_id, providers.get(provider_id, {}))
             for provider_id in LLM_PROVIDER_PRIORITY}
 
@@ -454,17 +458,22 @@ def get_llm_settings() -> LLMSettings:
     return select_llm_settings(get_all_llm_settings())
 
 
+def get_privacy_llm_settings() -> LLMSettings:
+    """脱敏模型（只给脱敏模块用）；没配置时 configured 为 False。"""
+    return select_llm_settings(get_all_llm_settings(PRIVACY_LLM_ROOT))
+
+
 def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | None, model: str | None,
                       thinking_enabled: bool | None = None, *,
                       capabilities: LLMCapabilities | dict | None = None,
-                      enabled: bool | None = None) -> LLMSettings:
+                      enabled: bool | None = None, root: str = "llm") -> LLMSettings:
     """Save one provider. None keeps a field; an empty API key clears it."""
     _provider_defaults(provider_id)  # validate before touching the file
     # FastAPI runs sync handlers in separate threads. Keep saves to different
     # providers from replacing one another's changes during read/modify/write.
     with _llm_settings_lock:
         data = _read_settings_file()
-        providers = _provider_overrides(data.get("llm", {}))
+        providers = _provider_overrides(data.get(root, {}))
         llm = dict(providers.get(provider_id, {}))
         current = _build_provider_settings(provider_id, llm)
         for retired in _RETIRED_LLM_FIELDS:  # 旧版保存的数值项不再使用，顺便清理
@@ -484,7 +493,7 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
             llm["capabilities"] = LLMCapabilities.model_validate({**current.capabilities.model_dump(), **changes}).model_dump()
         # false and 0 are real configuration values, including disabled retries.
         providers[provider_id] = {k: v for k, v in llm.items() if v is not None and v != ""}
-        data["llm"] = {"providers": {
+        data[root] = {"providers": {
             current_id: providers[current_id] for current_id in LLM_PROVIDER_PRIORITY if providers.get(current_id)
         }}
         _write_settings_file(data)

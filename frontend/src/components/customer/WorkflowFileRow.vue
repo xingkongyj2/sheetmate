@@ -4,13 +4,16 @@ import { Check, Download, FileCheck2, FileSpreadsheet, LoaderCircle, Pencil, Tra
 import { computed, nextTick, ref } from 'vue'
 
 import { errorText } from '@/api/http'
-import type { FileInfo } from '@/api/types'
+import type { FileInfo, PrivacyFileStatus } from '@/api/types'
+import PrivacyStatusIcon from '@/components/chat/PrivacyStatusIcon.vue'
 import { timeAgo } from '@/composables/chatModel'
 
 const props = defineProps<{
   file: FileInfo
   badge?: string
   badgeClass?: string
+  /** 这个文件的脱敏状态；不是表格文件（没有状态）就不显示图标 */
+  privacy?: PrivacyFileStatus | null
   /** 不传就不显示改名按钮；失败时抛出错误，这一行会把原因显示在下面 */
   renameFile?: (file: FileInfo, filename: string) => Promise<void>
 }>()
@@ -79,6 +82,7 @@ async function save() {
       </button>
       <span v-if="badge" class="tag shrink-0 whitespace-nowrap" :class="badgeClass">{{ badge }}</span>
       <span class="shrink-0 text-xs text-faint">{{ timeAgo(file.created_at) }}</span>
+      <PrivacyStatusIcon :status="privacy" class="-mx-1" />
       <div class="flex shrink-0 items-center gap-0.5">
         <button v-if="renameFile" type="button" class="icon-btn" title="修改文件名" :aria-label="`修改 ${file.filename} 的文件名`" @click="startEdit"><Pencil class="size-4" /></button>
         <a :href="file.download_url" class="icon-btn" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>

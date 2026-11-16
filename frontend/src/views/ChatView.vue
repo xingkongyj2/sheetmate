@@ -69,7 +69,7 @@ const uploadedReferences = ref<TableReference[]>([])
 const checklistOpen = ref(true) // 任务目录默认显示，可用顶部图标隐藏
 const panelOpen = ref(false) // 工作区面板默认关闭，需要时点右上角打开
 const panelWidth = ref(320)
-const panelTab = ref<'recipes' | 'files' | 'data' | 'usage'>('recipes')
+const panelTab = ref<'recipes' | 'files' | 'data' | 'usage' | 'privacy'>('recipes')
 // 地址里带 ?flow=（全屏流程图）：流程图在工作区面板的「流程」标签里，刷新后要先把面板打开，全屏才能恢复。
 watch(() => route.query.flow, (flow) => {
   if (!flow) return

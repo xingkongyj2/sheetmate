@@ -16,6 +16,7 @@ from sheetmate.api.deps import admin_user, current_user, sse_response
 from sheetmate.db.session import get_db
 from sheetmate.db.models import User
 from sheetmate.services.customers import service as customer_service
+from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.formulas import service as formula_service
 from sheetmate.services.formulas import suggestions as suggestion_service
 from sheetmate.services.files import service as file_service
@@ -153,10 +154,12 @@ def delete_global_formula(formula_id: str, db: Session = Depends(get_db), user: 
 
 
 @router.post("/formulas/files")
-async def upload_formula_file(file: UploadFile = File(...), db: Session = Depends(get_db),
+async def upload_formula_file(background: BackgroundTasks, file: UploadFile = File(...), db: Session = Depends(get_db),
                               user: User = Depends(admin_user)) -> dict[str, Any]:
     """生成内置公式时上传的参考表：不属于任何客户。"""
     record = file_service.save_upload(db, data=await file.read(), filename=file.filename or "file", user=user, kind="input")
+    db.commit()   # 后台识别要读到刚保存的文件
+    background.add_task(privacy_service.identify_uploaded, record.id)
     return {"ok": True, "file": file_service.file_dict(record)}
 
 

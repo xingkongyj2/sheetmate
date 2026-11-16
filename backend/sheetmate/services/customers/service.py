@@ -27,6 +27,7 @@ from sheetmate.db.models import (
 from sheetmate.services.files import service as file_service
 from sheetmate.services.formulas import service as formula_service
 from sheetmate.services.memory import long_term as memory_service
+from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import runs as run_service
 from sheetmate.core.errors import ServiceError
@@ -326,6 +327,7 @@ async def auto_refresh_summary(customer_id: str | None) -> None:
         await _auto_refresh(customer_id)
 
 
+@privacy_service.metadata_only   # 只发文件名、列名、流程结构，不发单元格内容
 async def _auto_refresh(customer_id: str) -> None:
     from sheetmate.agent.llm.client import LLMError, get_llm
 
@@ -372,6 +374,7 @@ def recipe_count(db: Session, customer_id: str) -> int:
     return db.scalar(select(func.count(func.distinct(RecipeRecord.recipe_id))).where(RecipeRecord.customer_id == customer_id)) or 0
 
 
+@privacy_service.metadata_only
 async def refresh_customer_summary(db: Session, customer: Customer, *, only_if_outdated: bool = False,
                                    recipe_id: str | None = None) -> dict[str, Any]:
     """刷新客户说明，统一处理无模型回退和旧版本说明升级。"""
@@ -398,5 +401,8 @@ async def generate_customer_formula(db: Session, customer: Customer | None, *, d
     from sheetmate.agent.llm import get_llm
     from sheetmate.services.formulas.generation import generate_formula
 
-    return await generate_formula(db, customer, get_llm(), description=description, file_ids=file_ids, formula=formula,
-                                  tables=tables, user=user, require_tables=require_tables)
+    # 公式生成会把参考表格的样例行发给模型：先给选中的文件脱敏，成功了才放行
+    chosen = [str(item["file_id"]) for item in (tables or [])] or list(file_ids)
+    async with privacy_service.protecting(chosen, user_id=getattr(user, "id", None)):
+        return await generate_formula(db, customer, get_llm(), description=description, file_ids=file_ids, formula=formula,
+                                      tables=tables, user=user, require_tables=require_tables)

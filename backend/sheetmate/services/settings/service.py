@@ -7,6 +7,7 @@ from typing import Any
 
 from sheetmate.agent.llm import LLMError, test_connection
 from sheetmate.core.config.settings import (
+    PRIVACY_LLM_ROOT,
     DEEPSEEK_BASE_URL, DEEPSEEK_DEFAULT_MODEL, DEEPSEEK_MODELS, DEEPSEEK_THINKING_MODELS,
     DEEPSEEK_THINKING_ALIASES,
     QWEN_BASE_URL, QWEN_MODELS, QWEN_THINKING_MODELS, LLMSettings, get_all_llm_settings,
@@ -61,8 +62,8 @@ def _provider_view(provider: dict[str, Any], cfg: LLMSettings) -> dict[str, Any]
     }
 
 
-def _view() -> dict[str, Any]:
-    configs = get_all_llm_settings()
+def _view(root: str = "llm") -> dict[str, Any]:
+    configs = get_all_llm_settings(root)
     active = select_llm_settings(configs)
     active_provider_id = active.provider_id if active.configured else None
     return {
@@ -77,22 +78,31 @@ def _view() -> dict[str, Any]:
         "thinking_supported": active.thinking_supported,
         "thinking_enabled": active.thinking_enabled,
         **_policy_view(active),
-        "providers": [_provider_view(provider, configs[provider["id"]]) for provider in PROVIDERS],
+        # 脱敏模型只有一个配置项（形式和「自定义」一样），不分服务商
+        "providers": [_provider_view(provider, configs[provider["id"]]) for provider in PROVIDERS
+                      if root != PRIVACY_LLM_ROOT or provider["id"] == "custom"],
     }
 
 
-def get_llm_config() -> dict[str, Any]:
-    return _view()
+def get_llm_config(root: str = "llm") -> dict[str, Any]:
+    return _view(root)
 
 
-def put_llm_config(update: ModelSettingsUpdate) -> dict[str, Any]:
+def _single(update: ModelSettingsUpdate, root: str) -> ModelSettingsUpdate:
+    """脱敏模型只有「自定义」这一个配置项：不管请求里写的是哪个服务商，都存到这一份里。"""
+    return replace(update, provider_id="custom") if root == PRIVACY_LLM_ROOT else update
+
+
+def put_llm_config(update: ModelSettingsUpdate, root: str = "llm") -> dict[str, Any]:
+    update = _single(update, root)
     save_llm_settings(update.provider_id, update.api_key, update.base_url, update.model, update.thinking_enabled,
-                      capabilities=update.capabilities, enabled=update.enabled)
-    return _view()
+                      capabilities=update.capabilities, enabled=update.enabled, root=root)
+    return _view(root)
 
 
-async def test_llm_config(update: ModelSettingsUpdate) -> dict[str, Any]:
-    current = get_llm_provider_settings(update.provider_id)
+async def test_llm_config(update: ModelSettingsUpdate, root: str = "llm") -> dict[str, Any]:
+    update = _single(update, root)
+    current = get_llm_provider_settings(update.provider_id, root)
     cfg = replace(current,
                   enabled=current.enabled if update.enabled is None else update.enabled,
                   api_key=current.api_key if update.api_key is None else update.api_key.strip(),

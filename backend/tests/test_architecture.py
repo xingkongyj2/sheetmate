@@ -47,6 +47,20 @@ def test_layer_dependencies_point_toward_interfaces(layer, forbidden):
     assert not violations, "\n".join(violations)
 
 
+def test_privacy_module_stays_standalone():
+    """脱敏模块是独立模块：只用标准库，不依赖项目里其他任何部分，也不依赖数据库、Web 框架、数据处理库。"""
+    allowed_third_party = set(sys.stdlib_module_names)
+    violations = []
+    for path in (PACKAGE / "privacy").rglob("*.py"):
+        for module in _imports(path):
+            root = module.split(".")[0]
+            if module == "sheetmate.privacy" or module.startswith("sheetmate.privacy."):
+                continue
+            if root not in allowed_third_party and root != "__future__":
+                violations.append(f"{path.relative_to(PACKAGE)} -> {module}")
+    assert not violations, "\n".join(violations)
+
+
 def test_all_packages_import_in_a_fresh_process(tmp_path):
     """Catch stale imports and eager package initialization outside pytest's module cache."""
     environment = {**os.environ, "SHEETMATE_DATA_DIR": str(tmp_path), "SEED_DEMO": "0",
