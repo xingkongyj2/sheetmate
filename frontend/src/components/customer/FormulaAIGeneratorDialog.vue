@@ -40,10 +40,11 @@ const files = computed(() => {
   return [...new Map(all.filter((file) => /\.(xlsx|xlsm|xls|csv)$/i.test(file.filename)).map((file) => [file.file_id, file])).values()]
 })
 const busy = computed(() => generating.value || uploading.value || saving.value)
-const tableOptions = computed(() => files.value.flatMap((file) => file.sheets.map((sheet) => ({
-  key: keyOf(file.file_id, sheet.sheet), file, sheet: sheet.sheet,
-  label: file.sheets.length > 1 ? `${file.filename} · ${sheet.sheet}` : file.filename,
-}))))
+/** 一个文件一个标签（不管它有几张工作表）；选中后，多张工作表的文件在标签里再选具体哪一张 */
+const fileOptions = computed(() => files.value.filter((file) => file.sheets.length).map((file) => {
+  const key = selectedKeys.value.find((item) => item.startsWith(`${file.file_id}::`))
+  return { file, selected: !!key, sheet: key ? splitKey(key).sheet : file.sheets[0].sheet }
+}))
 const canGenerate = computed(() => !!description.value.trim() && !busy.value)
 const canUse = computed(() => validated.value && !!result.value && !result.value.questions.length && requestUnchanged.value && !busy.value)
 const formulaName = computed(() => String(result.value?.formula.name ?? '生成的公式'))
@@ -77,8 +78,20 @@ function initialKeys(): string[] {
   return keys.slice(0, 5)
 }
 
-function toggle(key: string) {
-  selectedKeys.value = selectedKeys.value.includes(key) ? selectedKeys.value.filter((item) => item !== key) : [...selectedKeys.value, key]
+/** 选中 / 取消一个文件：选中时默认用它的第一张工作表 */
+function toggleFile(file: FileInfo) {
+  const prefix = `${file.file_id}::`
+  selectedKeys.value = selectedKeys.value.some((key) => key.startsWith(prefix))
+    ? selectedKeys.value.filter((key) => !key.startsWith(prefix))
+    : [...selectedKeys.value, keyOf(file.file_id, file.sheets[0].sheet)]
+}
+/** 换这个文件用的工作表：保持它在已选表里的先后位置（第几张表就是公式里第几个表参数的默认表） */
+function pickSheet(file: FileInfo, sheet: string) {
+  const prefix = `${file.file_id}::`
+  const at = selectedKeys.value.findIndex((key) => key.startsWith(prefix))
+  if (at < 0) return
+  selectedKeys.value = selectedKeys.value.map((key, index) => (index === at ? keyOf(file.file_id, sheet) : key))
+    .filter((key, index) => index === at || !key.startsWith(prefix))
 }
 
 function requestKey() {
@@ -113,10 +126,8 @@ async function upload(event: Event) {
     for (const file of chosen) {
       const saved = global.value ? await recipeApi.uploadGlobalFormulaFile(file) : await customerApi.uploadFile(props.customerId!, file, 'input')
       uploadedFiles.value.push(saved)
-      // 新上传的文件，它的每张工作表直接选上（超过 5 张就停）
-      for (const sheet of saved.sheets) {
-        if (selectedKeys.value.length < 5) selectedKeys.value.push(keyOf(saved.file_id, sheet.sheet))
-      }
+      // 新上传的文件直接选上，默认用它的第一张工作表（超过 5 张表就不再自动选）
+      if (saved.sheets.length && selectedKeys.value.length < 5) selectedKeys.value.push(keyOf(saved.file_id, saved.sheets[0].sheet))
       emit('uploaded', saved)
     }
   } catch (err) {
@@ -131,7 +142,7 @@ async function generate() {
   if (!canGenerate.value) return
   // 客户公式一张表都没选就不生成，也就没有可保存的公式：弹个提示；内置公式不针对某张表，参考表可选
   if (!selectedKeys.value.length && !global.value) {
-    toast.error(tableOptions.value.length ? '请先选择要处理的表' : '请先上传要处理的表')
+    toast.error(fileOptions.value.length ? '请先选择要处理的表' : '请先上传要处理的表')
     return
   }
   generating.value = true
@@ -218,18 +229,34 @@ async function save() {
             <LoaderCircle v-if="uploading" class="size-4 animate-spin" /><Paperclip v-else class="size-4" />
             <input type="file" multiple accept=".xlsx,.xlsm,.xls,.csv" class="hidden" :disabled="busy" data-testid="formula-ai-upload" @change="upload" />
           </label>
-          <button
-            v-for="item in tableOptions"
-            :key="item.key"
-            type="button"
-            class="max-w-[16rem] truncate rounded-full border px-3 py-1 text-xs transition disabled:opacity-40"
-            :class="selectedKeys.includes(item.key) ? 'border-ink bg-ink text-white' : 'border-line text-mute hover:border-ink/30'"
-            :title="item.label"
-            :aria-pressed="selectedKeys.includes(item.key)"
-            :disabled="busy || (selectedKeys.length >= 5 && !selectedKeys.includes(item.key))"
-            data-testid="formula-ai-table"
-            @click="toggle(item.key)"
-          >{{ item.label }}</button>
+          <div
+            v-for="item in fileOptions"
+            :key="item.file.file_id"
+            class="inline-flex max-w-full items-center rounded-full border text-xs transition"
+            :class="[item.selected ? 'border-ink bg-ink text-white' : 'border-line text-mute hover:border-ink/30', busy || (selectedKeys.length >= 5 && !item.selected) ? 'opacity-40' : '']"
+          >
+            <button
+              type="button"
+              class="max-w-[16rem] truncate rounded-full px-3 py-1"
+              :title="item.file.filename"
+              :aria-pressed="item.selected"
+              :disabled="busy || (selectedKeys.length >= 5 && !item.selected)"
+              data-testid="formula-ai-table"
+              @click="toggleFile(item.file)"
+            >{{ item.file.filename }}</button>
+            <select
+              v-if="item.selected && item.file.sheets.length > 1"
+              class="mr-1 max-w-[9rem] cursor-pointer truncate border-l border-white/30 bg-transparent py-1 pl-2 pr-1 text-xs text-white/85 outline-none"
+              :value="item.sheet"
+              :title="`工作表：${item.sheet}`"
+              :aria-label="`${item.file.filename} 用哪张工作表`"
+              :disabled="busy"
+              data-testid="formula-ai-sheet"
+              @change="pickSheet(item.file, ($event.target as HTMLSelectElement).value)"
+            >
+              <option v-for="sheet in item.file.sheets" :key="sheet.sheet" :value="sheet.sheet" class="bg-white text-ink">{{ sheet.sheet }}</option>
+            </select>
+          </div>
         </div>
       </div>
 
