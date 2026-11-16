@@ -63,9 +63,16 @@ const failed = computed(() => props.context.failed || states.value.some((step) =
 const canReplay = computed(() => !context.value.deleted && !!(context.value.recipeId || context.value.recipe?.id || context.value.runId))
 const canEdit = computed(() => !context.value.deleted && !!(context.value.recipeId || context.value.recipe?.id))
 const dialogOpen = computed(() => fullscreen.value || !!selection.value)
+// stageSize 只用来给画布居中；舞台本身的尺寸由 CSS 解析（stageStyle），不能把 JS 取整后的视口尺寸写进布局：
+// Windows 显示缩放 125%/150% 时容器高度是小数像素，clientHeight 取整后比真实高度大，舞台多出零点几像素 → 出滚动条 →
+// 经典滚动条占布局、视口变小 → ResizeObserver 重设舞台 → 滚动条消失 → 循环，画面每帧抖动。
 const stageSize = computed(() => ({
   width: Math.max(dimensions.value.viewportWidth, dimensions.value.width * zoom.value + 96),
   height: Math.max(dimensions.value.viewportHeight, dimensions.value.height * zoom.value + 96),
+}))
+const stageStyle = computed(() => ({
+  width: `max(100%, ${dimensions.value.width * zoom.value + 96}px)`,
+  height: `max(100%, ${dimensions.value.height * zoom.value + 96}px)`,
 }))
 const canvasStyle = computed(() => ({
   left: `${(stageSize.value.width - dimensions.value.width * zoom.value) / 2}px`,
@@ -360,7 +367,7 @@ onBeforeUnmount(() => {
                 </div>
               </header>
               <div ref="viewport" class="flow-viewport" tabindex="0" aria-label="流程画布，可滚动和拖动" @pointerdown="startPan" @pointermove="pan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan" @wheel="wheel">
-                <div class="flow-stage" :style="{ width: `${stageSize.width}px`, height: `${stageSize.height}px` }">
+                <div class="flow-stage" :style="stageStyle">
                   <div ref="canvas" class="flow-canvas" :style="canvasStyle">
                     <RecipeFlowCanvas :flow="shownFlow" :states="states" :active-step="selection?.kind === 'step' ? selection.id : null" :selected-file-key="selection?.kind === 'file' ? selection.file.key : null" :busy="running" :failed="failed" @select="selectStep" @select-file="selectFile" />
                   </div>
@@ -413,7 +420,7 @@ onBeforeUnmount(() => {
 .flow-action:disabled { cursor: default; opacity: .45; }
 .flow-workspace { display: flex; min-height: 0; flex: 1; }
 .flow-canvas-area { position: relative; min-width: 0; min-height: 0; flex: 1; background-color: #fafafd; background-image: radial-gradient(#0b0b0c59 1.6px, transparent 1.7px); background-size: 24px 24px; }
-.flow-viewport { width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; cursor: grab; touch-action: pan-x pan-y; }
+.flow-viewport { width: 100%; height: 100%; overflow: auto; scrollbar-gutter: stable both-edges; overscroll-behavior: contain; cursor: grab; touch-action: pan-x pan-y; }
 .flow-viewport:active { cursor: grabbing; }
 .flow-viewport:focus-visible { outline: 2px solid #6265dc; outline-offset: -3px; }
 .flow-stage { position: relative; }
