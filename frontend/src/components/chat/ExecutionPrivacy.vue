@@ -86,7 +86,7 @@ const sendNumbers = computed(() => {
   const totals = overview.value?.totals
   return totals ? [
     { label: '发送次数', value: totals.requests, warn: false },
-    { label: '补充替换', value: totals.sent_values ?? 0, warn: false },
+    { label: '漏掉的值', value: totals.sent_values ?? 0, warn: (totals.sent_values ?? 0) > 0 },
     { label: '拦截', value: totals.blocked, warn: totals.blocked > 0 },
   ] : []
 })
@@ -161,7 +161,7 @@ function levelClass(level: PrivacyEventItem['level']): string {
         <div class="flex items-end justify-between gap-2 px-0.5">
           <div class="min-w-0">
             <h4 class="text-[13px] font-medium text-ink">发给 AI 前检查</h4>
-            <p class="text-xs leading-5 text-faint">发送前再查一遍对话和工具结果，补上漏掉的</p>
+            <p class="text-xs leading-5 text-faint">文件脱敏漏掉的内容，发送前在这里补上</p>
           </div>
           <button v-if="(overview.totals.sent_values ?? 0) > 0" type="button" class="flex shrink-0 items-center gap-0.5 text-xs text-mute transition hover:text-ink" @click="showSends = true">
             明细<ChevronRight class="size-3.5" />

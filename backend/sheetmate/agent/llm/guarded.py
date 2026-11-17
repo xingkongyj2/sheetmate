@@ -33,6 +33,15 @@ def _ensure_ready() -> None:
 SEND_TOKENS_MAX = 500      # 一次发送最多记多少个换掉的值
 
 
+def _source(roles: set[str] | None) -> str:
+    """这个值是从哪来的：
+    leak：出现在系统说明、工具结果里（这些内容来自文件和工作区，本该已经是令牌）——文件脱敏漏掉的；
+    user：用户自己在对话里打的；history：之前的 AI 回复（给用户看时还原成了原文，再次发送时换回令牌，属于正常往返）。"""
+    if not roles or roles - {"user", "assistant"}:
+        return "leak"
+    return "user" if "user" in roles else "history"
+
+
 def _kinds_text(stats: Stats) -> str:
     return "、".join(f"{KIND_LABELS.get(kind, kind)} {count}" for kind, count in stats.values.items())
 
@@ -100,7 +109,8 @@ class GuardedLLM:
         # tokens：这次发送里换掉的值（只有令牌和类型；真实值在加密的令牌库里，打开「发送明细」时才在本机还原出来）
         privacy.log.emit(level, "发送检查", text, requests=1, messages=messages, values=stats.total,
                          kinds=dict(stats.values), methods=dict(stats.methods), images=stats.images,
-                         tokens=[[token, kind, method] for token, (kind, method) in list(stats.tokens.items())[:SEND_TOKENS_MAX]])
+                         tokens=[[token, kind, method, _source(stats.roles.get(token))]
+                                 for token, (kind, method) in list(stats.tokens.items())[:SEND_TOKENS_MAX]])
 
     def _protect_messages(self, messages: list[dict[str, Any]]) -> tuple[Any, list[dict[str, Any]]]:
         guard = self._guard()

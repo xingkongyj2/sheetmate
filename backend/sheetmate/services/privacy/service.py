@@ -96,8 +96,8 @@ SENDS_KEPT = 200          # 一条「发送检查」记录里最多留多少次�
 def _aggregate_text(kind: str, detail: dict[str, Any]) -> str | None:
     if kind == "发送检查":
         # 每次发送都带着整段对话，同一个值会在每次发送里都被换一次：这里数的是不同的值
-        distinct = int(detail.get("distinct", detail.get("values", 0)))
-        tail = f"补充替换 {distinct} 个值" if distinct else "无需替换"
+        leaked = int(detail.get("leaked", 0))
+        tail = f"补上漏掉的 {leaked} 个值" if leaked else "没有漏掉的数据"
         return f"发给 AI {int(detail.get('requests', 1))} 次，{tail}"
     if kind == "还原":
         text = f"回复中 {int(detail.get('restored', 0))} 个令牌已还原"
@@ -127,7 +127,12 @@ def _with_send(detail: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     extra = event.get("detail") or {}
     sends = [*detail.get("sends", []), {"time": event["time"], "messages": int(extra.get("messages", 0)),
                                         "tokens": list(extra.get("tokens") or [])}][-SENDS_KEPT:]
-    return {**detail, "sends": sends, "distinct": len({item[0] for send in sends for item in send["tokens"]})}
+    return {**detail, "sends": sends, "leaked": len({item[0] for send in sends for item in send["tokens"] if _leaked(item)})}
+
+
+def _leaked(item: list[Any]) -> bool:
+    """发送明细里的一项是不是文件脱敏漏掉的（见 GuardedLLM 的 _source）。"""
+    return isinstance(item, list) and len(item) >= 3 and (len(item) < 4 or item[3] == "leak")
 
 
 def _store_event(event: dict[str, Any]) -> None:
@@ -891,7 +896,7 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
             detail = detail or {}
             if kind == "发送检查":
                 requests += int(detail.get("requests", 1))
-                sent_tokens.update(item[0] for send in detail.get("sends", []) for item in send.get("tokens", []))
+                sent_tokens.update(item[0] for send in detail.get("sends", []) for item in send.get("tokens", []) if _leaked(item))
             elif kind == "拦截":
                 blocked += 1
             elif kind == "还原":
@@ -931,24 +936,25 @@ METHOD_LABELS = {
 
 
 def sends(conversation_id: str) -> list[dict[str, Any]]:
-    """发给 AI 的每一次请求里，发送前检查补充换掉了哪些值（文件脱敏之外漏掉、在发送环节补上的）。
-    记录里只存了令牌，真实值在这里用本机的令牌库还原出来给用户看。"""
+    """文件脱敏漏掉、在发给 AI 前才补换掉的值：按第几次发送列出，每个值只在第一次出现的那次发送里列一次
+    （对话记录每次都会重复带上，后面的发送里还会再换一次，不重复列）。
+    用户自己打的、之前回复里还原出来的不算漏掉，不列。记录里只存了令牌，真实值在这里用本机的令牌库还原出来给用户看。"""
     start()
     guard = privacy.require()
     with session_scope() as db:
         rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
                                                           PrivacyEvent.kind == "发送检查").order_by(PrivacyEvent.id)))
         raw = [send for row in rows for send in (row.detail or {}).get("sends", [])]
-    out, previous = [], None
+    out, seen = [], set()
     for number, send in enumerate(raw, 1):
-        tokens = [item for item in send.get("tokens", []) if isinstance(item, list) and len(item) == 3]
-        current = frozenset(item[0] for item in tokens)
+        fresh = [item for item in send.get("tokens", []) if _leaked(item) and item[0] not in seen]
+        seen.update(item[0] for item in fresh)
+        if not fresh:
+            continue
         out.append({
             "number": number, "time": send.get("time"), "messages": int(send.get("messages", 0)),
-            "same_as_previous": bool(current) and current == previous,
-            "items": [{"token": token, "value": guard.vault.reveal(token), "kind": kind,
-                       "kind_label": KIND_LABELS.get(kind, kind), "method_label": METHOD_LABELS.get(method, method)}
-                      for token, kind, method in tokens],
+            "items": [{"token": item[0], "value": guard.vault.reveal(item[0]), "kind": item[1],
+                       "kind_label": KIND_LABELS.get(item[1], item[1]), "method_label": METHOD_LABELS.get(item[2], item[2])}
+                      for item in fresh],
         })
-        previous = current
     return out

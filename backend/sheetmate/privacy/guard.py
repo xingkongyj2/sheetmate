@@ -107,6 +107,8 @@ class Stats:
         self.images = 0
         # 换出来的令牌 → (类型, 方式)。只有令牌，没有真实值（真实值只在加密的令牌库里），给「发送明细」用
         self.tokens: dict[str, tuple[str, str]] = {}
+        # 令牌出现在哪些角色的消息里（system / user / assistant / tool），用来分出「漏掉的」和「用户自己打的、回复里还原的」
+        self.roles: dict[str, set[str]] = {}
 
     def add(self, kind: str, method: str, count: int = 1) -> None:
         self.values[kind] += count
@@ -123,6 +125,9 @@ class Stats:
         self.methods.update(other.methods)
         for token, info in other.tokens.items():
             self.tokens.setdefault(token, info)
+        for token, roles in other.roles.items():
+            self.roles.setdefault(token, set()).update(roles)
+        self.images += other.images
 
     @property
     def total(self) -> int:
@@ -637,8 +642,16 @@ class Guard:
         return out
 
     def protect_messages(self, messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], Stats]:
-        stats = Stats()
-        return [self.protect_message(message, stats) for message in messages], stats
+        stats, out = Stats(), []
+        for message in messages:
+            local = Stats()
+            out.append(self.protect_message(message, local))
+            role = str(message.get("role") or "other")
+            for token in local.tokens:
+                local.roles.setdefault(token, set()).add(role)
+            stats.texts += local.texts
+            stats.merge(local)
+        return out, stats
 
     # ------------------------------------------------------------------ 还原
 
