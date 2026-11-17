@@ -210,6 +210,13 @@ def privacy_overview(conversation_id: str, db: Session = Depends(get_db), user: 
     return {"ok": True, "privacy": privacy_service.overview(user, conversation_id)}
 
 
+@router.get("/{conversation_id}/privacy/sends")
+def privacy_sends(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """发送明细：每次发给 AI 前，发送检查补充换掉了哪些值（真实值只在这里、在本机还原给用户看）。"""
+    conv_service.get_conversation(db, user, conversation_id)
+    return {"ok": True, "sends": privacy_service.sends(conversation_id)}
+
+
 @router.post("/{conversation_id}/chat")
 async def chat(conversation_id: str, body: ChatBody, request: Request, user: User = Depends(current_user)):
     # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）

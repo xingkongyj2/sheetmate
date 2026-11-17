@@ -90,15 +90,19 @@ def _reload_registry() -> None:
 # ---------------------------------------------------------------------------
 
 
+SENDS_KEPT = 200          # 一条「发送检查」记录里最多留多少次发送的明细
+
+
 def _aggregate_text(kind: str, detail: dict[str, Any]) -> str | None:
     if kind == "发送检查":
-        values = int(detail.get("values", 0))
-        tail = (f"共替换 {values} 个联系方式/地址，检查后没有发现明文" if values else "没有发现联系方式或地址")
-        return f"本轮向 AI 发送了 {int(detail.get('requests', 1))} 次请求，每次发送前都已检查：{tail}"
+        # 每次发送都带着整段对话，同一个值会在每次发送里都被换一次：这里数的是不同的值
+        distinct = int(detail.get("distinct", detail.get("values", 0)))
+        tail = f"补充替换 {distinct} 个值" if distinct else "无需替换"
+        return f"发给 AI {int(detail.get('requests', 1))} 次，{tail}"
     if kind == "还原":
-        text = f"AI 的回复里共 {int(detail.get('restored', 0))} 个令牌，已在本机还原为真实值"
+        text = f"回复中 {int(detail.get('restored', 0))} 个令牌已还原"
         if detail.get("unknown"):
-            text += f"；另有 {int(detail['unknown'])} 个令牌不认识，保持原样"
+            text += f"，{int(detail['unknown'])} 个未识别"
         return text
     return None
 
@@ -118,7 +122,17 @@ def _add_counts(base: dict[str, Any], extra: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _with_send(detail: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    """把这次发送的明细（时间、消息数、换掉的令牌）追加进记录，并重算不同的值有几个。"""
+    extra = event.get("detail") or {}
+    sends = [*detail.get("sends", []), {"time": event["time"], "messages": int(extra.get("messages", 0)),
+                                        "tokens": list(extra.get("tokens") or [])}][-SENDS_KEPT:]
+    return {**detail, "sends": sends, "distinct": len({item[0] for send in sends for item in send["tokens"]})}
+
+
 def _store_event(event: dict[str, Any]) -> None:
+    if (event.get("detail") or {}).get("cached"):
+        return              # 「已识别过、沿用结果」没有做任何事，只写进 privacy.log，不放进面板的处理记录
     with session_scope() as db:
         conversation_id = event.get("conversation_id")
         kind = event["kind"]
@@ -127,12 +141,16 @@ def _store_event(event: dict[str, Any]) -> None:
                               .order_by(PrivacyEvent.id.desc()).limit(1)).first()
             if (last is not None and last.kind == kind and last.level == event["level"]
                     and now() - last.updated_at < _MERGE_WINDOW):
-                detail = _add_counts(last.detail or {}, event.get("detail") or {})
+                detail = _add_counts(last.detail or {}, {k: v for k, v in (event.get("detail") or {}).items() if k != "tokens"})
+                if kind == "发送检查":
+                    detail = _with_send(detail, event)
                 last.detail = detail
                 last.text = _aggregate_text(kind, detail) or event["text"]
                 last.updated_at = now()
                 return
         detail = event.get("detail")
+        if detail and kind == "发送检查":
+            detail = _with_send({k: v for k, v in detail.items() if k != "tokens"}, event)
         text = (_aggregate_text(kind, detail) if detail and kind in {"发送检查", "还原"} else None) or event["text"]
         db.add(PrivacyEvent(conversation_id=conversation_id, user_id=event.get("user_id"), level=event["level"],
                             kind=kind, text=text, detail=detail))
@@ -460,10 +478,10 @@ def _merge_deep(filename: str, sheets: list[dict[str, Any]], deep: dict[tuple[st
                 entry["columns"].append({"name": column, "kind": "mixed", "kind_label": KIND_LABELS["mixed"], "action": "cell_scan",
                                          "action_label": ACTION_LABELS["cell_scan"], "source": "model", "reason": reason,
                                          "values": info["cells"]})
-            privacy.log.emit("info", "识别", f"{filename}：「{column}」{reason}", column=column, values=info["values"],
+            privacy.log.emit("info", "识别", f"{filename}「{column}」：发现 {info['snippets']} 处联系方式或地址", column=column, values=info["values"],
                              cells=info["cells"], snippets=info["snippets"])
         else:
-            privacy.log.emit("info", "识别", f"{filename}：「{column}」{how}，没有发现联系方式或地址", column=column, values=info["values"])
+            privacy.log.emit("info", "识别", f"{filename}「{column}」：无敏感内容", column=column, values=info["values"], partial=info["partial"])
 
 
 async def _identify(file_id: str, filename: str, profile: dict[str, Any], model: _Model,
@@ -579,8 +597,7 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
         outcomes = _first_error(await asyncio.gather(*(one(item) for item in snapshot), return_exceptions=True))
         for item, (sheets, was_cached, source) in zip(snapshot, outcomes):
             if was_cached:
-                when = "上传时的" if source == "upload" else "之前的"
-                privacy.log.emit("info", "识别", f"{item['filename']}：沿用{when}识别结果（文件内容和识别方式都没有变）",
+                privacy.log.emit("info", "识别", f"{item['filename']}：已识别过，无需重复处理",
                                  file_id=item["id"], cached=True, source=source)
             columns = _remember(item["id"], item["profile"], sheets)
             if columns:
@@ -601,7 +618,7 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
     except PrivacyBlocked as exc:
         return await _stop(conversation_id, emit, model.mode, model.name, str(exc), reports)
     except Exception as exc:  # 识别过程出任何意外，都不能继续
-        privacy.log.emit("error", "错误", f"识别过程出现意外（{type(exc).__name__}），已停止处理", error=str(exc)[:200])
+        privacy.log.emit("error", "错误", f"识别出错（{type(exc).__name__}），已停止", error=str(exc)[:200])
         return await _stop(conversation_id, emit, model.mode, model.name,
                            f"识别过程出现意外（{type(exc).__name__}），为保护数据已停止处理，没有任何内容发给 AI。", reports)
 
@@ -643,7 +660,7 @@ async def identify_uploaded(file_id: str) -> None:
         except Exception as exc:
             reason = str(exc)[:300] or type(exc).__name__
             _save_failed(item["id"], reason)
-            privacy.log.emit("warn", "识别", f"{item['filename']}：上传后自动识别没有完成，对话用到这个文件时会再试——{reason}",
+            privacy.log.emit("warn", "识别", f"{item['filename']}：上传后识别未完成，使用时重试（{reason}）",
                              file_id=item["id"], source="upload")
     except Exception:   # 后台任务出任何问题都不能影响上传本身
         logging.getLogger(__name__).exception("上传后自动识别出现意外")
@@ -766,7 +783,7 @@ def metadata_only(function: Callable[..., Awaitable[Any]]) -> Callable[..., Awai
 
 async def _stop(conversation_id: str, emit: Emit, mode: str, model: str | None, reason: str,
                 files: list[dict[str, Any]]) -> dict[str, Any]:
-    privacy.log.emit("error", "拦截", f"脱敏没有完成，本轮已停止，没有任何内容发给 AI：{reason}", reason=reason)
+    privacy.log.emit("error", "拦截", f"脱敏未完成，本轮已停止：{reason}", reason=reason)
     report = _blocked_report(mode, model, reason, files)
     await emit(report)
     raise PrivacyBlocked(reason)
@@ -801,11 +818,11 @@ def _log_file(filename: str, file_id: str, sheets: list[dict[str, Any]], scanned
     how = f"规则 + 脱敏模型「{model}」" if mode == "model_rules" else "内置规则"
     when = "上传后自动" if source == "upload" else ""
     if not columns:
-        privacy.log.emit("info", "识别", f"{filename}：{when}用{how}检查了 {scanned} 列，没有发现联系方式或地址", file_id=file_id,
+        privacy.log.emit("info", "识别", f"{filename}：无需脱敏", file_id=file_id, how=how, when=when,
                          scanned=scanned, protected=0, source=source)
         return
-    listing = "；".join(f"「{c['name']}」{c['kind_label']}（{c['reason']}；{c['action_label']}；涉及 {c['values']} 个值）" for c in columns)
-    privacy.log.emit("info", "识别", f"{filename}：{when}用{how}检查了 {scanned} 列，{len(columns)} 列需要保护——{listing}",
+    listing = "、".join(c["name"] for c in columns)
+    privacy.log.emit("info", "识别", f"{filename}：脱敏 {len(columns)} 列（{listing}）", how=how, when=when,
                      file_id=file_id, scanned=scanned, protected=len(columns), source=source,
                      columns=[{"name": c["name"], "kind": c["kind"], "source": c["source"]} for c in columns])
 
@@ -856,28 +873,33 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
             if row is None and record.kind == "output":
                 continue          # 还没轮到脱敏的结果文件（中间文件、本轮刚交付的）：不列出，不显示成「识别中」
             ready = row is not None and row.status == "ready"
-            files.append({"file_id": record.id, "filename": record.filename, "cached": False,
+            files.append({"file_id": record.id, "filename": record.filename, "kind": record.kind, "cached": False,
                           "source": row.source if row is not None else None,
                           "sheets": choices.effective(record.id, list((row.sheets if row is not None else []) or [])),
                           "status": "ready" if ready else "failed" if row is not None else "pending",
                           "updated_at": row.updated_at.isoformat(timespec="seconds") if row is not None else None,
                           "error": row.error if row is not None else None})
-        events = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id)
-                                 .order_by(PrivacyEvent.id.desc()).limit(50)))
+        events = [event for event in db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id)
+                                                .order_by(PrivacyEvent.id.desc()).limit(200))
+                  if not (event.detail or {}).get("cached")][:50]      # 旧版本存下的「沿用识别结果」也不显示
         # 统计只需要类型和计数两列，不把整条记录都读出来
         counted = db.execute(select(PrivacyEvent.kind, PrivacyEvent.detail).where(
             PrivacyEvent.conversation_id == conversation_id, PrivacyEvent.kind.in_(("发送检查", "拦截", "还原"))))
         requests = blocked = restored = 0
+        sent_tokens: set[str] = set()
         for kind, detail in counted:
             detail = detail or {}
             if kind == "发送检查":
                 requests += int(detail.get("requests", 1))
+                sent_tokens.update(item[0] for send in detail.get("sends", []) for item in send.get("tokens", []))
             elif kind == "拦截":
                 blocked += 1
             elif kind == "还原":
                 restored += int(detail.get("restored", 0))
+        # 取最近 50 条，按时间从早到晚排（面板里从上往下读）
         listed = [{"id": e.id, "time": e.updated_at.isoformat(timespec="seconds"), "level": e.level, "kind": e.kind,
-                   "text": e.text, "detail": e.detail} for e in events]
+                   "text": e.text, "detail": {k: v for k, v in (e.detail or {}).items() if k != "sends"} or None}
+                  for e in reversed(events)]
     from sheetmate.services.privacy import columns as privacy_columns
 
     for item in files:          # 和文件维护页（客户文件页、聊天页的盾牌弹窗）是同一份判断：列有没有脱敏，两边必须一致
@@ -886,6 +908,8 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
                 item["sheets"] = privacy_columns.masked_sheets(item["file_id"], item["sheets"])
             except Exception:
                 logger.exception("按维护页的判断整理脱敏概览失败：%s", item["file_id"])
+    # 识别完成、但没有任何列真的脱敏的文件不列出；识别中、识别失败的照常列出（要让用户知道）
+    files = [item for item in files if item["status"] != "ready" or any(sheet["columns"] for sheet in item["sheets"])]
     columns = sum(len(s["columns"]) for f in files for s in f["sheets"])
     values = sum(c["values"] for f in files for s in f["sheets"] for c in s["columns"])
     # 显示实际用来识别这个会话文件的模型（识别记录里存的），没有识别记录时才用设置里的
@@ -895,5 +919,36 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
     return {"enabled": privacy.enabled, "mode": "model_rules" if configured else "rules", "model": used or (cfg.model if cfg else None),
             "model_configured": configured,
             "totals": {"files": len(files), "columns": columns, "values": values, "requests": requests, "blocked": blocked,
-                       "restored": restored},
+                       "restored": restored, "sent_values": len(sent_tokens)},
             "files": files, "events": listed}
+
+
+METHOD_LABELS = {
+    "pattern": "号码、地址格式", "context": "标签后面的值", "text_table": "表格里的敏感列", "json_table": "表格里的敏感列",
+    "json_key": "敏感字段", "json_samples": "敏感列的样本", "json_number": "数字格式的手机号", "sample_line": "敏感列的样本",
+    "top_values": "敏感列的常见值", "known_value": "已识别过的敏感值", "learned": "脱敏模型发现的片段", "copy": "敏感列",
+}
+
+
+def sends(conversation_id: str) -> list[dict[str, Any]]:
+    """发给 AI 的每一次请求里，发送前检查补充换掉了哪些值（文件脱敏之外漏掉、在发送环节补上的）。
+    记录里只存了令牌，真实值在这里用本机的令牌库还原出来给用户看。"""
+    start()
+    guard = privacy.require()
+    with session_scope() as db:
+        rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
+                                                          PrivacyEvent.kind == "发送检查").order_by(PrivacyEvent.id)))
+        raw = [send for row in rows for send in (row.detail or {}).get("sends", [])]
+    out, previous = [], None
+    for number, send in enumerate(raw, 1):
+        tokens = [item for item in send.get("tokens", []) if isinstance(item, list) and len(item) == 3]
+        current = frozenset(item[0] for item in tokens)
+        out.append({
+            "number": number, "time": send.get("time"), "messages": int(send.get("messages", 0)),
+            "same_as_previous": bool(current) and current == previous,
+            "items": [{"token": token, "value": guard.vault.reveal(token), "kind": kind,
+                       "kind_label": KIND_LABELS.get(kind, kind), "method_label": METHOD_LABELS.get(method, method)}
+                      for token, kind, method in tokens],
+        })
+        previous = current
+    return out

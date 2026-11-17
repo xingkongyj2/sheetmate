@@ -234,7 +234,7 @@ def restore_file(path: Path) -> bool:
         return _restore_workbook(guard, path)
     except Exception:  # 还原失败不能毁掉结果文件：保留原文件，并留下记录（令牌留在文件里，用户一眼能看出来）
         logger.exception("结果文件还原令牌失败：%s", path)
-        privacy.log.emit("warn", "还原", f"结果文件「{path.name}」里的令牌没能还原，文件保持原样")
+        privacy.log.emit("warn", "还原", f"{path.name}：令牌还原失败，保持原样")
         return False
 
 
@@ -292,5 +292,5 @@ def _restore_workbook(guard: Any, path: Path) -> bool:
             temporary.unlink(missing_ok=True)
             raise
     os.replace(temporary, path)
-    privacy.log.emit("info", "还原", f"结果文件「{path.name}」里的令牌已换回真实值", file=path.name)
+    privacy.log.emit("info", "还原", f"{path.name}：令牌已还原", file=path.name)
     return True

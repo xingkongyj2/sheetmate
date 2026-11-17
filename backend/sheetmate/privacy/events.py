@@ -84,7 +84,8 @@ class PrivacyLog:
         scope = current_scope()
         conversation_id = scope.conversation_id if scope else None
         prefix = f"会话 {conversation_id}：" if conversation_id else ""
-        suffix = f" | {json.dumps(detail, ensure_ascii=False, default=str)}" if detail else ""
+        shown = {key: value for key, value in detail.items() if key != "tokens"}     # 换掉的令牌清单很长，只进数据库给「发送明细」用
+        suffix = f" | {json.dumps(shown, ensure_ascii=False, default=str)}" if shown else ""
         log_level = {"info": logging.INFO, "warn": logging.WARNING, "error": logging.ERROR}.get(level, logging.INFO)
         self._logger.log(log_level, f"{prefix}{text}{suffix}", extra={"kind": kind})
         event = {"time": datetime.now().isoformat(timespec="seconds"), "level": level, "kind": kind, "text": text,

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 详情面板「脱敏」：当前会话的脱敏情况（只读）。哪些文件、哪些列、怎么处理、每次发送前检查的结果，都写清楚。 */
-import { LoaderCircle, RefreshCw, ShieldAlert, ShieldCheck } from '@lucide/vue'
+import { ChevronRight, LoaderCircle, RefreshCw, ShieldAlert, ShieldCheck } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { conversationApi } from '@/api'
@@ -10,6 +10,7 @@ import type { UiMessage } from '@/composables/chatModel'
 import { formatCount } from '@/composables/privacyPresentation'
 
 import PrivacyFiles from './PrivacyFiles.vue'
+import PrivacySendsDialog from './PrivacySendsDialog.vue'
 
 const props = defineProps<{ detail: ConversationDetail | null; message: UiMessage | null }>()
 
@@ -71,16 +72,33 @@ const status = computed(() => {
   if (blocked > 0) return { error: true, text: `有 ${formatCount(blocked)} 次发送被拦截，这些内容没有发给 AI` }
   if (failed.value) return { error: true, text: '有文件脱敏失败，相关处理已停止，没有数据发给 AI' }
   const sent = requests ? `发送给 AI 的 ${formatCount(requests)} 次请求全部通过检查` : '还没有向 AI 发送请求'
-  return { error: false, text: `本会话已脱敏 ${formatCount(data.files.length)} 个文件，${sent}` }
+  return { error: false, text: `已脱敏 ${formatCount(data.files.length)} 个文件，${sent}` }
 })
-const numbers = computed(() => {
+// 两个环节分开：上传的文件先脱敏；之后每次发给 AI 前，再把文件之外的内容（对话、工具结果、说明）查一遍，漏掉的在这里补上
+const fileNumbers = computed(() => {
   const totals = overview.value?.totals
   return totals ? [
-    { label: '保护的列', value: totals.columns, warn: false },
+    { label: '脱敏的列', value: totals.columns, warn: false },
     { label: '替换的值', value: totals.values, warn: false },
-    { label: '发送检查', value: totals.requests, warn: false },
+  ] : []
+})
+const sendNumbers = computed(() => {
+  const totals = overview.value?.totals
+  return totals ? [
+    { label: '发送次数', value: totals.requests, warn: false },
+    { label: '补充替换', value: totals.sent_values ?? 0, warn: false },
     { label: '拦截', value: totals.blocked, warn: totals.blocked > 0 },
   ] : []
+})
+const showSends = ref(false)
+
+// 输入（含期望结果）和输出分开列；没有脱敏的文件后端已经去掉
+const fileGroups = computed(() => {
+  const files = overview.value?.files ?? []
+  return [
+    { key: 'input', label: '输入文件', files: files.filter((file) => file.kind !== 'output') },
+    { key: 'output', label: '输出文件', files: files.filter((file) => file.kind === 'output') },
+  ].filter((group) => group.files.length)
 })
 
 function clock(iso: string): string {
@@ -122,31 +140,54 @@ function levelClass(level: PrivacyEventItem['level']): string {
         {{ overview.mode === 'rules' ? '未配置脱敏模型，仅使用内置规则' : `脱敏模型：${overview.model ?? '已配置'}` }}
       </p>
 
-      <dl class="grid grid-cols-2 gap-2">
-        <div v-for="item in numbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
-          <dd class="text-xl font-medium tabular-nums tracking-tight" :class="item.warn ? 'text-error' : ''">{{ formatCount(item.value) }}</dd>
-          <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>
+      <section class="grid gap-2.5" aria-label="文件脱敏">
+        <div class="px-0.5">
+          <h4 class="text-[13px] font-medium text-ink">文件脱敏</h4>
+          <p class="text-xs leading-5 text-faint">上传的表格里，联系方式和详细地址换成令牌</p>
         </div>
-      </dl>
+        <dl class="grid grid-cols-2 gap-2">
+          <div v-for="item in fileNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
+            <dd class="text-xl font-medium tabular-nums tracking-tight">{{ formatCount(item.value) }}</dd>
+            <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>
+          </div>
+        </dl>
+        <div v-for="group in fileGroups" :key="group.key" class="min-w-0">
+          <div class="label-mini mb-2 mt-1 flex items-center gap-2">{{ group.label }}<span class="font-normal tabular-nums tracking-normal">{{ group.files.length }}</span></div>
+          <PrivacyFiles :files="group.files" />
+        </div>
+      </section>
 
-      <div v-if="overview.files.length" class="min-w-0">
-        <div class="label-mini mb-2 flex items-center gap-2">文件<span class="font-normal tabular-nums tracking-normal">{{ overview.files.length }}</span></div>
-        <PrivacyFiles :files="overview.files" open-first />
-      </div>
+      <section class="grid gap-2.5" aria-label="发给 AI 前检查">
+        <div class="flex items-end justify-between gap-2 px-0.5">
+          <div class="min-w-0">
+            <h4 class="text-[13px] font-medium text-ink">发给 AI 前检查</h4>
+            <p class="text-xs leading-5 text-faint">发送前再查一遍对话和工具结果，补上漏掉的</p>
+          </div>
+          <button v-if="(overview.totals.sent_values ?? 0) > 0" type="button" class="flex shrink-0 items-center gap-0.5 text-xs text-mute transition hover:text-ink" @click="showSends = true">
+            明细<ChevronRight class="size-3.5" />
+          </button>
+        </div>
+        <dl class="grid grid-cols-3 gap-2">
+          <div v-for="item in sendNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
+            <dd class="text-xl font-medium tabular-nums tracking-tight" :class="item.warn ? 'text-error' : ''">{{ formatCount(item.value) }}</dd>
+            <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>
+          </div>
+        </dl>
+      </section>
 
       <div>
         <div class="label-mini mb-2 flex items-center gap-2">处理记录<span class="font-normal tabular-nums tracking-normal">{{ overview.events.length }}</span></div>
         <p v-if="!overview.events.length" class="px-0.5 text-xs text-faint">暂无记录</p>
         <ol v-else class="divide-y divide-line rounded-xl border border-line" aria-label="处理记录">
-          <li v-for="event in overview.events" :key="event.id" class="flex items-start gap-2 px-3 py-2 font-mono text-[11px] leading-5">
-            <time class="shrink-0 tabular-nums text-faint" :datetime="event.time">{{ clock(event.time) }}</time>
-            <span class="tag shrink-0 font-sans" :class="levelClass(event.level)">{{ event.kind }}</span>
+          <li v-for="event in overview.events" :key="event.id" class="flex items-start gap-2 px-3 py-2 text-xs leading-5">
+            <time class="shrink-0 font-mono text-[11px] tabular-nums text-faint" :datetime="event.time">{{ clock(event.time) }}</time>
+            <span class="tag shrink-0" :class="levelClass(event.level)">{{ event.kind }}</span>
             <span class="min-w-0 flex-1 break-words" :class="event.level === 'error' ? 'text-error' : 'text-mute'">{{ event.text }}</span>
           </li>
         </ol>
       </div>
 
-      <p class="px-0.5 text-[11px] leading-5 text-faint">完整日志见服务器 数据目录/log/privacy.log</p>
     </template>
+    <PrivacySendsDialog v-if="showSends && detail" :conversation-id="detail.id" @close="showSends = false" />
   </section>
 </template>

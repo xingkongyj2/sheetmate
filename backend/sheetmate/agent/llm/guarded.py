@@ -30,6 +30,9 @@ def _ensure_ready() -> None:
         privacy.configure(settings.data_dir)
 
 
+SEND_TOKENS_MAX = 500      # 一次发送最多记多少个换掉的值
+
+
 def _kinds_text(stats: Stats) -> str:
     return "、".join(f"{KIND_LABELS.get(kind, kind)} {count}" for kind, count in stats.values.items())
 
@@ -52,7 +55,7 @@ class GuardedLLM:
     # ------------------------------------------------------------------ 发出去之前
 
     def _block(self, reason: str) -> PrivacyBlockedError:
-        privacy.log.emit("error", "拦截", f"已拒绝向 AI 发送内容：{reason}", reason=reason)
+        privacy.log.emit("error", "拦截", f"已拦截：{reason}", reason=reason)
         return PrivacyBlockedError(reason)
 
     def _guard(self):
@@ -87,16 +90,17 @@ class GuardedLLM:
 
     def _report(self, stats: Stats, messages: int) -> None:
         if stats.total:
-            text = (f"向 AI 发送 {messages} 条消息前已检查，替换 {stats.total} 个联系方式/地址（{_kinds_text(stats)}），"
-                    "检查后没有发现明文")
+            text = f"发送前检查：替换 {stats.total} 个（{_kinds_text(stats)}）"
         else:
-            text = f"向 AI 发送 {messages} 条消息前已检查：没有发现联系方式或地址"
+            text = "发送前检查：无敏感内容"
         level = "info"
         if stats.images:
-            text += f"；含 {stats.images} 张图片，图片内容无法检查"
+            text += f"，{stats.images} 张图片无法检查"
             level = "warn"
+        # tokens：这次发送里换掉的值（只有令牌和类型；真实值在加密的令牌库里，打开「发送明细」时才在本机还原出来）
         privacy.log.emit(level, "发送检查", text, requests=1, messages=messages, values=stats.total,
-                         kinds=dict(stats.values), methods=dict(stats.methods), images=stats.images)
+                         kinds=dict(stats.values), methods=dict(stats.methods), images=stats.images,
+                         tokens=[[token, kind, method] for token, (kind, method) in list(stats.tokens.items())[:SEND_TOKENS_MAX]])
 
     def _protect_messages(self, messages: list[dict[str, Any]]) -> tuple[Any, list[dict[str, Any]]]:
         guard = self._guard()
@@ -127,9 +131,9 @@ class GuardedLLM:
     def _report_restore(counter: Counter[str]) -> None:
         restored, unknown = counter.get("restored", 0), counter.get("unknown", 0)
         if restored or unknown:
-            text = f"AI 的回复里有 {restored} 个令牌，已在本机还原为真实值"
+            text = f"回复中 {restored} 个令牌已还原"
             if unknown:
-                text += f"；另有 {unknown} 个令牌不认识，保持原样"
+                text += f"，{unknown} 个未识别"
             privacy.log.emit("warn" if unknown else "info", "还原", text, restored=restored, unknown=unknown)
 
     def _restore_message(self, guard: Any, message: Any, counter: Counter[str]) -> None:

@@ -105,14 +105,24 @@ class Stats:
         self.methods: Counter[str] = Counter()
         self.texts = 0
         self.images = 0
+        # 换出来的令牌 → (类型, 方式)。只有令牌，没有真实值（真实值只在加密的令牌库里），给「发送明细」用
+        self.tokens: dict[str, tuple[str, str]] = {}
 
     def add(self, kind: str, method: str, count: int = 1) -> None:
         self.values[kind] += count
         self.methods[method] += count
 
+    def note(self, kind: str, method: str, token: str) -> str:
+        """记下一次替换，返回令牌。"""
+        self.add(kind, method)
+        self.tokens.setdefault(token, (kind, method))
+        return token
+
     def merge(self, other: "Stats") -> None:
         self.values.update(other.values)
         self.methods.update(other.methods)
+        for token, info in other.tokens.items():
+            self.tokens.setdefault(token, info)
 
     @property
     def total(self) -> int:
@@ -120,6 +130,13 @@ class Stats:
 
 
 _NUMBER_TEXT = re.compile(r"[-+]?\d[\d,.\s]*")
+_HEADER_NOISE = re.compile(r"[,，、;；|]|\s/\s|^[-*•·]\s|`")
+
+
+def _plain_header(name: str) -> bool:
+    """表格的表头格子像不像一个列名：不长、里面没有逗号顿号这类分隔（那是一段说明或一串列名）。"""
+    text = name.strip()
+    return 0 < len(text) <= 30 and not _HEADER_NOISE.search(text)
 # 整格就是一个号码（含空格、横线、括号和半隐藏的星号）；多出别的字就是「姓名 + 号码」这类混写
 _PHONE_LIKE = re.compile(r"[\d\s\-—()（）+*＊xX×●•转]+")
 _NAME_NOISE = re.compile(r"[\s,，、;；:：|/]+|收件人|收货人|联系人|姓名|电话|手机号?|地址")
@@ -141,7 +158,7 @@ def _cannot_be(kind: str, value: object, text: str) -> bool:
 class Guard:
     def __init__(self, vault: Vault, registry: Registry, log: PrivacyLog) -> None:
         self.vault, self.registry, self.log = vault, registry, log
-        self._cache: OrderedDict[tuple[int, int, frozenset[str], str], tuple[str, Counter[str], Counter[str]]] = OrderedDict()
+        self._cache: OrderedDict[tuple[int, int, frozenset[str], str], tuple[str, Counter[str], Counter[str], dict[str, tuple[str, str]]]] = OrderedDict()
         self._cache_lock = threading.Lock()
         self._cache_costs: dict[tuple[int, int, frozenset[str], str], int] = {}
         self._cache_bytes = 0
@@ -163,8 +180,7 @@ class Guard:
             return value
         forced, kind = kind.endswith(FORCED), kind.rstrip(FORCED)
         if kind == "custom" or forced:   # 用户在维护页里手动指定的整列：不管里面是什么，每一格都按选的类型换成令牌
-            stats.add(kind, method)
-            return self.vault.token(kind, text.strip())
+            return stats.note(kind, method, self.vault.token(kind, text.strip()))
         if is_label(text):
             return value             # 列头、「收货地址：」这类标签：不是内容，不换令牌
         if kind == "mixed":
@@ -188,10 +204,8 @@ class Guard:
                 return kept
             if not split_address(text)[1].strip():
                 return value                # 整格只有省、市（「武汉」「成都」「武汉武汉」）：没有详细地址，不遮
-            stats.add("address", method)
-            return self.vault.token("address", text.strip())   # 有详细地址：整个地址一起遮，省市区也不留
-        stats.add(kind, method)
-        return self.vault.token(kind, text)
+            return stats.note("address", method, self.vault.token("address", text.strip()))   # 有详细地址：整个地址一起遮，省市区也不留
+        return stats.note(kind, method, self.vault.token(kind, text))
 
     def _address_keeping_names(self, text: str, stats: Stats) -> str | None:
         """地址格子里，地址前后只多出一个姓名（最多 3 个字）和号码时：整个地址和号码遮掉，姓名留着。
@@ -335,7 +349,9 @@ class Guard:
                 while j < len(lines) and lines[j].count(" | ") == separators and not lines[j].startswith("…"):
                     rows.append(lines[j].split(" | "))
                     j += 1
-                kinds = [self._column_kind(name, [r[k] for r in rows]) for k, name in enumerate(header)]
+                # 只有像列名的表头才按列处理：「…60 行 × 7 列 | 列：序号, 订单号, 收货地…」这种说明文字里提到了「收货地」，
+                # 不能把整列都当成地址遮掉（AI 会连表有哪些列都看不到）
+                kinds = [self._column_kind(name, [r[k] for r in rows]) if _plain_header(name) else None for k, name in enumerate(header)]
                 for row_index, row in enumerate(rows):
                     new = [str(self._token_cell(kinds[k], cell, stats, "text_table")) if kinds[k] else self._scan_learned(cell, stats)
                            for k, cell in enumerate(row)]
@@ -491,8 +507,7 @@ class Guard:
                 continue
             if not split_address(segment)[1].strip():
                 continue                    # 只有省市，没有详细地址
-            stats.add("address", "pattern")
-            text = text[:start] + self.vault.token("address", segment.strip()) + text[end:]
+            text = text[:start] + stats.note("address", "pattern", self.vault.token("address", segment.strip())) + text[end:]
         # 带标签的值：「电话：…」「微信 …」「收件地址：…」，不管值长什么格式都遮（比格式规则更宽，又不会误伤没有标签的单号）
         text = self._mask(text, ADDR_CTX_RE, "address", stats, "context", group=1, accept=address_context_ok)
         text = self._mask(text, IM_CTX_RE, "im", stats, "context", group=1)
@@ -521,8 +536,7 @@ class Guard:
     def _pattern_token(self, kind: str, value: str, stats: Stats, method: str = "pattern") -> str:
         if self._off(kind):
             return value
-        stats.add(kind, method)
-        return self.vault.token(kind, value)
+        return stats.note(kind, method, self.vault.token(kind, value))
 
     # ------------------------------------------------------------------ 对外
 
@@ -560,6 +574,8 @@ class Guard:
             if hit is not None:
                 stats.values.update(hit[1])
                 stats.methods.update(hit[2])
+                for token, info in hit[3].items():
+                    stats.tokens.setdefault(token, info)
                 return hit[0]
         local = Stats()
         out = self._protect(text, local)
@@ -572,7 +588,7 @@ class Guard:
             with self._cache_lock:
                 if key in self._cache:
                     self._cache_bytes -= self._cache_costs.pop(key, 0)
-                self._cache[key] = (out, local.values, local.methods)
+                self._cache[key] = (out, local.values, local.methods, local.tokens)
                 self._cache_costs[key] = cost
                 self._cache_bytes += cost
                 while self._cache and (len(self._cache) > _CACHE_ENTRIES or self._cache_bytes > _CACHE_BYTES):

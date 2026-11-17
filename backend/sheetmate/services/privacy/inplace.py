@@ -179,7 +179,7 @@ def _sync_file(file_id: str, fingerprint_of: Callable[[dict[str, Any]], str] | N
             staging.replace(path)
         except OoxmlUnsupported as exc:
             logger.warning("文件「%s」无法在原文件上改成脱敏版（%s），原文件保持不变，AI 和查看使用脱敏副本", path.name, exc)
-            privacy.log.emit("warn", "识别", f"文件「{record.filename}」格式没法保留原样地直接修改（{exc}），原文件保持不变，AI 和查看使用脱敏副本",
+            privacy.log.emit("warn", "识别", f"{record.filename}：无法直接修改原文件，改用脱敏副本（{exc}）",
                              file_id=file_id)
             state = "copy"
         finally:
@@ -203,5 +203,5 @@ def _sync_file(file_id: str, fingerprint_of: Callable[[dict[str, Any]], str] | N
             if fingerprint_of is not None and row.source != "manual":
                 row.fingerprint = fingerprint_of(new_profile)       # 内容变成令牌后指纹跟着换，不会被当成「文件变了」重新识别
     if changed and state != "copy":
-        privacy.log.emit("info", "识别", f"文件「{record.filename}」已按脱敏结果更新（脱敏的列是令牌，不脱敏的列是原文）", file_id=file_id)
+        privacy.log.emit("info", "识别", f"{record.filename}：原文件已按脱敏结果更新", file_id=file_id)
     return state

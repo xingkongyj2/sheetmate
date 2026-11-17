@@ -244,6 +244,6 @@ async def masked_xlsx(user: User, file_id: str, *, conversation_id: str | None =
     filename, path, report = await _ready(user, file_id, conversation_id)
     content, stats = await asyncio.to_thread(_build, path, report)
     with bind(Scope(conversation_id=conversation_id, user_id=user.id)):
-        privacy.log.emit("info", "导出", f"{filename}：下载了脱敏副本，{stats.total} 个联系方式/地址已替换为令牌（副本里没有真实内容）",
+        privacy.log.emit("info", "导出", f"{filename}：下载脱敏副本（替换 {stats.total} 个）",
                          file_id=file_id, values=stats.total, kinds=dict(stats.values))
     return f"{Path(filename).stem}_脱敏.xlsx", content

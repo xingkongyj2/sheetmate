@@ -125,7 +125,7 @@ def _build(file_id: str, source: Path, target: Path, view: bool = False) -> None
             return
         except OoxmlUnsupported as exc:
             logger.warning("文件「%s」无法在原文件上换成令牌（%s），改用重新生成的令牌版", source.name, exc)
-            privacy.log.emit("warn", "识别", f"文件「{source.name}」无法保留原有格式地换成令牌版（{exc}），本次使用重新生成的令牌版")
+            privacy.log.emit("warn", "识别", f"{source.name}：无法保留原格式，已重新生成脱敏版（{exc}）")
     write_excel(target, [SheetSpec(name=sheet.name, df=frame) for sheet, frame in masked])
 
 

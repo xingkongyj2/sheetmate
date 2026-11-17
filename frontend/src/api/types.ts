@@ -687,6 +687,8 @@ export interface PrivacyReport {
 
 export interface PrivacyFileState extends PrivacyFile {
   status: 'ready' | 'pending' | 'failed'
+  /** 文件类别：input 输入、expected 期望结果、output 输出 */
+  kind?: string
   updated_at: string | null
   error: string | null
 }
@@ -695,7 +697,7 @@ export interface PrivacyEventItem {
   id: number
   time: string
   level: 'info' | 'warn' | 'error'
-  kind: '识别' | '发送检查' | '还原' | '拦截' | '错误' | '导出'
+  kind: '识别' | '发送检查' | '还原' | '拦截' | '错误' | '导出' | '设置'
   text: string
   detail: Record<string, unknown> | null
 }
@@ -721,11 +723,21 @@ export interface PrivacyCopyPreview {
 }
 
 /** 详情面板「脱敏」tab：当前会话的整体情况 */
+/** 发给 AI 的一次请求：发送前检查补充换掉了哪些值（value 是在本机还原出来的真实值） */
+export interface PrivacySend {
+  number: number
+  time: string | null
+  messages: number
+  same_as_previous: boolean
+  items: { token: string; value: string | null; kind: string; kind_label: string; method_label: string }[]
+}
+
 export interface PrivacyOverview {
   mode: 'model_rules' | 'rules'
   model: string | null
   model_configured: boolean
-  totals: { files: number; columns: number; values: number; requests: number; blocked: number; restored: number }
+  /** sent_values：发给 AI 前的检查补充换掉的不同值的个数（文件脱敏之外漏掉、在发送环节补上的） */
+  totals: { files: number; columns: number; values: number; requests: number; blocked: number; restored: number; sent_values?: number }
   files: PrivacyFileState[]
   events: PrivacyEventItem[]
 }

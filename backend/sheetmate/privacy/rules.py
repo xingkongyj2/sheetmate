@@ -221,6 +221,10 @@ def address_context_ok(value: str) -> bool:
         if not parts:
             return False
         value = parts[0]
+    # 「收货地址： / 开票信息： / 制表人：」：模板表头里一串空着的标签，标签后面跟的是下一个标签，不是地址
+    segments = [part.strip() for part in re.split(r"\s*[/／]\s*", value)]
+    if all(not part or part.endswith((":", "：")) or is_label(part) for part in segments):
+        return False
     return len(value.strip()) >= 6 or any(ch.isdigit() for ch in value)
 
 # ---- 全角 → 半角 ----
