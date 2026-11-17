@@ -21,6 +21,7 @@ import { copyMarkdown } from '@/composables/markdown'
 import { messageMarkdown, PLAN_STATUS_LABELS, recipeAttempts, recipeFailure, recipeOutcomeSummary } from '@/composables/messagePresentation'
 import { recipeViewReply } from '@/composables/recipeViewPresentation'
 import { recipeDeliveries } from '@/composables/recipeDeliveries'
+import { showsPrivacyReport } from '@/composables/privacyPresentation'
 import { auditLine } from '@/composables/thinkingPresentation'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
@@ -167,7 +168,7 @@ onBeforeUnmount(() => {
     <div class="assistant-content w-full min-w-0 space-y-3">
       <p v-if="replyTime" class="text-xs leading-5 text-faint tabular-nums" data-testid="reply-timer">{{ replyTime }}</p>
       <!-- 每轮对话先脱敏再交给模型：脱敏结果永远是回复的第一块内容。 -->
-      <PrivacyReportCard v-if="message.privacy || message.privacyRunning" class="assistant-privacy" :report="message.privacy" :running="message.privacyRunning" />
+      <PrivacyReportCard v-if="(message.privacy && showsPrivacyReport(message.privacy)) || (!message.privacy && message.privacyRunning)" class="assistant-privacy" :report="message.privacy" :running="message.privacyRunning" />
       <!-- 按发生顺序只合并相邻同类步骤，正文保持原位。 -->
       <template v-for="(group, index) in displayGroups" :key="group.key">
         <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :class="{ 'assistant-stage--before-process': isFollowedByProcess(index) }" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">

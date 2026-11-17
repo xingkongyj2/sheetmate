@@ -72,6 +72,8 @@ class TableInfo:
     revision: str = ""
     probe_memory: dict[str, Any] = field(default_factory=dict)
     read_quality: dict[str, Any] = field(default_factory=dict)  # 原件读取风险，不能把缺公式缓存误当正常空值
+    privacy_masked: bool = False  # 内容已经换成令牌（联系方式、地址）：AI 和工具从头到尾只碰令牌，交付时才还原
+    privacy_sig: str = ""         # 生成令牌版时，用户在脱敏维护页里对这个文件的列选择的指纹；选择变了就按新的重新生成
     # {source: 读取批次 UUID, rows: 原始数据行的零基位置}；rows 恰为 0..n-1 时存紧凑形式 {source, identity: n}，
     # 避免大表的元数据每次读写都要处理 n 个整数。读取请一律经 validated_row_lineage() 展开。
     row_lineage: dict[str, Any] | None = None

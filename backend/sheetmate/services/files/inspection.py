@@ -51,11 +51,13 @@ def preview_upload(stream: BinaryIO, *, filename: str | None, sheet: str | None 
 
 
 def preview_file(record: FileRecord, *, sheet: str | None = None, offset: int = 0,
-                 limit: int = 50, raw: bool = False) -> dict[str, Any]:
+                 limit: int = 50, raw: bool = False, path: Path | None = None) -> dict[str, Any]:
+    """path：要预览的文件内容的位置，不传就是文件本身（有脱敏的列时传令牌版副本）。"""
+    source = path or Path(record.stored_path)
     if raw:
-        return {"file_id": record.id, **preview_data(Path(record.stored_path), filename=record.filename,
+        return {"file_id": record.id, **preview_data(source, filename=record.filename,
                                                     sheet=sheet, offset=offset, limit=limit)}
-    return file_service.preview(record, sheet, offset, min(limit, 500))
+    return file_service.preview(record, sheet, offset, min(limit, 500), path=source)
 
 
 def image_media_type(record: FileRecord) -> str:

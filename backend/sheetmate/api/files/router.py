@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -16,8 +20,10 @@ from sheetmate.db.models import FileRecord, User
 from sheetmate.services.customers import service as customer_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.files import inspection
+from sheetmate.services.privacy import columns as privacy_columns_service
 from sheetmate.services.privacy import masked_copy
 from sheetmate.services.privacy import service as privacy_service
+from sheetmate.services.privacy.workspace import restore_for_display, restored_download
 from sheetmate.services.workflows import node_edit as node_edit_service
 from sheetmate.core.errors import Forbidden, NotFound, ServiceError
 
@@ -87,6 +93,35 @@ async def privacy_preview(file_id: str, sheet: str | None = None, offset: int = 
     return {"ok": True, "preview": preview}
 
 
+class PrivacyColumnChange(BaseModel):
+    sheet: str
+    column: str
+    choice: str | None = None      # mask 脱敏 / keep 不脱敏 / 空 = 恢复自动识别
+    kind: str | None = None        # phone 电话号码 / address 详细地址 / custom 通用（手动选脱敏时；不传：自动识别的列照自动结果，其余用通用）
+
+
+class PrivacyColumnsBody(BaseModel):
+    changes: list[PrivacyColumnChange]
+    conversation_id: str | None = None
+
+
+@router.get("/{file_id}/privacy-columns")
+async def privacy_columns(file_id: str, conversation_id: str | None = None, db: Session = Depends(get_db),
+                          user: User = Depends(current_user)) -> dict[str, Any]:
+    """脱敏维护页：每一列现在是否脱敏、为什么（规则 + 脱敏模型分析列头和内容的结果，加上用户手动改的）。"""
+    _check(db, user, file_service.get_file(db, file_id))
+    return {"ok": True, "columns": await privacy_columns_service.list_columns(user, file_id, conversation_id)}
+
+
+@router.put("/{file_id}/privacy-columns")
+async def save_privacy_columns(file_id: str, body: PrivacyColumnsBody, db: Session = Depends(get_db),
+                               user: User = Depends(current_user)) -> dict[str, Any]:
+    """手动改某些列的脱敏（脱敏 / 不脱敏 / 恢复自动）；下一轮对话开始时这个文件在对话里的表会按新的选择重新生成。"""
+    _check(db, user, file_service.get_file(db, file_id))
+    return {"ok": True, "columns": await privacy_columns_service.save_columns(
+        user, file_id, [change.model_dump() for change in body.changes], body.conversation_id)}
+
+
 @router.get("/{file_id}/privacy-copy")
 async def privacy_copy(file_id: str, conversation_id: str | None = None, db: Session = Depends(get_db),
                        user: User = Depends(current_user)) -> Response:
@@ -98,21 +133,33 @@ async def privacy_copy(file_id: str, conversation_id: str | None = None, db: Ses
 
 
 @router.get("/{file_id}/preview")
-def file_preview(file_id: str, sheet: str | None = None, offset: int = Query(0, ge=0),
-                 limit: int = Query(50, ge=1, le=500), raw: bool = False,
-                 db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+async def file_preview(file_id: str, sheet: str | None = None, offset: int = Query(0, ge=0),
+                       limit: int = Query(50, ge=1, le=500), raw: bool = False,
+                       db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     record = file_service.get_file(db, file_id)
     _check(db, user, record)
-    return {"ok": True, "preview": inspection.preview_file(record, sheet=sheet, offset=offset, limit=limit, raw=raw)}
+    path, mode = await privacy_columns_service.viewable_path(user, record)    # 脱敏的列里就是令牌，不换回真实值
+    preview = await asyncio.to_thread(inspection.preview_file, record, sheet=sheet, offset=offset, limit=limit, raw=raw, path=path)
+    return JSONResponse({"ok": True, "preview": jsonable_encoder(preview if mode != "original" else restore_for_display(preview))},
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.get("/{file_id}/download")
-def download(file_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> FileResponse:
+async def download(file_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> FileResponse:
     record = file_service.get_file(db, file_id)
     _check(db, user, record)
-    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(record.filename)}"}
-    return FileResponse(record.stored_path, headers=headers,
-                        media_type=file_service.file_media_type(record))
+    source, mode = await privacy_columns_service.viewable_path(user, record)
+    filename = record.filename
+    if mode == "copy" and source.suffix.lower() != Path(filename).suffix.lower():
+        filename = f"{Path(filename).stem}{source.suffix}"                     # .xls 的令牌版是 .xlsx
+    # 脱敏状态随时会变（开关、手动选择）：浏览器不能缓存，每次都取最新的
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}", "Cache-Control": "no-store"}
+    if mode != "original":
+        return FileResponse(source, headers=headers, media_type=file_service.file_media_type(record))
+    # 还没确认成正式结果的文件里是令牌版内容：下载给用户的是换回真实值的副本，下载完删除
+    path, temporary = restored_download(source)
+    return FileResponse(path, headers=headers, media_type=file_service.file_media_type(record),
+                        background=BackgroundTask(path.unlink, missing_ok=True) if temporary else None)
 
 
 @router.get("/{file_id}/image")

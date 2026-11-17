@@ -20,6 +20,8 @@ import type {
   LLMConfigUpdate,
   MemoryItem,
   PrivacyCopyPreview,
+  PrivacyColumnChange,
+  PrivacyColumns,
   PrivacyFileStatus,
   PrivacyOverview,
   RecipeBrief,
@@ -193,10 +195,16 @@ export const fileApi = {
     (await http.patch<{ old: string; filename: string; changed: boolean; recipes: { recipe_id: string; version: number; customer_id: string | null }[] }>(
       `/files/${id}`, { filename, customer_id: scope.customerId, recipe_id: scope.recipeId })).data,
   content: async (id: string, signal?: AbortSignal) =>
-    (await http.get<ArrayBuffer>(`/files/${id}/download`, { responseType: 'arraybuffer', signal })).data,
+    (await http.get<ArrayBuffer>(`/files/${id}/download`, { responseType: 'arraybuffer', signal, params: { t: Date.now() } })).data,   // 脱敏状态随时会变，不能用浏览器里之前缓存的内容
   /** 文件列表里每个表格文件的脱敏状态；不是表格文件、或没有权限的文件不在返回里。 */
   privacyStatus: async (ids: string[]) =>
     (await http.post<{ status: Record<string, PrivacyFileStatus> }>('/files/privacy-status', { ids: ids.slice(0, 200) })).data.status ?? {},
+  /** 脱敏维护页：每一列现在是否脱敏（没识别过的文件会先识别）。 */
+  privacyColumns: async (id: string, conversationId?: string) =>
+    (await http.get<{ columns: PrivacyColumns }>(`/files/${id}/privacy-columns`, { params: { conversation_id: conversationId } })).data.columns,
+  /** 手动改某些列：脱敏 / 不脱敏 / 恢复自动（choice 为 null）。 */
+  savePrivacyColumns: async (id: string, changes: PrivacyColumnChange[], conversationId?: string) =>
+    (await http.put<{ columns: PrivacyColumns }>(`/files/${id}/privacy-columns`, { changes, conversation_id: conversationId })).data.columns,
   /** 脱敏副本预览：AI 实际看到的样子（被保护的格子是令牌）。conversationId 用来把查看记到该会话的处理记录里。 */
   privacyPreview: async (id: string, options: { sheet?: string; offset?: number; limit?: number; conversationId?: string } = {}) =>
     (await http.get<{ preview: PrivacyCopyPreview }>(`/files/${id}/privacy-preview`, {
@@ -234,7 +242,7 @@ export const fileApi = {
   },
   remove: async (id: string, customerId?: string, recipeId?: string, conversationId?: string) =>
     http.delete(`/files/${id}`, { params: { customer_id: customerId, recipe_id: recipeId, conversation_id: conversationId } }),
-  downloadUrl: (id: string) => `/api/files/${id}/download`,
+  downloadUrl: (id: string) => `/api/files/${id}/download?t=${Date.now()}`,
 }
 
 // ---------------------------------------------------------------- 流程 / 运行

@@ -222,7 +222,14 @@ def save_upload(
 def register_output(db: Session, *, path: Path, filename: str, customer_id: str | None, conversation_id: str | None,
                     run_id: str | None, user_id: int | None, delivery_status: str = "final",
                     sheets: list[SheetData] | None = None) -> FileRecord:
-    """登记系统生成的结果文件。sheets 为调用方刚读取的同一文件内容时可避免重复解析。"""
+    """登记系统生成的结果文件。sheets 为调用方刚读取的同一文件内容时可避免重复解析。
+
+    正式交付（delivery_status 为 final）的文件里如果有令牌（AI 和工具处理的是令牌版数据），在这里换回真实值；
+    候选和中间文件保持令牌，确认成正式结果时才还原（见 finalize_delivery）。没有令牌就不动。"""
+    from sheetmate.services.privacy import workspace as privacy_workspace
+
+    if delivery_status == "final" and privacy_workspace.restore_file(path):
+        sheets = None                      # 调用方读到的是令牌版，文件已经换成真实值：重新读
     try:
         profile = profile_file(path, sheets=sheets)
     except ReadError:
@@ -307,7 +314,7 @@ def file_dict(record: FileRecord) -> dict[str, Any]:
              "columns": [{"name": c["name"], "dtype": c["dtype"]} for c in s.get("columns", [])]}
             for s in sheets
         ],
-        "download_url": f"/api/files/{record.id}/download",
+        "download_url": f"/api/files/{record.id}/download?v={_stamp(record)}",    # 文件内容随脱敏设置变化：地址跟着变，浏览器不会用旧缓存
         "media_type": file_media_type(record),
         "preview_url": f"/api/files/{record.id}/image" if image_type in {
             "image/png", "image/jpeg", "image/webp", "image/gif",
@@ -351,9 +358,18 @@ def finalize_delivery(db: Session, *, conversation_id: str, candidate_file_ids: 
     retired = [record for record in replacements_to_check
                if _replacement_visible_to_all_references(db, record, [candidates[file_id] for file_id in finals])]
     # 所有归属与文件状态检查通过后再修改，避免某一目标无效时部分退休。
+    from sheetmate.services.privacy import workspace as privacy_workspace
+
     for file_id, record in candidates.items():
         record.profile = {**(record.profile or {}), "delivery_status": "final" if file_id in finals else "intermediate",
                           "intermediate": file_id not in finals, "delivery_summary": summary[:1000]}
+        if file_id in finals and privacy_workspace.restore_file(Path(record.stored_path)):
+            # 确认成正式结果：令牌换回真实值，画像也按真实内容重算（size 同步更新）
+            try:
+                record.profile = {**record.profile, **profile_file(Path(record.stored_path))}
+            except ReadError:
+                pass
+            record.size = Path(record.stored_path).stat().st_size
     for record in retired:
         record.profile = {**(record.profile or {}), "delivery_status": "superseded", "intermediate": True,
                           "superseded_by_file_ids": finals}
@@ -386,6 +402,13 @@ def _replacement_visible_to_all_references(db: Session, record: FileRecord, fina
                 conversation_id=conversation_id, customer_id=conversation.customer_id) for final in finals):
             return False
     return True
+
+
+def _stamp(record: FileRecord) -> int:
+    try:
+        return Path(record.stored_path).stat().st_mtime_ns // 1_000_000
+    except OSError:
+        return 0
 
 
 def file_media_type(record: FileRecord) -> str:
@@ -671,10 +694,11 @@ def remove_from_workspace(db: Session, record: FileRecord, user: User, conversat
     return remove_from_conversation(db, record, user, conversation_id)
 
 
-def preview(record: FileRecord, sheet: str | None = None, offset: int = 0, limit: int = 50) -> dict[str, Any]:
-    if Path(record.stored_path).suffix.lower() in IMAGE_SUFFIXES:
+def preview(record: FileRecord, sheet: str | None = None, offset: int = 0, limit: int = 50, *, path: Path | None = None) -> dict[str, Any]:
+    source = path or Path(record.stored_path)
+    if source.suffix.lower() in IMAGE_SUFFIXES:
         raise ServiceError("图片不支持表格预览，请使用图片预览")
-    sheets = _read_file_copy(Path(record.stored_path))
+    sheets = _read_file_copy(source)
     chosen = next((s for s in sheets if s.name == sheet), sheets[0]) if sheet else sheets[0]
     part = chosen.df.iloc[offset : offset + limit]
     return {
@@ -719,8 +743,10 @@ def table_base_name(filename: str) -> str:
 
 
 def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None = None,
-                        sheets: list[SheetData] | None = None) -> list[TableInfo]:
-    """把文件的每个 sheet 存成工作区里的一张表。期望结果文件的表名用「期望_sheet名」。"""
+                        sheets: list[SheetData] | None = None, protect: bool = False) -> list[TableInfo]:
+    """把文件的每个 sheet 存成工作区里的一张表。期望结果文件的表名用「期望_sheet名」。
+
+    protect：对话工作区用——联系方式和地址换成令牌后再存（见 sheetmate.services.privacy.workspace）。"""
     source = Path(record.stored_path)
     profile = dict(getattr(record, "profile", None) or {})
     version = file_version(source, profile.get(FILE_VERSION_KEY))
@@ -753,14 +779,22 @@ def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None 
         # 工作区里已经有别的文件占了这个名字（例如同时上传了 9 月和 10 月）：用带日期的完整文件名，方便区分
         base = Path(record.filename).stem
     tables = []
+    masking = False
+    if protect:
+        from sheetmate.services.privacy import choices as privacy_choices
+        from sheetmate.services.privacy import workspace as privacy_workspace
+
+        masking = privacy_workspace.protecting()
     for sheet in sheets:
+        frame = privacy_workspace.mask_frame(record.id, sheet.name, sheet.df)[0] if masking else sheet.df
         if record.kind == "expected":
             name = f"期望_{sheet.name}"
         else:
             name = base if len(sheets) == 1 else f"{base}_{sheet.name}"
         name = ws.unique_name(name)
         info = ws.put_dataframe(
-            name, sheet.df, label=f"{record.filename} · {sheet.name}", source="uploaded",
+            name, frame, label=f"{record.filename} · {sheet.name}", source="uploaded", privacy_masked=masking,
+            privacy_sig=privacy_choices.signature(record.id) if masking else "",
             role="expected" if record.kind == "expected" else "input", file_id=record.id, filename=record.filename,
             sheet=sheet.name, header=sheet.header.to_dict(), file_version=version["sha256"] if original_bytes else "",
             read_quality=dict(sheet.quality or {}),
@@ -770,14 +804,17 @@ def load_into_workspace(ws: Workspace, record: FileRecord, *, path: Path | None 
         )
         if original_bytes:
             saved = profile.get(FILE_MEMORY_KEY) or {}
-            restored = saved.get("sha256") == version["sha256"] and restore_memory(
+            # 令牌版的表不沿用旧的探测记忆（它可能是在真实数据上做的，里面有真实样例）：用换成令牌的画像重新开始
+            restored = not masking and saved.get("sha256") == version["sha256"] and restore_memory(
                 ws, name, (saved.get("sheets") or {}).get(sheet.name, {}),
             )
             if not restored:
                 sheet_profile = next((item for item in profile.get("sheets", []) if item.get("sheet") == sheet.name), None)
                 if sheet_profile:
+                    if masking:
+                        sheet_profile = privacy_workspace.mask_profile(sheet_profile, frame)
                     seed_profile(ws, name, {**sheet_profile, "preview": {
-                        "columns": info.column_names, "rows": frame_rows(sheet.df, 5),
+                        "columns": info.column_names, "rows": frame_rows(frame, 5),
                     }})
         tables.append(ws.require(name))
     return tables

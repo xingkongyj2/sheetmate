@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from sheetmate.api.deps import current_user, sse_response
+from sheetmate.services.privacy.workspace import restore_for_display
 from sheetmate.db.session import get_db, session_scope
 from sheetmate.db.models import Run, User
 from sheetmate.core.observability.conversation_log import (
@@ -154,7 +155,7 @@ async def upload_file(conversation_id: str, background: BackgroundTasks, file: U
                                       customer_id=conv.customer_id, conversation_id=conv.id, kind=kind)
     if conv.customer_id and conv.recipe_id:
         file_service.retain_for_recipe(db, record, conv.customer_id, conv.recipe_id)
-    tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
+    tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record, protect=True)
     db.commit()   # 后台识别要读到刚保存的文件
     background.add_task(privacy_service.identify_uploaded, record.id)   # 上传后自动识别敏感列，发第一条消息时直接用结果
     return {"ok": True, "file": file_service.file_dict(record),
@@ -170,7 +171,7 @@ def load_file(conversation_id: str, body: LoadFileBody, db: Session = Depends(ge
     file_service.retain_for_conversation(db, record, conv.id)
     if conv.customer_id and conv.recipe_id:
         file_service.retain_for_recipe(db, record, conv.customer_id, conv.recipe_id)
-    tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record)
+    tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record, protect=True)
     return {"ok": True, "tables": [conv_service._table_brief(t, conversation=conv) for t in tables]}
 
 
@@ -179,7 +180,8 @@ def table_page(conversation_id: str, name: str, offset: int = 0, limit: int = 50
                source_conversation_id: str | None = None,
                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     source = conv_service.table_source(db, user, conversation_id, source_conversation_id)
-    return {"ok": True, "table": conv_service.workspace(source.id).page(name, offset, min(limit, 500))}
+    # 工作区里是令牌版；给用户看的换回真实值（数据本身不变）
+    return {"ok": True, "table": restore_for_display(conv_service.workspace(source.id).page(name, offset, min(limit, 500)))}
 
 
 @router.delete("/{conversation_id}/tables/{name}")

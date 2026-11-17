@@ -22,8 +22,10 @@ from sheetmate.db.models import FileRecord, PrivacyFile, User
 from sheetmate.db.session import session_scope
 from sheetmate.engine.tables.sql import frame_rows
 from sheetmate.engine.workbooks.reader import SheetData, read_workbook
-from sheetmate.privacy import ACTION_LABELS, ACTIONS, KIND_LABELS, Scope, Stats, bind, privacy
+from sheetmate.privacy.guard import FORCED
+from sheetmate.privacy import ACTION_LABELS, ACTIONS, KIND_LABELS, TOKEN_RE, Scope, Stats, bind, privacy
 from sheetmate.privacy.rules import cell_text, is_numeric_cell
+from sheetmate.services.privacy import choices
 from sheetmate.services.privacy import service as privacy_service
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -65,7 +67,8 @@ def _fetch(file_id: str) -> tuple[str, str, str, list[dict[str, Any]]] | None:
         row = db.get(PrivacyFile, file_id)
         if record is None or row is None:
             return None
-        return record.filename, record.stored_path, row.status, list(row.sheets or [])
+        sheets = list(row.sheets or [])
+        return record.filename, record.stored_path, row.status, choices.effective(file_id, sheets, for_masking=True)
 
 
 async def _ready(user: User, file_id: str, conversation_id: str | None) -> tuple[str, str, list[dict[str, Any]]]:
@@ -87,13 +90,52 @@ async def _ready(user: User, file_id: str, conversation_id: str | None) -> tuple
 
 
 def _flagged(report: list[dict[str, Any]], sheet: str) -> dict[str, dict[str, Any]]:
-    return {column["name"]: column for entry in report if entry["sheet"] == sheet for column in entry["columns"]}
+    found = {column["name"]: column for entry in report if entry["sheet"] == sheet for column in entry["columns"]}
+    for entry in report:
+        if entry["sheet"] == sheet:
+            for name in entry.get("kept", []):              # 用户选了「不脱敏」的列：不按整列处理，也不按列名被别处的结果带上
+                found[name] = {"name": name, "kind": None}
+    return found
 
 
 def _kinds(frame: pd.DataFrame, flagged: dict[str, dict[str, Any]]) -> list[str | None]:
     """每一列的类型：识别结果里有的用识别结果，其余的看注册表（别的文件里识别出的同名列也算）。"""
     guard = privacy.require()
-    return [(flagged[str(name)]["kind"] if str(name) in flagged else guard.registry.kind_for(str(name))) for name in frame.columns]
+    return [column_kind(flagged[str(name)]) if str(name) in flagged else guard.registry.kind_for(str(name)) for name in frame.columns]
+
+
+def column_kind(found: dict[str, Any]) -> str | None:
+    """识别结果里一列的类型；手动选的整列后面带 FORCED：按选的类型把每一格都换成令牌。"""
+    kind = found.get("kind")
+    return kind + FORCED if kind and found.get("source") == "manual" else kind
+
+
+SCAN_ROWS = 20_000      # 判断一列是不是真的被脱敏时最多看多少行
+
+
+def really_masked(frame: pd.DataFrame, kinds: list[str | None]) -> list[bool]:
+    """每一列是不是真的被脱敏了：里面已经是令牌，或者按这一列的类型处理会换掉某些格子。
+    只是「按这个类型会处理」但没有任何格子真的被换（比如只写了城市的收货地）不算脱敏，界面上就显示成没脱敏。"""
+    guard = privacy.require()
+    head = frame.iloc[:SCAN_ROWS]
+    out: list[bool] = []
+    for position, kind in enumerate(kinds):
+        if kind is None or guard._off(kind):
+            out.append(False)
+            continue
+        forced, kind = kind.endswith(FORCED), kind.rstrip(FORCED)
+        hit = False
+        for value in head.iloc[:, position].dropna().drop_duplicates():
+            if isinstance(value, str) and TOKEN_RE.search(value):
+                hit = True
+            elif kind == "custom" or forced:
+                hit = bool(cell_text(value).strip())
+            else:
+                hit = guard.protect_cell(kind, value, Stats()) != value
+            if hit:
+                break
+        out.append(hit)
+    return out
 
 
 def _meta(name: str, kind: str | None, info: dict[str, Any] | None) -> dict[str, Any]:
@@ -148,12 +190,13 @@ def _preview(filename: str, path: str, report: list[dict[str, Any]], sheet: str 
     flagged = _flagged(report, chosen.name)
     kinds = _kinds(chosen.df, flagged)
     masked = _mask(chosen.df.iloc[offset:offset + limit], kinds, Stats())   # 只处理这一页，翻页才不慢
+    shown = [kind.rstrip(FORCED) if kind and really else None for kind, really in zip(kinds, really_masked(chosen.df, kinds))]   # 标记的只有真的被脱敏的列
     _assert_clean(masked)
     return {
         "filename": filename,
         "sheets": [{"sheet": item.name, "rows": int(len(item.df))} for item in sheets],
         "sheet": chosen.name, "total": int(len(chosen.df)), "offset": offset, "limit": limit,
-        "columns": [_meta(str(name), kinds[index], flagged.get(str(name))) for index, name in enumerate(chosen.df.columns)],
+        "columns": [_meta(str(name), shown[index], flagged.get(str(name))) for index, name in enumerate(chosen.df.columns)],
         "rows": frame_rows(masked),
     }
 

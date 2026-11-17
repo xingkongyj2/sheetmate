@@ -26,7 +26,7 @@ from sheetmate.privacy.rules import KIND_PREFIX
 MIN_KNOWN_CHARS = 4
 MAX_TOKEN_ATTEMPTS = 64
 TOKEN_BODY = 13  # 8 字节 → 13 个字母数字，碰撞概率可以忽略
-TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(TEL|MAIL|IM|ADDR)_([A-Z2-7]{%d})(?![A-Za-z0-9_])" % TOKEN_BODY)
+TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(TEL|MAIL|IM|ADDR|TXT)_([A-Z2-7]{%d})(?![A-Za-z0-9_])" % TOKEN_BODY)
 
 
 def normalize(kind: str, value: object) -> str:
@@ -214,6 +214,25 @@ class Vault:
                 known.update(dict(fresh))
                 self.known_version += 1
             return len(fresh)
+
+    def forget(self, values: Iterable[object]) -> int:
+        """把这些值从已知敏感值里去掉（用户在维护页里确认这一列不需要脱敏时用）。返回去掉了多少个。令牌记录不动。"""
+        texts = {str(value).strip() for value in values}
+        with self._lock:
+            known = self._known_values()
+            gone = [text for text in texts if text in known]
+            if gone:
+                self._db.execute("BEGIN")
+                try:
+                    self._db.executemany("DELETE FROM known WHERE value = ?", [(text,) for text in gone])
+                    self._db.execute("COMMIT")
+                except BaseException:
+                    self._db.execute("ROLLBACK")
+                    raise
+                for text in gone:
+                    known.pop(text, None)
+                self.known_version += 1
+            return len(gone)
 
     def _known_values(self) -> dict[str, str]:
         if self._known is None:

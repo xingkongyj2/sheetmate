@@ -29,6 +29,7 @@ from sheetmate.privacy.rules import (
 )
 from sheetmate.privacy.vault import MIN_KNOWN_CHARS, TOKEN_RE, Vault
 
+FORCED = "!"       # 列类型后面带它：手动指定的整列，不管内容是什么每一格都换成这个类型的令牌
 _JSON_START = re.compile(r"(?:^|(?<=[\s:：=]))[\[{]", re.M)      # 一段 JSON 可能的起点：行首，或前面是空白、冒号、等号
 _CACHE_MIN_CHARS = 200
 _CACHE_ENTRIES = 512
@@ -151,7 +152,8 @@ class Guard:
         self.active = frozenset(kinds)
 
     def _off(self, kind: str) -> bool:
-        return kind != "mixed" and kind not in self.active
+        kind = kind.rstrip(FORCED)
+        return kind not in {"mixed", "custom"} and kind not in self.active
 
     # ------------------------------------------------------------------ 单元格
 
@@ -159,6 +161,10 @@ class Guard:
         text = cell_text(value)
         if not text or TOKEN_RE.search(text) or self._off(kind):
             return value
+        forced, kind = kind.endswith(FORCED), kind.rstrip(FORCED)
+        if kind == "custom" or forced:   # 用户在维护页里手动指定的整列：不管里面是什么，每一格都按选的类型换成令牌
+            stats.add(kind, method)
+            return self.vault.token(kind, text.strip())
         if is_label(text):
             return value             # 列头、「收货地址：」这类标签：不是内容，不换令牌
         if kind == "mixed":
@@ -395,11 +401,13 @@ class Guard:
 
     def register_values(self, kind: str, values: Iterable[object]) -> int:
         """登记敏感列里的真实值：之后不管它出现在发给模型的什么文字里，都会被换成令牌。只登记地址和微信/QQ。"""
-        if kind not in {"address", "im"} or self._off(kind):
+        if kind not in {"address", "im", "custom"} or self._off(kind):
             return 0
         kept = []
         for value in values:
             text = cell_text(value)
+            if TOKEN_RE.search(text):
+                continue  # 已经是令牌了
             if kind == "address" and not split_address(text)[1].strip():
                 continue  # 只有省市区的不算
             kept.append(text)

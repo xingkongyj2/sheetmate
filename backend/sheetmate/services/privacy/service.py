@@ -33,7 +33,7 @@ from sheetmate.privacy import (
 )
 from sheetmate.privacy.rules import ALL_KINDS, cell_text
 from sheetmate.services.files import service as file_service
-from sheetmate.services.privacy import adaptive
+from sheetmate.services.privacy import adaptive, choices
 
 Emit = Callable[[dict[str, Any]], Awaitable[None]]
 
@@ -319,7 +319,8 @@ def _headline(files: list[dict[str, Any]], *, cached_all: bool) -> str:
         head = "文件已脱敏（上传时已完成识别）" if all(f.get("source") == "upload" for f in files) else "文件已脱敏（沿用之前的识别结果）"
     else:
         head = "已完成脱敏"
-    return f"{head}：{len(files)} 个文件，保护 {columns} 列联系方式或地址，涉及 {values:,} 个值。AI 只会看到令牌，真实内容留在本机。"
+    masked = sum(1 for f in files if any(s["columns"] for s in f["sheets"]))        # 只数真的脱敏了的文件
+    return f"{head}：{masked} 个文件，保护 {columns} 列联系方式或地址，涉及 {values:,} 个值。AI 只会看到令牌，真实内容留在本机。"
 
 
 def _blocked_report(mode: str, model: str | None, reason: str, files: list[dict[str, Any]]) -> dict[str, Any]:
@@ -404,7 +405,34 @@ def _file_lock(file_id: str) -> asyncio.Lock:
 def _cached(file_id: str) -> tuple[str, str, list[dict[str, Any]], str] | None:
     with session_scope() as db:
         row = db.get(PrivacyFile, file_id)
-        return None if row is None else (row.fingerprint, row.status, list(row.sheets or []), row.source or "chat")
+        if row is None:
+            return None
+        return row.fingerprint, row.status, choices.effective(file_id, list(row.sheets or [])), row.source or "chat"
+
+
+def _applied(file_id: str) -> str:
+    with session_scope() as db:
+        row = db.get(PrivacyFile, file_id)
+        return (row.applied or "") if row is not None else ""
+
+
+def _set_fingerprint(file_id: str, fingerprint: str) -> None:
+    with session_scope() as db:
+        row = db.get(PrivacyFile, file_id)
+        if row is not None:
+            row.fingerprint = fingerprint
+
+
+async def apply_masking(file_id: str) -> None:
+    """让上传的原文件和它的脱敏状态一致：脱敏的列把原文件里的内容换成令牌，之后就当原文件里是脱敏后的值（见 inplace）。已经一致就什么都不做。
+    总开关关着时也能用（用户手动选了列），这时只按这个文件已有的结果和手动的选择处理，不自动识别。"""
+    from sheetmate.services.privacy import inplace
+
+    fingerprint_of = None
+    if sync_privacy_settings():
+        model = await _open_model()
+        fingerprint_of = lambda profile: _fingerprint(profile, model.id)  # noqa: E731
+    await asyncio.to_thread(inplace.sync_file, file_id, fingerprint_of)
 
 
 _progress: dict[str, tuple[int, int]] = {}    # 文件 → (已检查, 一共)：自由文本列逐个检查的进度
@@ -445,10 +473,16 @@ async def _identify(file_id: str, filename: str, profile: dict[str, Any], model:
 
     识别分两步：先按列判断（规则 + 模型），再让模型把自由文本列的每一个不同的值逐个检查一遍。
     第二步可能要几分钟（值很多的话），所以没做完的文件不会被标成「已识别」：已经检查过的值会保留，下次接着做。"""
+    from sheetmate.services.privacy import inplace
+
     fingerprint = _fingerprint(profile, model.id)
     async with _file_lock(file_id):
         row = _cached(file_id)
         if row is not None and row[0] == fingerprint and row[1] == "ready":
+            return row[2], True, row[3]
+        if row is not None and row[1] == "ready" and row[3] != "manual" and inplace.in_place(_applied(file_id)):
+            # 原文件已经改成脱敏版：里面是令牌，重新识别只会得到更差的结果。沿用之前的识别结果，只更新指纹
+            _set_fingerprint(file_id, fingerprint)
             return row[2], True, row[3]
         _running.add(file_id)
         try:
@@ -460,6 +494,7 @@ async def _identify(file_id: str, filename: str, profile: dict[str, Any], model:
                 _merge_deep(filename, sheets, deep)
             _save_file(file_id, fingerprint, model.mode, model.name, sheets, source)
             _log_file(filename, file_id, sheets, scanned, model.mode, model.name, source)
+            sheets = choices.effective(file_id, sheets)
         finally:
             _running.discard(file_id)
             _progress.pop(file_id, None)
@@ -471,6 +506,8 @@ def _remember(file_id: str, profile: dict[str, Any], sheets: list[dict[str, Any]
     protected: dict[str, str] = {}
     for sheet in sheets:
         for column in sheet["columns"]:
+            if column.get("source") == "manual":
+                continue                  # 用户手动选的列只管这一个文件，不按列名影响别的文件
             privacy.registry.add(column["name"], column["kind"])
             if column["kind"] in {"address", "im"}:
                 protected[column["name"]] = column["kind"]
@@ -536,9 +573,11 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
         async def one(item: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, str]:
             async with slots:
                 try:
-                    return await asyncio.wait_for(
+                    result = await asyncio.wait_for(
                         _identify(item["id"], item["filename"], item["profile"], model, source="chat", path=item["path"]),
                         DEEP_WAIT_SECONDS)
+                    await apply_masking(item["id"])
+                    return result
                 except asyncio.TimeoutError:
                     # 自由文本列还在逐个检查（值很多的文件）：这一轮先停下，检查交给后台接着做，做完再发一次就行。
                     # 已经检查完的值都已经存下了，不会重来。
@@ -604,6 +643,7 @@ async def identify_uploaded(file_id: str) -> None:
             model = await _open_model()
             sheets, _, _ = await _identify(item["id"], item["filename"], item["profile"], model, source="upload", path=item["path"])
             _remember(item["id"], item["profile"], sheets)
+            await apply_masking(item["id"])
         except Exception as exc:
             reason = str(exc)[:300] or type(exc).__name__
             _save_failed(item["id"], reason)
@@ -627,7 +667,7 @@ def file_statuses(user: User, file_ids: list[str]) -> dict[str, dict[str, Any]]:
                 continue
             row = rows.get(file_id)
             state = "running" if file_id in _running else "none" if row is None else "ready" if row.status == "ready" else "failed"
-            columns = sum(len(sheet["columns"]) for sheet in (row.sheets if row is not None else None) or [])
+            columns = sum(len(sheet["columns"]) for sheet in choices.effective(file_id, list((row.sheets if row is not None else None) or [])))
             result[file_id] = {
                 "state": state, "columns": columns if state == "ready" else 0,
                 "mode": row.mode if row is not None else None, "model": row.model if row is not None else None,
@@ -644,12 +684,17 @@ async def _silent(_: dict[str, Any]) -> None:
     return None
 
 
+def records_by_id(db: Any, ids: list[str]) -> list[FileRecord]:
+    return list(db.scalars(select(FileRecord).where(FileRecord.id.in_(ids))))
+
+
 def _unfinished_files(conversation_id: str) -> list[str]:
     """这个会话里上传的原件和样例中，还没有「识别完成」记录的。对话中途生成的结果文件不算：它们是从已脱敏的数据算出来的，
     到被再次分析时才需要脱敏。只读，不改任何记录。"""
     from pathlib import Path
 
     from sheetmate.db.models import FileConversation
+    from sheetmate.services.privacy import inplace
 
     with session_scope() as db:
         conversation = db.get(Conversation, conversation_id)
@@ -664,8 +709,12 @@ def _unfinished_files(conversation_id: str) -> list[str]:
         candidates = [r.id for r in records if (r.profile or {}).get("sheets") and Path(r.stored_path).is_file()]
         if not candidates:
             return []
-        ready = set(db.scalars(select(PrivacyFile.file_id).where(PrivacyFile.file_id.in_(candidates), PrivacyFile.status == "ready")))
-        return [file_id for file_id in candidates if file_id not in ready]
+        ready = {row.file_id: row.applied or "" for row in db.scalars(
+            select(PrivacyFile).where(PrivacyFile.file_id.in_(candidates), PrivacyFile.status == "ready"))}
+        paths = {r.id: (r.kind, Path(r.stored_path)) for r in records_by_id(db, candidates)}
+        # 输入文件的原文件还没有按脱敏设置改好（applied 为空）也算没完成
+        return [file_id for file_id in candidates
+                if file_id not in ready or (not ready[file_id] and inplace.modifiable(*paths[file_id]))]
 
 
 async def ensure_complete(conversation_id: str) -> None:
@@ -813,7 +862,7 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
             ready = row is not None and row.status == "ready"
             files.append({"file_id": record.id, "filename": record.filename, "cached": False,
                           "source": row.source if row is not None else None,
-                          "sheets": (row.sheets if row is not None else []) or [],
+                          "sheets": choices.effective(record.id, list((row.sheets if row is not None else []) or [])),
                           "status": "ready" if ready else "failed" if row is not None else "pending",
                           "updated_at": row.updated_at.isoformat(timespec="seconds") if row is not None else None,
                           "error": row.error if row is not None else None})

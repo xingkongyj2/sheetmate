@@ -43,6 +43,7 @@ def get_privacy_config(response: Response, _: User = Depends(current_user)) -> d
 
 @router.put("/privacy")
 def put_privacy_config(body: PrivacyBody, response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+    """总开关和规则开关只管处理文件时要不要自动识别、脱敏；已经脱敏的文件和手动的选择都不受影响。"""
     response.headers["Cache-Control"] = "no-store"
     return {"ok": True, **settings_service.put_privacy_config(body.enabled, body.rules)}
 

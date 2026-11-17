@@ -137,11 +137,7 @@ class GuardedLLM:
             value = getattr(message, attr, None)
             if isinstance(value, str) and value:
                 setattr(message, attr, guard.restore_text(value, counter=counter))
-        for call in getattr(message, "tool_calls", None) or []:
-            function = getattr(call, "function", None)
-            arguments = getattr(function, "arguments", None)
-            if isinstance(arguments, str) and arguments:
-                function.arguments = guard.restore_text(arguments, json_safe=True, counter=counter)
+        # 工具调用的参数不还原：工作区里的数据是令牌版，参数里的令牌正好和它对得上；要展示给用户时再还原
 
     # ------------------------------------------------------------------ 模型接口
 
@@ -176,11 +172,6 @@ class GuardedLLM:
                         delta.content = content.feed(delta.content)
                     if getattr(delta, "reasoning_content", None):
                         delta.reasoning_content = reasoning.feed(delta.reasoning_content)
-                    for call in getattr(delta, "tool_calls", None) or []:
-                        function = getattr(call, "function", None)
-                        if function is not None and function.arguments:
-                            restorer = calls.setdefault(call.index, guard.restorer(json_safe=True, counter=counter))
-                            function.arguments = restorer.feed(function.arguments)
                     if getattr(choice, "finish_reason", None) is not None:
                         self._flush_into(delta, content, reasoning, calls)
                 yield chunk

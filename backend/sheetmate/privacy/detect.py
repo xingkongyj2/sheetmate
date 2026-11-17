@@ -12,7 +12,7 @@ from sheetmate.privacy.rules import (
 )
 
 ACTIONS = {"phone": "tokenize", "landline": "tokenize", "email": "tokenize", "im": "tokenize",
-           "address": "address_detail", "mixed": "cell_scan"}
+           "address": "address_detail", "mixed": "cell_scan", "custom": "tokenize"}
 
 # 整列处理的内容门槛：多数单元格符合格式，才不看列名也整列处理
 WHOLE_COLUMN_RATE = 0.5
@@ -54,6 +54,15 @@ def _rates(texts: list[str]) -> tuple[dict[str, float], int]:
     return {kind: count / total for kind, count in counts.items()}, embedded
 
 
+def region_only_column(name: object, values: Iterable[object]) -> bool:
+    """列名只是「发货地」「收货地」这类含糊的说法（不是「地址」「门牌」），内容又都只有省、市：没有要遮的详细地址。"""
+    header = header_kind(name)
+    if header is None or header[0] != "address" or header[1] in _STRONG_ADDRESS_WORDS:
+        return False
+    texts = [text for text in (cell_text(value) for value in list(values)[:MAX_VALUES]) if text]
+    return bool(texts) and all(not split_address(text)[1].strip() for text in texts)
+
+
 def classify_column(name: object, values: Iterable[object]) -> Finding | None:
     """只用内置规则判断一列；没有发现联系方式或地址时返回 None。"""
     texts = [text for text in (cell_text(value) for value in list(values)[:MAX_VALUES]) if text]
@@ -65,7 +74,7 @@ def classify_column(name: object, values: Iterable[object]) -> Finding | None:
         kind, word = header
         # 列名只是「发货地」「收货地」这类，内容又只有省、市：没有要遮的详细地址，不用识别、不用标记，直接放过。
         # 列名明说是「地址」的仍然保护：这一列后面的行里可能有详细地址。
-        if kind == "address" and word not in _STRONG_ADDRESS_WORDS and texts and all(not split_address(t)[1].strip() for t in texts):
+        if region_only_column(name, texts):
             return None
         # 列名说是电话、内容多半是座机，就按座机处理（两者令牌一样，只影响显示）
         if kind == "phone" and rates["landline"] > rates["phone"] and rates["landline"] >= SUPPORT_RATE:

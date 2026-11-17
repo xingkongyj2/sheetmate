@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Iterable
 
-from sheetmate.privacy.detect import ACTIONS, Finding, classify_column, merge
+from sheetmate.privacy.detect import ACTIONS, Finding, classify_column, merge, region_only_column
 from sheetmate.privacy.events import KINDS, PrivacyLog, Scope, bind, current_scope
 from sheetmate.privacy.guard import Guard, PrivacyBlocked, Registry, Stats, StreamRestorer
 from sheetmate.privacy.rules import ACTION_LABELS, KIND_LABELS, RULES, RULES_VERSION, Rule, active_kinds, header_kind
@@ -22,7 +22,7 @@ from sheetmate.privacy.vault import TOKEN_RE, Vault
 
 __all__ = [
     "ACTIONS", "ACTION_LABELS", "KINDS", "KIND_LABELS", "RULES_VERSION", "TOKEN_RE", "Finding", "Guard", "Privacy",
-    "PrivacyBlocked", "PrivacyLog", "Registry", "Scope", "Stats", "StreamRestorer", "Vault", "bind", "classify_column",
+    "PrivacyBlocked", "PrivacyLog", "Registry", "Scope", "Stats", "StreamRestorer", "Vault", "bind", "classify_column", "region_only_column",
     "RULES", "Rule", "active_kinds", "current_scope", "header_kind", "merge", "privacy",
 ]
 

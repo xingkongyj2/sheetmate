@@ -104,6 +104,12 @@ def execution_view(db: Any, conv: Conversation) -> dict[str, Any] | None:
             inputs = state_store.recovery_input_fingerprint(db, execution)
             if inputs.get("customer_id") != conv.customer_id or inputs.get("recipe_id") != conv.recipe_id:
                 reason = "客户或流程关联已变化，无法从旧进度继续。"
+            else:
+                # Same check as claim_recovery: never offer a resume the claim would reject.
+                try:
+                    state_store.validate_inputs(inputs, input_snapshot(db, conv, execution.input_fingerprint))
+                except Conflict:
+                    reason = "输入文件已变化（例如调整过脱敏设置），无法从旧进度继续，请重新发送需求。"
         except ServiceError:
             reason = "上次任务的流程关联缺少有效执行回执，请重新发送需求。"
     if reason:

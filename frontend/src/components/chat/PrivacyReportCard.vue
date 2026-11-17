@@ -11,9 +11,9 @@ import PrivacyFiles from './PrivacyFiles.vue'
 const props = defineProps<{ report?: PrivacyReport; running?: string[] }>()
 const blocked = computed(() => props.report?.status === 'blocked')
 // 被中止时只有真的识别出了列才值得展开；否则没有任何可看的内容
-const expandable = computed(() => !!props.report && (blocked.value
-  ? props.report.files.some((file) => protectedColumnCount(file) > 0)
-  : props.report.files.length > 0))
+const expandable = computed(() => !!props.report && props.report.files.some((file) => protectedColumnCount(file) > 0))
+// 只列真的脱敏了的文件：没有需要替换的文件不展示
+const shownFiles = computed(() => (props.report?.files ?? []).filter((file) => protectedColumnCount(file) > 0))
 </script>
 
 <template>
@@ -38,7 +38,7 @@ const expandable = computed(() => !!props.report && (blocked.value
           <ChevronRight v-if="expandable" class="mt-[3px] size-3.5 shrink-0 text-faint transition group-open/privacy:rotate-90" aria-hidden="true" />
         </summary>
         <div v-if="expandable" class="ml-5 mt-1.5 space-y-2">
-          <PrivacyFiles :files="report.files" :unfinished="blocked" open-first />
+          <PrivacyFiles :files="shownFiles" :unfinished="blocked" open-first />
         </div>
       </details>
       <div class="ml-5 space-y-0.5">

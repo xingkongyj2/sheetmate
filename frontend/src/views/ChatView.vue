@@ -115,6 +115,11 @@ const selectedMessage = computed(() => {
 })
 const customer = computed(() => detail.value?.customer ?? null)
 const canResume = computed(() => detail.value?.execution?.can_resume === true && !streaming.value && !reconnecting.value && !startingResume.value)
+const resumeBlockedReason = computed(() => {
+  const execution = detail.value?.execution
+  if (!execution || execution.can_resume || streaming.value || reconnecting.value || startingResume.value) return ''
+  return ['interrupted', 'paused'].includes(execution.status) ? execution.resume_reason ?? '' : ''
+})
 const visibleSteers = computed(() => steers.value.filter((item) => item.status !== 'committed' ||
   !messages.value.some((message) => message.role === 'user' && message.id === item.message_id)))
 const currentAssistant = computed(() => [...messages.value].reverse().find((message) => message.role === 'assistant'))
@@ -795,6 +800,7 @@ function answer(option: string) {
             <p class="min-w-0 flex-1 text-mute">{{ detail?.execution?.resume_reason || '上次处理已中断，可以从已保存的进度继续。' }}</p>
             <button type="button" class="btn-line h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="resume"><Play class="size-3.5" />继续处理</button>
           </div>
+          <div v-else-if="resumeBlockedReason" class="mb-3 rounded-xl border border-line bg-paper/50 px-3.5 py-3 text-xs text-mute" role="status">{{ resumeBlockedReason }}</div>
           <ChatComposer
             ref="composer"
             v-model="text"

@@ -7,9 +7,9 @@ import type { AgentEvent, PrivacyColumn, PrivacyFile, PrivacyFileStatus, Privacy
 const counter = new Intl.NumberFormat('en-US')
 export const formatCount = (value: number) => counter.format(value)
 
-export const PRIVACY_SOURCE_LABELS: Record<PrivacySource, string> = { rules: '规则', model: '模型', both: '规则+模型' }
+export const PRIVACY_SOURCE_LABELS: Record<PrivacySource, string> = { rules: '规则', model: '模型', both: '规则+模型', manual: '手动' }
 
-const KINDS = ['phone', 'landline', 'email', 'im', 'address', 'mixed'] as const
+const KINDS = ['phone', 'landline', 'email', 'im', 'address', 'mixed', 'custom'] as const
 const ACTIONS = ['tokenize', 'address_detail', 'cell_scan'] as const
 const SOURCES = ['rules', 'model', 'both'] as const
 
@@ -80,6 +80,11 @@ export function readPrivacyReport(event: AgentEvent): PrivacyReport | null {
 /** privacy_start 事件 → 正在脱敏的文件名 */
 export function readPrivacyStart(event: AgentEvent): string[] {
   return list(event.files).filter((item): item is string => typeof item === 'string' && !!item)
+}
+
+/** 助手回复里要不要显示脱敏这一块：被中止、有被保护的列、或有需要说明的事才显示；没有任何东西被脱敏就什么都不说 */
+export function showsPrivacyReport(report: PrivacyReport): boolean {
+  return report.status === 'blocked' || report.notes.length > 0 || report.files.some((file) => protectedColumnCount(file) > 0)
 }
 
 /** 一个文件被保护的列数 */

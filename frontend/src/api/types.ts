@@ -575,9 +575,9 @@ export interface DeliveryManifestEvent extends AgentEvent {
 }
 
 // ---------------------------------------------------------------- 脱敏
-export type PrivacyKind = 'phone' | 'landline' | 'email' | 'im' | 'address' | 'mixed'
+export type PrivacyKind = 'phone' | 'landline' | 'email' | 'im' | 'address' | 'mixed' | 'custom'
 export type PrivacyAction = 'tokenize' | 'address_detail' | 'cell_scan'
-export type PrivacySource = 'rules' | 'model' | 'both'
+export type PrivacySource = 'rules' | 'model' | 'both' | 'manual'
 
 export interface PrivacyColumn {
   name: string
@@ -641,6 +641,36 @@ export interface PrivacyFileStatus {
   source: 'upload' | 'chat' | null
   updated_at: string | null
   error: string | null
+}
+
+/** 脱敏维护页里的一列：自动识别（规则 + 脱敏模型看列头和内容）加上用户手动改的结果 */
+export interface PrivacyColumnState {
+  name: string
+  masked: boolean
+  /** 用户手动选的：mask 脱敏 / keep 不脱敏；空 = 照自动识别 */
+  choice: 'mask' | 'keep' | null
+  /** 自动识别给出的类型（没识别出敏感内容为空） */
+  auto_kind: string | null
+  kind: string | null
+  kind_label: string | null
+  source: 'rules' | 'model' | 'both' | 'manual' | null
+  reason: string | null
+}
+
+export interface PrivacyColumns {
+  enabled: boolean
+  file_id: string
+  filename: string
+  sheets: { sheet: string; rows: number; columns: PrivacyColumnState[] }[]
+  /** 手动脱敏时可选的类型；enabled 为 false 的（对应规则在设置页里关了）不能选 */
+  types: { id: 'phone' | 'address' | 'custom'; label: string; enabled: boolean }[]
+}
+
+export interface PrivacyColumnChange {
+  sheet: string
+  column: string
+  choice: 'mask' | 'keep' | null
+  kind?: 'phone' | 'address' | 'custom'
 }
 
 /** 每轮对话开始时的脱敏结果（privacy_report 事件）；blocked 表示没有完成，本轮没有任何数据发给 AI */

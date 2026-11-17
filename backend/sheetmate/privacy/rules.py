@@ -15,7 +15,7 @@ RULES_VERSION = "5"   # 规则变了就加一：已缓存的识别结果会按�
 
 KIND_LABELS = {
     "phone": "手机号", "landline": "座机", "email": "邮箱", "im": "微信/QQ",
-    "address": "地址", "mixed": "含联系方式的文本",
+    "address": "地址", "mixed": "含联系方式的文本", "custom": "通用",
 }
 
 
@@ -39,11 +39,11 @@ ALL_KINDS = frozenset(KIND_LABELS)
 def active_kinds(enabled_rules: Iterable[str]) -> frozenset[str]:
     """打开的规则负责的类型；「含联系方式的文本」（mixed）只是逐格扫描的方式，永远可用，真正遮什么仍由各类型决定。"""
     wanted = set(enabled_rules)
-    return frozenset(kind for rule in RULES if rule.id in wanted for kind in rule.kinds) | {"mixed"}
+    return frozenset(kind for rule in RULES if rule.id in wanted for kind in rule.kinds) | {"mixed", "custom"}
 
 
 # 令牌前缀：手机和座机共用 TEL，AI 不需要区分
-KIND_PREFIX = {"phone": "TEL", "landline": "TEL", "email": "MAIL", "im": "IM", "address": "ADDR"}
+KIND_PREFIX = {"phone": "TEL", "landline": "TEL", "email": "MAIL", "im": "IM", "address": "ADDR", "custom": "TXT"}
 ACTION_LABELS = {
     "tokenize": "整列替换为令牌",
     "address_detail": "整个详细地址替换为令牌（只有省市的不动）",

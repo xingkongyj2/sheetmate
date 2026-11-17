@@ -82,8 +82,8 @@ async function save() {
       </button>
       <span v-if="badge" class="tag shrink-0 whitespace-nowrap" :class="badgeClass">{{ badge }}</span>
       <span class="shrink-0 text-xs text-faint">{{ timeAgo(file.created_at) }}</span>
-      <PrivacyStatusIcon :status="privacy" class="-mx-1" />
       <div class="flex shrink-0 items-center gap-0.5">
+        <PrivacyStatusIcon :status="privacy" :file="file" />
         <button v-if="renameFile" type="button" class="icon-btn" title="修改文件名" :aria-label="`修改 ${file.filename} 的文件名`" @click="startEdit"><Pencil class="size-4" /></button>
         <a :href="file.download_url" class="icon-btn" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>
         <button type="button" class="icon-btn hover:text-error" title="删除" :aria-label="`删除 ${file.filename}`" @click="emit('remove', file)"><Trash2 class="size-4" /></button>

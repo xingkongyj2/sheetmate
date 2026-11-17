@@ -178,9 +178,14 @@ class ConversationHost:
                 ):
                     return None
                 file_service.retain_for_conversation(db, record, self.conversation_id)
-                return Path(record.stored_path)
+                source = Path(record.stored_path)
+                file_id = record.id
             except NotFound:
                 return None
+        # AI 能间接碰到原文件的地方（脚本、流程在原文件上改写保留格式）拿到的是令牌版副本；结果文件登记时令牌会换回真实值
+        from sheetmate.services.privacy.masked_files import masked_path
+
+        return masked_path(file_id, source)
 
     def load_file(self, file_id: str) -> list[TableInfo]:
         with session_scope() as db:
@@ -194,7 +199,7 @@ class ConversationHost:
                 file_service.retain_for_recipe(db, record, self.customer_id, self.recipe_id)
             source = Path(record.stored_path)
             path = self.analysis.file_copy(source) if self.analysis else (self.files.file_copy(source) if self.files else None)
-            loaded = file_service.load_into_workspace(self.ws, record, path=path)
+            loaded = file_service.load_into_workspace(self.ws, record, path=path, protect=True)
             is_output = record.kind == "output"
         if is_output:
             dependency = self.file_dependency(file_id)
@@ -346,7 +351,7 @@ class ConversationHost:
                                                       sheets=parsed)
                 warnings: list[str] = list(prepare_notes)
                 try:
-                    tables = file_service.load_into_workspace(self.ws, record, sheets=parsed)
+                    tables = file_service.load_into_workspace(self.ws, record, sheets=parsed, protect=True)
                     for table in tables:
                         self.ws.update_meta(table.name, created_by="create_workbook")
                 except ReadError:

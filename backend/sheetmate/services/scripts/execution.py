@@ -62,7 +62,9 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
             if not _scoped(db, host, record):
                 raise ServiceError("这个文件不属于当前客户或会话")
             file_service.retain_for_conversation(db, record, host.conversation_id)
-            source_files[alias] = Path(record.stored_path)
+            from sheetmate.services.privacy.masked_files import masked_path
+
+            source_files[alias] = masked_path(record.id, Path(record.stored_path))   # 脚本读到的是令牌版副本
             input_file_ids.append(file_id)
         source_params: dict[str, Any] = {"code": code, "description": description,
                                        "input_tables": input_tables, "input_files": input_files}
@@ -115,7 +117,7 @@ def execute_for_conversation(host, *, code: str, description: str, input_tables:
                         report["files"].append({**file_service.file_dict(record), "script_run_id": run_id})
                         report["files"][-1]["ref"] = f"脚本_{run_id}/{output.name}"
                         try:
-                            loaded = file_service.load_into_workspace(host.ws, record)
+                            loaded = file_service.load_into_workspace(host.ws, record, protect=True)
                             for info in loaded:
                                 created_tables.append(info.name)
                                 host.ws.update_meta(info.name, created_by="run_python_script",

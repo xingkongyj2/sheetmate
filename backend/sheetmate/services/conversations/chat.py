@@ -90,6 +90,7 @@ from sheetmate.services.execution.workspace import AnalysisWorkspace, analysis_w
 from sheetmate.core.errors import Conflict, ServiceError
 from sheetmate.services.conversations.host import ConversationHost
 from sheetmate.privacy import PrivacyBlocked, Scope as PrivacyScope, bind as privacy_bind, current_scope as privacy_scope
+from sheetmate.services.privacy import workspace as privacy_workspace
 from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.memory.table_profiles import file_memories_text, restore_workspace_memories
 from sheetmate.services.execution.jobs import Job, jobs
@@ -477,6 +478,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
             if callable(snapshot):
                 event = {**event, "usage": snapshot()}
         event = externalize_script_references(event)
+        event = privacy_workspace.restore_for_display(event)   # 工作区和工具结果里是令牌版：给用户看的换回真实值
         if event.get("type") == "file" and event.get("delivery_status") == "candidate":
             if event.get("file_id") in delivery_candidates:
                 # 工具重复展示本轮候选时仍须等待交付确认，并沿用原始生成证据。
@@ -745,6 +747,8 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         await privacy_service.prepare_files(conversation_id=conversation_id, files=host.list_files(),
                                             emit=_already_shown if shown else emit, workspace=ctx.ws,
                                             sources_only=True)
+        # 上传时识别还没完成、载入的是原文的表，现在换成令牌版：AI 和工具从这里开始只碰令牌
+        await asyncio.to_thread(privacy_workspace.protect_workspace, ctx.ws)
         current = privacy_scope()
         if current is not None:
             current.ready = True
