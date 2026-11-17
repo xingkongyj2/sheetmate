@@ -165,8 +165,9 @@ onBeforeUnmount(() => {
     <div class="absolute right-full top-0 mr-4 size-12">
       <Mascot :variant="mascot ?? 'blob'" :size="48" :mood="mood" :shadow="false" :track="false" />
     </div>
+    <!-- 用时压在首行文字上方，不占位，首行文字仍和头像中心对齐。 -->
+    <p v-if="replyTime" class="pointer-events-none absolute left-0 top-0 text-[11px] leading-3 text-faint tabular-nums" data-testid="reply-timer">{{ replyTime }}</p>
     <div class="assistant-content w-full min-w-0 space-y-3">
-      <p v-if="replyTime" class="text-xs leading-5 text-faint tabular-nums" data-testid="reply-timer">{{ replyTime }}</p>
       <!-- 每轮对话先脱敏再交给模型：脱敏结果永远是回复的第一块内容。 -->
       <PrivacyReportCard v-if="(message.privacy && showsPrivacyReport(message.privacy)) || (!message.privacy && message.privacyRunning)" class="assistant-privacy" :report="message.privacy" :running="message.privacyRunning" />
       <!-- 按发生顺序只合并相邻同类步骤，正文保持原位。 -->
