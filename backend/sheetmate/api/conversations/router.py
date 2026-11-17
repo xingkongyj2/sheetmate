@@ -217,6 +217,13 @@ def privacy_sends(conversation_id: str, db: Session = Depends(get_db), user: Use
     return {"ok": True, "sends": privacy_service.sends(conversation_id)}
 
 
+@router.get("/{conversation_id}/privacy/restores")
+def privacy_restores(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """还原明细：模型回复里的令牌换回了哪些原文（原文只在这里、在本机还原给用户看）。"""
+    conv_service.get_conversation(db, user, conversation_id)
+    return {"ok": True, "restores": privacy_service.restores(conversation_id)}
+
+
 @router.post("/{conversation_id}/chat")
 async def chat(conversation_id: str, body: ChatBody, request: Request, user: User = Depends(current_user)):
     # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）

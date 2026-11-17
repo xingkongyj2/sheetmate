@@ -138,6 +138,11 @@ _NUMBER_TEXT = re.compile(r"[-+]?\d[\d,.\s]*")
 _HEADER_NOISE = re.compile(r"[,，、;；|]|\s/\s|^[-*•·]\s|`")
 
 
+def _city_only(kind: str, text: str) -> bool:
+    """只有省、市、区（「北京」「广东省深圳市」），没有路名门牌：不算详细地址，不遮。"""
+    return kind == "address" and not split_address(str(text))[1].strip()
+
+
 def _plain_header(name: str) -> bool:
     """表格的表头格子像不像一个列名：不长、里面没有逗号顿号这类分隔（那是一段说明或一串列名）。"""
     text = name.strip()
@@ -442,7 +447,8 @@ class Guard:
         hits = self.vault.cell_hits().get(text)
         if hits:
             for snippet, kind in sorted(hits, key=lambda item: len(item[0]), reverse=True):
-                if snippet in text and not TOKEN_RE.search(snippet) and not is_label(snippet):   # 模型曾把列头当成地址摘出来过：不理它
+                # 模型曾把列头当成地址摘出来过、也会把「北京」「深圳」这种只有城市的当成地址：都不理它（只遮详细地址）
+                if snippet in text and not TOKEN_RE.search(snippet) and not is_label(snippet) and not _city_only(kind, snippet):
                     text = text.replace(snippet, self._pattern_token(kind, snippet, stats, "learned"))
         return self._scan_snippets(text, stats)
 
@@ -458,7 +464,7 @@ class Guard:
             for snippet, kind in items:
                 snippet = str(snippet).strip()
                 if (len(snippet) < MIN_KNOWN_CHARS or kind not in KIND_PREFIX or TOKEN_RE.search(snippet) or is_label(snippet)
-                        or kind == "address" and not split_address(snippet)[1].strip()):
+                        or _city_only(kind, snippet)):
                     continue
                 index.setdefault(snippet, kind)
         built = (index, "".join({snippet[0] for snippet in index}), sorted({len(snippet) for snippet in index}, reverse=True))
@@ -663,6 +669,7 @@ class Guard:
             value = self.vault.reveal(match.group(0))
             if counter is not None:
                 counter["restored" if value is not None else "unknown"] += 1
+                counter[("§" if value is not None else "¿") + match.group(0)] += 1     # 还原明细：哪些令牌（只记令牌）
             if value is None:
                 return match.group(0)
             return json.dumps(value, ensure_ascii=False)[1:-1] if json_safe else value

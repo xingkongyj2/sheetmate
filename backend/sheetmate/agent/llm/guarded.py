@@ -144,7 +144,10 @@ class GuardedLLM:
             text = f"回复中 {restored} 个令牌已还原"
             if unknown:
                 text += f"，{unknown} 个未识别"
-            privacy.log.emit("warn" if unknown else "info", "还原", text, restored=restored, unknown=unknown)
+            # tokens：这条回复里还原了哪些令牌（ok）、哪些不认识（unknown）；只有令牌，原文打开明细时才在本机还原
+            tokens = [[key[1:], "ok" if key[0] == "§" else "unknown"] for key in counter if key[:1] in {"§", "¿"}]
+            privacy.log.emit("warn" if unknown else "info", "还原", text, restored=restored, unknown=unknown,
+                             tokens=tokens[:SEND_TOKENS_MAX])
 
     def _restore_message(self, guard: Any, message: Any, counter: Counter[str]) -> None:
         for attr in ("content", "reasoning_content"):

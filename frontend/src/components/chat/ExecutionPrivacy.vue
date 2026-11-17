@@ -84,10 +84,16 @@ const sendNumbers = computed(() => {
   return totals ? [
     { label: '发送次数', value: totals.requests, warn: false },
     { label: '脱敏', value: totals.sent_values ?? 0, warn: false },
+    { label: '还原', value: totals.restored, warn: false },
     { label: '拦截', value: totals.blocked, warn: totals.blocked > 0 },
   ] : []
 })
-const showSends = ref(false)
+const showSends = ref<false | 'sends' | 'restores'>(false)
+const hasDetail = computed(() => (overview.value?.totals.sent_values ?? 0) > 0 || (overview.value?.totals.restored ?? 0) > 0)
+// 处理记录里的「发送检查」「还原」可以点开，直接看对应的明细
+function detailTab(event: PrivacyEventItem): 'sends' | 'restores' | null {
+  return event.kind === '发送检查' ? 'sends' : event.kind === '还原' ? 'restores' : null
+}
 
 // 输入（含期望结果）和输出分开列；没有脱敏的文件后端已经去掉
 const fileGroups = computed(() => {
@@ -149,7 +155,7 @@ function levelClass(level: PrivacyEventItem['level']): string {
       <section class="grid gap-2.5" aria-label="模型脱敏">
         <div class="flex items-center justify-between gap-2 px-0.5">
           <h4 class="text-[13px] font-medium leading-7 text-ink">模型脱敏</h4>
-          <button v-if="(overview.totals.sent_values ?? 0) > 0" type="button" class="flex shrink-0 items-center gap-0.5 text-xs leading-7 text-mute transition hover:text-ink" @click="showSends = true">
+          <button v-if="hasDetail" type="button" class="flex shrink-0 items-center gap-0.5 text-xs leading-7 text-mute transition hover:text-ink" @click="showSends = (overview.totals.sent_values ?? 0) > 0 ? 'sends' : 'restores'">
             明细<ChevronRight class="size-3.5" />
           </button>
         </div>
@@ -158,7 +164,7 @@ function levelClass(level: PrivacyEventItem['level']): string {
           <ShieldCheck v-else class="mt-0.5 size-4 shrink-0 text-[#318b76]" aria-hidden="true" />
           <span class="min-w-0 break-words">{{ sendStatus.text }}</span>
         </div>
-        <dl class="grid grid-cols-3 gap-2">
+        <dl class="grid grid-cols-4 gap-2">
           <div v-for="item in sendNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
             <dd class="text-xl font-medium tabular-nums tracking-tight" :class="item.warn ? 'text-error' : ''">{{ formatCount(item.value) }}</dd>
             <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>
@@ -170,14 +176,20 @@ function levelClass(level: PrivacyEventItem['level']): string {
         <div class="label-mini flex items-center gap-2 px-0.5">处理记录<span class="font-normal tabular-nums tracking-normal">{{ overview.events.length }}</span></div>
         <p v-if="!overview.events.length" class="px-0.5 text-xs text-faint">暂无记录</p>
         <ol v-else class="divide-y divide-line rounded-xl border border-line">
-          <li v-for="event in overview.events" :key="event.id" class="flex items-start gap-2 px-3 py-2 text-xs leading-6">
-            <time class="shrink-0 font-mono text-[11px] leading-6 tabular-nums text-faint" :datetime="event.time">{{ clock(event.time) }}</time>
-            <span class="tag mt-0.5 shrink-0 !py-0 leading-5" :class="levelClass(event.level)">{{ event.kind }}</span>
-            <span class="min-w-0 flex-1 break-words" :class="event.level === 'error' ? 'text-error' : 'text-mute'">{{ event.text }}</span>
+          <li v-for="event in overview.events" :key="event.id">
+            <component :is="detailTab(event) ? 'button' : 'div'" :type="detailTab(event) ? 'button' : undefined"
+              class="group/event flex w-full items-start gap-2 px-3 py-2 text-left text-xs leading-6"
+              :class="detailTab(event) ? 'transition hover:bg-paper/60' : ''"
+              @click="detailTab(event) && (showSends = detailTab(event)!)">
+              <time class="shrink-0 font-mono text-[11px] leading-6 tabular-nums text-faint" :datetime="event.time">{{ clock(event.time) }}</time>
+              <span class="tag mt-0.5 shrink-0 !py-0 leading-5" :class="levelClass(event.level)">{{ event.kind }}</span>
+              <span class="min-w-0 flex-1 break-words" :class="event.level === 'error' ? 'text-error' : 'text-mute'">{{ event.text }}</span>
+              <ChevronRight v-if="detailTab(event)" class="mt-[5px] size-3.5 shrink-0 text-faint transition group-hover/event:text-ink" aria-hidden="true" />
+            </component>
           </li>
         </ol>
       </section>
     </template>
-    <PrivacySendsDialog v-if="showSends && detail" :conversation-id="detail.id" @close="showSends = false" />
+    <PrivacySendsDialog v-if="showSends && detail" :conversation-id="detail.id" :tab="showSends" @close="showSends = false" />
   </section>
 </template>

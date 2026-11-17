@@ -732,6 +732,13 @@ export interface PrivacySend {
   items: { token: string; value: string | null; kind: string; kind_label: string; method_label: string }[]
 }
 
+/** 第 number 条模型回复里，令牌换回原文的明细（value 是在本机还原出来的原文；known 为 false 是不认识的令牌） */
+export interface PrivacyRestore {
+  number: number
+  time: string | null
+  items: { token: string; value: string | null; known: boolean; kind: string; kind_label: string }[]
+}
+
 export interface PrivacyOverview {
   /** 脱敏开关（只管上传文件的分析和脱敏；关着时文件脱敏不展示，模型脱敏照常） */
   enabled?: boolean

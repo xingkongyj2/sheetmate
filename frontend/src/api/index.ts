@@ -23,7 +23,7 @@ import type {
   PrivacyColumnChange,
   PrivacyColumns,
   PrivacyFileStatus,
-  PrivacyOverview, PrivacySend,
+  PrivacyOverview, PrivacyRestore, PrivacySend,
   RecipeBrief,
   RecipeEditRequest,
   PrivacyRuleSetting,
@@ -140,6 +140,7 @@ export const conversationApi = {
   /** 脱敏情况：处理了哪些文件和列、发送检查与还原的次数、最近的处理记录 */
   privacy: async (id: string) => (await http.get<{ privacy: PrivacyOverview }>(`/conversations/${id}/privacy`)).data.privacy,
   privacySends: async (id: string) => (await http.get<{ sends: PrivacySend[] }>(`/conversations/${id}/privacy/sends`)).data.sends ?? [],
+  privacyRestores: async (id: string) => (await http.get<{ restores: PrivacyRestore[] }>(`/conversations/${id}/privacy/restores`)).data.restores ?? [],
   update: async (id: string, payload: Partial<{ title: string; customer_id: string | null }>) =>
     (await http.put<{ conversation: ConversationBrief }>(`/conversations/${id}`, payload)).data.conversation,
   remove: async (id: string) => http.delete(`/conversations/${id}`),

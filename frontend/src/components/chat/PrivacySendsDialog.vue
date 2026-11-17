@@ -1,27 +1,30 @@
 <script setup lang="ts">
-/** 模型脱敏明细：文件脱敏之后仍以原文出现、在发给 AI 前才换成令牌的值。每个值只在第一次出现的那次发送里列一次。
- *  原文是在本机用令牌库还原出来的，只给当前用户看。 */
+/** 模型脱敏明细，两页：
+ *  脱敏——文件脱敏之后仍以原文出现、发给模型前才换成令牌的值（每个值只在第一次出现的那次发送里列一次）；
+ *  还原——模型回复里的令牌换回了哪些原文。原文都是打开时在本机用令牌库还原的，只给当前用户看。 */
 import { ArrowRight, LoaderCircle, RotateCw } from '@lucide/vue'
-import { computed, onMounted, ref } from 'vue'
+import { onMounted, ref, watch } from 'vue'
 
 import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { PrivacySend } from '@/api/types'
+import type { PrivacyRestore, PrivacySend } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 
-const props = defineProps<{ conversationId: string }>()
+const props = withDefaults(defineProps<{ conversationId: string; tab?: 'sends' | 'restores' }>(), { tab: 'sends' })
 const emit = defineEmits<{ close: [] }>()
 
+const active = ref<'sends' | 'restores'>(props.tab)
 const sends = ref<PrivacySend[] | null>(null)
+const restores = ref<PrivacyRestore[] | null>(null)
 const loading = ref(false)
 const error = ref('')
-const shown = computed(() => sends.value ?? [])
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    sends.value = await conversationApi.privacySends(props.conversationId)
+    if (active.value === 'sends') sends.value = await conversationApi.privacySends(props.conversationId)
+    else restores.value = await conversationApi.privacyRestores(props.conversationId)
   } catch (err) {
     error.value = errorText(err)
   } finally {
@@ -29,6 +32,7 @@ async function load() {
   }
 }
 onMounted(load)
+watch(active, () => { if ((active.value === 'sends' ? sends.value : restores.value) === null) void load() })
 
 function clock(iso: string | null): string {
   if (!iso) return ''
@@ -40,10 +44,18 @@ function clock(iso: string | null): string {
 <template>
   <BaseModal width="max-w-2xl" @close="emit('close')">
     <template #title>
-      <h3 class="text-base font-semibold">模型脱敏明细</h3>
+      <div class="flex min-w-0 items-center gap-3">
+        <h3 class="text-base font-semibold">模型脱敏明细</h3>
+        <div class="flex gap-1" role="tablist" aria-label="明细类别">
+          <button v-for="item in [{ id: 'sends', label: '脱敏' }, { id: 'restores', label: '还原' }] as const" :key="item.id" type="button" role="tab"
+            class="rounded-full px-2.5 py-0.5 text-xs leading-5 transition"
+            :class="active === item.id ? 'bg-ink text-white' : 'text-mute hover:bg-paper hover:text-ink'"
+            :aria-selected="active === item.id" @click="active = item.id">{{ item.label }}</button>
+        </div>
+      </div>
     </template>
 
-    <div v-if="!sends && loading" class="flex justify-center py-12" role="status" aria-label="加载中">
+    <div v-if="loading && (active === 'sends' ? !sends : !restores)" class="flex justify-center py-12" role="status" aria-label="加载中">
       <LoaderCircle class="size-5 animate-spin text-mute motion-reduce:animate-none" />
     </div>
 
@@ -52,31 +64,60 @@ function clock(iso: string | null): string {
       <button type="button" class="btn-line !px-3 !py-1.5 text-xs" @click="load"><RotateCw class="size-3.5" />重试</button>
     </div>
 
-    <p v-else-if="!shown.length" class="py-10 text-center text-sm text-faint">没有需要脱敏的内容</p>
+    <template v-else-if="active === 'sends'">
+      <p v-if="!sends?.length" class="py-10 text-center text-sm text-faint">没有需要脱敏的内容</p>
+      <ol v-else class="space-y-3" aria-label="每次发送">
+        <li v-for="send in sends" :key="send.number" class="overflow-hidden rounded-xl border border-line">
+          <div class="flex items-center gap-2 bg-paper/70 px-3.5 py-2 text-xs">
+            <span class="font-medium text-ink">第 {{ send.number }} 次发送</span>
+            <time class="font-mono tabular-nums text-faint">{{ clock(send.time) }}</time>
+            <span class="ml-auto text-mute">脱敏 {{ send.items.length }} 个</span>
+          </div>
+          <table class="w-full text-[13px] leading-5">
+            <tbody>
+              <tr v-for="item in send.items" :key="item.token" class="border-t border-line/70 first:border-t-0">
+                <td class="w-full max-w-0 px-3.5 py-2">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <span class="min-w-0 break-all text-ink">{{ item.value ?? '（令牌库里没有这条记录）' }}</span>
+                    <ArrowRight class="size-3.5 shrink-0 text-faint" aria-hidden="true" />
+                    <code class="shrink-0 font-mono text-[11px] text-mute">{{ item.token }}</code>
+                  </div>
+                </td>
+                <td class="whitespace-nowrap px-3.5 py-2 text-xs text-mute">{{ item.kind_label }}</td>
+                <td class="whitespace-nowrap px-3.5 py-2 text-right text-xs text-faint">{{ item.method_label }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </li>
+      </ol>
+    </template>
 
-    <ol v-else class="space-y-3" aria-label="每次发送">
-      <li v-for="send in shown" :key="send.number" class="overflow-hidden rounded-xl border border-line">
-        <div class="flex items-center gap-2 bg-paper/70 px-3.5 py-2 text-xs">
-          <span class="font-medium text-ink">第 {{ send.number }} 次发送</span>
-          <time class="font-mono tabular-nums text-faint">{{ clock(send.time) }}</time>
-          <span class="ml-auto text-mute">发现 {{ send.items.length }} 个</span>
-        </div>
-        <table class="w-full text-[13px] leading-5">
-          <tbody>
-            <tr v-for="item in send.items" :key="item.token" class="border-t border-line/70 first:border-t-0">
-              <td class="w-full max-w-0 px-3.5 py-2">
-                <div class="flex min-w-0 items-center gap-2">
-                  <span class="min-w-0 break-all text-ink">{{ item.value ?? '（令牌库里没有这条记录）' }}</span>
-                  <ArrowRight class="size-3.5 shrink-0 text-faint" aria-hidden="true" />
-                  <code class="shrink-0 font-mono text-[11px] text-mute">{{ item.token }}</code>
-                </div>
-              </td>
-              <td class="whitespace-nowrap px-3.5 py-2 text-xs text-mute">{{ item.kind_label }}</td>
-              <td class="whitespace-nowrap px-3.5 py-2 text-right text-xs text-faint">{{ item.method_label }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </li>
-    </ol>
+    <template v-else>
+      <p v-if="!restores?.length" class="py-10 text-center text-sm text-faint">模型回复里没有需要还原的令牌</p>
+      <ol v-else class="space-y-3" aria-label="每条回复">
+        <li v-for="reply in restores" :key="reply.number" class="overflow-hidden rounded-xl border border-line">
+          <div class="flex items-center gap-2 bg-paper/70 px-3.5 py-2 text-xs">
+            <span class="font-medium text-ink">第 {{ reply.number }} 条回复</span>
+            <time class="font-mono tabular-nums text-faint">{{ clock(reply.time) }}</time>
+            <span class="ml-auto text-mute">还原 {{ reply.items.filter((item) => item.known).length }} 个</span>
+          </div>
+          <table class="w-full text-[13px] leading-5">
+            <tbody>
+              <tr v-for="item in reply.items" :key="item.token" class="border-t border-line/70 first:border-t-0">
+                <td class="w-full max-w-0 px-3.5 py-2">
+                  <div class="flex min-w-0 items-center gap-2">
+                    <code class="shrink-0 font-mono text-[11px] text-mute">{{ item.token }}</code>
+                    <ArrowRight class="size-3.5 shrink-0 text-faint" aria-hidden="true" />
+                    <span v-if="item.known" class="min-w-0 break-all text-ink">{{ item.value ?? '（令牌库里没有这条记录）' }}</span>
+                    <span v-else class="text-[#9a6b00]">不认识，保持原样</span>
+                  </div>
+                </td>
+                <td class="whitespace-nowrap px-3.5 py-2 text-right text-xs text-mute">{{ item.kind_label }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </li>
+      </ol>
+    </template>
   </BaseModal>
 </template>

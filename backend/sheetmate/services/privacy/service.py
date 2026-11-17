@@ -130,6 +130,14 @@ def _with_send(detail: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
     return {**detail, "sends": sends, "leaked": len({item[0] for send in sends for item in send["tokens"] if _leaked(item)})}
 
 
+def _with_reply(detail: dict[str, Any], event: dict[str, Any]) -> dict[str, Any]:
+    """把这条回复还原了哪些令牌追加进记录（只有令牌）。"""
+    tokens = list((event.get("detail") or {}).get("tokens") or [])
+    if not tokens:
+        return detail
+    return {**detail, "replies": [*detail.get("replies", []), {"time": event["time"], "tokens": tokens}][-SENDS_KEPT:]}
+
+
 def _leaked(item: list[Any]) -> bool:
     """发送明细里的一项是不是文件脱敏漏掉的（见 GuardedLLM 的 _source）。"""
     return isinstance(item, list) and len(item) >= 3 and (len(item) < 4 or item[3] == "leak")
@@ -149,6 +157,8 @@ def _store_event(event: dict[str, Any]) -> None:
                 detail = _add_counts(last.detail or {}, {k: v for k, v in (event.get("detail") or {}).items() if k != "tokens"})
                 if kind == "发送检查":
                     detail = _with_send(detail, event)
+                elif kind == "还原":
+                    detail = _with_reply(detail, event)
                 last.detail = detail
                 last.text = _aggregate_text(kind, detail) or event["text"]
                 last.updated_at = now()
@@ -156,6 +166,8 @@ def _store_event(event: dict[str, Any]) -> None:
         detail = event.get("detail")
         if detail and kind == "发送检查":
             detail = _with_send({k: v for k, v in detail.items() if k != "tokens"}, event)
+        elif detail and kind == "还原":
+            detail = _with_reply({k: v for k, v in detail.items() if k != "tokens"}, event)
         text = (_aggregate_text(kind, detail) if detail and kind in {"发送检查", "还原"} else None) or event["text"]
         db.add(PrivacyEvent(conversation_id=conversation_id, user_id=event.get("user_id"), level=event["level"],
                             kind=kind, text=text, detail=detail))
@@ -906,7 +918,7 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
         # 有发送明细的记录按现在的说法重新生成文字（文案改过，存下的旧文字不再用）
         listed = [{"id": e.id, "time": e.updated_at.isoformat(timespec="seconds"), "level": e.level, "kind": e.kind,
                    "text": (_aggregate_text(e.kind, e.detail) if e.kind == "发送检查" and "sends" in (e.detail or {}) else None) or e.text,
-                   "detail": {k: v for k, v in (e.detail or {}).items() if k != "sends"} or None}
+                   "detail": {k: v for k, v in (e.detail or {}).items() if k not in {"sends", "replies"}} or None}
                   for e in reversed(events)]
     from sheetmate.services.privacy import columns as privacy_columns
 
@@ -963,4 +975,30 @@ def sends(conversation_id: str) -> list[dict[str, Any]]:
                        "kind_label": KIND_LABELS.get(item[1], item[1]), "method_label": METHOD_LABELS.get(item[2], item[2])}
                       for item in fresh],
         })
+    return out
+
+
+_PREFIX_KIND = {"TEL": "phone", "MAIL": "email", "IM": "im", "ADDR": "address", "TXT": "custom"}
+
+
+def restores(conversation_id: str) -> list[dict[str, Any]]:
+    """模型回复里的令牌换回原文的明细：按第几条回复列出。记录里只存了令牌，原文在这里用本机的令牌库还原给用户看。"""
+    start()
+    guard = privacy.require()
+    with session_scope() as db:
+        rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
+                                                          PrivacyEvent.kind == "还原").order_by(PrivacyEvent.id)))
+        raw = [reply for row in rows for reply in (row.detail or {}).get("replies", [])]
+    out = []
+    for number, reply in enumerate(raw, 1):
+        items = []
+        for item in reply.get("tokens", []):
+            if not (isinstance(item, list) and len(item) == 2):
+                continue
+            token, state = item
+            kind = _PREFIX_KIND.get(str(token).split("_", 1)[0], "custom")
+            items.append({"token": token, "value": guard.vault.reveal(token) if state == "ok" else None, "known": state == "ok",
+                          "kind": kind, "kind_label": KIND_LABELS.get(kind, kind)})
+        if items:
+            out.append({"number": number, "time": reply.get("time"), "items": items})
     return out
