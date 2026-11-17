@@ -119,8 +119,10 @@ def _sources_available(db: Session, conv: Conversation, sources: list[dict[str, 
     return bool(sources)
 
 
-def _invalid_results(execution: AgentExecution) -> set[str]:
-    budget = _dict(_dict(execution.checkpoint).get("runtime")).get("budget")
+def _invalid_results(db: Session, execution: AgentExecution) -> set[str]:
+    from sheetmate.services.execution.state import hydrate_checkpoint
+
+    budget = _dict(_dict(hydrate_checkpoint(db, execution)).get("runtime")).get("budget")
     budget = _dict(budget)
     invalid = set()
     for evidence_id, result in _dict(budget.get("results")).items():
@@ -190,7 +192,7 @@ def _observations(db: Session, conv: Conversation, execution: AgentExecution,
     receipts = {item.call_id: item for item in db.scalars(select(AgentToolReceipt).where(
         AgentToolReceipt.execution_id == execution.id))}
     baseline = _baseline_versions(inputs)
-    invalid, seen, results = _invalid_results(execution), set(), []
+    invalid, seen, results = _invalid_results(db, execution), set(), []
     for index, event in enumerate(events):
         if event.get("type") != "tool_result":
             continue

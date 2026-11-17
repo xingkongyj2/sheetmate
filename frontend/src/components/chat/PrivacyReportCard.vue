@@ -50,7 +50,7 @@ const viewing = ref<{ fileId: string; filename: string } | null>(null)
           <ChevronRight v-if="expandable" class="mt-1 size-4 shrink-0 text-faint transition group-open/privacy:rotate-90" aria-hidden="true" />
         </summary>
 
-        <div v-if="expandable" class="mb-1 ml-[22px] mt-1.5 max-w-xl space-y-2.5">
+        <div v-if="expandable" class="mb-1 mt-1.5 max-w-xl space-y-2.5">
           <article v-for="file in shownFiles" :key="file.file_id || file.filename" class="overflow-hidden rounded-xl border border-line bg-white">
             <header class="flex min-w-0 items-center gap-2 px-3.5 pb-2 pt-2.5">
               <FileSpreadsheet class="size-4 shrink-0 text-fun-green" aria-hidden="true" />
@@ -102,7 +102,7 @@ const viewing = ref<{ fileId: string; filename: string } | null>(null)
         </div>
       </details>
 
-      <div v-if="(blocked && report.reason) || report.notes.length" class="ml-[22px] space-y-0.5">
+      <div v-if="(blocked && report.reason) || report.notes.length" class="space-y-0.5">
         <p v-if="blocked && report.reason" class="break-words text-xs leading-5 text-mute" role="alert">{{ report.reason }}</p>
         <p v-for="note in report.notes" :key="note" class="break-words text-xs leading-5 text-faint">{{ note }}</p>
       </div>

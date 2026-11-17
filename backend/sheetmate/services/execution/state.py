@@ -150,11 +150,172 @@ def _externalize_ui_events(db: Session, execution: AgentExecution, checkpoint: d
                     for event in events]
 
 
+# 检查点里随工具调用次数增长的集合。它们的元素写出后基本不再改变：
+# 大元素单独存一份，满 _CHUNK_ITEMS 个的旧元素整块存一份，检查点里只留引用和最近不满一块的尾部。
+# 这样检查点大小不随调用次数增长，同一份查询结果也不会在多处重复保存。
+# (路径, 是否把大元素单独存)；"*" 表示列表里的每一项。外层在前，内层在后。
+_GROWING: tuple[tuple[tuple[str, ...], bool], ...] = (
+    (("context", "evidence_store"), True),
+    (("runtime", "conversation"), True),
+    (("runtime", "loop", "messages"), True),
+    (("runtime", "budget", "results"), True),
+    (("runtime", "budget", "recoveries"), False),   # 进行中的那条每次都在变，不单独存
+    (("runtime", "budget", "recoveries", "*", "state", "results"), True),
+    (("ui", "stored"), False),
+    (("llm_usage", "calls"), True),
+)
+_PART_TOOL = "__checkpoint_part__"
+_PART_KEY = "_checkpoint_part"
+_CHUNKS_KEY = "_checkpoint_chunks"
+_ITEM_MIN_CHARS = 1024
+_CHUNK_ITEMS = 32
+
+
+def _slots(root: Any, path: tuple[str, ...]):
+    """路径上实际存在的 (容器, 键)。"""
+    holders = [root]
+    for step in path[:-1]:
+        nxt = []
+        for holder in holders:
+            if step == "*":
+                if isinstance(holder, list):
+                    nxt.extend(item for item in holder if isinstance(item, dict))
+            elif isinstance(holder, dict) and isinstance(holder.get(step), (dict, list)):
+                nxt.append(holder[step])
+        holders = nxt
+    last = path[-1]
+    for holder in holders:
+        if isinstance(holder, dict) and last in holder:
+            yield holder, last
+
+
+def _is_ref(value: Any) -> bool:
+    return isinstance(value, dict) and set(value) == {_PART_KEY} and isinstance(value[_PART_KEY], str)
+
+
+def _is_chunked(value: Any) -> bool:
+    return isinstance(value, dict) and _CHUNKS_KEY in value
+
+
+class _PartStore:
+    """同一次执行的检查点分块，按内容寻址：内容不变就不会重复写。"""
+
+    def __init__(self, db: Session, execution: AgentExecution):
+        self.db, self.execution = db, execution
+        self.known: dict[str, str] | None = None
+
+    def put(self, value: Any) -> dict[str, str] | None:
+        from sheetmate.services.execution.tool_results import save_tool_result
+
+        if self.known is None:
+            self.known = dict(self.db.execute(select(AgentToolOutput.call_id, AgentToolOutput.id).where(
+                AgentToolOutput.execution_id == self.execution.id, AgentToolOutput.tool_name == _PART_TOOL)).all())
+        call_id = "part:" + fingerprint(value)
+        if call_id not in self.known:
+            saved = save_tool_result(self.db, user_id=self.execution.user_id,
+                conversation_id=self.execution.conversation_id, execution_id=self.execution.id,
+                tool_name=_PART_TOOL, call_id=call_id, payload={"value": value})
+            if saved["sanitized_fields"]:
+                return None  # 存储时被改动过的内容不能原样取回，留在检查点里
+            self.known[call_id] = saved["result_id"]
+        return {_PART_KEY: self.known[call_id]}
+
+    def get_many(self, result_ids: set[str]) -> dict[str, Any]:
+        from sheetmate.services.execution.tool_results import _UNSET, _scope
+
+        if not result_ids:
+            return {}
+        _scope(self.db, self.execution.user_id, self.execution.conversation_id, _UNSET)
+        rows = {row.id: row for row in self.db.scalars(
+            select(AgentToolOutput).where(AgentToolOutput.id.in_(result_ids)))}
+        values = {}
+        for result_id in result_ids:
+            row = rows.get(result_id)
+            if (row is None or row.execution_id != self.execution.id or row.tool_name != _PART_TOOL
+                    or row.conversation_id != self.execution.conversation_id):
+                raise ServiceError("执行检查点记录无效，无法恢复。")
+            values[result_id] = json.loads(row.payload)["value"]
+        return values
+
+
+def _externalize_parts(db: Session, execution: AgentExecution, checkpoint: dict[str, Any]) -> None:
+    store = _PartStore(db, execution)
+    for path, item_refs in reversed(_GROWING):          # 先处理内层，外层分块时内层已经是引用
+        for holder, key in list(_slots(checkpoint, path)):
+            collection = holder[key]
+            if isinstance(collection, dict) and not _is_chunked(collection) and not _is_ref(collection):
+                items = list(collection.items())
+            elif isinstance(collection, list):
+                items = list(enumerate(collection))
+            else:
+                continue
+            if item_refs:
+                for index, (name, value) in enumerate(items):
+                    if not _is_ref(value) and len(_canonical(value)) >= _ITEM_MIN_CHARS:
+                        ref = store.put(value)
+                        if ref is not None:
+                            items[index] = (name, ref)
+            full = len(items) - len(items) % _CHUNK_ITEMS
+            chunks = []
+            for start in range(0, full, _CHUNK_ITEMS):
+                block = items[start:start + _CHUNK_ITEMS]
+                chunk = store.put([[name, value] for name, value in block] if isinstance(collection, dict)
+                                  else [value for _, value in block])
+                if chunk is None:
+                    full = start
+                    break
+                chunks.append(chunk)
+            tail = items[full:]
+            if not chunks:
+                holder[key] = dict(tail) if isinstance(collection, dict) else [value for _, value in tail]
+                continue
+            holder[key] = {_CHUNKS_KEY: chunks, "kind": "dict" if isinstance(collection, dict) else "list",
+                           "tail": [[name, value] for name, value in tail] if isinstance(collection, dict)
+                           else [value for _, value in tail]}
+
+
+def _hydrate_parts(db: Session, execution: AgentExecution, checkpoint: dict[str, Any]) -> None:
+    store = _PartStore(db, execution)
+    for path, _ in _GROWING:                            # 先展开外层，内层路径才能找到
+        slots = list(_slots(checkpoint, path))
+        if not slots:
+            continue
+        chunk_ids = {ref[_PART_KEY] for holder, key in slots if _is_chunked(holder[key])
+                     for ref in holder[key][_CHUNKS_KEY] if _is_ref(ref)}
+        chunks = store.get_many(chunk_ids)
+        for holder, key in slots:
+            value = holder[key]
+            if not _is_chunked(value):
+                continue
+            if any(not _is_ref(ref) for ref in value[_CHUNKS_KEY]):
+                raise ServiceError("执行检查点记录无效，无法恢复。")
+            parts = [item for ref in value[_CHUNKS_KEY] for item in chunks[ref[_PART_KEY]]] + list(value["tail"])
+            holder[key] = {name: item for name, item in parts} if value.get("kind") == "dict" else parts
+        collections = [holder[key] for holder, key in slots
+                       if isinstance(holder[key], (dict, list)) and not _is_ref(holder[key])]
+        items = store.get_many({item[_PART_KEY] for collection in collections
+                                for item in (collection.values() if isinstance(collection, dict) else collection)
+                                if _is_ref(item)})
+        for collection in collections:
+            names = list(collection) if isinstance(collection, dict) else range(len(collection))
+            for name in names:
+                if _is_ref(collection[name]):
+                    collection[name] = json.loads(_canonical(items[collection[name][_PART_KEY]]))
+
+
+def hydrate_checkpoint(db: Session, execution: AgentExecution) -> dict[str, Any]:
+    """数据库里的检查点只存了引用；需要完整内容时用这个展开（不含界面事件）。"""
+    checkpoint = _payload(execution.checkpoint, limit=None)
+    _hydrate_parts(db, execution, checkpoint)
+    return checkpoint
+
+
 def restore_checkpoint_ui(db: Session, execution: AgentExecution) -> dict[str, Any]:
     """Hydrate UI locators under the same live scope checks as tool outputs."""
     from sheetmate.services.execution.tool_results import resolve_tool_result_events
 
-    checkpoint = _payload(execution.checkpoint)
+    checkpoint = _payload(execution.checkpoint, limit=None)
+    _hydrate_parts(db, execution, checkpoint)
     ui = checkpoint.get("ui")
     events = ui.get("stored") if isinstance(ui, dict) else None
     if not isinstance(events, list):
@@ -327,6 +488,7 @@ def save_checkpoint(
     # locators must not become a way around the durable-data safeguards.
     safe_checkpoint = _payload(checkpoint, limit=None)
     _externalize_ui_events(db, execution, safe_checkpoint)
+    _externalize_parts(db, execution, safe_checkpoint)
     values: dict[str, Any] = {"checkpoint": _payload(safe_checkpoint), "status": status}
     if assistant_message_id is not None:
         values["assistant_message_id"] = assistant_message_id
