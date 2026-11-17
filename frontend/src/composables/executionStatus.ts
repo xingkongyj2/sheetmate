@@ -47,6 +47,7 @@ const REASONS: Record<string, string> = {
   stream_incomplete: '模型返回中途结束，没有收到完整的结束信号。',
   empty_response: '模型没有返回可执行的操作或有效回答。',
   output_limit: '模型输出达到长度上限，本次响应不完整。',
+  context_overflow: '输入内容超出了模型的上下文窗口，本次处理未执行。',
   content_filter: '模型服务中止了本次回复，本次处理未完成。',
   unexpected_finish_reason: '模型服务返回了异常的结束状态，本次处理未完成。',
   tool_protocol: '模型返回的操作不完整，相关操作未执行。',

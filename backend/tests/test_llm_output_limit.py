@@ -51,15 +51,7 @@ def _clear_llm_env(monkeypatch) -> None:
 # ---- 输出上限 ----
 
 def test_default_requests_the_maximum():
-    cfg = _cfg()
-    assert cfg.output_limit == 0
-    assert _kwargs(cfg)["max_tokens"] == AUTO_MAX_TOKENS
-
-
-def test_fixed_limit_from_config_is_sent():
-    cfg = _cfg(max_tokens=65536)
-    assert cfg.output_limit == 65536
-    assert _kwargs(cfg)["max_tokens"] == 65536
+    assert _kwargs(_cfg())["max_tokens"] == AUTO_MAX_TOKENS
 
 
 # ---- 环境变量 ----
@@ -68,19 +60,20 @@ def test_env_controls_limits_with_large_defaults(clean_settings_file, monkeypatc
     _clear_llm_env(monkeypatch)
     cfg = get_llm_provider_settings("custom")
     policy = cfg.runtime_policy
-    assert cfg.max_tokens == 0 and cfg.output_limit == 0  # 默认自动取模型最大值
+    assert not hasattr(cfg, "max_tokens") and not hasattr(cfg, "output_limit")      # 输出上限不再是配置项，自动处理
+    assert not hasattr(policy, "context_window_tokens")                              # 模型窗口也不再预设
     assert cfg.timeout >= 7200
     assert policy.budget_enabled is False
     assert policy.structured_retries >= 20 and policy.tool_protocol_retries >= 40 and policy.sdk_retries >= 10
     assert policy.llm_hard_idle_seconds >= 86400 and policy.tool_timeout_seconds >= 14400
     assert policy.max_total_tokens >= 1_000_000_000 and policy.max_task_seconds >= 86400
 
-    monkeypatch.setenv("LLM_MAX_TOKENS", "50000")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "50000")          # 旧环境变量即使还留着，也不再有任何作用
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "99")
     monkeypatch.setenv("LLM_SDK_RETRIES", "2")
     monkeypatch.setenv("LLM_BUDGET_ENABLED", "1")
     cfg = get_llm_provider_settings("custom")
-    assert cfg.output_limit == 50000 and cfg.timeout == 99
+    assert not hasattr(cfg, "max_tokens") and cfg.timeout == 99
     assert cfg.runtime_policy.sdk_retries == 2 and cfg.runtime_policy.budget_enabled is True
 
 
@@ -101,7 +94,7 @@ def test_saved_numeric_settings_are_ignored_and_cleaned(clean_settings_file, mon
         "max_tokens_enabled": True, "timeout": 5,
         "runtime_policy": {"compatibility_mode": "relaxed", "sdk_retries": 0}}}}}), encoding="utf-8")
     cfg = get_llm_provider_settings("custom")
-    assert cfg.output_limit == 0 and cfg.timeout != 5 and cfg.runtime_policy.sdk_retries != 0
+    assert cfg.timeout != 5 and cfg.runtime_policy.sdk_retries != 0
     save_llm_settings("custom", None, None, None, thinking_enabled=True)
     saved = json.loads(clean_settings_file.read_text(encoding="utf-8"))["llm"]["providers"]["custom"]
     assert not {"max_tokens", "max_tokens_enabled", "timeout", "runtime_policy"} & set(saved)
@@ -194,24 +187,6 @@ def test_context_overflow_uses_window_minus_input_not_the_input_count():
     assert sent == [AUTO_MAX_TOKENS, 163840 - 34927 - 3276]
 
 
-def test_known_context_window_keeps_auto_output_inside_it():
-    from sheetmate.agent.llm.client import LLMClient
-
-    cfg = _cfg()
-    policy = cfg.runtime_policy.model_copy(update={"context_window_tokens": 163840})
-    from dataclasses import replace
-    client = LLMClient(replace(cfg, runtime_policy=policy))
-    assert client._kwargs([{"role": "user", "content": "hi"}], None)["max_tokens"] == 163840 // 4
-
-
-def test_fixed_limit_is_never_lowered_silently():
-    from sheetmate.agent.llm.client import LLMError
-
-    with pytest.raises(LLMError) as caught:
-        _chat_with(_cfg(max_tokens=65536), ["valid range of max_tokens is [1, 8192]"])
-    assert "400" in str(caught.value) and "max_tokens" in str(caught.value)
-
-
 def test_unrelated_400_is_not_touched():
     from sheetmate.agent.llm import client as llm_client
     from sheetmate.agent.llm.client import LLMError
@@ -221,10 +196,98 @@ def test_unrelated_400_is_not_touched():
     assert not llm_client._ACCEPTED_MAX_TOKENS
 
 
-def test_auto_maximum_does_not_inflate_budget_or_context_reserve():
+def test_auto_maximum_does_not_inflate_budget_reserve():
     from sheetmate.agent.llm.client import LLMClient
 
     auto = LLMClient(_cfg())
     assert auto._output_reserve(auto._kwargs([{"role": "user", "content": "hi"}], None)) == 8192
-    fixed = LLMClient(_cfg(max_tokens=65536))
-    assert fixed._output_reserve(fixed._kwargs([{"role": "user", "content": "hi"}], None)) == 65536
+
+
+# ---- 超出模型窗口：不替使用者限制，报错讲清楚 ----
+
+VLLM_OVERFLOW = ("Requested token count exceeds the model's maximum context length of 20000 tokens. "
+                 "You requested a total of 34096 tokens: 30000 tokens from the input messages and "
+                 "4096 tokens for the completion. Please reduce the length of the input messages or completion.")
+
+
+def test_input_alone_over_the_window_is_reported_without_touching_the_request():
+    from sheetmate.agent.llm import client as llm_client
+    from sheetmate.agent.llm.client import LLMError, lower_max_tokens
+
+    kwargs = {"max_tokens": AUTO_MAX_TOKENS}
+    assert lower_max_tokens(kwargs, VLLM_OVERFLOW, ("u", "m")) is False and kwargs == {"max_tokens": AUTO_MAX_TOKENS}
+    with pytest.raises(LLMError) as caught:
+        _chat_with(_cfg(), [VLLM_OVERFLOW])
+    assert caught.value.code == "context_overflow"
+    assert not llm_client._ACCEPTED_MAX_TOKENS                      # 不能把这次的结论缓存成「该模型不接受输出上限」
+
+
+def test_input_alone_over_the_window_sends_one_request_only():
+    from types import SimpleNamespace
+
+    from sheetmate.agent.llm.client import LLMClient, LLMError
+
+    sent: list = []
+    client = LLMClient(_cfg())
+
+    async def create(**kwargs):
+        sent.append(kwargs.get("max_tokens"))
+        raise _bad_request(VLLM_OVERFLOW)
+
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)), close=lambda: None)
+    with pytest.raises(LLMError):
+        asyncio.run(client.chat([{"role": "user", "content": "hi"}]))
+    assert sent == [AUTO_MAX_TOKENS]                                 # 没有「改小 / 不传 max_tokens」再试一遍之类的折腾
+
+
+def test_context_overflow_error_text_is_clear_and_has_no_settings_link_word():
+    from sheetmate.agent.llm.client import LLMError
+
+    with pytest.raises(LLMError) as caught:
+        _chat_with(_cfg(), [VLLM_OVERFLOW])
+    message = str(caught.value)
+    for expected in ("输入内容超出了模型的上下文窗口", "模型窗口 20,000 Token", "本次输入 30,000", "请求输出 4,096", "合计 34,096",
+                     "仅输入就已超出窗口", "服务端原文", "maximum context length of 20000"):
+        assert expected in message, expected
+    assert "设置" not in message                                      # 前端看到「设置」会给「去设置」链接，这里不该有
+
+
+def test_other_400s_keep_the_generic_message():
+    from sheetmate.agent.llm.client import LLMError, context_overflow_message
+
+    assert context_overflow_message("image input is not supported") is None
+    assert context_overflow_message("valid range of max_tokens is [1, 8192]") is None
+    with pytest.raises(LLMError) as caught:
+        _chat_with(_cfg(), ["unsupported value: temperature must be 1"])
+    assert caught.value.code == "api_error"
+
+
+def test_length_truncation_message_is_accurate_and_has_no_settings_link_word():
+    from types import SimpleNamespace
+
+    from sheetmate.agent.llm.client import LLMClient, LLMError
+
+    client = LLMClient(_cfg())
+
+    def chunk(content=None, finish=None):
+        delta = SimpleNamespace(content=content, reasoning_content=None, tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(index=0, delta=delta, finish_reason=finish)], usage=None, model="m")
+
+    async def stream():
+        yield chunk("部分内容")
+        yield chunk(None, "length")
+
+    async def create(**kwargs):
+        return stream()
+
+    client.client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)), close=lambda: None)
+
+    async def run():
+        async for _ in client.stream_chat([{"role": "user", "content": "hi"}]):
+            pass
+
+    with pytest.raises(LLMError) as caught:
+        asyncio.run(run())
+    message = str(caught.value)
+    assert caught.value.code == "output_limit" and "已写满" not in message and "设置" not in message
+    assert f"输出上限为 {AUTO_MAX_TOKENS}" in message and "输入加输出用完了模型窗口" in message

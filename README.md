@@ -45,9 +45,9 @@ start.bat
 
 模型的运行参数全部放在 `.env` 环境变量里，设置页不再展示，修改后重启后端生效（完整清单和注释见 `.env.example`）。默认值都放得很大，保证长任务能一直跑完，一般无需调整：请求超时 `LLM_TIMEOUT_SECONDS` 7200 秒，回复流无新内容等待 `LLM_STREAM_IDLE_SECONDS` 7200 秒，模型等待上限 `LLM_HARD_IDLE_SECONDS` 86400 秒，工具执行等待 `TOOL_TIMEOUT_SECONDS` 14400 秒；断流恢复 20 次、结构化输出纠错 20 次、工具调用纠错 40 次、连接错误重试 10 次；Agent 推理轮数 `AGENT_MAX_ITERATIONS` 1000、流程自动修复 `REPAIR_MAX_ATTEMPTS` 30、结果比对修正 `VERIFY_MAX_ROUNDS` 20，工具调用总次数 `TOOL_CALL_BUDGET` 5000，计划步骤补做、计划修复、催促继续、单方法失败和换方法次数也都放宽（`MAX_STEP_FIXES`、`MAX_PLAN_REPAIRS`、`MAX_COMPLETION_RETRIES`、`METHOD_FAILURE_LIMIT`、`MAX_METHODS`）；计划、核对等辅助调用的单次等待下限 `AUX_CALL_TIMEOUT_SECONDS` 1800 秒。设置页只保留提供商连接信息、思考开关和结构输出 / 思考参数协议；旧版写进 `settings.json` 的超时、重试、Token 上限、预算会被忽略，保存时清掉。
 
-「任务预算」默认关闭（`LLM_BUDGET_ENABLED=0`），关闭时不限制单次任务的调用次数、Token 和时长；设为 1 后才按 `LLM_MAX_MODEL_CALLS`、`LLM_MAX_PROMPT_TOKENS`、`LLM_MAX_TOTAL_TOKENS`、`LLM_MAX_TASK_SECONDS`、`LLM_MAX_INPUT_CHARS` 限制，这些默认也很大。「上下文压缩」独立于任务预算，默认软字符目标 `LLM_CONTEXT_TARGET_CHARS=80000`（0 表示不按字符触发），这一项不调大：调大会让上下文更长，可能超出模型窗口；模型窗口很大时可自行调高，或用 `LLM_CONTEXT_WINDOW_TOKENS` 填实际容量，系统预留输出额度及安全余量后整理旧过程。
+「任务预算」默认关闭（`LLM_BUDGET_ENABLED=0`），关闭时不限制单次任务的调用次数、Token 和时长；设为 1 后才按 `LLM_MAX_MODEL_CALLS`、`LLM_MAX_PROMPT_TOKENS`、`LLM_MAX_TOTAL_TOKENS`、`LLM_MAX_TASK_SECONDS`、`LLM_MAX_INPUT_CHARS` 限制，这些默认也很大。「上下文压缩」独立于任务预算，默认软字符目标 `LLM_CONTEXT_TARGET_CHARS=80000`（0 表示不按字符触发），这一项不调大：调大会让上下文更长，可能超出模型窗口；模型窗口很大时可自行调高。项目不预设模型窗口：输入加输出超出窗口时，由模型服务报错，报错会用中文写明窗口、输入、请求输出的 Token 数并附服务端原文，显示在对话里。
 
-输出 Token 上限 `LLM_MAX_TOKENS` 默认 0（自动）：每次请求先按 131072 请求最大输出（填了 `LLM_CONTEXT_WINDOW_TOKENS` 时，最多取窗口的四分之一，避免输入加输出超出窗口），模型服务因 `max_tokens` 过大返回 400 时，从报错里读出该模型的真实上限自动降级重试（报错给出上下文窗口和输入 Token 数时，按「窗口 − 输入 − 2% 余量」计算）（读不出就不再传 `max_tokens`），并按「接口地址 + 模型」记住，进程内不再重复试错；上限只限制单次模型回复，不是整个任务的总量。设为正数则固定使用该值，不会被自动降级。开启任务预算时，自动最大值只按 8192 估算预留，不会占满总 Token 预算。
+输出 Token 上限不需要配置：每次请求先按 131072 请求最大输出，模型服务因 `max_tokens` 过大返回 400 时，从报错里读出该模型的真实上限自动降级重试（报错给出上下文窗口和输入 Token 数时，按「窗口 − 输入 − 2% 余量」计算；读不出就不再传 `max_tokens`），并按「接口地址 + 模型」记住，进程内不再重复试错；输入本身就超出窗口时不改写请求，直接把服务端报错展示出来。上限只限制单次模型回复，不是整个任务的总量。开启任务预算时，输出只按 8192 估算预留，不会占满总 Token 预算。
 
 不配置模型也能看效果：首次启动会写入一个示例客户「顺达物流（示例）」，里面有原始文件、人工结果样例、一个已验证的月结账单流程、字段映射和业务规则；客户页的「用新文件执行」不需要 AI。
 

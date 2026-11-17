@@ -45,9 +45,6 @@ class LLMRuntimePolicy(BaseModel):
     # 对话上下文超过多少字符后，自动把较早的执行过程收成简短进度；只整理，不中止任务；0 = 不按字符触发。（LLM_CONTEXT_TARGET_CHARS）
     context_target_chars: int = Field(default=80000, ge=0, le=2_000_000_000)
 
-    # 模型服务实际的上下文容量（Token），用于给输出和安全余量预留空间；0 = 未知，不从模型名称猜测。（LLM_CONTEXT_WINDOW_TOKENS）
-    context_window_tokens: int = Field(default=0, ge=0, le=2_000_000_000)
-
     # 是否开启任务预算：False 时只记录用量，下面 5 项预算都不生效；True 时超过任何一项就保留已有结果并停止任务。（LLM_BUDGET_ENABLED）
     budget_enabled: bool = False
 

@@ -41,9 +41,9 @@ from sheetmate.core.observability.conversation_log import record_event
 
 log = logging.getLogger(__name__)
 _LLM_STAGE: contextvars.ContextVar[str | None] = contextvars.ContextVar("sheetmate_llm_stage", default=None)
-# 未开启输出上限时，辅助结构化调用遇到截断后扩大额度的上限。
+# 辅助结构化调用遇到截断后扩大额度的上限。
 _UNCAPPED_GROWTH_LIMIT = 32768
-# 未开启输出上限时，预算和上下文预留按这个常见输出量估算，不按 AUTO_MAX_TOKENS 占满。
+# 预算预留按这个常见输出量估算，不按 AUTO_MAX_TOKENS 占满。
 _AUTO_RESERVE_TOKENS = 8192
 # 按（接口地址, 模型）记住服务端实际接受的输出上限；0 表示该模型不接受或无需传 max_tokens。
 _ACCEPTED_MAX_TOKENS: dict[tuple[str, str], int] = {}
@@ -61,18 +61,57 @@ _INPUT_TOKENS = [re.compile(pattern, re.I) for pattern in (
 )]
 
 
-def _context_headroom(message: str) -> int:
-    """报错同时给出上下文窗口和输入 Token 数时，算出输出还能用多少（留 2% 余量）；读不出返回 0。"""
-    window = _CONTEXT_LENGTH.search(message)
-    if not window:
-        return 0
-    size = int(window.group(1).replace(",", ""))
+def _number(match: re.Match[str] | None) -> int:
+    return int(match.group(1).replace(",", "")) if match else 0
+
+
+def _parse_window(message: str) -> int:
+    """报错里说出的上下文窗口（Token）；说不出返回 0。"""
+    size = _number(_CONTEXT_LENGTH.search(message))
+    return size if size >= 1024 else 0
+
+
+def _find_input_tokens(message: str) -> int:
+    """报错里说出的输入 Token 数；说不出返回 0。"""
     for pattern in _INPUT_TOKENS:
         found = pattern.search(message)
         if found:
-            used = int(found.group(1).replace(",", ""))
-            return max(0, size - used - max(256, size // 50)) if used < size else 0
+            return _number(found)
     return 0
+
+
+def _context_headroom(message: str) -> int:
+    """报错同时给出上下文窗口和输入 Token 数时，算出输出还能用多少（留 2% 余量）；读不出返回 0。"""
+    size, used = _parse_window(message), _find_input_tokens(message)
+    if not size or not used or used >= size:
+        return 0
+    return max(0, size - used - max(256, size // 50))
+
+
+_REQUESTED_OUTPUT = re.compile(rf"{_NUM}\s*tokens?\s*for the (?:completion|output)", re.I)
+_REQUESTED_TOTAL = re.compile(rf"total of {_NUM}\s*tokens", re.I)
+_OVERFLOW_WORDS = re.compile(r"exceed|too (?:large|long)|reduce|however|超出|超过", re.I)
+
+
+def context_overflow_message(message: str) -> str | None:
+    """模型服务说「输入 + 输出超过上下文窗口」时，写成使用者看得懂的话：窗口多大、输入多少、请求输出多少，再附服务端原文。
+    不是这类报错返回 None。刻意不含「设置」二字：前端看到它会给「去设置」链接，而窗口不在设置页里改。"""
+    window = _parse_window(message)
+    if not window or not _OVERFLOW_WORDS.search(message):
+        return None
+    used, output, total = _find_input_tokens(message), _number(_REQUESTED_OUTPUT.search(message)), _number(_REQUESTED_TOTAL.search(message))
+    facts = [f"模型窗口 {window:,} Token"]
+    if used:
+        facts.append(f"本次输入 {used:,}")
+    if output:
+        facts.append(f"请求输出 {output:,}")
+    if total:
+        facts.append(f"合计 {total:,}")
+    if used and used >= window:
+        advice = "仅输入就已超出窗口：请减少一次处理的文件或 sheet 数量，或把大表拆开分次处理。"
+    else:
+        advice = "输入加输出超出窗口：请减少一次处理的文件或 sheet 数量，或换用窗口更大的模型。"
+    return f"输入内容超出了模型的上下文窗口，本次请求没有执行。{'，'.join(facts)}。{advice}服务端原文：{_short(message, 600)}"
 
 
 def lower_max_tokens(kwargs: dict[str, Any], message: str, key: tuple[str, str]) -> bool:
@@ -82,6 +121,8 @@ def lower_max_tokens(kwargs: dict[str, Any], message: str, key: tuple[str, str])
     current = int(kwargs.get("max_tokens") or 0)
     if current <= 0 or not _MAX_TOKENS_ERROR.search(message):
         return False
+    if _parse_window(message) and _find_input_tokens(message) and _context_headroom(message) < 256:
+        return False        # 输入本身就占满窗口：降低输出没用，也不能按报错里别的数字乱猜，直接把报错交给使用者
     accepted = _context_headroom(message)
     if 256 <= accepted < current:
         # 上下文窗口减输入后的剩余额度；与本次输入长度有关，不缓存为模型固定上限。
@@ -187,6 +228,10 @@ def translate_error(exc: Exception) -> LLMError:
             str(exc.message), re.IGNORECASE,
         ):
             return LLMError("当前模型或接口不支持图片输入，请在「设置」中切换为支持图片的模型后重试。", code="unsupported_input")
+        if exc.status_code in {400, 422}:
+            overflow = context_overflow_message(str(exc.message))
+            if overflow:
+                return LLMError(overflow, code="context_overflow")
         if exc.status_code == 402:
             return LLMError("模型账户余额不足，请充值后再试。", code="quota_exceeded")
         if exc.status_code == 404:
@@ -396,21 +441,13 @@ class LLMClient:
         return (self.cfg.base_url.rstrip("/"), self.model)
 
     def _auto_output_tokens(self) -> int:
-        """未开启上限时请求的输出 Token：先试最大值，服务端拒绝后用它记住的真实上限（0 表示不传）。"""
-        default = AUTO_MAX_TOKENS
-        window = self.cfg.runtime_policy.context_window_tokens
-        if window:
-            # 已知上下文容量时，最多拿四分之一给输出，避免「输入 + 输出」超出窗口。
-            default = max(1024, min(default, window // 4))
-        return _ACCEPTED_MAX_TOKENS.get(self._accepted_key(), default)
-
-    def _default_output_tokens(self) -> int:
-        return self.cfg.output_limit or self._auto_output_tokens()
+        """请求的输出 Token：先试最大值，服务端拒绝后用它报错里给出的真实上限（0 表示不传），并按模型记住。"""
+        return _ACCEPTED_MAX_TOKENS.get(self._accepted_key(), AUTO_MAX_TOKENS)
 
     def _output_reserve(self, kwargs: dict[str, Any]) -> int:
         """预算与上下文预留使用的输出量：自动最大值只按常见输出量预留，避免占满窗口和任务预算。"""
         requested = int(kwargs.get("max_tokens") or _AUTO_RESERVE_TOKENS)
-        if not self.cfg.output_limit and requested == self._auto_output_tokens():
+        if requested == self._auto_output_tokens():
             return min(requested, _AUTO_RESERVE_TOKENS)
         return requested
 
@@ -437,7 +474,7 @@ class LLMClient:
             "messages": messages,
             "temperature": self.cfg.temperature if temperature is None else temperature,
         }
-        output_tokens = self._default_output_tokens()
+        output_tokens = self._auto_output_tokens()
         if output_tokens > 0:
             kwargs["max_tokens"] = output_tokens
         # An explicitly selected dialect controls both the primary switch and
@@ -473,16 +510,9 @@ class LLMClient:
         if policy.budget_enabled and policy.max_input_chars:
             projection_chars = (min(projection_chars, policy.max_input_chars) if projection_chars
                                 else policy.max_input_chars)
-        # Capacity is supplied by the operator, never guessed from a model name.
-        # Reserve the requested output plus a safety margin before estimating
-        # the input target. These are soft targets; inability to shrink does
-        # not change output settings, execution limits or request admission.
-        context_window = policy.context_window_tokens
-        output_reserve = self._output_reserve(kwargs) if context_window else 0
-        safety_reserve = math.ceil(context_window * 0.1)
-        projection_tokens = max(1, context_window - output_reserve - safety_reserve) if context_window else 0
+        # 不预设模型窗口：只按字符目标整理较早的执行过程，超出窗口时由模型服务报错，报错原文会展示给使用者。
         before_chars, before_tokens = request_size(kwargs) if context_metrics is not None else (0, 0)
-        prepared = prepare_context(kwargs, projection_chars, max_tokens=projection_tokens)
+        prepared = prepare_context(kwargs, projection_chars)
         if context_metrics is not None:
             after_profile = context_profile(prepared)
             after_chars, after_tokens = request_size(prepared)
@@ -490,10 +520,6 @@ class LLMClient:
             context_metrics["projection"] = {
                 "applied": after_chars < before_chars,
                 "target_chars": projection_chars,
-                "target_input_tokens": projection_tokens,
-                "context_window_tokens": context_window,
-                "reserved_output_tokens": output_reserve,
-                "reserved_safety_tokens": safety_reserve,
                 "before_serialized_chars": before_chars,
                 "after_serialized_chars": after_chars,
                 "saved_serialized_chars": max(0, before_chars - after_chars),
@@ -536,8 +562,7 @@ class LLMClient:
 
     async def _create(self, kwargs: dict[str, Any], call_id: str, stage: str) -> Any:
         # 只有「自动最大值」才允许根据服务端报错降级；调用方明确指定的值和用户开启的上限原样使用。
-        auto_sent = (not self.cfg.output_limit and bool(kwargs.get("max_tokens"))
-                     and kwargs["max_tokens"] == self._auto_output_tokens())
+        auto_sent = bool(kwargs.get("max_tokens")) and kwargs["max_tokens"] == self._auto_output_tokens()
         for attempt in range(self.cfg.runtime_policy.sdk_retries + 1):
             try:
                 self.budget.reserve(call_id, kwargs, self._output_reserve(kwargs))
@@ -721,11 +746,10 @@ class LLMClient:
                         if reason is not None:
                             finish_reason = reason
                             if reason == "length":
-                                limit = self.cfg.output_limit
                                 auto = int(kwargs.get("max_tokens") or 0)
-                                hint = (f"当前固定的输出 Token 上限为 {limit}（环境变量 LLM_MAX_TOKENS），可调大后重启重试。" if limit else
-                                        f"当前未设置输出上限，本次请求的输出上限为 {auto}（受模型窗口和输入长度限制），已写满；"
-                                        "可在环境变量 LLM_MAX_TOKENS 设置更大的固定值，或精简任务、分步处理。"
+                                hint = (f"本次请求的输出上限为 {auto}，服务端的结束原因是 length（长度截断）。"
+                                        "常见原因：输入加输出用完了模型窗口（文件大、对话长时最容易），或模型服务自带更小的输出上限。"
+                                        "请减少一次处理的 sheet 数量，或查看模型服务日志里这次请求的输入、输出 Token 数。"
                                         if auto else
                                         "当前未设置输出上限，且该模型不接受输出上限参数，长度由模型服务自身决定；可尝试精简任务或分步处理。")
                                 raise LLMError(f"模型输出达到长度上限，本轮响应不完整。{hint}",
@@ -827,12 +851,9 @@ class LLMClient:
                              validator: Callable[[Any], None] | None) -> Any:
         # Honour the stage's output headroom, including hidden reasoning. A
         # private server can ignore thinking-off, so explicit truncation may
-        # still grow the budget within the user's configured cap.
+        # still grow the budget.
         auxiliary = schema_name in _AUXILIARY_JSON_STAGES
         output_tokens = max_tokens
-        output_cap = self.cfg.output_limit
-        if auxiliary and output_cap > 0:
-            output_tokens = min(max_tokens, output_cap) if max_tokens else output_cap
         if schema is not None:
             prompt += ("\n\n请只返回符合以下 JSON Schema 的 json，不要省略必填字段，不能把布尔值或数组写成字符串：\n"
                        + json.dumps(schema, ensure_ascii=False, separators=(",", ":")))
@@ -897,9 +918,9 @@ class LLMClient:
                     break
                 repairs_left -= 1
                 if (auxiliary and getattr(msg, "_sheetmate_finish_reason", None) == "length"
-                        and output_tokens and (output_cap or _UNCAPPED_GROWTH_LIMIT) > output_tokens):
+                        and output_tokens and _UNCAPPED_GROWTH_LIMIT > output_tokens):
                     previous_tokens = output_tokens
-                    output_tokens = min(output_cap or _UNCAPPED_GROWTH_LIMIT, output_tokens * 2)
+                    output_tokens = min(_UNCAPPED_GROWTH_LIMIT, output_tokens * 2)
                     record_event("llm.structured.output_budget", "sheetmate.agent.llm.client.LLMClient._complete_json",
                                  {"schema_name": schema_name, "from": previous_tokens, "to": output_tokens,
                                   "reason": "output_truncated", "repairs_left": repairs_left})
@@ -1036,12 +1057,12 @@ async def test_connection(cfg: LLMSettings) -> dict[str, Any]:
         if getattr(msg, "_sheetmate_finish_reason", None) == "length":
             raise LLMError(
                 "模型输出达到 Token 上限，尚未生成回复。"
-                "可在 .env 中调大 LLM_MAX_TOKENS（0 表示自动使用模型最大值）后重启，或关闭模型思考后重试。"
+                "可关闭模型思考后重试，或检查模型服务自带的输出上限。"
             )
         if getattr(msg, "reasoning_content", None):
             raise LLMError(
                 "模型只返回了思考内容，没有返回最终回复。"
-                "可关闭模型思考后重试，或在 .env 中调大 LLM_MAX_TOKENS 后重启。"
+                "可关闭模型思考后重试。"
             )
         raise LLMError("模型服务已响应，但返回的回复内容为空，请检查模型或接口兼容性后重试。")
     return {"ok": True, "model": cfg.model, "reply": reply}

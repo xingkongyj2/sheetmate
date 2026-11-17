@@ -37,8 +37,7 @@ QWEN_DEFAULT_MODEL = "qwen-plus"
 QWEN_MODELS = (QWEN_DEFAULT_MODEL, "qwen-max", "deepseek-v3")
 QWEN_THINKING_MODELS = (QWEN_DEFAULT_MODEL, "qwen-flash", "qwen3.8-max", "qwen3.8-flash")
 LLM_PROVIDER_PRIORITY = ("deepseek", "qwen", "custom")
-# 未开启「限制输出 Token 上限」时，每次请求先尝试的输出上限（与设置页允许的最大值一致）；
-# 模型支持的上限更小时，请求会自动降到模型报错里给出的真实上限。
+# 每次请求先尝试的输出上限；模型支持的上限更小、或输入加输出超出窗口时，请求会按模型服务报错里给出的真实数字自动降级。
 AUTO_MAX_TOKENS = 131072
 
 
@@ -188,8 +187,6 @@ class LLMSettings:
     temperature: float = 0.1
     # 单次模型请求的总超时（秒）。来自环境变量 LLM_TIMEOUT_SECONDS。
     timeout: float = 7200.0
-    # 单次回复的输出 Token 上限。来自环境变量 LLM_MAX_TOKENS：0 表示不固定，请求自动尝试模型能接受的最大值。
-    max_tokens: int = 0
     # 额外的请求体字段（私有部署的特殊参数）；只能手工写入 settings.json。
     extra_body: dict = field(default_factory=dict)
     # 是否启用模型自带的深度思考（与输入框旁的「思考模式」不是一回事）；在设置页开关。
@@ -202,11 +199,6 @@ class LLMSettings:
     runtime_policy: LLMRuntimePolicy = field(default_factory=LLMRuntimePolicy)
     # 该提供商是否启用；关闭后不参与当前服务的选择。
     enabled: bool = True
-
-    @property
-    def output_limit(self) -> int:
-        """环境变量固定的输出上限；0 表示没有固定（此时请求按 AUTO_MAX_TOKENS 尝试最大值）。"""
-        return max(0, self.max_tokens)
 
     @property
     def thinking_protocol(self) -> str:
@@ -329,7 +321,6 @@ def env_runtime_policy() -> LLMRuntimePolicy:
         # 上下文超过多少字符后自动整理较早的执行过程；0 = 不按字符触发。
         context_target_chars=_env_int("LLM_CONTEXT_TARGET_CHARS", 80000),
         # 模型服务实际的上下文容量（Token）；0 = 未知。
-        context_window_tokens=_env_int("LLM_CONTEXT_WINDOW_TOKENS", 0),
         # 是否开启任务预算；关闭时下面 5 项预算都不生效。
         budget_enabled=_env_bool("LLM_BUDGET_ENABLED", False),
         # 预算：单次任务最多调用模型多少次；0 = 不限。
@@ -420,7 +411,6 @@ def _build_provider_settings(provider_id: str, overrides: dict) -> LLMSettings:
         model=model,
         temperature=float(overrides.get("temperature", 0.1)),
         timeout=_env_float("LLM_TIMEOUT_SECONDS", 7200),
-        max_tokens=max(0, _env_int("LLM_MAX_TOKENS", 0)),
         extra_body=extra_body,
         thinking_enabled=thinking_enabled,
         provider_id=provider_id,
