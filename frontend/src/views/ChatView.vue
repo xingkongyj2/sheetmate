@@ -88,6 +88,8 @@ const scroller = ref<HTMLElement | null>(null)
 const content = ref<HTMLElement | null>(null)
 let handle: StreamHandle | null = null
 let pollTimer = 0
+let watchdogTimer = 0
+let serverEnded = false      // 看门狗发现服务端任务早已结束，而事件流还挂着
 let usageRefreshTimer = 0
 let usagePendingSince = 0
 let metadataRefreshVersion = 0
@@ -341,6 +343,7 @@ onBeforeUnmount(() => {
   disposed = true
   resizeObserver?.disconnect()
   clearTimeout(pollTimer)
+  clearInterval(watchdogTimer)
   clearTimeout(usageRefreshTimer)
   cancelAnimationFrame(scrollFrame)
   handle?.abort() // 只是断开连接，后台任务会继续执行并保存结果
@@ -443,7 +446,9 @@ async function send(message: string, opts: { attachments?: string[]; thinking?: 
 
 async function receiveStream(assistant: UiMessage, open: (onEvent: (event: AgentEvent) => void) => StreamHandle, resuming = false, onRejected?: (err: unknown) => void) {
   streaming.value = true
+  serverEnded = false
   scheduleUsageRefresh()
+  startWatchdog()
   let received = false
   let retry = false
   let retryDelay = 1000
@@ -483,17 +488,39 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
     }
   } finally {
     if (disposed || handle !== currentHandle) return
+    clearInterval(watchdogTimer)
     streaming.value = false
     handle = null
     reconnecting.value = retry
     if (retry) schedulePoll(retryDelay)
     else {
+      const stale = serverEnded
+      serverEnded = false
       finishMessage(assistant)
       store.patchConversation(props.id, { running: false, updated_at: new Date().toISOString() })
       usagePendingSince = 0
       refreshSide()
+      // 事件流里没有最终回复的情形（失败、停止、连接挂死）：以服务端保存的这一轮为准重建，不停在中间状态
+      if (stale || assistant.execution?.status !== 'completed') void load(true)
     }
   }
+}
+
+/** 事件流在处理时可能被网络或代理悄悄掐断而不报错：定期问服务端任务还在不在，已经结束就收尾并按保存的结果重建。 */
+function startWatchdog() {
+  clearInterval(watchdogTimer)
+  watchdogTimer = window.setInterval(async () => {
+    if (disposed || !streaming.value) return
+    const current = handle
+    try {
+      const data = await conversationApi.get(props.id)
+      if (disposed || !streaming.value || handle !== current || data.running_job) return
+      serverEnded = true
+      current?.abort()
+    } catch {
+      /* 网络暂时不通：下一次再看 */
+    }
+  }, 6000)
 }
 
 async function stop() {
