@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 漏掉的数据：文件脱敏之后仍以原文出现、在发给 AI 前才补换掉的值。每个值只在第一次出现的那次发送里列一次。
+/** 模型脱敏明细：文件脱敏之后仍以原文出现、在发给 AI 前才换成令牌的值。每个值只在第一次出现的那次发送里列一次。
  *  原文是在本机用令牌库还原出来的，只给当前用户看。 */
 import { ArrowRight, LoaderCircle, RotateCw } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
@@ -40,10 +40,7 @@ function clock(iso: string | null): string {
 <template>
   <BaseModal width="max-w-2xl" @close="emit('close')">
     <template #title>
-      <div class="min-w-0">
-        <h3 class="text-base font-semibold">漏掉的数据</h3>
-        <p class="mt-0.5 text-xs leading-5 text-faint">文件脱敏后仍是原文、发给 AI 前才补换成令牌的内容；原文只在本机显示</p>
-      </div>
+      <h3 class="text-base font-semibold">模型脱敏明细</h3>
     </template>
 
     <div v-if="!sends && loading" class="flex justify-center py-12" role="status" aria-label="加载中">
@@ -55,7 +52,7 @@ function clock(iso: string | null): string {
       <button type="button" class="btn-line !px-3 !py-1.5 text-xs" @click="load"><RotateCw class="size-3.5" />重试</button>
     </div>
 
-    <p v-else-if="!shown.length" class="py-10 text-center text-sm text-faint">没有漏掉的数据</p>
+    <p v-else-if="!shown.length" class="py-10 text-center text-sm text-faint">没有需要脱敏的内容</p>
 
     <ol v-else class="space-y-3" aria-label="每次发送">
       <li v-for="send in shown" :key="send.number" class="overflow-hidden rounded-xl border border-line">

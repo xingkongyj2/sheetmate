@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 详情面板「脱敏」：当前会话的脱敏情况（只读）。哪些文件、哪些列、怎么处理、每次发送前检查的结果，都写清楚。 */
-import { ChevronRight, LoaderCircle, RefreshCw, ShieldAlert, ShieldCheck } from '@lucide/vue'
+import { ChevronRight, LoaderCircle, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { conversationApi } from '@/api'
@@ -63,18 +63,15 @@ onBeforeUnmount(() => {
   window.removeEventListener('focus', onVisible)
 })
 
-const empty = computed(() => !!overview.value && !overview.value.files.length && !overview.value.events.length)
 const failed = computed(() => overview.value?.files.some((file) => file.status === 'failed') ?? false)
-const status = computed(() => {
-  const data = overview.value
-  if (!data) return null
-  const { blocked, requests } = data.totals
-  if (blocked > 0) return { error: true, text: `有 ${formatCount(blocked)} 次发送被拦截，这些内容没有发给 AI` }
-  if (failed.value) return { error: true, text: '有文件脱敏失败，相关处理已停止，没有数据发给 AI' }
-  const sent = requests ? `发送给 AI 的 ${formatCount(requests)} 次请求全部通过检查` : '还没有向 AI 发送请求'
-  return { error: false, text: `已脱敏 ${formatCount(data.files.length)} 个文件，${sent}` }
+// 模型脱敏这一块的一句话：被拦截时标红，否则写发了几次
+const sendStatus = computed(() => {
+  const totals = overview.value?.totals
+  if (!totals) return null
+  if (totals.blocked > 0) return { error: true, text: `${formatCount(totals.blocked)} 次发送被拦截，这些内容没有发给 AI` }
+  return { error: false, text: totals.requests ? `发给 AI 的 ${formatCount(totals.requests)} 次请求全部通过检查` : '还没有向 AI 发送请求' }
 })
-// 两个环节分开：上传的文件先脱敏；之后每次发给 AI 前，再把文件之外的内容（对话、工具结果、说明）查一遍，漏掉的在这里补上
+// 两个环节分开：上传的文件先脱敏；之后每次发给 AI 前，再把文件之外的内容（对话、工具结果、说明）查一遍，文件之外的敏感内容在这里补上
 const fileNumbers = computed(() => {
   const totals = overview.value?.totals
   return totals ? [
@@ -86,7 +83,7 @@ const sendNumbers = computed(() => {
   const totals = overview.value?.totals
   return totals ? [
     { label: '发送次数', value: totals.requests, warn: false },
-    { label: '漏掉的值', value: totals.sent_values ?? 0, warn: (totals.sent_values ?? 0) > 0 },
+    { label: '脱敏', value: totals.sent_values ?? 0, warn: false },
     { label: '拦截', value: totals.blocked, warn: totals.blocked > 0 },
   ] : []
 })
@@ -111,61 +108,55 @@ function levelClass(level: PrivacyEventItem['level']): string {
 </script>
 
 <template>
-  <section class="grid gap-4" aria-label="脱敏">
-    <div class="flex h-7 items-center justify-between px-0.5">
-      <span class="label-mini">脱敏</span>
-      <button type="button" class="icon-btn size-7" :disabled="loading" title="刷新" aria-label="刷新脱敏情况" @click="load">
-        <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" />
-      </button>
-    </div>
-
+  <section class="grid gap-5" aria-label="脱敏">
     <p v-if="error" class="break-words rounded-xl bg-error/5 px-3 py-2 text-xs leading-5 text-error" role="alert">{{ error }}</p>
 
     <div v-if="!overview && loading" class="flex justify-center py-8" role="status" aria-label="加载中">
       <LoaderCircle class="size-5 animate-spin text-mute" />
     </div>
 
-    <div v-else-if="empty" class="flex flex-col items-center justify-center gap-3 py-8 text-center text-sm text-faint">
-      <span class="text-2xl leading-none" aria-hidden="true">🔒</span>
-      <p>还没有文件需要脱敏</p>
-    </div>
-
-    <template v-else-if="overview && status">
-      <div class="flex items-start gap-2 rounded-xl px-3 py-2.5 text-[13px] leading-5" :class="status.error ? 'bg-error/5 text-error' : 'bg-paper text-ink'" :role="status.error ? 'alert' : 'status'" data-testid="privacy-status">
-        <ShieldAlert v-if="status.error" class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-        <ShieldCheck v-else class="mt-0.5 size-4 shrink-0 text-[#318b76]" aria-hidden="true" />
-        <span class="min-w-0 break-words">{{ status.text }}</span>
-      </div>
-      <p class="-mt-2 px-0.5 text-xs leading-5 text-faint" data-testid="privacy-mode">
-        {{ overview.mode === 'rules' ? '未配置脱敏模型，仅使用内置规则' : `脱敏模型：${overview.model ?? '已配置'}` }}
-      </p>
-
+    <template v-else-if="overview">
       <section class="grid gap-2.5" aria-label="文件脱敏">
-        <div class="px-0.5">
-          <h4 class="text-[13px] font-medium text-ink">文件脱敏</h4>
-          <p class="text-xs leading-5 text-faint">上传的表格里，联系方式和详细地址换成令牌</p>
+        <div class="flex items-center justify-between gap-2 px-0.5">
+          <h4 class="text-[13px] font-medium leading-7 text-ink">文件脱敏</h4>
+          <button type="button" class="icon-btn size-7" :disabled="loading" title="刷新" aria-label="刷新脱敏情况" @click="load">
+            <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" />
+          </button>
         </div>
-        <dl class="grid grid-cols-2 gap-2">
-          <div v-for="item in fileNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
-            <dd class="text-xl font-medium tabular-nums tracking-tight">{{ formatCount(item.value) }}</dd>
-            <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>
+        <div v-if="overview.enabled === false" class="flex items-center gap-2 rounded-xl bg-paper px-3 py-2.5 text-[13px] leading-5 text-mute" data-testid="privacy-off">
+          <ShieldOff class="size-4 shrink-0" aria-hidden="true" />脱敏已关闭，上传的文件不做分析
+        </div>
+        <template v-else>
+          <p v-if="failed" class="flex items-start gap-2 rounded-xl bg-error/5 px-3 py-2.5 text-[13px] leading-5 text-error" role="alert">
+            <ShieldAlert class="mt-0.5 size-4 shrink-0" aria-hidden="true" />有文件脱敏失败，相关处理已停止，没有数据发给 AI
+          </p>
+          <dl class="grid grid-cols-2 gap-2">
+            <div v-for="item in fileNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
+              <dd class="text-xl font-medium tabular-nums tracking-tight">{{ formatCount(item.value) }}</dd>
+              <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>
+            </div>
+          </dl>
+          <p class="px-0.5 text-xs leading-5 text-faint" data-testid="privacy-mode">
+            {{ overview.mode === 'rules' ? '未配置脱敏模型，仅使用内置规则' : `识别模型：${overview.model ?? '已配置'}` }}
+          </p>
+          <div v-for="group in fileGroups" :key="group.key" class="min-w-0">
+            <div class="label-mini mb-2 mt-1 flex items-center gap-2">{{ group.label }}<span class="font-normal tabular-nums tracking-normal">{{ group.files.length }}</span></div>
+            <PrivacyFiles :files="group.files" />
           </div>
-        </dl>
-        <div v-for="group in fileGroups" :key="group.key" class="min-w-0">
-          <div class="label-mini mb-2 mt-1 flex items-center gap-2">{{ group.label }}<span class="font-normal tabular-nums tracking-normal">{{ group.files.length }}</span></div>
-          <PrivacyFiles :files="group.files" />
-        </div>
+        </template>
       </section>
 
-      <section class="grid gap-2.5" aria-label="发给 AI 前检查">
-        <div class="flex items-end justify-between gap-2 px-0.5">
-          <div class="min-w-0">
-            <h4 class="text-[13px] font-medium text-ink">发给 AI 前检查</h4>
-            <p class="text-xs leading-5 text-faint">文件脱敏漏掉的内容，发送前在这里补上</p>
-          </div>
-          <button v-if="(overview.totals.sent_values ?? 0) > 0" type="button" class="flex shrink-0 items-center gap-0.5 text-xs text-mute transition hover:text-ink" @click="showSends = true">
+      <section class="grid gap-2.5" aria-label="模型脱敏">
+        <div class="flex items-center justify-between gap-2 px-0.5">
+          <h4 class="text-[13px] font-medium leading-7 text-ink">模型脱敏</h4>
+          <button v-if="(overview.totals.sent_values ?? 0) > 0" type="button" class="flex shrink-0 items-center gap-0.5 text-xs leading-7 text-mute transition hover:text-ink" @click="showSends = true">
             明细<ChevronRight class="size-3.5" />
           </button>
+        </div>
+        <div v-if="sendStatus" class="flex items-start gap-2 rounded-xl px-3 py-2.5 text-[13px] leading-5" :class="sendStatus.error ? 'bg-error/5 text-error' : 'bg-paper text-ink'" :role="sendStatus.error ? 'alert' : 'status'" data-testid="privacy-status">
+          <ShieldAlert v-if="sendStatus.error" class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <ShieldCheck v-else class="mt-0.5 size-4 shrink-0 text-[#318b76]" aria-hidden="true" />
+          <span class="min-w-0 break-words">{{ sendStatus.text }}</span>
         </div>
         <dl class="grid grid-cols-3 gap-2">
           <div v-for="item in sendNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
@@ -175,18 +166,17 @@ function levelClass(level: PrivacyEventItem['level']): string {
         </dl>
       </section>
 
-      <div>
-        <div class="label-mini mb-2 flex items-center gap-2">处理记录<span class="font-normal tabular-nums tracking-normal">{{ overview.events.length }}</span></div>
+      <section class="grid gap-2" aria-label="处理记录">
+        <div class="label-mini flex items-center gap-2 px-0.5">处理记录<span class="font-normal tabular-nums tracking-normal">{{ overview.events.length }}</span></div>
         <p v-if="!overview.events.length" class="px-0.5 text-xs text-faint">暂无记录</p>
-        <ol v-else class="divide-y divide-line rounded-xl border border-line" aria-label="处理记录">
-          <li v-for="event in overview.events" :key="event.id" class="flex items-start gap-2 px-3 py-2 text-xs leading-5">
-            <time class="shrink-0 font-mono text-[11px] tabular-nums text-faint" :datetime="event.time">{{ clock(event.time) }}</time>
-            <span class="tag shrink-0" :class="levelClass(event.level)">{{ event.kind }}</span>
+        <ol v-else class="divide-y divide-line rounded-xl border border-line">
+          <li v-for="event in overview.events" :key="event.id" class="flex items-start gap-2 px-3 py-2 text-xs leading-6">
+            <time class="shrink-0 font-mono text-[11px] leading-6 tabular-nums text-faint" :datetime="event.time">{{ clock(event.time) }}</time>
+            <span class="tag mt-0.5 shrink-0 !py-0 leading-5" :class="levelClass(event.level)">{{ event.kind }}</span>
             <span class="min-w-0 flex-1 break-words" :class="event.level === 'error' ? 'text-error' : 'text-mute'">{{ event.text }}</span>
           </li>
         </ol>
-      </div>
-
+      </section>
     </template>
     <PrivacySendsDialog v-if="showSends && detail" :conversation-id="detail.id" @close="showSends = false" />
   </section>

@@ -97,7 +97,7 @@ def _aggregate_text(kind: str, detail: dict[str, Any]) -> str | None:
     if kind == "发送检查":
         # 每次发送都带着整段对话，同一个值会在每次发送里都被换一次：这里数的是不同的值
         leaked = int(detail.get("leaked", 0))
-        tail = f"补上漏掉的 {leaked} 个值" if leaked else "没有漏掉的数据"
+        tail = f"模型脱敏 {leaked} 个值" if leaked else "无需脱敏"
         return f"发给 AI {int(detail.get('requests', 1))} 次，{tail}"
     if kind == "还原":
         text = f"回复中 {int(detail.get('restored', 0))} 个令牌已还原"
@@ -881,7 +881,8 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
             files.append({"file_id": record.id, "filename": record.filename, "kind": record.kind, "cached": False,
                           "source": row.source if row is not None else None,
                           "sheets": choices.effective(record.id, list((row.sheets if row is not None else []) or [])),
-                          "status": "ready" if ready else "failed" if row is not None else "pending",
+                          # pending 只表示「此刻正在识别」；没有识别记录、也没在识别的（比如脱敏开关关着时上传的）是 none，不显示转圈
+                          "status": "ready" if ready else "failed" if row is not None else "pending" if record.id in _running else "none",
                           "updated_at": row.updated_at.isoformat(timespec="seconds") if row is not None else None,
                           "error": row.error if row is not None else None})
         events = [event for event in db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id)
@@ -902,8 +903,10 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
             elif kind == "还原":
                 restored += int(detail.get("restored", 0))
         # 取最近 50 条，按时间从早到晚排（面板里从上往下读）
+        # 有发送明细的记录按现在的说法重新生成文字（文案改过，存下的旧文字不再用）
         listed = [{"id": e.id, "time": e.updated_at.isoformat(timespec="seconds"), "level": e.level, "kind": e.kind,
-                   "text": e.text, "detail": {k: v for k, v in (e.detail or {}).items() if k != "sends"} or None}
+                   "text": (_aggregate_text(e.kind, e.detail) if e.kind == "发送检查" and "sends" in (e.detail or {}) else None) or e.text,
+                   "detail": {k: v for k, v in (e.detail or {}).items() if k != "sends"} or None}
                   for e in reversed(events)]
     from sheetmate.services.privacy import columns as privacy_columns
 
@@ -914,7 +917,10 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
             except Exception:
                 logger.exception("按维护页的判断整理脱敏概览失败：%s", item["file_id"])
     # 识别完成、但没有任何列真的脱敏的文件不列出；识别中、识别失败的照常列出（要让用户知道）
-    files = [item for item in files if item["status"] != "ready" or any(sheet["columns"] for sheet in item["sheets"])]
+    files = [item for item in files if item["status"] in {"pending", "failed"}
+             or (item["status"] == "ready" and any(sheet["columns"] for sheet in item["sheets"]))]
+    if not privacy.enabled:
+        files = []          # 脱敏开关关着：不分析文件，文件脱敏这一块整个不展示（模型脱敏照常）
     columns = sum(len(s["columns"]) for f in files for s in f["sheets"])
     values = sum(c["values"] for f in files for s in f["sheets"] for c in s["columns"])
     # 显示实际用来识别这个会话文件的模型（识别记录里存的），没有识别记录时才用设置里的

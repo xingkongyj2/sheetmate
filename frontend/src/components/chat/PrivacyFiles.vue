@@ -51,6 +51,7 @@ function canCopy(file: PrivacyFile | PrivacyFileState) {
           </template>
         </summary>
         <div class="space-y-3 border-t border-line px-3 py-2.5">
+          <p v-if="status(file) === 'pending'" class="text-xs leading-5 text-faint">正在识别敏感列…</p>
           <p v-if="error(file)" class="break-words text-xs leading-5 text-error" role="alert">{{ error(file) }}</p>
           <p v-if="file.cached" class="text-[11px] leading-5 text-faint">{{ file.source === 'upload' ? '上传时已识别' : '沿用之前的识别结果' }}</p>
           <p v-if="!file.sheets.length && status(file) === 'ready'" class="text-xs leading-5 text-faint">{{ unfinished ? '识别没有完成' : '没有发现联系方式或地址' }}</p>

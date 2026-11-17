@@ -686,7 +686,8 @@ export interface PrivacyReport {
 }
 
 export interface PrivacyFileState extends PrivacyFile {
-  status: 'ready' | 'pending' | 'failed'
+  /** pending：正在识别；none：没有识别过（脱敏分析关着时上传的），面板里不列出 */
+  status: 'ready' | 'pending' | 'failed' | 'none'
   /** 文件类别：input 输入、expected 期望结果、output 输出 */
   kind?: string
   updated_at: string | null
@@ -732,6 +733,8 @@ export interface PrivacySend {
 }
 
 export interface PrivacyOverview {
+  /** 脱敏开关（只管上传文件的分析和脱敏；关着时文件脱敏不展示，模型脱敏照常） */
+  enabled?: boolean
   mode: 'model_rules' | 'rules'
   model: string | null
   model_configured: boolean
