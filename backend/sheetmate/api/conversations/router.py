@@ -224,6 +224,13 @@ def privacy_restores(conversation_id: str, db: Session = Depends(get_db), user: 
     return {"ok": True, "restores": privacy_service.restores(conversation_id)}
 
 
+@router.get("/{conversation_id}/privacy/blocks")
+def privacy_blocks(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """拦截明细：每次停止发送的原因，以及没能处理掉的值（原文只在这里、在本机还原给用户看）。"""
+    conv_service.get_conversation(db, user, conversation_id)
+    return {"ok": True, "blocks": privacy_service.blocks(conversation_id)}
+
+
 @router.post("/{conversation_id}/chat")
 async def chat(conversation_id: str, body: ChatBody, request: Request, user: User = Depends(current_user)):
     # 必须是 async：后台任务要挂在服务的事件循环上（同步接口在线程池里执行，没有事件循环）

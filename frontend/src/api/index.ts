@@ -23,7 +23,7 @@ import type {
   PrivacyColumnChange,
   PrivacyColumns,
   PrivacyFileStatus,
-  PrivacyOverview, PrivacyRestore, PrivacySend,
+  PrivacyOverview, PrivacyBlock, PrivacyRestore, PrivacySend,
   RecipeBrief,
   RecipeEditRequest,
   PrivacyRuleSetting,
@@ -141,6 +141,7 @@ export const conversationApi = {
   privacy: async (id: string) => (await http.get<{ privacy: PrivacyOverview }>(`/conversations/${id}/privacy`)).data.privacy,
   privacySends: async (id: string) => (await http.get<{ sends: PrivacySend[] }>(`/conversations/${id}/privacy/sends`)).data.sends ?? [],
   privacyRestores: async (id: string) => (await http.get<{ restores: PrivacyRestore[] }>(`/conversations/${id}/privacy/restores`)).data.restores ?? [],
+  privacyBlocks: async (id: string) => (await http.get<{ blocks: PrivacyBlock[] }>(`/conversations/${id}/privacy/blocks`)).data.blocks ?? [],
   update: async (id: string, payload: Partial<{ title: string; customer_id: string | null }>) =>
     (await http.put<{ conversation: ConversationBrief }>(`/conversations/${id}`, payload)).data.conversation,
   remove: async (id: string) => http.delete(`/conversations/${id}`),

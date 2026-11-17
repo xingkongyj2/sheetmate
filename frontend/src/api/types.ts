@@ -739,6 +739,13 @@ export interface PrivacyRestore {
   items: { token: string; value: string | null; known: boolean; kind: string; kind_label: string }[]
 }
 
+export interface PrivacyBlock {
+  number: number
+  time: string | null
+  reason: string
+  items: { token: string; value: string | null; kind: string; kind_label: string }[]
+}
+
 export interface PrivacyOverview {
   /** 脱敏开关（只管上传文件的分析和脱敏；关着时文件脱敏不展示，模型脱敏照常） */
   enabled?: boolean

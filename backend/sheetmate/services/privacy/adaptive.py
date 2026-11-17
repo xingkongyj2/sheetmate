@@ -95,7 +95,7 @@ async def extract(llm: Any, texts: list[str]) -> list[list[tuple[str, str]]]:
             return found
         correction = (f"\n\n你上一次的回答不能用：{problem}。请重新输出完整的 JSON：每一条文本都要有一项（没有片段就给空列表），"
                       "snippets 里的 text 必须是该条原文里连续的一段。")
-    raise PrivacyBlocked(f"脱敏模型没有给出可用的检查结果（{problem}），为保护数据已停止处理，没有任何内容发给 AI。")
+    raise PrivacyBlocked(f"脱敏模型没有给出可用的检查结果（{problem}），为保护数据已停止处理，没有任何内容发给模型。")
 
 
 def first_error(results: list[Any]) -> list[Any]:

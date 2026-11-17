@@ -282,7 +282,7 @@ async def _ask_model(llm: Any, sheet_name: str, batch: dict[str, list[Any]],
         # 回答了，但内容不能用：带上具体原因再问，比原样重问更容易答对
         correction = (f"\n\n你上一次的回答不能用：{problem}。请重新输出完整的 JSON：每一列都要有一项，"
                       "category 只能是 phone|landline|email|im|address|mixed|none 之一，name 必须和上面的列名完全一致。")
-    raise PrivacyBlocked(f"脱敏模型没有给出可用的识别结果（{problem}），为保护数据已停止处理，没有任何内容发给 AI。")
+    raise PrivacyBlocked(f"脱敏模型没有给出可用的识别结果（{problem}），为保护数据已停止处理，没有任何内容发给模型。")
 
 
 def _column_report(name: str, finding: Finding, rows: int, null_rate: float) -> dict[str, Any]:
@@ -593,7 +593,7 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
     try:
         model = await _open_model()
     except Exception as exc:
-        reason = f"脱敏模型无法使用（{exc}），为保护数据已停止处理，没有任何内容发给 AI。"
+        reason = f"脱敏模型无法使用（{exc}），为保护数据已停止处理，没有任何内容发给模型。"
         return await _stop(conversation_id, emit, "model_rules", None, reason, [])
 
     todo = [item for item in snapshot if not _is_ready(item, model)]
@@ -637,7 +637,7 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
     except Exception as exc:  # 识别过程出任何意外，都不能继续
         privacy.log.emit("error", "错误", f"识别出错（{type(exc).__name__}），已停止", error=str(exc)[:200])
         return await _stop(conversation_id, emit, model.mode, model.name,
-                           f"识别过程出现意外（{type(exc).__name__}），为保护数据已停止处理，没有任何内容发给 AI。", reports)
+                           f"识别过程出现意外（{type(exc).__name__}），为保护数据已停止处理，没有任何内容发给模型。", reports)
 
     if not reports:
         return None
@@ -760,7 +760,7 @@ async def ensure_complete(conversation_id: str) -> None:
     try:
         await prepare_files(conversation_id=conversation_id, files=[{"file_id": file_id} for file_id in pending], emit=_silent)
     except PrivacyBlocked as exc:
-        raise PrivacyBlocked(f"脱敏未完成，无法继续，已结束本次对话（没有任何内容发给 AI）：{exc}") from exc
+        raise PrivacyBlocked(f"脱敏未完成，无法继续，已结束本次对话（没有任何内容发给模型）：{exc}") from exc
 
 
 class PrivacyPrepareError(ServiceError):
@@ -918,7 +918,7 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
         # 有发送明细的记录按现在的说法重新生成文字（文案改过，存下的旧文字不再用）
         listed = [{"id": e.id, "time": e.updated_at.isoformat(timespec="seconds"), "level": e.level, "kind": e.kind,
                    "text": (_aggregate_text(e.kind, e.detail) if e.kind == "发送检查" and "sends" in (e.detail or {}) else None) or e.text,
-                   "detail": {k: v for k, v in (e.detail or {}).items() if k not in {"sends", "replies"}} or None}
+                   "detail": {k: v for k, v in (e.detail or {}).items() if k not in {"sends", "replies", "tokens"}} or None}
                   for e in reversed(events)]
     from sheetmate.services.privacy import columns as privacy_columns
 
@@ -1001,4 +1001,22 @@ def restores(conversation_id: str) -> list[dict[str, Any]]:
                           "kind": kind, "kind_label": KIND_LABELS.get(kind, kind)})
         if items:
             out.append({"number": number, "time": reply.get("time"), "items": items})
+    return out
+
+
+def blocks(conversation_id: str) -> list[dict[str, Any]]:
+    """拦截明细：每次停止发送的原因；发送前检查没能处理掉的值也列出来（原文在这里用本机的令牌库还原给用户看）。"""
+    start()
+    guard = privacy.require()
+    with session_scope() as db:
+        rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
+                                                          PrivacyEvent.kind == "拦截").order_by(PrivacyEvent.id)))
+        raw = [(row.updated_at.isoformat(timespec="seconds"), row.detail or {}, row.text) for row in rows]
+    out = []
+    for number, (time, detail, text) in enumerate(raw, 1):
+        items = [{"token": item[0], "value": guard.vault.reveal(item[0]), "kind": item[1],
+                  "kind_label": KIND_LABELS.get(item[1], item[1])}
+                 for item in detail.get("tokens", []) if isinstance(item, list) and len(item) == 2]
+        reason = str(detail.get("reason") or text).removeprefix("已拦截：")
+        out.append({"number": number, "time": time, "reason": reason, "items": items})
     return out

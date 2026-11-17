@@ -88,11 +88,15 @@ const sendNumbers = computed(() => {
     { label: '拦截', value: totals.blocked, warn: totals.blocked > 0 },
   ] : []
 })
-const showSends = ref<false | 'sends' | 'restores'>(false)
-const hasDetail = computed(() => (overview.value?.totals.sent_values ?? 0) > 0 || (overview.value?.totals.restored ?? 0) > 0)
-// 处理记录里的「发送检查」「还原」可以点开，直接看对应的明细
-function detailTab(event: PrivacyEventItem): 'sends' | 'restores' | null {
-  return event.kind === '发送检查' ? 'sends' : event.kind === '还原' ? 'restores' : null
+type DetailTab = 'sends' | 'restores' | 'blocks'
+const showSends = ref<false | DetailTab>(false)
+const hasDetail = computed(() => { const totals = overview.value?.totals
+  return (totals?.sent_values ?? 0) > 0 || (totals?.restored ?? 0) > 0 || (totals?.blocked ?? 0) > 0 })
+const firstTab = computed<DetailTab>(() => { const totals = overview.value?.totals
+  return (totals?.sent_values ?? 0) > 0 ? 'sends' : (totals?.restored ?? 0) > 0 ? 'restores' : 'blocks' })
+// 处理记录里的「发送检查」「还原」「拦截」可以点开，直接看对应的明细
+function detailTab(event: PrivacyEventItem): DetailTab | null {
+  return event.kind === '发送检查' ? 'sends' : event.kind === '还原' ? 'restores' : event.kind === '拦截' ? 'blocks' : null
 }
 
 // 输入（含期望结果）和输出分开列；没有脱敏的文件后端已经去掉
@@ -155,7 +159,7 @@ function levelClass(level: PrivacyEventItem['level']): string {
       <section class="grid gap-2.5" aria-label="模型脱敏">
         <div class="flex items-center justify-between gap-2 px-0.5">
           <h4 class="text-[13px] font-medium leading-7 text-ink">模型脱敏</h4>
-          <button v-if="hasDetail" type="button" class="flex shrink-0 items-center gap-0.5 text-xs leading-7 text-mute transition hover:text-ink" @click="showSends = (overview.totals.sent_values ?? 0) > 0 ? 'sends' : 'restores'">
+          <button v-if="hasDetail" type="button" class="flex shrink-0 items-center gap-0.5 text-xs leading-7 text-mute transition hover:text-ink" @click="showSends = firstTab">
             明细<ChevronRight class="size-3.5" />
           </button>
         </div>

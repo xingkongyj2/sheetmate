@@ -336,12 +336,12 @@ onBeforeUnmount(() => {
   margin-block-end: 0.25rem;
 }
 
-/* 连续的步骤之间用竖线连起来，像时间线：线从本行标记下方，一直接到下一行标记上方 */
+/* 展开的步骤用竖线接到下一步，像时间线；收起时不画线 */
 .assistant-stage {
   position: relative;
 }
 
-.assistant-stage--before-process::after {
+.assistant-stage--before-process:has(> .assistant-process[open])::after {
   content: '';
   position: absolute;
   top: 1.75rem;

@@ -23,7 +23,7 @@ from sheetmate.privacy.address import find_addresses, split_address
 from sheetmate.privacy.detect import classify_column
 from sheetmate.privacy.events import PrivacyLog
 from sheetmate.privacy.rules import (
-    ADDR_CTX_RE, ALL_KINDS, EMAIL_OBF_RE, EMAIL_RE, IM_CTX_RE, KIND_PREFIX, LANDLINE_COMPACT_RE, LANDLINE_MASKED_RE, LANDLINE_RE,
+    ADDR_CTX_RE, ALL_KINDS, EMAIL_OBF_RE, EMAIL_RE, IM_CTX_RE, KIND_LABELS, KIND_PREFIX, LANDLINE_COMPACT_RE, LANDLINE_MASKED_RE, LANDLINE_RE,
     MOBILE_MASKED_RE, MOBILE_RE, PHONE_CTX_RE,
     address_context_ok, cell_text, fold, header_kind, is_label, is_mobile, normalize_header, phone_context_ok,
 )
@@ -61,9 +61,14 @@ def _shadow(text: str) -> str:
 
 
 class PrivacyBlocked(RuntimeError):
-    """脱敏没有完成或检查没有通过：不能把这些内容交给正常模型。str(异常) 是给用户看的原因。"""
+    """脱敏没有完成或检查没有通过：不能把这些内容交给正常模型。str(异常) 是给用户看的原因。
+    leaks：发送前检查没能处理掉的值 [(类型, 原文)]，只在内存里，记录时换成令牌。"""
 
     code = "privacy_blocked"
+
+    def __init__(self, message: str = "", leaks: list[tuple[str, str]] | None = None) -> None:
+        super().__init__(message)
+        self.leaks = leaks or []
 
 
 class Registry:
@@ -553,21 +558,34 @@ class Guard:
 
     def leaks(self, text: str) -> list[str]:
         """处理完之后再查一遍：还剩下什么联系方式或地址（令牌本身不算）。"""
+        return list(dict.fromkeys(KIND_LABELS.get(kind, kind) for kind, _ in self.leak_values(text)))
+
+    def leak_values(self, text: str, limit: int = 20) -> list[tuple[str, str]]:
+        """同 leaks，但给出具体是哪些值 [(类型, 原文)]，拦截时记下来给用户看。"""
         bare = fold(TOKEN_RE.sub("§", text))
         active = self.active
-        found = []
-        if "email" in active and (EMAIL_RE.search(bare) or EMAIL_OBF_RE.search(bare)):
-            found.append("邮箱")
-        if "phone" in active and (MOBILE_RE.search(bare) or MOBILE_MASKED_RE.search(bare)
-                                  or any(phone_context_ok(m.group(1)) for m in PHONE_CTX_RE.finditer(bare))):
-            found.append("手机号")
-        if "landline" in active and (LANDLINE_RE.search(bare) or LANDLINE_COMPACT_RE.search(bare) or LANDLINE_MASKED_RE.search(bare)):
-            found.append("座机")
-        if "im" in active and IM_CTX_RE.search(bare):
-            found.append("微信/QQ")
-        if "address" in active and (find_addresses(bare) or any(address_context_ok(m.group(1)) and split_address(m.group(1))[1].strip()
-                                                               for m in ADDR_CTX_RE.finditer(bare))):
-            found.append("地址")
+        found: list[tuple[str, str]] = []
+
+        def add(kind: str, values: Iterable[str]) -> None:
+            for value in values:
+                value = value.strip()
+                if value and (kind, value) not in found and len(found) < limit:
+                    found.append((kind, value))
+
+        if "email" in active:
+            add("email", (m.group(0) for regex in (EMAIL_RE, EMAIL_OBF_RE) for m in regex.finditer(bare)))
+        if "phone" in active:
+            add("phone", (m.group(0) for regex in (MOBILE_RE, MOBILE_MASKED_RE) for m in regex.finditer(bare)))
+            add("phone", (m.group(1) for m in PHONE_CTX_RE.finditer(bare) if phone_context_ok(m.group(1))))
+        if "landline" in active:
+            add("landline", (m.group(0) for regex in (LANDLINE_RE, LANDLINE_COMPACT_RE, LANDLINE_MASKED_RE)
+                             for m in regex.finditer(bare)))
+        if "im" in active:
+            add("im", (m.group(1) for m in IM_CTX_RE.finditer(bare)))
+        if "address" in active:
+            add("address", (bare[start:end] for start, end in find_addresses(bare)))
+            add("address", (m.group(1) for m in ADDR_CTX_RE.finditer(bare)
+                            if address_context_ok(m.group(1)) and split_address(m.group(1))[1].strip()))
         return found
 
     def protect_text(self, text: str, stats: Stats) -> str:
@@ -590,9 +608,10 @@ class Guard:
                 return hit[0]
         local = Stats()
         out = self._protect(text, local)
-        remaining = self.leaks(out)
+        remaining = self.leak_values(out)
         if remaining:
-            raise PrivacyBlocked(f"发送前检查发现仍有{'、'.join(remaining)}没能处理，为保护数据已停止发送。")
+            labels = "、".join(dict.fromkeys(KIND_LABELS.get(kind, kind) for kind, _ in remaining))
+            raise PrivacyBlocked(f"发送前检查发现仍有{labels}没能处理，为保护数据已停止发送。", remaining)
         stats.merge(local)
         if cacheable:
             cost = (len(text) + len(out)) * _CACHE_BYTES_PER_CHAR   # 键里存着全文、值里也存着全文

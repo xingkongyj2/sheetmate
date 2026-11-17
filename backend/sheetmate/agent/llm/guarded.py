@@ -63,8 +63,16 @@ class GuardedLLM:
 
     # ------------------------------------------------------------------ 发出去之前
 
-    def _block(self, reason: str) -> PrivacyBlockedError:
-        privacy.log.emit("error", "拦截", f"已拦截：{reason}", reason=reason)
+    def _block(self, reason: str, leaks: list[tuple[str, str]] | None = None) -> PrivacyBlockedError:
+        # tokens：发送前检查没能处理掉的值。和发送明细一样只记令牌，原文在加密的令牌库里，打开明细时才在本机还原
+        tokens = []
+        if leaks:
+            try:
+                vault = privacy.require().vault
+                tokens = [[vault.token(kind, value), kind] for kind, value in leaks]
+            except Exception:
+                tokens = []
+        privacy.log.emit("error", "拦截", f"已拦截：{reason}", reason=reason, **({"tokens": tokens} if tokens else {}))
         return PrivacyBlockedError(reason)
 
     def _guard(self):
@@ -73,12 +81,12 @@ class GuardedLLM:
         try:
             guard = privacy.require()
         except PrivacyBlocked as exc:
-            raise self._block(str(exc)) from exc
+            raise self._block(str(exc), getattr(exc, "leaks", None)) from exc
         # 没有经过「先脱敏」这一步的调用，一律不放行：宁可不处理，也不能让没脱敏的数据被正常模型读到
         if scope is None:
-            raise self._block("这次调用没有经过脱敏准备，为保护数据已停止处理，没有任何内容发给 AI。")
+            raise self._block("这次调用没有经过脱敏准备，为保护数据已停止处理，没有任何内容发给模型。")
         if scope.required and not scope.ready:
-            raise self._block("本轮用到的文件还没有完成脱敏，为保护数据已停止处理，没有任何内容发给 AI。")
+            raise self._block("本轮用到的文件还没有完成脱敏，为保护数据已停止处理，没有任何内容发给模型。")
         return guard
 
     @staticmethod
@@ -95,7 +103,7 @@ class GuardedLLM:
         try:
             await scope.verify()
         except PrivacyBlocked as exc:
-            raise self._block(str(exc)) from exc
+            raise self._block(str(exc), getattr(exc, "leaks", None)) from exc
 
     def _report(self, stats: Stats, messages: int) -> None:
         if stats.total:
@@ -117,7 +125,7 @@ class GuardedLLM:
         try:
             protected, stats = guard.protect_messages(messages)
         except PrivacyBlocked as exc:
-            raise self._block(str(exc)) from exc
+            raise self._block(str(exc), getattr(exc, "leaks", None)) from exc
         except Exception as exc:  # 处理过程出任何错，都不能把原文发出去
             raise self._block(f"脱敏处理出错（{type(exc).__name__}），为保护数据已停止发送。") from exc
         self._report(stats, len(messages))
@@ -129,7 +137,7 @@ class GuardedLLM:
         try:
             out = [guard.protect_text(text, stats) if isinstance(text, str) else text for text in texts]
         except PrivacyBlocked as exc:
-            raise self._block(str(exc)) from exc
+            raise self._block(str(exc), getattr(exc, "leaks", None)) from exc
         except Exception as exc:
             raise self._block(f"脱敏处理出错（{type(exc).__name__}），为保护数据已停止发送。") from exc
         self._report(stats, sum(1 for text in texts if isinstance(text, str)))
