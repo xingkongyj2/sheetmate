@@ -107,6 +107,67 @@ def _resync_uploaded(ws: Workspace) -> int:
     return rebuilt
 
 
+MIN_LINK_CHARS = 4      # 太短的值（几个字、数字）不按值对应，避免把普通内容当成同一个值
+
+
+def _reconcile_derived(ws: Workspace) -> int:
+    """计算出来的表和上传的表保持一致：同一个值在上传的表里脱敏了，计算出来的表里也是令牌；上传的表里不脱敏了，这里也是真实值。
+    用户在维护页里把某一列开了又关（或关了又开）之后，之前算出来的表里留着旧状态，和上传的表对不上，关联、核对都会失败。
+    只按整格相同的字符串值对应，数字和很短的值不动。"""
+    guard = privacy.require()
+    tables = ws.list_tables()
+    derived = [info for info in tables if info.source != "uploaded"]
+    if not derived or len(derived) == len(tables):
+        return 0
+    token_of: dict[str, str] = {}      # 脱敏列里的真实值 -> 令牌
+    plain: set[str] = set()            # 没脱敏的列里出现的值
+    for info in tables:
+        if info.source != "uploaded":
+            continue
+        frame = ws.df(info.name)
+        for name in frame.columns:
+            series = frame[name]
+            if series.dtype != object and not pd.api.types.is_string_dtype(series):
+                continue
+            cells = series.dropna().astype(str).drop_duplicates().head(200_000).tolist()
+            tokens = [cell for cell in cells if TOKEN_RE.fullmatch(cell)]
+            if tokens:
+                for cell in tokens:
+                    token_of[guard.restore_text(cell)] = cell
+            else:
+                plain.update(cell for cell in cells if len(cell) >= MIN_LINK_CHARS)
+    plain -= set(token_of)             # 同一个值既在脱敏的列又在没脱敏的列里：不动，宁可保持原样
+    if not token_of and not plain:
+        return 0
+    fixed = 0
+    for info in derived:
+        frame = ws.df(info.name)
+        changed = False
+        for position, name in enumerate(frame.columns):
+            series = frame.iloc[:, position]
+            if series.dtype != object and not pd.api.types.is_string_dtype(series):
+                continue
+
+            def convert(cell: Any) -> Any:
+                if not isinstance(cell, str):
+                    return cell
+                if TOKEN_RE.fullmatch(cell):
+                    real = guard.restore_text(cell)
+                    return real if real in plain else cell
+                return token_of.get(cell, cell) if len(cell) >= MIN_LINK_CHARS else cell
+
+            converted = series.map(convert).astype(object)
+            if not converted.equals(series.astype(object)):
+                frame.isetitem(position, converted)
+                changed = True
+        if changed:
+            meta = {key: value for key, value in dataclasses.asdict(info).items() if key not in _KEEP}
+            meta["privacy_masked"] = True
+            ws.put_dataframe(info.name, frame, **meta)
+            fixed += 1
+    return fixed
+
+
 def _sha(path: Path | None) -> str:
     from sheetmate.services.privacy.masked_files import _digest
 
@@ -118,6 +179,7 @@ def protect_workspace(ws: Workspace) -> int:
     if not protecting():
         return 0
     done = _resync_uploaded(ws)
+    done += _reconcile_derived(ws)
     for info in ws.list_tables():
         if info.privacy_masked:
             continue
