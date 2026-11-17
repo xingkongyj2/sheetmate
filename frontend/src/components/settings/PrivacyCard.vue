@@ -9,7 +9,7 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import { usePrivacySwitch } from '@/composables/usePrivacySwitch'
 import { useToast } from '@/composables/useToast'
 
-/** 脱敏设置：总开关（关闭后文件不脱敏、发给 AI 的内容也原样发送）+ 每条脱敏规则的开关，规则的匹配逻辑可以查看 */
+/** 脱敏设置：总开关（只管上传文件时的自动分析和脱敏；发给 AI 的内容什么时候都会检查、替换）+ 每条脱敏规则的开关，规则的匹配逻辑可以查看 */
 const toast = useToast()
 const shared = usePrivacySwitch()
 const enabled = ref(true)
@@ -68,7 +68,6 @@ async function save(payload: { enabled?: boolean; rules?: Record<string, boolean
       v-for="rule in rules"
       :key="rule.id"
       class="flex items-center gap-3 p-5 transition-opacity sm:px-6"
-      :class="{ 'opacity-50': !enabled }"
     >
       <span class="min-w-0 flex-1 text-sm font-medium">{{ rule.name }}</span>
       <button type="button" class="icon-btn size-9" title="查看规则" :aria-label="`查看${rule.name}规则`" :data-testid="`privacy-view-${rule.id}`" @click="viewing = rule">

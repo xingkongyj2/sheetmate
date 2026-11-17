@@ -48,6 +48,8 @@ async function change(column: PrivacyColumnState, patch: Pick<PrivacyColumnChang
   }
 }
 
+// 自动识别出来的列不支持手动关闭；手动打开的列可以关
+const locked = (column: PrivacyColumnState) => column.masked && column.choice !== 'mask'
 const toggle = (column: PrivacyColumnState) => change(column, { choice: column.masked ? 'keep' : 'mask' })
 const setKind = (column: PrivacyColumnState, kind: PrivacyColumnChange['kind']) => change(column, { choice: 'mask', kind })
 </script>
@@ -84,7 +86,7 @@ const setKind = (column: PrivacyColumnState, kind: PrivacyColumnChange['kind']) 
             <span v-else-if="column.masked && column.kind_label" class="shrink-0 text-xs text-mute">{{ column.kind_label }}</span>
             <LoaderCircle v-if="busy === column.name" class="size-4 shrink-0 animate-spin text-mute" />
             <input
-              v-else type="checkbox" role="switch" class="toggle toggle-sm shrink-0" :checked="column.masked" :disabled="busy !== null"
+              v-else type="checkbox" role="switch" class="toggle toggle-sm shrink-0" :checked="column.masked" :disabled="busy !== null || locked(column)" :title="locked(column) ? '自动识别的列不能关闭' : undefined"
               :aria-label="`${column.name}脱敏`" @change="toggle(column)"
             />
           </li>

@@ -70,10 +70,10 @@ class GuardedLLM:
         return guard
 
     @staticmethod
-    def _enabled() -> bool:
-        """设置页的脱敏总开关。关闭时一律原样调用，不做任何脱敏和还原（和普通调用一样）。同时把规则开关应用到脱敏模块。"""
+    def _sync_rules() -> None:
+        """把设置页的规则开关应用到脱敏模块。总开关不影响这里：发给 AI 的内容什么时候都要检查、替换，总开关只管上传文件时的自动分析。"""
         _ensure_ready()
-        return sync_privacy_settings()
+        sync_privacy_settings()
 
     async def _verify_files(self) -> None:
         """每次发给 AI 之前，确认这个会话里的表格文件都脱敏完成了；没完成就结束本次对话，不发任何内容。"""
@@ -142,8 +142,7 @@ class GuardedLLM:
     # ------------------------------------------------------------------ 模型接口
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, **extra: Any) -> Any:
-        if not self._enabled():
-            return await self._inner.chat(messages, tools, **extra)
+        self._sync_rules()
         await self._verify_files()
         guard, protected = self._protect_messages(messages)
         message = await self._inner.chat(protected, tools, **extra)
@@ -154,10 +153,7 @@ class GuardedLLM:
 
     async def stream_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                           *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        if not self._enabled():
-            async for chunk in self._inner.stream_chat(messages, tools, *args, **kwargs):
-                yield chunk
-            return
+        self._sync_rules()
         await self._verify_files()
         guard, protected = self._protect_messages(messages)
         counter: Counter[str] = Counter()
@@ -212,8 +208,7 @@ class GuardedLLM:
         return SimpleNamespace(choices=[SimpleNamespace(index=0, finish_reason=None, delta=delta)], usage=None, model=None)
 
     async def complete_json(self, prompt: str, system: str | None = None, *args: Any, **kwargs: Any) -> Any:
-        if not self._enabled():
-            return await self._inner.complete_json(prompt, system, *args, **kwargs)
+        self._sync_rules()
         await self._verify_files()
         guard, (prompt_p, system_p) = self._protect_strings(prompt, system)
         value = await self._inner.complete_json(prompt_p, system_p, *args, **kwargs)

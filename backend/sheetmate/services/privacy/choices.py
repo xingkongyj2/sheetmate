@@ -15,7 +15,7 @@ from sqlalchemy import delete, select
 
 from sheetmate.db.models import PrivacyColumnChoice
 from sheetmate.db.session import session_scope
-from sheetmate.privacy import ACTION_LABELS, ACTIONS, KIND_LABELS
+from sheetmate.privacy import ACTION_LABELS, ACTIONS, KIND_LABELS, privacy
 
 # 手动脱敏时可选的类型：电话号码、详细地址（和自动识别的两条规则一样）、通用（兜底：整列每一格都换成令牌，只能手动选，自动识别不会用它）
 MANUAL_KINDS = ("phone", "address", "custom")
@@ -60,7 +60,11 @@ def effective(file_id: str, sheets: list[dict[str, Any]], *, for_masking: bool =
     if not picks:
         return sheets
     out = [{**sheet, "columns": list(sheet["columns"])} for sheet in sheets]
+    guard = privacy.guard
     for (sheet_name, column), (choice, kind, values) in picks.items():
+        if choice == "keep" and (any(item["name"] == column for sheet in sheets if sheet["sheet"] == sheet_name for item in sheet["columns"])
+                                 or (guard is not None and guard.registry.kind_for(column))):
+            continue                       # 自动识别出来的列不支持手动关闭（旧版本留下的「不脱敏」选择不再生效）
         entry = _entry(out, sheet_name)
         entry["columns"] = [item for item in entry["columns"] if item["name"] != column]
         if choice == "mask" and kind in KIND_LABELS:

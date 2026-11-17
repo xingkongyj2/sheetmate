@@ -78,6 +78,34 @@ def _describe(file_id: str) -> dict[str, Any]:
     return {"enabled": True, "file_id": file_id, "filename": filename, "sheets": sheets, "types": types}
 
 
+def masked_sheets(file_id: str, sheets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """详情面板「脱敏」页用的列清单：只列维护页里显示为已脱敏的列（自动识别的 + 手动打开的），两边的状态永远一致。
+    sheets 是识别记录加手动选择合并后的列表，里面有每列的类型、依据等明细。"""
+    from sheetmate.privacy import ACTION_LABELS, ACTIONS
+
+    state = _describe(file_id)
+    masked = {(entry["sheet"], item["name"]): item for entry in state["sheets"] for item in entry["columns"] if item["masked"]}
+    rows = {entry["sheet"]: entry["rows"] for entry in state["sheets"]}
+    out, seen = [], set()
+    for entry in sheets:
+        kept = [column for column in entry["columns"] if (entry["sheet"], column["name"]) in masked]
+        seen.update((entry["sheet"], column["name"]) for column in kept)
+        out.append({**entry, "columns": kept})
+    for (sheet_name, name), item in masked.items():       # 维护页里是已脱敏、记录里没有明细的列（比如按别的文件里同名的列识别的）
+        if (sheet_name, name) in seen or not item["kind"]:
+            continue
+        action = ACTIONS.get(item["kind"], "tokenize")
+        column = {"name": name, "kind": item["kind"], "kind_label": item["kind_label"] or KIND_LABELS.get(item["kind"], item["kind"]),
+                  "action": action, "action_label": ACTION_LABELS.get(action, ""), "source": item["source"] or "rules",
+                  "reason": item["reason"] or "", "values": rows.get(sheet_name, 0)}
+        target = next((entry for entry in out if entry["sheet"] == sheet_name), None)
+        if target is None:
+            target = {"sheet": sheet_name, "rows": rows.get(sheet_name, 0), "columns": []}
+            out.append(target)
+        target["columns"].append(column)
+    return [entry for entry in out if entry["columns"]]
+
+
 async def list_columns(user: User, file_id: str, conversation_id: str | None = None) -> dict[str, Any]:
     from sheetmate.core.config.privacy_switch import sync_privacy_settings
 
@@ -105,6 +133,8 @@ async def save_columns(user: User, file_id: str, changes: list[dict[str, Any]], 
         if choice not in {"mask", "keep", None}:
             raise ServiceError("选择只能是脱敏、不脱敏或恢复自动。")
         automatic, kind = base[key], change.get("kind")
+        if choice == "keep" and automatic is not None:
+            raise ServiceError("自动识别出来的列不能手动关闭脱敏。")
         if kind is not None and kind not in choices.MANUAL_KINDS:
             raise ServiceError("脱敏类型只能是电话号码、详细地址或通用。")
         if choice == "mask" and automatic is not None and kind in (None, automatic, "phone" if automatic == "landline" else automatic):

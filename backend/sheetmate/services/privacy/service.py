@@ -436,8 +436,6 @@ async def apply_masking(file_id: str) -> None:
 
 
 _progress: dict[str, tuple[int, int]] = {}    # 文件 → (已检查, 一共)：自由文本列逐个检查的进度
-_background: set[asyncio.Task] = set()        # 对话里等不及、交给后台接着做的任务（持有引用，防止被回收）
-DEEP_WAIT_SECONDS = 90.0                      # 一轮对话最多等这么久（自由文本列还在逐个检查时）
 
 
 def _merge_deep(filename: str, sheets: list[dict[str, Any]], deep: dict[tuple[str, str], dict[str, Any]]) -> None:
@@ -572,22 +570,10 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
 
         async def one(item: dict[str, Any]) -> tuple[list[dict[str, Any]], bool, str]:
             async with slots:
-                try:
-                    result = await asyncio.wait_for(
-                        _identify(item["id"], item["filename"], item["profile"], model, source="chat", path=item["path"]),
-                        DEEP_WAIT_SECONDS)
-                    await apply_masking(item["id"])
-                    return result
-                except asyncio.TimeoutError:
-                    # 自由文本列还在逐个检查（值很多的文件）：这一轮先停下，检查交给后台接着做，做完再发一次就行。
-                    # 已经检查完的值都已经存下了，不会重来。
-                    task = asyncio.create_task(identify_uploaded(item["id"]))
-                    _background.add(task)
-                    task.add_done_callback(_background.discard)
-                    done, total = _progress.get(item["id"], (0, 0))
-                    progress = f"（已检查 {done:,}/{total:,}）" if total else ""
-                    raise PrivacyBlocked(f"文件「{item['filename']}」里的自由文本还在逐个检查{progress}，为保护数据暂停了这一轮，"
-                                         "没有任何内容发给 AI。检查在后台继续，做完后再发一次就可以。") from None
+                # 脱敏不设等待时限：表再大、自由文本列再多，也等逐个检查做完再往下走（已经检查完的值都存下了，中断了也不会重来）
+                result = await _identify(item["id"], item["filename"], item["profile"], model, source="chat", path=item["path"])
+                await apply_masking(item["id"])
+                return result
 
         outcomes = _first_error(await asyncio.gather(*(one(item) for item in snapshot), return_exceptions=True))
         for item, (sheets, was_cached, source) in zip(snapshot, outcomes):
@@ -882,6 +868,14 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
                 restored += int(detail.get("restored", 0))
         listed = [{"id": e.id, "time": e.updated_at.isoformat(timespec="seconds"), "level": e.level, "kind": e.kind,
                    "text": e.text, "detail": e.detail} for e in events]
+    from sheetmate.services.privacy import columns as privacy_columns
+
+    for item in files:          # 和文件维护页（客户文件页、聊天页的盾牌弹窗）是同一份判断：列有没有脱敏，两边必须一致
+        if item["status"] == "ready":
+            try:
+                item["sheets"] = privacy_columns.masked_sheets(item["file_id"], item["sheets"])
+            except Exception:
+                logger.exception("按维护页的判断整理脱敏概览失败：%s", item["file_id"])
     columns = sum(len(s["columns"]) for f in files for s in f["sheets"])
     values = sum(c["values"] for f in files for s in f["sheets"] for c in s["columns"])
     # 显示实际用来识别这个会话文件的模型（识别记录里存的），没有识别记录时才用设置里的

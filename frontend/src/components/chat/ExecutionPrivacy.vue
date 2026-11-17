@@ -47,8 +47,20 @@ const fileKey = computed(() => (props.detail?.files ?? []).map((file) => file.fi
 watch(() => props.detail?.id, () => { overview.value = null; void load() })
 watch(streaming, () => { void load(); schedule() })
 watch([fileKey, () => props.message?.privacy], () => { void load() })
-onMounted(() => { void load(); schedule() })
-onBeforeUnmount(() => { clearTimeout(timer); version++ })
+// 客户文件页里改了某个文件的列脱敏，这里要同步：回到这个页面时立即刷新，开着的时候也隔几秒刷新一次
+const onVisible = () => { if (document.visibilityState === 'visible') void load() }
+let idle = 0
+onMounted(() => {
+  void load(); schedule()
+  document.addEventListener('visibilitychange', onVisible)
+  window.addEventListener('focus', onVisible)
+  idle = window.setInterval(onVisible, 8000)
+})
+onBeforeUnmount(() => {
+  clearTimeout(timer); clearInterval(idle); version++
+  document.removeEventListener('visibilitychange', onVisible)
+  window.removeEventListener('focus', onVisible)
+})
 
 const empty = computed(() => !!overview.value && !overview.value.files.length && !overview.value.events.length)
 const failed = computed(() => overview.value?.files.some((file) => file.status === 'failed') ?? false)

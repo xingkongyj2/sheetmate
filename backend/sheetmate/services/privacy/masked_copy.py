@@ -229,7 +229,8 @@ def _build(path: str, report: list[dict[str, Any]]) -> tuple[bytes, Stats]:
     # 不能让「一个工作表都没写」的写入器关闭错误把它盖住
     frames: list[tuple[str, pd.DataFrame]] = []
     for sheet in _read(path):
-        masked = _mask(sheet.df, _kinds(sheet.df, _flagged(report, sheet.name)), stats)
+        kinds = _kinds(sheet.df, _flagged(report, sheet.name))
+        masked = _mask(sheet.df, kinds, stats)
         _assert_clean(masked)
         frames.append((_sheet_title(sheet.name, used), masked))
     with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
