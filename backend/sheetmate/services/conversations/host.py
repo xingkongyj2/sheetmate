@@ -187,6 +187,26 @@ class ConversationHost:
 
         return masked_path(file_id, source)
 
+    def refresh_stale_files(self) -> list[str]:
+        """工作区里的表和文件现在的内容对不上（文件被改了：客户文件页里替换、脱敏设置改了原文件……）：
+        以文件现在的内容为准，从文件重新载入这些表。返回重新载入的文件。"""
+        stale: dict[str, str] = {}
+        for info in self.ws.list_tables():
+            if info.source == "uploaded" and info.file_id and info.file_version and info.file_id not in stale:
+                with session_scope() as db:
+                    record = db.get(FileRecord, info.file_id)
+                    path = Path(record.stored_path) if record is not None else None
+                if path is not None and path.is_file() and file_service.content_digest(path) != info.file_version:
+                    stale[info.file_id] = info.name
+        refreshed = []
+        for file_id, name in stale.items():
+            try:
+                self.load_file(file_id)
+                refreshed.append(file_id)
+            except Exception:
+                logger.exception("文件 %s 已经变了，重新载入表「%s」失败，继续使用旧表", file_id, name)
+        return refreshed
+
     def load_file(self, file_id: str) -> list[TableInfo]:
         with session_scope() as db:
             record = file_service.get_file(db, file_id)

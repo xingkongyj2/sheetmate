@@ -302,6 +302,14 @@ def _start_chat(user: User, conversation_id: str, message: str, *,
     return jobs.start(conversation_id, work, message_id=message_id, execution_id=execution_id)
 
 
+def _refresh_input_baseline(conversation_id: str, execution_id: str) -> None:
+    """本轮脱敏准备完成后，把输入文件和表的版本记成这一轮的基线：之后文件再变（比如用户调整了脱敏设置）才算输入变了。"""
+    with session_scope() as db:
+        conv, execution = db.get(Conversation, conversation_id), db.get(AgentExecution, execution_id)
+        if conv is not None and execution is not None:
+            execution.input_fingerprint = input_snapshot(db, conv, execution.input_fingerprint)
+
+
 def _cleanup_execution_workspace(execution_id: str) -> None:
     import shutil
     with session_scope() as db:
@@ -747,8 +755,12 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         await privacy_service.prepare_files(conversation_id=conversation_id, files=host.list_files(),
                                             emit=_already_shown if shown else emit, workspace=ctx.ws,
                                             sources_only=True)
+        # 表和文件现在的内容对不上（文件被改过）：读最新的文件，不用旧表
+        await asyncio.to_thread(host.refresh_stale_files)
         # 上传时识别还没完成、载入的是原文的表，现在换成令牌版：AI 和工具从这里开始只碰令牌
         await asyncio.to_thread(privacy_workspace.protect_workspace, ctx.ws)
+        if job.execution_id:     # 脱敏会把原文件改成脱敏版：这是本轮自己的准备工作，不能算成「输入文件被用户改了」而不让续跑
+            await asyncio.to_thread(_refresh_input_baseline, conversation_id, job.execution_id)
         current = privacy_scope()
         if current is not None:
             current.ready = True

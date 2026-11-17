@@ -401,7 +401,7 @@ class Guard:
 
     def register_values(self, kind: str, values: Iterable[object]) -> int:
         """登记敏感列里的真实值：之后不管它出现在发给模型的什么文字里，都会被换成令牌。只登记地址和微信/QQ。"""
-        if kind not in {"address", "im", "custom"} or self._off(kind):
+        if kind not in {"address", "im"} or self._off(kind):       # 「通用」的整列不登记：见 Vault 里的说明
             return 0
         kept = []
         for value in values:

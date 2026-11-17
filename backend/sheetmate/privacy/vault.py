@@ -64,6 +64,8 @@ class Vault:
         self._db.execute("CREATE UNIQUE INDEX IF NOT EXISTS tokens_by_value ON tokens (prefix, norm)")
         # 已识别为敏感的列里出现过的真实值：不管它以什么格式出现在发给模型的文字里，都要替换（见 Guard._scan_known）
         self._db.execute("CREATE TABLE IF NOT EXISTS known (value TEXT PRIMARY KEY, kind TEXT NOT NULL)")
+        # 「通用」是用户手动指定的整列，里面可能是数字、编号、几个字的词：不能登记成全局的已知值，不然这些值出现在别的表里也会被换成令牌（旧版本登记过的清掉）
+        self._db.execute("DELETE FROM known WHERE kind = 'custom'")
         # 脱敏模型逐个检查过的单元格：原文 → 里面的敏感片段 [[片段, 类型], …]；没有敏感片段的也记一行（表示「检查过了，没有」，
         # 这样中断了可以接着做，同样的文字在别的文件里出现也不用再问模型）
         self._db.execute("CREATE TABLE IF NOT EXISTS cells (cell TEXT PRIMARY KEY, items TEXT NOT NULL)")
@@ -197,7 +199,7 @@ class Vault:
     def remember(self, kind: str, values: Iterable[object]) -> int:
         """登记敏感列里的真实值，返回新增了多少个。太短的值（几个字）不登记，避免把普通词语也替换掉。"""
         rows = {(str(value).strip(), kind) for value in values if len(str(value).strip()) >= MIN_KNOWN_CHARS}
-        if not rows:
+        if not rows or kind == "custom":
             return 0
         with self._lock:
             known = self._known_values()

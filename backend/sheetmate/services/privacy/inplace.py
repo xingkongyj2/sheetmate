@@ -14,6 +14,7 @@ import hashlib
 import io
 import logging
 import re
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 KINDS = {"input", "expected"}
 SUFFIXES = {".xlsx", ".xlsm", ".csv"}
 _NUMBER = re.compile(r"-?\d+(\.\d+)?")
-_REGISTER = {"address", "im", "custom"}        # 真实值要登记成已知敏感值的类型
+_REGISTER = {"address", "im"}        # 真实值要登记成已知敏感值的类型
 
 
 def modifiable(kind: str, path: Path) -> bool:
@@ -123,7 +124,19 @@ def _write_csv(source: Path, target: Path, desired: list[tuple[Any, pd.DataFrame
     target.write_text(buffer.getvalue(), encoding=encoding, newline="")
 
 
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
 def sync_file(file_id: str, fingerprint_of: Callable[[dict[str, Any]], str] | None = None) -> str:
+    """同一个文件同一时间只改一次（上传后的后台识别和对话开始时的准备可能同时来）。"""
+    with _LOCKS_GUARD:
+        lock = _LOCKS.setdefault(file_id, threading.Lock())
+    with lock:
+        return _sync_file(file_id, fingerprint_of)
+
+
+def _sync_file(file_id: str, fingerprint_of: Callable[[dict[str, Any]], str] | None = None) -> str:
     """让原文件和这个文件的脱敏状态（自动识别的结果 + 用户手动的选择）一致：脱敏的列换成令牌，不脱敏的列里的令牌还原。
     返回 masked（已处理）/ copy（格式没法原地改）/ skip（不用处理）。总开关不影响这里：已有的识别结果和手动的选择始终有效。"""
     privacy.configure(settings.data_dir)       # 总开关关着时没有别的地方会启动脱敏模块（比如重启之后）

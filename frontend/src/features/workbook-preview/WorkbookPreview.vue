@@ -204,10 +204,10 @@ onBeforeUnmount(() => {
           <div class="min-w-0 flex-1">
             <h2 id="workbook-preview-title" class="truncate text-sm font-semibold" :title="filename">{{ filename }}</h2>
           </div>
-          <a v-if="file && !localFile" :href="file.download_url || fileApi.downloadUrl(file.file_id)" class="btn-line shrink-0 !h-8 py-0 text-xs" title="下载原始文件"><Download class="size-4" /><span class="hidden sm:inline">下载</span></a>
+          <a v-if="file && !localFile" :href="file.download_url || fileApi.downloadUrl(file.file_id)" class="btn-line shrink-0 !h-8 py-0 text-xs" :class="{ 'order-last': page }" title="下载原始文件"><Download class="size-4" /><span class="hidden sm:inline">下载</span></a>
           <button v-if="supportsDataPreview && !legacy && (!dataMode || size <= 25 * 1024 * 1024)" type="button" class="btn-line shrink-0 !h-8 py-0 text-xs" @click="load(!dataMode)">{{ dataMode ? '原样式预览' : '分页预览' }}</button>
           <button v-if="!page" type="button" class="icon-btn" :aria-label="expanded ? '还原窗口' : '放大窗口'" :title="expanded ? '还原窗口' : '放大窗口'" @click="expanded = !expanded"><Minimize2 v-if="expanded" class="size-4" /><Maximize2 v-else class="size-4" /></button>
-          <button type="button" class="icon-btn" aria-label="关闭文件预览" :title="page ? '关闭此页（Esc）' : '关闭（Esc）'" @click="emit('close')"><X class="size-4" /></button>
+          <button v-if="!page" type="button" class="icon-btn" aria-label="关闭文件预览" :title="page ? '关闭此页（Esc）' : '关闭（Esc）'" @click="emit('close')"><X class="size-4" /></button>
         </header>
 
         <div v-if="warnings.length" class="shrink-0 border-b border-amber-100 bg-amber-50 px-4 py-2 text-xs text-amber-800">

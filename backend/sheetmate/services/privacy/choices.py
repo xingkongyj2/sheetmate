@@ -29,12 +29,15 @@ def load(file_id: str) -> dict[tuple[str, str], tuple[str, str | None, int]]:
         return {(row.sheet, row.column): (row.choice, row.kind, row.values) for row in rows}
 
 
+REVISION = "2"       # 脱敏处理方式变了就加一：工作区里按旧方式生成的表会按新方式重新生成
+
+
 def signature(file_id: str) -> str:
-    """这个文件的列选择的指纹：没有任何选择时是空串；选择变了指纹就变，用来判断工作区里的表是不是过期了。"""
+    """这个文件的列选择的指纹：选择变了指纹就变，用来判断工作区里的表是不是过期了。"""
     picks = load(file_id)
     if not picks:
-        return ""
-    return hashlib.sha1(repr(sorted(picks.items())).encode()).hexdigest()[:12]
+        return REVISION
+    return REVISION + hashlib.sha1(repr(sorted(picks.items())).encode()).hexdigest()[:12]
 
 
 def _entry(sheets: list[dict[str, Any]], name: str) -> dict[str, Any]:

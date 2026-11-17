@@ -115,10 +115,13 @@ async def save_columns(user: User, file_id: str, changes: list[dict[str, Any]], 
         saved.append({"sheet": key[0], "column": key[1], "choice": choice, "kind": kind, "values": rows.get(key[0], 0)})
         if choice == "mask":
             masked_now.append((key, kind))
+    previous = await asyncio.to_thread(choices.load, file_id)
     await asyncio.to_thread(choices.save, file_id, saved)
     if masked_now:
         await asyncio.to_thread(_register_values, path, masked_now)
-    kept_now = [(item["sheet"], item["column"]) for item in saved if item["choice"] == "keep"]
+    # 选了「不脱敏」、或把手动脱敏的列恢复成自动识别：之前登记的已知值去掉，不然这些值在别处还是会被换成令牌
+    kept_now = [(item["sheet"], item["column"]) for item in saved
+                if item["choice"] == "keep" or (item["choice"] is None and (previous.get((item["sheet"], item["column"])) or ("",))[0] == "mask")]
     if kept_now:
         await asyncio.to_thread(_forget_values, path, kept_now)
     await privacy_service.apply_masking(file_id)             # 原文件马上按新的选择改成脱敏版 / 还原

@@ -61,12 +61,12 @@ const setKind = (column: PrivacyColumnState, kind: PrivacyColumnChange['kind']) 
       <p v-if="loading" class="flex items-center justify-center gap-2 py-10 text-sm text-mute"><LoaderCircle class="size-4 animate-spin" />正在分析列头和内容</p>
       <p v-else-if="error && !data" class="py-10 text-center text-sm text-error" role="alert">{{ error }}</p>
       <template v-else-if="data && sheet">
-        <div v-if="data.sheets.length > 1" class="mb-3 flex flex-wrap gap-1.5" role="tablist">
+        <div class="mb-3 flex flex-wrap gap-1.5" role="tablist">
           <button
             v-for="(item, index) in data.sheets" :key="item.sheet" type="button" role="tab" :aria-selected="index === current"
             class="rounded-lg px-2.5 py-1 text-[13px] transition" :class="index === current ? 'bg-ink text-white' : 'bg-paper text-mute hover:text-ink'"
             @click="current = index"
-          >{{ item.sheet }}</button>
+          >{{ item.sheet }}<span v-if="item.columns.some((column) => column.masked)" class="ml-1.5 tabular-nums opacity-70">{{ item.columns.filter((column) => column.masked).length }}</span></button>
         </div>
         <ul class="divide-y divide-line">
           <li
