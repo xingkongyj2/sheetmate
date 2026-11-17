@@ -19,3 +19,10 @@ class LLMBody(BaseModel):
     enabled: bool | None = None
     capabilities: LLMCapabilities | None = None
 
+
+
+class PrivacyBody(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    enabled: bool | None = None                 # 总开关；不传表示保持原样
+    rules: dict[str, bool] | None = None        # 每条规则的开关；不传的规则保持原样

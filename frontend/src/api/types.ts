@@ -590,6 +590,31 @@ export interface PrivacyColumn {
   values: number
 }
 
+/** 设置页的脱敏设置：总开关 + 每条规则 */
+/** 规则匹配逻辑的一项：regex 是正则、words 是关键词清单、text 是一句话 */
+export interface PrivacyRuleLogicItem {
+  label: string
+  kind: 'regex' | 'words' | 'text'
+  value: string | string[]
+}
+
+export interface PrivacyRuleLogicSection {
+  title: string
+  items: PrivacyRuleLogicItem[]
+}
+
+export interface PrivacyRuleSetting {
+  id: string
+  name: string
+  enabled: boolean
+  logic: PrivacyRuleLogicSection[]
+}
+
+export interface PrivacySettings {
+  enabled: boolean
+  rules: PrivacyRuleSetting[]
+}
+
 export interface PrivacySheet {
   sheet: string
   rows: number

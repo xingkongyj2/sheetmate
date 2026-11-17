@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Response
 
 from sheetmate.api.deps import current_user
-from sheetmate.api.settings.schemas import LLMBody
+from sheetmate.api.settings.schemas import LLMBody, PrivacyBody
 from sheetmate.db.models import User
 from sheetmate.services.settings import service as settings_service
 
@@ -32,6 +32,19 @@ async def test_llm(body: LLMBody, response: Response, _: User = Depends(current_
     response.headers["Cache-Control"] = "no-store"
     update = settings_service.ModelSettingsUpdate(**dict(body))
     return await settings_service.test_llm_config(update)
+
+
+# 脱敏设置：总开关和每条规则的开关
+@router.get("/privacy")
+def get_privacy_config(response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True, **settings_service.get_privacy_config()}
+
+
+@router.put("/privacy")
+def put_privacy_config(body: PrivacyBody, response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store"
+    return {"ok": True, **settings_service.put_privacy_config(body.enabled, body.rules)}
 
 
 # 脱敏模型：专门给脱敏模块识别联系方式和地址用，和对话模型分开保存，接口、字段完全一样。

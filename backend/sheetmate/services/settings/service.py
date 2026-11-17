@@ -14,6 +14,24 @@ from sheetmate.core.config.settings import (
     get_llm_provider_settings, save_llm_settings, select_llm_settings,
 )
 from sheetmate.core.config.model_policy import LLMCapabilities
+from sheetmate.core.config.privacy_switch import RULE_IDS, sync_privacy_settings
+from sheetmate.core.config.settings import get_privacy_switches, save_privacy_switches
+from sheetmate.privacy import RULES
+from sheetmate.privacy.rule_logic import describe
+
+
+def get_privacy_config() -> dict[str, Any]:
+    """设置页的脱敏卡片：总开关 + 每条规则（名称、说明、是否打开）。"""
+    enabled, rules = get_privacy_switches(RULE_IDS)
+    return {"enabled": enabled,
+            "rules": [{"id": rule.id, "name": rule.name, "enabled": rules[rule.id], "logic": describe(rule.id)} for rule in RULES]}
+
+
+def put_privacy_config(enabled: bool | None, rules: dict[str, bool] | None) -> dict[str, Any]:
+    save_privacy_switches(enabled, {key: value for key, value in (rules or {}).items() if key in RULE_IDS}, RULE_IDS)
+    sync_privacy_settings()                 # 立即生效
+    return get_privacy_config()
+
 
 
 @dataclass(frozen=True)

@@ -490,6 +490,29 @@ def save_llm_settings(provider_id: str, api_key: str | None, base_url: str | Non
         return _build_provider_settings(provider_id, providers[provider_id])
 
 
+# settings.json 里的脱敏设置：{"privacy": {"enabled": true, "rules": {"phone": true, "address": true}}}
+# 没保存过时：总开关打开，所有规则打开。规则清单见 sheetmate.privacy.rules.RULES，新增规则默认打开。
+def get_privacy_switches(rule_ids: tuple[str, ...]) -> tuple[bool, dict[str, bool]]:
+    saved = _read_settings_file().get("privacy")
+    saved = saved if isinstance(saved, dict) else {}
+    rules = saved.get("rules") if isinstance(saved.get("rules"), dict) else {}
+    enabled = saved.get("enabled")
+    return (enabled if isinstance(enabled, bool) else True,
+            {rule_id: rules.get(rule_id) if isinstance(rules.get(rule_id), bool) else True for rule_id in rule_ids})
+
+
+def save_privacy_switches(enabled: bool | None, rules: dict[str, bool] | None, rule_ids: tuple[str, ...]) -> tuple[bool, dict[str, bool]]:
+    """None 表示保留当前值；规则只接受清单里有的。"""
+    with _llm_settings_lock:
+        data = _read_settings_file()
+        current_enabled, current_rules = get_privacy_switches(rule_ids)
+        merged = {rule_id: bool((rules or {}).get(rule_id, current_rules[rule_id])) for rule_id in rule_ids}
+        result = current_enabled if enabled is None else bool(enabled)
+        data["privacy"] = {"enabled": result, "rules": merged}
+        _write_settings_file(data)
+        return result, merged
+
+
 def get_secret_key() -> bytes:
     """登录令牌签名密钥：首次启动自动生成并保存在 data/secret.key。"""
     settings.ensure_dirs()

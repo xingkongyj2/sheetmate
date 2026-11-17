@@ -25,6 +25,8 @@ const props = withDefaults(defineProps<{
   providers?: LLMProviderId[]
   /** 是否显示下方的「结构协议」设置 */
   showProtocol?: boolean
+  /** 嵌在别的设置分组里：不再单独一个大标题，用卡片内的小标题 */
+  embedded?: boolean
   api: {
     load: () => Promise<LLMConfig>
     save: (payload: LLMConfigUpdate) => Promise<LLMConfig>
@@ -257,8 +259,9 @@ async function test(provider: LLMProviderConfig) {
 </script>
 
 <template>
-  <section class="mt-8" :aria-labelledby="`${ns}providers-heading`">
-    <h2 :id="`${ns}providers-heading`" class="mb-3 text-lg font-semibold tracking-tight">{{ title }}</h2>
+  <section :class="embedded ? 'mt-3' : 'mt-8'" :aria-labelledby="`${ns}providers-heading`">
+    <component :is="embedded ? 'h3' : 'h2'" :id="`${ns}providers-heading`"
+               :class="embedded ? 'mb-2 px-1 text-sm font-medium text-mute' : 'mb-3 text-lg font-semibold tracking-tight'">{{ title }}</component>
     <p v-if="description" class="-mt-1.5 mb-3 text-[13px] leading-5 text-mute">{{ description }}</p>
     <div class="card-soft overflow-hidden">
       <div v-if="tabIds.length > 1" class="px-5 pt-5 sm:px-6 sm:pt-6">

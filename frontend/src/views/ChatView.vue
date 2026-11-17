@@ -3,7 +3,7 @@
  * 对话页：中间是消息流和输入框，右侧是工作区面板。
  * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和工作区面板开关。
  */
-import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Play, Save, X } from '@lucide/vue'
+import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Play, Save, ShieldOff, X } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -27,6 +27,7 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import { attachmentMessage } from '@/composables/attachmentFiles'
 import { applyDeliveryManifest, applyEvent, finishMessage, restoreConversationMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
 import { useFilePreview } from '@/composables/useFilePreview'
+import { usePrivacySwitch } from '@/composables/usePrivacySwitch'
 import { useToast } from '@/composables/useToast'
 import { serializeTableReferences, type FileReference, type TableReference } from '@/composables/tableReferences'
 import { conversationTables, executionTableKey } from '@/composables/executionPresentation'
@@ -310,7 +311,12 @@ watch([panelOpen, panelTab], ([open, tab]) => {
 
 let resizeObserver: ResizeObserver | null = null
 
+const privacySwitch = usePrivacySwitch()
+const refreshPrivacySwitch = () => { void privacySwitch.refresh() }
+
 onMounted(async () => {
+  void privacySwitch.refresh()
+  window.addEventListener('focus', refreshPrivacySwitch)   // 在设置页改完回来，提示立刻更新
   // 内容高度变化（逐字显示、表格渲染、图片加载）时，如果用户本来就在底部附近，就跟着滚到底
   if (typeof ResizeObserver !== 'undefined' && content.value) {
     resizeObserver = new ResizeObserver(() => scrollToBottom())
@@ -326,6 +332,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('focus', refreshPrivacySwitch)
   disposed = true
   resizeObserver?.disconnect()
   clearTimeout(pollTimer)
@@ -652,7 +659,7 @@ function answer(option: string) {
     <div class="chat-workspace flex min-w-0 flex-1 flex-col">
       <!-- 顶部 -->
       <header class="flex h-11 shrink-0 items-center gap-2 border-b border-line px-4">
-        <div class="min-w-0 flex-1">
+        <div class="flex min-w-0 flex-1 items-center gap-2">
           <input
             v-if="editingTitle"
             v-model="titleDraft"
@@ -665,6 +672,15 @@ function answer(option: string) {
             <span class="truncate text-sm font-semibold">{{ detail?.title ?? '…' }}</span>
             <Pencil class="size-3.5 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
           </button>
+          <RouterLink
+            v-if="privacySwitch.enabled.value === false"
+            to="/settings"
+            class="flex shrink-0 items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-ink"
+            title="脱敏已关闭：文件和对话内容会原样发给 AI。点击去设置"
+            data-testid="privacy-off-notice"
+          >
+            <ShieldOff class="size-3.5" />脱敏已关闭
+          </RouterLink>
         </div>
 
         <RouterLink

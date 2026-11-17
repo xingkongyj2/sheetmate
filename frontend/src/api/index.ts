@@ -24,6 +24,7 @@ import type {
   PrivacyOverview,
   RecipeBrief,
   RecipeEditRequest,
+  PrivacyRuleSetting,
   RecipeFlowData,
   RecipeJSON,
   RunBrief,
@@ -62,6 +63,10 @@ export const settingsApi = {
     (await http.post<{ ok: boolean; reply?: string; model?: string; error?: { message: string } }>('/settings/llm/test', payload,
       // 后端测试连接最多等 300 秒，这里多留 10 秒接收超时说明，避免被前端的默认超时提前中断。
       { timeout: 310_000, validateStatus: () => true })).data,
+  // 脱敏设置：总开关和每条规则的开关
+  getPrivacy: async () => (await http.get<{ enabled: boolean; rules: PrivacyRuleSetting[] }>('/settings/privacy')).data,
+  savePrivacy: async (payload: { enabled?: boolean; rules?: Record<string, boolean> }) =>
+    (await http.put<{ enabled: boolean; rules: PrivacyRuleSetting[] }>('/settings/privacy', payload)).data,
   // 脱敏模型：与对话模型同构的一套独立配置，只给脱敏模块用
   getPrivacyLLM: async () => parseLLMConfig((await http.get<unknown>('/settings/privacy-llm')).data),
   savePrivacyLLM: async (payload: LLMConfigUpdate) =>

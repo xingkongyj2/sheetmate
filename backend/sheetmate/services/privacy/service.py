@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Iterable
 from sqlalchemy import delete, event, or_, select
 
 from sheetmate.agent.llm import aux_json, get_privacy_llm, privacy_llm_configured
+from sheetmate.core.config.privacy_switch import sync_privacy_settings
 from sheetmate.core.config.settings import get_privacy_llm_settings, settings
 from sheetmate.core.errors import ServiceError
 from sheetmate.core.observability.conversation_log import bind_trace
@@ -30,7 +31,7 @@ from sheetmate.engine.tables.sql import quote_ident
 from sheetmate.privacy import (
     ACTION_LABELS, KIND_LABELS, RULES_VERSION, Finding, PrivacyBlocked, Scope, bind, classify_column, merge, privacy,
 )
-from sheetmate.privacy.rules import cell_text
+from sheetmate.privacy.rules import ALL_KINDS, cell_text
 from sheetmate.services.files import service as file_service
 from sheetmate.services.privacy import adaptive
 
@@ -55,6 +56,7 @@ def start() -> None:
     """准备脱敏模块、挂上数据库记录、载入已识别的列名。可重复调用。"""
     global _started
     privacy.configure(settings.data_dir)
+    sync_privacy_settings()          # 设置页里的总开关和规则开关
     if not _started:
         privacy.log.add_sink(_store_event)
         # 只在第一次载入：之后每识别一个文件，会把新发现的敏感列增量加进注册表，不用每轮都扫全表
@@ -287,6 +289,7 @@ async def _classify_file(profile: dict[str, Any], llm: Any | None) -> tuple[list
                 jobs.append(ask(index, sheet.get("sheet", ""), batch, {name: rules.get(name) for name in batch}))
         for index, answer in _first_error(await asyncio.gather(*jobs, return_exceptions=True)):
             verdicts.update({(index, name): finding for name, finding in answer.items()})
+    active = (privacy.guard.active if privacy.guard is not None else ALL_KINDS) | {"mixed"}
     sheets, scanned = [], 0
     for index, (sheet, values, columns, rules) in enumerate(plans):
         scanned += len(columns)
@@ -295,7 +298,7 @@ async def _classify_file(profile: dict[str, Any], llm: Any | None) -> tuple[list
         for name, column in columns.items():
             texts = [text for text in (cell_text(v) for v in values.get(name, [])[:200]) if text]
             finding = merge(rules.get(name), model.get(name), reviewed=llm is not None, texts=texts)
-            if finding is not None:
+            if finding is not None and finding.kind in active:
                 found.append(_column_report(name, finding, int(sheet.get("rows") or 0), column.get("null_rate", 0)))
         if found:
             sheets.append({"sheet": sheet.get("sheet", ""), "rows": int(sheet.get("rows") or 0), "columns": found})
@@ -475,15 +478,35 @@ def _remember(file_id: str, profile: dict[str, Any], sheets: list[dict[str, Any]
     return protected
 
 
+def needs_scan(kind: str, profile: dict[str, Any] | None) -> bool:
+    """哪些文件要在对话开头脱敏：上传的原件、样例，和之前交付过的结果文件（再拿来分析时它们是输入，里面是还原后的真实内容）。
+
+    处理过程中产生的中间文件、还没交付的候选结果不用：它们是从已脱敏的数据算出来的，发给 AI 时仍逐条检查；
+    本轮刚生成的结果要到被再次分析时才需要脱敏。"""
+    if kind in {"input", "expected"}:
+        return True
+    profile = profile or {}
+    return kind == "output" and not profile.get("intermediate") and profile.get("delivery_status") in {None, "final"}
+
+
+def _is_ready(item: dict[str, Any], model: "_Model") -> bool:
+    row = _cached(item["id"])
+    return row is not None and row[0] == _fingerprint(item["profile"], model.id) and row[1] == "ready"
+
+
 async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], emit: Emit,
-                        workspace: Any = None) -> dict[str, Any] | None:
+                        workspace: Any = None, sources_only: bool = False) -> dict[str, Any] | None:
     """对话的第一步：给这一轮涉及的表格文件脱敏。上传时已经识别过的文件直接用结果，没识别过的现在识别。
 
     用户自己打的字不交给脱敏模型（私部署模型慢，每轮都问不现实），只在发给 AI 时用规则检查（见 Guard）。
     返回要展示给用户的报告（没有表格文件时返回 None）；
+    只有这一轮真的做了脱敏（有文件要新识别）才把「已脱敏」的报告发给用户：文件都已脱敏过就不再提示，状态在面板的「脱敏」页里看。
+    sources_only：只处理需要脱敏的文件（见 needs_scan），对话开头用。
     失败时先把「已停止」的报告发给用户，再抛出 PrivacyBlocked。
     """
     start()
+    if not privacy.enabled:
+        return None                 # 设置页关闭了脱敏：不处理文件，和普通对话一样
     global _dirty
     if _dirty:                      # 有文件被删除过：先清掉它们的识别记录，注册表里的列名才不会一直留着
         _dirty = False
@@ -491,7 +514,8 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
     ids = [item["file_id"] for item in files if item.get("file_id")]
     with session_scope() as db:
         snapshot = [{"id": record.id, "filename": record.filename, "profile": record.profile or {}, "path": record.stored_path}
-                    for record in db.scalars(select(FileRecord).where(FileRecord.id.in_(ids))) if (record.profile or {}).get("sheets")]
+                    for record in db.scalars(select(FileRecord).where(FileRecord.id.in_(ids)))
+                    if (record.profile or {}).get("sheets") and (not sources_only or needs_scan(record.kind, record.profile))]
     if not snapshot:
         return None
 
@@ -501,7 +525,9 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
         reason = f"脱敏模型无法使用（{exc}），为保护数据已停止处理，没有任何内容发给 AI。"
         return await _stop(conversation_id, emit, "model_rules", None, reason, [])
 
-    await emit({"type": "privacy_start", "files": [item["filename"] for item in snapshot]})
+    todo = [item for item in snapshot if not _is_ready(item, model)]
+    if todo:                                            # 有文件要新脱敏才提示；都已脱敏过的不打扰
+        await emit({"type": "privacy_start", "files": [item["filename"] for item in todo]})
     reports: list[dict[str, Any]] = []
     protected_columns: dict[str, dict[str, str]] = {}   # 文件 → {地址/微信列名: 类型}，用来登记工作区里的整列真实值
     try:
@@ -546,6 +572,10 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
 
     if not reports:
         return None
+    done = [item for item in reports if not item["cached"]]
+    if not todo and not done:
+        return None                                     # 全部沿用之前的结果：不展示
+    reports = done or reports
     notes = [] if model.llm is not None else ["未配置脱敏模型，仅使用内置规则识别；在设置页配置后识别会更全面"]
     totals = {"files": len(reports), "columns": sum(len(s["columns"]) for f in reports for s in f["sheets"]),
               "values": sum(c["values"] for f in reports for s in f["sheets"] for c in s["columns"])}
@@ -563,6 +593,8 @@ async def identify_uploaded(file_id: str) -> None:
     失败不影响上传：记成「识别失败」，等对话里用到这个文件时再识别一次。"""
     try:
         start()
+        if not privacy.enabled:
+            return                                        # 脱敏已关闭：上传时不识别，之后重新打开，对话里用到时会自动识别
         with session_scope() as db:
             record = db.get(FileRecord, file_id)
             if record is None or not (record.profile or {}).get("sheets"):
@@ -613,7 +645,8 @@ async def _silent(_: dict[str, Any]) -> None:
 
 
 def _unfinished_files(conversation_id: str) -> list[str]:
-    """这个会话涉及的表格文件里，还没有「识别完成」记录的（对话进行中新生成的结果文件就是这样）。只读，不改任何记录。"""
+    """这个会话里上传的原件和样例中，还没有「识别完成」记录的。对话中途生成的结果文件不算：它们是从已脱敏的数据算出来的，
+    到被再次分析时才需要脱敏。只读，不改任何记录。"""
     from pathlib import Path
 
     from sheetmate.db.models import FileConversation
@@ -627,7 +660,7 @@ def _unfinished_files(conversation_id: str) -> list[str]:
         if conversation.customer_id:
             scope.append(file_service.customer_file_condition(conversation.customer_id))
         records = db.scalars(select(FileRecord).where(or_(*scope), file_service.current_file_condition(),
-                                                      FileRecord.kind.in_(("input", "expected", "output"))))
+                                                      FileRecord.kind.in_(("input", "expected"))))
         candidates = [r.id for r in records if (r.profile or {}).get("sheets") and Path(r.stored_path).is_file()]
         if not candidates:
             return []
@@ -640,6 +673,8 @@ async def ensure_complete(conversation_id: str) -> None:
 
     对话进行中新生成的结果文件会在这里当场识别；识别不成功（或超时）就抛出 PrivacyBlocked，本次对话直接结束，
     不会有任何内容发给 AI。检查本身只是一次数据库查询，文件都脱敏完成时几乎没有开销。"""
+    if not sync_privacy_settings():
+        return
     pending = await asyncio.to_thread(_unfinished_files, conversation_id)
     if not pending:
         return
@@ -773,6 +808,8 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
             if not (record.profile or {}).get("sheets"):
                 continue
             row = rows.get(record.id)
+            if row is None and record.kind == "output":
+                continue          # 还没轮到脱敏的结果文件（中间文件、本轮刚交付的）：不列出，不显示成「识别中」
             ready = row is not None and row.status == "ready"
             files.append({"file_id": record.id, "filename": record.filename, "cached": False,
                           "source": row.source if row is not None else None,
@@ -802,7 +839,7 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
     used = next((row.model for row in sorted(rows.values(), key=lambda r: r.updated_at, reverse=True)
                  if row.mode == "model_rules" and row.model), None)
     cfg = get_privacy_llm_settings() if configured else None
-    return {"mode": "model_rules" if configured else "rules", "model": used or (cfg.model if cfg else None),
+    return {"enabled": privacy.enabled, "mode": "model_rules" if configured else "rules", "model": used or (cfg.model if cfg else None),
             "model_configured": configured,
             "totals": {"files": len(files), "columns": columns, "values": values, "requests": requests, "blocked": blocked,
                        "restored": restored},

@@ -12,17 +12,18 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from typing import Iterable
 
 from sheetmate.privacy.detect import ACTIONS, Finding, classify_column, merge
 from sheetmate.privacy.events import KINDS, PrivacyLog, Scope, bind, current_scope
 from sheetmate.privacy.guard import Guard, PrivacyBlocked, Registry, Stats, StreamRestorer
-from sheetmate.privacy.rules import ACTION_LABELS, KIND_LABELS, RULES_VERSION, header_kind
+from sheetmate.privacy.rules import ACTION_LABELS, KIND_LABELS, RULES, RULES_VERSION, Rule, active_kinds, header_kind
 from sheetmate.privacy.vault import TOKEN_RE, Vault
 
 __all__ = [
     "ACTIONS", "ACTION_LABELS", "KINDS", "KIND_LABELS", "RULES_VERSION", "TOKEN_RE", "Finding", "Guard", "Privacy",
     "PrivacyBlocked", "PrivacyLog", "Registry", "Scope", "Stats", "StreamRestorer", "Vault", "bind", "classify_column",
-    "current_scope", "header_kind", "merge", "privacy",
+    "RULES", "Rule", "active_kinds", "current_scope", "header_kind", "merge", "privacy",
 ]
 
 
@@ -37,7 +38,16 @@ class Privacy:
         self.data_dir: Path | None = None
         self.healthy = False
         self.error: str | None = None
+        self.enabled = True                                   # 总开关（设置页）：关闭后不做任何脱敏，和普通调用一样
+        self.rule_ids: frozenset[str] = frozenset(rule.id for rule in RULES)   # 打开的规则
         self._lock = threading.RLock()
+
+    def apply(self, enabled: bool, rule_ids: Iterable[str]) -> None:
+        """应用设置页的脱敏设置（开关和每条规则）。随时可调用，立即生效。"""
+        with self._lock:
+            self.enabled, self.rule_ids = bool(enabled), frozenset(rule_ids)
+            if self.guard is not None:
+                self.guard.set_active(active_kinds(self.rule_ids))
 
     @property
     def configured(self) -> bool:
@@ -59,7 +69,8 @@ class Privacy:
                 self.guard, self.healthy, self.error = None, False, f"脱敏模块无法初始化：{exc}"
                 self.log.emit("error", "错误", self.error)
                 return
-            failures = self.self_check()
+            failures = self.self_check()          # 自检用全部类型；通过之后才按设置页打开的规则收窄
+            self.guard.set_active(active_kinds(self.rule_ids))
             self.healthy, self.error = not failures, ("；".join(failures) if failures else None)
             if failures:
                 self.log.emit("error", "启动", f"脱敏模块自检失败，已拒绝向模型发送任何内容：{self.error}")

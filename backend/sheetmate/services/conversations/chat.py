@@ -743,7 +743,8 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
 
         shown = resumed and any(item.get("type") == "privacy_report" for item in stored)
         await privacy_service.prepare_files(conversation_id=conversation_id, files=host.list_files(),
-                                            emit=_already_shown if shown else emit, workspace=ctx.ws)
+                                            emit=_already_shown if shown else emit, workspace=ctx.ws,
+                                            sources_only=True)
         current = privacy_scope()
         if current is not None:
             current.ready = True

@@ -8,13 +8,40 @@ from __future__ import annotations
 import numbers
 import re
 import unicodedata
+from dataclasses import dataclass
+from typing import Iterable
 
-RULES_VERSION = "4"   # 规则变了就加一：已缓存的识别结果会按新规则重新识别
+RULES_VERSION = "5"   # 规则变了就加一：已缓存的识别结果会按新规则重新识别
 
 KIND_LABELS = {
     "phone": "手机号", "landline": "座机", "email": "邮箱", "im": "微信/QQ",
     "address": "地址", "mixed": "含联系方式的文本",
 }
+
+
+@dataclass(frozen=True)
+class Rule:
+    """一条脱敏规则：在设置页里可以单独开关。以后要增加规则，在 RULES 里加一项（并让识别代码认得它的 kinds）即可。"""
+
+    id: str
+    name: str
+    description: str
+    kinds: tuple[str, ...]      # 这条规则负责的内容类型（对应 KIND_LABELS 里的键）
+
+
+RULES: tuple[Rule, ...] = (
+    Rule("phone", "电话号码", "手机号和座机，包括已被部分隐藏的写法（如 152****1234）", ("phone", "landline")),
+    Rule("address", "详细地址", "带街道、门牌、小区、楼栋的详细地址，整个地址一起替换；只有省市的不处理", ("address",)),
+)
+ALL_KINDS = frozenset(KIND_LABELS)
+
+
+def active_kinds(enabled_rules: Iterable[str]) -> frozenset[str]:
+    """打开的规则负责的类型；「含联系方式的文本」（mixed）只是逐格扫描的方式，永远可用，真正遮什么仍由各类型决定。"""
+    wanted = set(enabled_rules)
+    return frozenset(kind for rule in RULES if rule.id in wanted for kind in rule.kinds) | {"mixed"}
+
+
 # 令牌前缀：手机和座机共用 TEL，AI 不需要区分
 KIND_PREFIX = {"phone": "TEL", "landline": "TEL", "email": "MAIL", "im": "IM", "address": "ADDR"}
 ACTION_LABELS = {

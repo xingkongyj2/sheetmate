@@ -23,7 +23,7 @@ from sheetmate.privacy.address import find_addresses, split_address
 from sheetmate.privacy.detect import classify_column
 from sheetmate.privacy.events import PrivacyLog
 from sheetmate.privacy.rules import (
-    ADDR_CTX_RE, EMAIL_OBF_RE, EMAIL_RE, IM_CTX_RE, KIND_PREFIX, LANDLINE_COMPACT_RE, LANDLINE_MASKED_RE, LANDLINE_RE,
+    ADDR_CTX_RE, ALL_KINDS, EMAIL_OBF_RE, EMAIL_RE, IM_CTX_RE, KIND_PREFIX, LANDLINE_COMPACT_RE, LANDLINE_MASKED_RE, LANDLINE_RE,
     MOBILE_MASKED_RE, MOBILE_RE, PHONE_CTX_RE,
     address_context_ok, cell_text, fold, header_kind, is_label, is_mobile, normalize_header, phone_context_ok,
 )
@@ -140,17 +140,24 @@ def _cannot_be(kind: str, value: object, text: str) -> bool:
 class Guard:
     def __init__(self, vault: Vault, registry: Registry, log: PrivacyLog) -> None:
         self.vault, self.registry, self.log = vault, registry, log
-        self._cache: OrderedDict[tuple[int, int, str], tuple[str, Counter[str], Counter[str]]] = OrderedDict()
+        self._cache: OrderedDict[tuple[int, int, frozenset[str], str], tuple[str, Counter[str], Counter[str]]] = OrderedDict()
         self._cache_lock = threading.Lock()
-        self._cache_costs: dict[tuple[int, int, str], int] = {}
+        self._cache_costs: dict[tuple[int, int, frozenset[str], str], int] = {}
         self._cache_bytes = 0
         self._snippets: tuple[int, tuple[dict[str, str], str, list[int]]] | None = None
+        self.active: frozenset[str] = ALL_KINDS      # 打开的规则负责的类型；没打开的类型一律不处理（见设置页的脱敏规则）
+
+    def set_active(self, kinds: Iterable[str]) -> None:
+        self.active = frozenset(kinds)
+
+    def _off(self, kind: str) -> bool:
+        return kind != "mixed" and kind not in self.active
 
     # ------------------------------------------------------------------ 单元格
 
     def _token_cell(self, kind: str, value: object, stats: Stats, method: str) -> Any:
         text = cell_text(value)
-        if not text or TOKEN_RE.search(text):
+        if not text or TOKEN_RE.search(text) or self._off(kind):
             return value
         if is_label(text):
             return value             # 列头、「收货地址：」这类标签：不是内容，不换令牌
@@ -200,12 +207,12 @@ class Guard:
     def _column_kind(self, name: object, values: Iterable[object]) -> str | None:
         kind = self.registry.kind_for(name)
         if kind:
-            return kind
+            return None if self._off(kind) else kind
         header = header_kind(name)
         if header:
-            return header[0]
+            return None if self._off(header[0]) else header[0]
         finding = classify_column(name, values)
-        return finding.kind if finding else None
+        return finding.kind if finding and not self._off(finding.kind) else None
 
     # ------------------------------------------------------------------ 1 JSON（递归：JSON 里的字符串可能又是 JSON、表格或样本行）
 
@@ -388,7 +395,7 @@ class Guard:
 
     def register_values(self, kind: str, values: Iterable[object]) -> int:
         """登记敏感列里的真实值：之后不管它出现在发给模型的什么文字里，都会被换成令牌。只登记地址和微信/QQ。"""
-        if kind not in {"address", "im"}:
+        if kind not in {"address", "im"} or self._off(kind):
             return 0
         kept = []
         for value in values:
@@ -470,7 +477,7 @@ class Guard:
         """扫描一段文字里的联系方式和地址。找位置都在「全角转半角」之后的文字上，替换的却是原文那一段（两者位置一一对应），
         所以全角写法也能识别，还原时拿回的是原样的值。"""
         # 先处理地址：地址里夹着的电话号码一起进地址令牌，还原时整段原样回来
-        for start, end in reversed(find_addresses(_shadow(text))):
+        for start, end in reversed(find_addresses(_shadow(text)) if "address" in self.active else []):
             segment = text[start:end]
             if TOKEN_RE.search(segment):
                 continue
@@ -504,6 +511,8 @@ class Guard:
         return text
 
     def _pattern_token(self, kind: str, value: str, stats: Stats, method: str = "pattern") -> str:
+        if self._off(kind):
+            return value
         stats.add(kind, method)
         return self.vault.token(kind, value)
 
@@ -512,17 +521,19 @@ class Guard:
     def leaks(self, text: str) -> list[str]:
         """处理完之后再查一遍：还剩下什么联系方式或地址（令牌本身不算）。"""
         bare = fold(TOKEN_RE.sub("§", text))
+        active = self.active
         found = []
-        if EMAIL_RE.search(bare) or EMAIL_OBF_RE.search(bare):
+        if "email" in active and (EMAIL_RE.search(bare) or EMAIL_OBF_RE.search(bare)):
             found.append("邮箱")
-        if MOBILE_RE.search(bare) or MOBILE_MASKED_RE.search(bare) or any(phone_context_ok(m.group(1)) for m in PHONE_CTX_RE.finditer(bare)):
+        if "phone" in active and (MOBILE_RE.search(bare) or MOBILE_MASKED_RE.search(bare)
+                                  or any(phone_context_ok(m.group(1)) for m in PHONE_CTX_RE.finditer(bare))):
             found.append("手机号")
-        if LANDLINE_RE.search(bare) or LANDLINE_COMPACT_RE.search(bare) or LANDLINE_MASKED_RE.search(bare):
+        if "landline" in active and (LANDLINE_RE.search(bare) or LANDLINE_COMPACT_RE.search(bare) or LANDLINE_MASKED_RE.search(bare)):
             found.append("座机")
-        if IM_CTX_RE.search(bare):
+        if "im" in active and IM_CTX_RE.search(bare):
             found.append("微信/QQ")
-        if find_addresses(bare) or any(address_context_ok(m.group(1)) and split_address(m.group(1))[1].strip()
-                                       for m in ADDR_CTX_RE.finditer(bare)):
+        if "address" in active and (find_addresses(bare) or any(address_context_ok(m.group(1)) and split_address(m.group(1))[1].strip()
+                                                               for m in ADDR_CTX_RE.finditer(bare))):
             found.append("地址")
         return found
 
@@ -532,7 +543,7 @@ class Guard:
         stats.texts += 1
         cacheable = len(text) >= _CACHE_MIN_CHARS
         # 登记了新的敏感值、或识别出新的敏感列，旧的处理结果就不能再用
-        key = (self.vault.known_version, self.registry.version, text)
+        key = (self.vault.known_version, self.registry.version, self.active, text)
         if cacheable:
             with self._cache_lock:
                 hit = self._cache.get(key)
