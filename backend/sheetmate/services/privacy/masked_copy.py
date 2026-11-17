@@ -23,7 +23,7 @@ from sheetmate.db.session import session_scope
 from sheetmate.engine.tables.sql import frame_rows
 from sheetmate.engine.workbooks.reader import SheetData, read_workbook
 from sheetmate.privacy import ACTION_LABELS, ACTIONS, KIND_LABELS, Scope, Stats, bind, privacy
-from sheetmate.privacy.rules import cell_text, is_landline_number, is_numeric_cell
+from sheetmate.privacy.rules import cell_text, is_numeric_cell
 from sheetmate.services.privacy import service as privacy_service
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -105,9 +105,9 @@ def _meta(name: str, kind: str | None, info: dict[str, Any] | None) -> dict[str,
 
 
 def _may_hold_mobile(series: pd.Series) -> bool:
-    """数字列里有没有可能是手机号或被吃掉前导 0 的座机（10～11 位，没有就整列跳过，不用逐格检查）。"""
+    """数字列里有没有可能是 11 位手机号（没有就整列跳过，不用逐格检查）。"""
     try:
-        return bool(series.abs().between(1e9, 2e10).any())
+        return bool(series.abs().between(1.3e10, 1.99e10).any())
     except (TypeError, ValueError):
         return True
 
@@ -131,8 +131,6 @@ def _assert_clean(frame: pd.DataFrame) -> None:
     # 数字单元格也要查：手机号、座机常被表格存成数字
     text = _JOIN.join(cell_text(value) for value in cells if isinstance(value, str) or is_numeric_cell(value))
     remaining = privacy.require().leaks(text)
-    if any(is_landline_number(value) for value in cells) and "座机" not in remaining:
-        remaining = [*remaining, "座机"]   # 被吃掉前导 0 的数字座机，文本规则认不出
     if remaining:
         raise ServiceError(f"脱敏副本里仍有{'、'.join(remaining)}没能处理，为保护数据已停止。")
 

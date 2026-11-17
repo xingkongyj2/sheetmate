@@ -9,7 +9,7 @@ import numbers
 import re
 import unicodedata
 
-RULES_VERSION = "2"   # 规则变了就加一：已缓存的识别结果会按新规则重新识别
+RULES_VERSION = "4"   # 规则变了就加一：已缓存的识别结果会按新规则重新识别
 
 KIND_LABELS = {
     "phone": "手机号", "landline": "座机", "email": "邮箱", "im": "微信/QQ",
@@ -19,7 +19,7 @@ KIND_LABELS = {
 KIND_PREFIX = {"phone": "TEL", "landline": "TEL", "email": "MAIL", "im": "IM", "address": "ADDR"}
 ACTION_LABELS = {
     "tokenize": "整列替换为令牌",
-    "address_detail": "保留省市区，详细地址替换为令牌",
+    "address_detail": "整个详细地址替换为令牌（只有省市的不动）",
     "cell_scan": "逐个单元格扫描替换",
 }
 
@@ -47,7 +47,8 @@ _HEADER_EN_WORDS = {
 # 即使列名里有关键词，这些词说明它是别的东西（邮编、编号、品牌…）：不作为列名依据
 _HEADER_NEGATIVE = ("邮编", "邮政编码", "区号", "地址编码", "地址编号", "地址类型", "是否", "品牌", "型号", "壳", "膜", "次数", "数量", "金额")
 # 订单号、运单号这类长数字列，内容上像手机号也不能据此整列处理
-_ID_LIKE_HEADER = ("单号", "编号", "编码", "订单", "运单", "流水", "批次", "条码", "id")
+_ID_LIKE_HEADER = ("单号", "编号", "编码", "订单", "运单", "流水", "批次", "条码", "id",
+                   "月结", "账号", "账户", "客户号", "合同", "卡号", "票号", "工号")
 
 _EN_TOKEN = re.compile(r"[A-Za-z]+")
 
@@ -89,8 +90,9 @@ def is_label(text: object) -> bool:
 
 
 def is_id_like_header(name: object) -> bool:
+    """编号类的列（月结号、账号、单号…）：内容长得像电话也不能据此整列处理。以「号」结尾又不是电话/微信这类联系方式列名的，也算。"""
     text = normalize_header(name)
-    return any(word in text for word in _ID_LIKE_HEADER)
+    return any(word in text for word in _ID_LIKE_HEADER) or (text.endswith("号") and header_kind(name) is None)
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +102,10 @@ def is_id_like_header(name: object) -> bool:
 _SEPARATORS = re.compile(r"[\s\-—()（）+]")
 _MOBILE_FULL = re.compile(r"(?:86|0086)?1[3-9]\d{9}")
 _LANDLINE_FULL = re.compile(r"0\d{9,11}(?:转\d{1,6})?")
+# 来源系统已经遮了一部分的号码（152****1234、0571****8888）：同样要换成令牌
+_MASK = "[*＊xX×●•]"
+_MOBILE_MASKED_FULL = re.compile(rf"(?:86|0086)?1[3-9]\d{_MASK}{{3,6}}\d{{2,4}}")
+_LANDLINE_MASKED_FULL = re.compile(rf"0\d{{2,3}}{_MASK}{{3,6}}\d{{2,4}}")
 _EMAIL_FULL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
 
 
@@ -118,32 +124,19 @@ def _compact(text: str) -> str:
 
 
 def is_mobile(text: str) -> bool:
-    return bool(_MOBILE_FULL.fullmatch(_compact(text)))
+    compact = _compact(text)
+    return bool(_MOBILE_FULL.fullmatch(compact) or _MOBILE_MASKED_FULL.fullmatch(compact))
 
 
 def is_landline(text: str) -> bool:
     # 400/800 是企业热线，不是个人号码
-    return bool(_LANDLINE_FULL.fullmatch(_compact(text)))
-
-
-# Excel 把 057188888888 存成数字会吃掉前导 0：变成 57188888888（11 位）或 1088888888（10 位）。
-# 这里认「去掉 0 之后的座机」：2 位区号（10、20～29）+ 8 位，或 3 位区号（3xx～9xx）+ 7～8 位。
-# 只用于数字类型的单元格；日期时间戳样式的整数（2024010112）排除，其余宁可多遮。
-_BARE_LANDLINE = re.compile(r"(?:10|2\d)\d{8}|[3-9]\d{9,10}")
-_DATE_STAMP = re.compile(r"(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{2}")
+    compact = _compact(text)
+    return bool(_LANDLINE_FULL.fullmatch(compact) or _LANDLINE_MASKED_FULL.fullmatch(compact))
 
 
 def is_numeric_cell(value: object) -> bool:
     """数字类型的单元格（含 numpy 数字）；布尔不算。"""
     return isinstance(value, numbers.Real) and not isinstance(value, bool)   # numpy 的整数、小数也是 numbers.Real
-
-
-def is_landline_number(value: object) -> bool:
-    """数字单元格是不是被吃掉前导 0 的座机；字符串、布尔、带小数的数都不算。"""
-    if not is_numeric_cell(value):
-        return False
-    text = cell_text(value)
-    return text.isdigit() and bool(_BARE_LANDLINE.fullmatch(text)) and not _DATE_STAMP.fullmatch(text)
 
 
 def is_email(text: str) -> bool:
@@ -162,6 +155,9 @@ LANDLINE_RE = re.compile(r"(?<![\dA-Za-z])(?:\(0\d{2,3}\)[\s-]?|0\d{2,3}[\s-])\d
 # 紧凑座机（057188888888）：区号必须是真实的区号开头（010、02x、03xx～09xx），再加 7～8 位，共 11～12 位；
 # 这样不会碰到不以 0 开头的运单号、订单号
 LANDLINE_COMPACT_RE = re.compile(r"(?<![\dA-Za-z])0(?:10|2\d|[3-9]\d{2})\d{7,8}(?!\d)")
+# 半隐藏的手机号、座机：152****1234、152 **** 1234、0571-****8888
+MOBILE_MASKED_RE = re.compile(rf"(?<![\dA-Za-z])(?:(?:\+|00)?86[\s-]?)?1[3-9]\d[\s-]?{_MASK}{{3,6}}[\s-]?\d{{2,4}}(?!\d)")
+LANDLINE_MASKED_RE = re.compile(rf"(?<![\dA-Za-z])0\d{{2,3}}[\s-]?{_MASK}{{3,8}}[\s-]?\d{{2,4}}(?!\d)")
 # 变形邮箱：user(at)example.com、user[at]example.com
 EMAIL_OBF_RE = re.compile(r"(?<![\w.+\-])[A-Za-z0-9._%+\-]+\s*[(\[]\s*at\s*[)\]]\s*[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}(?![\w\-])", re.I)
 

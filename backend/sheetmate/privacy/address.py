@@ -50,7 +50,7 @@ CITIES = (
 _PROV = "|".join(sorted(PROVINCES, key=len, reverse=True))
 _CITY = "|".join(sorted(CITIES, key=len, reverse=True))
 _REGION_ONLY = re.compile(
-    rf"^(?:(?:{_PROV})(?:省|市|自治区|特别行政区)?)?(?:(?:{_CITY})(?:市|地区|盟|自治州)?)?$")
+    rf"^(?:(?:{_PROV})(?:省|市|自治区|特别行政区)?|(?:{_CITY})(?:市|地区|盟|自治州)?)+$")   # 可重复：「武汉武汉」「湖北武汉」
 _CJK = "一-龥"
 _BODY = rf"[{_CJK}A-Za-z0-9\-—#（）()·\s]"
 

@@ -27,6 +27,8 @@ class Scope:
     user_id: int | None = None
     required: bool = False
     ready: bool = False
+    # 每次调用正常模型之前再确认一遍「用到的文件都脱敏完成了」；没完成就抛出 PrivacyBlocked（由服务层提供）
+    verify: Any = None
 
 
 _scope: contextvars.ContextVar[Scope | None] = contextvars.ContextVar("sheetmate_privacy_scope", default=None)

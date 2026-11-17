@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 from contextlib import aclosing
 from copy import deepcopy
@@ -746,6 +747,8 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         current = privacy_scope()
         if current is not None:
             current.ready = True
+            # 之后每次调用 AI 之前再确认一遍：对话中途生成的文件没脱敏完成，就直接结束本次对话
+            current.verify = functools.partial(privacy_service.ensure_complete, conversation_id)
         history = await _history(conversation_id, llm, emit, current_message_id=message_id)
         _limit_history_images(history, ctx.image_parts)
         ctx.runtime_image_parts = [part for item in history for part in item.get("image_parts", [])] + ctx.image_parts

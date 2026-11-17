@@ -68,6 +68,16 @@ class GuardedLLM:
             raise self._block("本轮用到的文件还没有完成脱敏，为保护数据已停止处理，没有任何内容发给 AI。")
         return guard
 
+    async def _verify_files(self) -> None:
+        """每次发给 AI 之前，确认这个会话里的表格文件都脱敏完成了；没完成就结束本次对话，不发任何内容。"""
+        scope = current_scope()
+        if scope is None or scope.verify is None:
+            return
+        try:
+            await scope.verify()
+        except PrivacyBlocked as exc:
+            raise self._block(str(exc)) from exc
+
     def _report(self, stats: Stats, messages: int) -> None:
         if stats.total:
             text = (f"向 AI 发送 {messages} 条消息前已检查，替换 {stats.total} 个联系方式/地址（{_kinds_text(stats)}），"
@@ -129,6 +139,7 @@ class GuardedLLM:
     # ------------------------------------------------------------------ 模型接口
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, **extra: Any) -> Any:
+        await self._verify_files()
         guard, protected = self._protect_messages(messages)
         message = await self._inner.chat(protected, tools, **extra)
         counter: Counter[str] = Counter()
@@ -138,6 +149,7 @@ class GuardedLLM:
 
     async def stream_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                           *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
+        await self._verify_files()
         guard, protected = self._protect_messages(messages)
         counter: Counter[str] = Counter()
         content, reasoning = guard.restorer(counter=counter), guard.restorer(counter=counter)
@@ -196,6 +208,7 @@ class GuardedLLM:
         return SimpleNamespace(choices=[SimpleNamespace(index=0, finish_reason=None, delta=delta)], usage=None, model=None)
 
     async def complete_json(self, prompt: str, system: str | None = None, *args: Any, **kwargs: Any) -> Any:
+        await self._verify_files()
         guard, (prompt_p, system_p) = self._protect_strings(prompt, system)
         value = await self._inner.complete_json(prompt_p, system_p, *args, **kwargs)
         counter: Counter[str] = Counter()

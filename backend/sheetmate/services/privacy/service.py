@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, AsyncIterator, Awaitable, Callable, Iterable
 
-from sqlalchemy import delete, event, select
+from sqlalchemy import delete, event, or_, select
 
 from sheetmate.agent.llm import aux_json, get_privacy_llm, privacy_llm_configured
 from sheetmate.core.config.settings import get_privacy_llm_settings, settings
@@ -179,15 +179,28 @@ _MODEL_SYSTEM = (
 )
 
 
-def _model_prompt(sheet_name: str, batch: dict[str, list[Any]]) -> str:
-    columns = [{"name": name, "samples": _model_samples(values)} for name, values in batch.items()]
+def _hint(finding: Finding | None) -> str | None:
+    return None if finding is None else f"{KIND_LABELS[finding.kind]}（{finding.reason}）"
+
+
+def _model_prompt(sheet_name: str, batch: dict[str, list[Any]], hints: dict[str, Finding | None] | None = None) -> str:
+    hints = hints or {}
+    columns = []
+    for name, values in batch.items():
+        column = {"name": name, "samples": _model_samples(values)}
+        if (hint := _hint(hints.get(name))) is not None:
+            column["rule_hint"] = hint            # 规则的初步判断，只供参考：内容明显不是时请改判 none
+        columns.append(column)
     return (
-        "判断下面这张表的每一列属于哪一类：\n"
+        "这是物流/电商类表格。表里需要保护的只有两种内容：联系方式（手机号、座机、邮箱、微信或 QQ 号）和详细地址"
+        "（带街道、门牌、小区、楼栋等的收件/寄件/取件/派送地址）。请结合列名和样例内容，判断下面每一列属于哪一类：\n"
         "- phone：手机号；landline：座机；email：邮箱；im：微信号或 QQ 号\n"
-        "- address：地址（收件、寄件、取件、派送等任何详细地址，包括只写了街道门牌、没有省市的）\n"
-        "- mixed：整体是普通文字（比如备注），但部分单元格里夹着手机号、邮箱或地址\n"
-        "- none：都不是（运单号、订单号、金额、日期、重量、省市区名称、网点名称等都选 none）\n"
-        "宁可多判，不要漏判：拿不准是不是联系方式或地址时，选对应的类别，不要选 none。\n"
+        "- address：详细地址（包括只写了街道门牌、没有省市的）\n"
+        "- mixed：整体是普通文字（比如备注），但部分单元格里夹着手机号、邮箱或详细地址\n"
+        "- none：都不是。人名、公司或店铺名称、网点名称、只有省/市/区的行政区、"
+        "各类编号（运单号、订单号、月结号、账号）、金额、日期、重量，一律选 none\n"
+        "以样例内容为准：列名像电话但样例里没有号码、列名像地址但样例只有省市，都选 none；"
+        "列名看不出来但样例里确实是号码或详细地址，按实际内容选。每个判断都要在 reason 里写出依据的样例值。\n"
         "每一列都必须有一项，name 必须和下面的列名完全一致。输出格式：\n"
         '{"columns":[{"name":"列名","category":"phone|landline|email|im|address|mixed|none","reason":"一句话依据"}]}\n\n'
         f"表：{sheet_name}\n列：{json.dumps(columns, ensure_ascii=False)}"
@@ -214,12 +227,13 @@ def _read_verdicts(value: Any, batch: dict[str, list[Any]]) -> tuple[str, dict[s
     return "", verdicts
 
 
-async def _ask_model(llm: Any, sheet_name: str, batch: dict[str, list[Any]]) -> dict[str, Finding | None]:
+async def _ask_model(llm: Any, sheet_name: str, batch: dict[str, list[Any]],
+                     hints: dict[str, Finding | None] | None = None) -> dict[str, Finding | None]:
     """问脱敏模型；结果不完整或不合法就再问一次（并告诉它上次错在哪），还不行就停止（宁可不处理）。"""
     problem, correction = "", ""
     for _ in range(2):
         with bind_trace(None):  # 这里要读真实样例，不能写进对话调试日志
-            result = await aux_json(llm, _model_prompt(sheet_name, batch) + correction, system=_MODEL_SYSTEM,
+            result = await aux_json(llm, _model_prompt(sheet_name, batch, hints) + correction, system=_MODEL_SYSTEM,
                                     timeout=MODEL_TIMEOUT, label="脱敏模型识别")
         if result.value is None:
             problem = result.reason or "没有返回结果"
@@ -260,16 +274,17 @@ async def _classify_file(profile: dict[str, Any], llm: Any | None) -> tuple[list
     if llm is not None:
         slots = asyncio.Semaphore(MODEL_PARALLEL)
 
-        async def ask(index: int, sheet_name: str, batch: dict[str, list[Any]]) -> tuple[int, dict[str, Finding | None]]:
+        async def ask(index: int, sheet_name: str, batch: dict[str, list[Any]],
+                      hints: dict[str, Finding | None]) -> tuple[int, dict[str, Finding | None]]:
             async with slots:
-                return index, await _ask_model(llm, sheet_name, batch)
+                return index, await _ask_model(llm, sheet_name, batch, hints)
 
         jobs = []
-        for index, (sheet, values, columns, _) in enumerate(plans):
+        for index, (sheet, values, columns, rules) in enumerate(plans):
             names = list(columns)
             for start_at in range(0, len(names), MODEL_BATCH):
                 batch = {name: values.get(name, []) for name in names[start_at:start_at + MODEL_BATCH]}
-                jobs.append(ask(index, sheet.get("sheet", ""), batch))
+                jobs.append(ask(index, sheet.get("sheet", ""), batch, {name: rules.get(name) for name in batch}))
         for index, answer in _first_error(await asyncio.gather(*jobs, return_exceptions=True)):
             verdicts.update({(index, name): finding for name, finding in answer.items()})
     sheets, scanned = [], 0
@@ -278,7 +293,8 @@ async def _classify_file(profile: dict[str, Any], llm: Any | None) -> tuple[list
         model = {name: verdicts.get((index, name)) for name in columns}
         found = []
         for name, column in columns.items():
-            finding = merge(rules.get(name), model.get(name))
+            texts = [text for text in (cell_text(v) for v in values.get(name, [])[:200]) if text]
+            finding = merge(rules.get(name), model.get(name), reviewed=llm is not None, texts=texts)
             if finding is not None:
                 found.append(_column_report(name, finding, int(sheet.get("rows") or 0), column.get("null_rate", 0)))
         if found:
@@ -594,6 +610,43 @@ def file_statuses(user: User, file_ids: list[str]) -> dict[str, dict[str, Any]]:
 
 async def _silent(_: dict[str, Any]) -> None:
     return None
+
+
+def _unfinished_files(conversation_id: str) -> list[str]:
+    """这个会话涉及的表格文件里，还没有「识别完成」记录的（对话进行中新生成的结果文件就是这样）。只读，不改任何记录。"""
+    from pathlib import Path
+
+    from sheetmate.db.models import FileConversation
+
+    with session_scope() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if conversation is None:
+            return []
+        linked = select(FileConversation.file_id).where(FileConversation.conversation_id == conversation_id)
+        scope = [FileRecord.conversation_id == conversation_id, FileRecord.id.in_(linked)]
+        if conversation.customer_id:
+            scope.append(file_service.customer_file_condition(conversation.customer_id))
+        records = db.scalars(select(FileRecord).where(or_(*scope), file_service.current_file_condition(),
+                                                      FileRecord.kind.in_(("input", "expected", "output"))))
+        candidates = [r.id for r in records if (r.profile or {}).get("sheets") and Path(r.stored_path).is_file()]
+        if not candidates:
+            return []
+        ready = set(db.scalars(select(PrivacyFile.file_id).where(PrivacyFile.file_id.in_(candidates), PrivacyFile.status == "ready")))
+        return [file_id for file_id in candidates if file_id not in ready]
+
+
+async def ensure_complete(conversation_id: str) -> None:
+    """每次调用正常模型之前确认：这个会话里的表格文件都已脱敏。
+
+    对话进行中新生成的结果文件会在这里当场识别；识别不成功（或超时）就抛出 PrivacyBlocked，本次对话直接结束，
+    不会有任何内容发给 AI。检查本身只是一次数据库查询，文件都脱敏完成时几乎没有开销。"""
+    pending = await asyncio.to_thread(_unfinished_files, conversation_id)
+    if not pending:
+        return
+    try:
+        await prepare_files(conversation_id=conversation_id, files=[{"file_id": file_id} for file_id in pending], emit=_silent)
+    except PrivacyBlocked as exc:
+        raise PrivacyBlocked(f"脱敏未完成，无法继续，已结束本次对话（没有任何内容发给 AI）：{exc}") from exc
 
 
 class PrivacyPrepareError(ServiceError):

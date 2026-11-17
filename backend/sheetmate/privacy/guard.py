@@ -23,8 +23,9 @@ from sheetmate.privacy.address import find_addresses, split_address
 from sheetmate.privacy.detect import classify_column
 from sheetmate.privacy.events import PrivacyLog
 from sheetmate.privacy.rules import (
-    ADDR_CTX_RE, EMAIL_OBF_RE, EMAIL_RE, IM_CTX_RE, KIND_PREFIX, LANDLINE_COMPACT_RE, LANDLINE_RE, MOBILE_RE, PHONE_CTX_RE,
-    address_context_ok, cell_text, fold, header_kind, is_label, is_landline_number, is_mobile, normalize_header, phone_context_ok,
+    ADDR_CTX_RE, EMAIL_OBF_RE, EMAIL_RE, IM_CTX_RE, KIND_PREFIX, LANDLINE_COMPACT_RE, LANDLINE_MASKED_RE, LANDLINE_RE,
+    MOBILE_MASKED_RE, MOBILE_RE, PHONE_CTX_RE,
+    address_context_ok, cell_text, fold, header_kind, is_label, is_mobile, normalize_header, phone_context_ok,
 )
 from sheetmate.privacy.vault import MIN_KNOWN_CHARS, TOKEN_RE, Vault
 
@@ -118,6 +119,10 @@ class Stats:
 
 
 _NUMBER_TEXT = re.compile(r"[-+]?\d[\d,.\s]*")
+# 整格就是一个号码（含空格、横线、括号和半隐藏的星号）；多出别的字就是「姓名 + 号码」这类混写
+_PHONE_LIKE = re.compile(r"[\d\s\-—()（）+*＊xX×●•转]+")
+_NAME_NOISE = re.compile(r"[\s,，、;；:：|/]+|收件人|收货人|联系人|姓名|电话|手机号?|地址")
+_NAME_ONLY = re.compile(r"[\u4e00-\u9fff]{1,3}")
 
 
 def _cannot_be(kind: str, value: object, text: str) -> bool:
@@ -157,14 +162,40 @@ class Guard:
             # 数字串里夹着手机号的情况仍然交给规则处理。
             out = self._scan(text, stats)
             return value if out == text else out
+        if kind in {"phone", "landline"} and not _PHONE_LIKE.fullmatch(text):
+            # 同一格里除了号码还有别的字（「张三 13800138000」）：只遮号码，姓名原样留着
+            out = self._scan(text, stats)
+            if out != text:
+                return out
+            if sum(ch.isdigit() for ch in text) < 5:
+                return value                # 里面没有号码（多半是姓名、「无」「同上」）：不遮
         if kind == "address":
-            region, detail = split_address(text)
-            if not detail.strip():
-                return value
+            kept = self._address_keeping_names(text, stats)
+            if kept is not None:
+                return kept
+            if not split_address(text)[1].strip():
+                return value                # 整格只有省、市（「武汉」「成都」「武汉武汉」）：没有详细地址，不遮
             stats.add("address", method)
-            return region + self.vault.token("address", detail.strip())
+            return self.vault.token("address", text.strip())   # 有详细地址：整个地址一起遮，省市区也不留
         stats.add(kind, method)
         return self.vault.token(kind, text)
+
+    def _address_keeping_names(self, text: str, stats: Stats) -> str | None:
+        """地址格子里，地址前后只多出一个姓名（最多 3 个字）和号码时：整个地址和号码遮掉，姓名留着。
+        多出来的内容里有数字、或超过 3 个字时返回 None，交给整格处理：宁可多遮，也不能把门牌、楼栋号漏出去。"""
+        spans = find_addresses(_shadow(text))
+        if not spans:
+            return None
+        leftover = text
+        for start, end in reversed(spans):
+            leftover = leftover[:start] + leftover[end:]
+        for pattern in (MOBILE_RE, MOBILE_MASKED_RE, LANDLINE_RE, LANDLINE_COMPACT_RE, LANDLINE_MASKED_RE):
+            leftover = pattern.sub("", leftover)
+        leftover = _NAME_NOISE.sub("", leftover)
+        if not leftover or not _NAME_ONLY.fullmatch(leftover):
+            return None
+        out = self._scan(text, stats)
+        return out if out != text else None
 
     def _column_kind(self, name: object, values: Iterable[object]) -> str | None:
         kind = self.registry.kind_for(name)
@@ -237,9 +268,7 @@ class Guard:
             return obj
         if isinstance(obj, (int, float)):
             # JSON 里以数字存的手机号：换成字符串令牌，保证 JSON 仍然有效
-            if is_mobile(cell_text(obj)):
-                return self._token_cell("phone", obj, stats, "json_number")
-            return self._token_cell("landline", obj, stats, "json_number") if is_landline_number(obj) else obj
+            return self._token_cell("phone", obj, stats, "json_number") if is_mobile(cell_text(obj)) else obj
         if isinstance(obj, list):
             return [self._walk(item, stats, depth) for item in obj]
         if not isinstance(obj, dict):
@@ -445,17 +474,16 @@ class Guard:
             segment = text[start:end]
             if TOKEN_RE.search(segment):
                 continue
-            region, detail = split_address(segment)
-            if not detail.strip():
-                region, detail = "", segment
+            if not split_address(segment)[1].strip():
+                continue                    # 只有省市，没有详细地址
             stats.add("address", "pattern")
-            text = text[:start] + region + self.vault.token("address", detail.strip()) + text[end:]
+            text = text[:start] + self.vault.token("address", segment.strip()) + text[end:]
         # 带标签的值：「电话：…」「微信 …」「收件地址：…」，不管值长什么格式都遮（比格式规则更宽，又不会误伤没有标签的单号）
         text = self._mask(text, ADDR_CTX_RE, "address", stats, "context", group=1, accept=address_context_ok)
         text = self._mask(text, IM_CTX_RE, "im", stats, "context", group=1)
         text = self._mask(text, PHONE_CTX_RE, "phone", stats, "context", group=1, accept=phone_context_ok)
-        for kind, pattern in (("email", EMAIL_RE), ("email", EMAIL_OBF_RE), ("phone", MOBILE_RE),
-                              ("landline", LANDLINE_RE), ("landline", LANDLINE_COMPACT_RE)):
+        for kind, pattern in (("email", EMAIL_RE), ("email", EMAIL_OBF_RE), ("phone", MOBILE_RE), ("phone", MOBILE_MASKED_RE),
+                              ("landline", LANDLINE_RE), ("landline", LANDLINE_COMPACT_RE), ("landline", LANDLINE_MASKED_RE)):
             text = self._mask(text, pattern, kind, stats, "pattern")
         return text
 
@@ -467,7 +495,7 @@ class Guard:
             if TOKEN_RE.search(original) or (accept is not None and not accept(original)):
                 continue
             if kind == "address":
-                replacement = str(self._token_cell("address", original, stats, method))   # 只遮详细部分，省市区保留
+                replacement = str(self._token_cell("address", original, stats, method))   # 有详细地址就整个遮
                 if replacement == original:
                     continue
             else:
@@ -487,9 +515,9 @@ class Guard:
         found = []
         if EMAIL_RE.search(bare) or EMAIL_OBF_RE.search(bare):
             found.append("邮箱")
-        if MOBILE_RE.search(bare) or any(phone_context_ok(m.group(1)) for m in PHONE_CTX_RE.finditer(bare)):
+        if MOBILE_RE.search(bare) or MOBILE_MASKED_RE.search(bare) or any(phone_context_ok(m.group(1)) for m in PHONE_CTX_RE.finditer(bare)):
             found.append("手机号")
-        if LANDLINE_RE.search(bare) or LANDLINE_COMPACT_RE.search(bare):
+        if LANDLINE_RE.search(bare) or LANDLINE_COMPACT_RE.search(bare) or LANDLINE_MASKED_RE.search(bare):
             found.append("座机")
         if IM_CTX_RE.search(bare):
             found.append("微信/QQ")
@@ -544,8 +572,6 @@ class Guard:
             return self._scan(self._scan_known(self._scan_learned(value, stats), stats), stats)
         if isinstance(value, (int, float)) and is_mobile(cell_text(value)):
             return self._token_cell("phone", value, stats, "copy")   # 数字格式的手机号：发给 AI 时同样会换
-        if is_landline_number(value):
-            return self._token_cell("landline", value, stats, "copy")   # 被吃掉前导 0 的数字座机
         return value
 
     def protect_message(self, message: dict[str, Any], stats: Stats) -> dict[str, Any]:
