@@ -35,6 +35,7 @@ from sheetmate.privacy.rules import ALL_KINDS, cell_text
 from sheetmate.services.files import service as file_service
 from sheetmate.services.privacy import adaptive, choices
 
+logger = logging.getLogger(__name__)
 Emit = Callable[[dict[str, Any]], Awaitable[None]]
 
 MODEL_BATCH = 30          # 一次问脱敏模型最多多少列
@@ -588,6 +589,15 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
                             "sheets": sheets})
         # 大表要扫整列：放到线程里做，不卡住服务里的其他请求
         await asyncio.to_thread(_register_workspace_values, workspace, protected_columns)
+        # 给用户看的报告只列文件里真的换成了令牌的列，值数是实际替换的格子数（和文件维护页、面板是同一份判断）。
+        # 识别成地址、但只写了城市的列不会被替换，不能写成「已脱敏」
+        from sheetmate.services.privacy import columns as privacy_columns
+
+        for entry in reports:
+            try:
+                entry["sheets"] = await asyncio.to_thread(privacy_columns.masked_sheets, entry["file_id"], entry["sheets"])
+            except Exception:
+                logger.exception("按实际脱敏结果整理报告失败：%s", entry["file_id"])
     except PrivacyBlocked as exc:
         return await _stop(conversation_id, emit, model.mode, model.name, str(exc), reports)
     except Exception as exc:  # 识别过程出任何意外，都不能继续

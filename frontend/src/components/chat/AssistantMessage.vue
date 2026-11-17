@@ -9,6 +9,7 @@ import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo, TableBrief } from '@/api/types'
 import Mascot from '@/components/brand/Mascot.vue'
+import StepSpinner from './StepSpinner.vue'
 import MarkdownView from '@/components/common/MarkdownView.vue'
 import RecipeProgressCard from '@/components/recipe/RecipeProgressCard.vue'
 import { assistantDisplayBlocks, groupAssistantBlocks, type AssistantDisplayGroup, type AssistantStage } from '@/composables/assistantTimeline'
@@ -186,13 +187,13 @@ onBeforeUnmount(() => {
       <template v-for="(group, index) in displayGroups" :key="group.key">
         <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :class="{ 'assistant-stage--before-process': isFollowedByProcess(index) }" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">
           <details class="assistant-process group/process">
-            <summary class="flex w-fit max-w-full cursor-pointer list-none items-start gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden" :title="processHeaders.get(group.key)?.title">
-              <LoaderCircle v-if="stepActive(group.key)" class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
-              <ChevronRight v-else class="mt-[3px] size-3.5 shrink-0 transition group-open/process:rotate-90" />
+            <summary class="flex w-fit max-w-full cursor-pointer list-none items-start gap-1.5 rounded py-1 text-[15px] leading-6 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden" :title="processHeaders.get(group.key)?.title">
+              <StepSpinner v-if="stepActive(group.key)" class="mt-1" />
+              <StepSpinner v-else class="mt-1" :state="processHeaders.get(group.key)?.status === 'error' ? 'error' : 'done'" />
               <span class="min-w-0 break-words [overflow-wrap:anywhere]" :class="{ 'process-title-running': stepActive(group.key), 'text-error': processHeaders.get(group.key)?.status === 'error' && !stepActive(group.key) }" aria-live="polite" aria-atomic="true">{{ processHeaders.get(group.key)?.title }}</span>
               <span v-if="processHeaders.get(group.key)?.status && !['running', 'done'].includes(processHeaders.get(group.key)!.status)" class="shrink-0 text-[11px]" :class="processHeaders.get(group.key)?.status === 'error' ? 'text-error' : 'text-faint'">{{ PLAN_STATUS_LABELS[processHeaders.get(group.key)!.status] }}</span>
             </summary>
-            <div class="mb-3 ml-1.5 mt-2 space-y-3 border-l-2 border-line py-1 pl-3.5">
+            <div class="mb-3 ml-[7px] mt-2 space-y-3 border-l-2 border-[#e2e2e7] py-1 pl-3.5">
               <div v-for="(stage, index) in group.stages" :key="stage.key" class="space-y-2" :class="{ 'border-t border-line pt-3': index > 0 }">
                 <TimelineList v-if="stage.plan || stage.items.some((item) => item.kind !== 'thinking')" :items="stage.plan ? [stage.plan, ...stage.items] : stage.items" :parent-title="processHeaders.get(group.key)?.title" />
                 <RecipeStageDetails v-for="attempt in stage.attempts" :key="attempt.key" :progress="attempt.progress" />
@@ -205,8 +206,8 @@ onBeforeUnmount(() => {
       </template>
 
       <!-- 正文和处理模块都没有展示加载状态时，才显示独立的思考提示。 -->
-      <div v-if="activity" class="assistant-activity flex items-start gap-1.5 py-0.5 text-[13px] leading-5 text-mute" role="status" aria-live="polite" data-testid="activity">
-        <LoaderCircle class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+      <div v-if="activity" class="assistant-activity flex items-start gap-1.5 py-1 text-[15px] leading-6 text-mute" role="status" aria-live="polite" data-testid="activity">
+        <StepSpinner class="mt-1" />
         <span class="process-title-running min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ activity }}…</span>
       </div>
 
@@ -335,15 +336,32 @@ onBeforeUnmount(() => {
   margin-block-end: 0.25rem;
 }
 
+/* 连续的步骤之间用竖线连起来，像时间线：线从本行标记下方，一直接到下一行标记上方 */
+.assistant-stage {
+  position: relative;
+}
+
+.assistant-stage--before-process::after {
+  content: '';
+  position: absolute;
+  top: 1.75rem;
+  bottom: -1rem;
+  left: 7px;
+  width: 2px;
+  border-radius: 1px;
+  background: #e2e2e7;
+  pointer-events: none;
+}
+
 .process-title-running {
   display: inline-block;
-  background-image: linear-gradient(90deg, var(--color-mute) 35%, var(--color-ink) 50%, var(--color-mute) 65%);
-  background-size: 250% 100%;
+  background-image: linear-gradient(90deg, var(--color-faint) 30%, var(--color-mute) 50%, var(--color-faint) 70%);
+  background-size: 300% 100%;
   background-repeat: no-repeat;
   background-clip: text;
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-  animation: process-shimmer 2s linear infinite;
+  animation: process-shimmer 1.4s linear infinite;
 }
 
 @keyframes process-shimmer {

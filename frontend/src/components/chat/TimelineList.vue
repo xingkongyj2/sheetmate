@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /** 执行过程：中间说明、工具调用（状态 / 耗时 / 结果）、计划步骤、多表专员、记忆等 */
-import { Brain, Check, ChevronRight, CircleAlert, ListChecks, LoaderCircle, MessageSquareText, Sparkles, Users } from '@lucide/vue'
+import { Brain, ChevronRight, MessageSquareText, Sparkles } from '@lucide/vue'
 import { computed, ref } from 'vue'
 
 import { AGENT_STATUS_LABELS, duration, type TimelineItem } from '@/composables/chatModel'
 import { PLAN_STATUS_LABELS } from '@/composables/messagePresentation'
 import { toolPresentation, userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import MarkdownView from '@/components/common/MarkdownView.vue'
+import StatusBadge from './StatusBadge.vue'
 import ScriptFile from '@/components/common/ScriptFile.vue'
 import { scriptReferences } from '@/composables/scriptPresentation'
 
@@ -43,16 +44,14 @@ function repeatsParentTitle(...titles: (string | undefined)[]): boolean {
       <!-- 工具调用 -->
       <div v-else-if="item.kind === 'tool'">
         <div class="flex w-full items-start gap-2 rounded-lg py-1 text-left">
-          <LoaderCircle v-if="item.status === 'running'" class="mt-0.5 size-3.5 shrink-0 animate-spin text-info" />
-          <Check v-else-if="item.status === 'ok'" class="mt-0.5 size-3.5 shrink-0 text-success" />
-          <CircleAlert v-else class="mt-0.5 size-3.5 shrink-0 text-error" />
+          <StatusBadge class="mt-0.5" :status="item.status === 'running' ? 'running' : item.status === 'ok' ? 'ok' : 'error'" />
           <div class="min-w-0 flex-1 space-y-1 break-words leading-5 [overflow-wrap:anywhere]">
-            <p v-if="!repeatsParentTitle(item.label, tools.get(item.key)?.label)" class="font-medium text-ink">{{ tools.get(item.key)?.label }}</p>
+            <p v-if="!repeatsParentTitle(item.label, tools.get(item.key)?.label)" class="text-sm font-medium leading-5 text-ink">{{ tools.get(item.key)?.label }}</p>
             <p v-else-if="!tools.get(item.key)?.details.length && (!tools.get(item.key)?.summary || recipeTools.has(item.tool))" class="text-xs leading-5 text-mute">{{ item.status === 'running' ? '正在处理' : item.status === 'ok' ? '已完成' : '未完成' }}</p>
-            <div v-if="tools.get(item.key)?.sections.length" class="space-y-3 pt-1 text-xs leading-5 text-mute">
+            <div v-if="tools.get(item.key)?.sections.length" class="space-y-0.5 pt-0.5 text-xs leading-5 text-mute">
               <details v-for="section in tools.get(item.key)?.sections" :key="section.label" class="group/tool-section">
-                <summary class="flex cursor-pointer list-none items-start gap-1.5 rounded py-0.5 text-[11px] font-medium text-faint transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
-                  <ChevronRight class="mt-1 size-3 shrink-0 transition group-open/tool-section:rotate-90" />
+                <summary class="flex cursor-pointer list-none items-start gap-1.5 rounded py-0.5 text-xs font-medium text-faint transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden">
+                  <ChevronRight class="mt-1 size-3 shrink-0 transition duration-200 group-open/tool-section:rotate-90" />
                   <span>{{ section.label }}</span>
                 </summary>
                 <div class="mt-1.5 pl-4.5">
@@ -84,8 +83,7 @@ function repeatsParentTitle(...titles: (string | undefined)[]): boolean {
 
       <!-- 计划步骤 -->
       <div v-else-if="item.kind === 'plan'" class="flex items-center gap-2 py-1">
-        <LoaderCircle v-if="item.status === 'running'" class="size-3.5 animate-spin text-info" />
-        <ListChecks v-else class="size-3.5" :class="item.status === 'done' ? 'text-success' : 'text-mute'" />
+        <StatusBadge :status="item.status === 'running' ? 'running' : item.status === 'done' ? 'ok' : item.status === 'error' ? 'error' : item.status === 'warning' ? 'warn' : 'idle'" />
         <span v-if="detailed" class="font-medium">第 {{ item.num }}/{{ item.total }} 步</span>
         <span v-if="!repeatsParentTitle(item.description)" class="min-w-0 break-words text-mute">{{ userFacingText(item.description) }}</span>
         <span class="shrink-0 text-xs text-faint">{{ PLAN_STATUS_LABELS[item.status] }}</span>
@@ -94,8 +92,7 @@ function repeatsParentTitle(...titles: (string | undefined)[]): boolean {
       <!-- 多表专员 -->
       <div v-else-if="item.kind === 'agent'" class="py-1">
         <button type="button" class="flex items-center gap-2" :aria-expanded="!!open[item.key]" @click="open[item.key] = !open[item.key]">
-          <LoaderCircle v-if="item.status === 'running'" class="size-3.5 animate-spin text-info" />
-          <Users v-else class="size-3.5" :class="item.status === 'error' ? 'text-error' : item.status === 'done' ? 'text-success' : item.status === 'waiting' ? 'text-info' : 'text-[#b7770c]'" />
+          <StatusBadge :status="item.status === 'running' ? 'running' : item.status === 'done' ? 'ok' : item.status === 'error' ? 'error' : item.status === 'waiting' ? 'idle' : 'warn'" />
           <span class="font-medium">专员 · {{ item.table }}</span>
           <span class="text-xs" :class="item.status === 'error' ? 'text-error' : item.status === 'done' ? 'text-success' : 'text-mute'">{{ AGENT_STATUS_LABELS[item.status] }}</span>
           <ChevronRight v-if="item.conclusion" class="size-3 text-faint transition" :class="{ 'rotate-90': open[item.key] }" />

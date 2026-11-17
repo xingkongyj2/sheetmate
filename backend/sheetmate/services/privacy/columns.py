@@ -15,7 +15,7 @@ from sqlalchemy import select
 from sheetmate.core.errors import ServiceError
 from sheetmate.db.models import FileRecord, PrivacyFile, User
 from sheetmate.db.session import session_scope
-from sheetmate.privacy import KIND_LABELS, Scope, bind, privacy
+from sheetmate.privacy import KIND_LABELS, TOKEN_RE, Scope, bind, privacy
 from sheetmate.services.privacy import choices, masked_copy
 from sheetmate.services.privacy import service as privacy_service
 
@@ -55,6 +55,8 @@ def _describe(file_id: str) -> dict[str, Any]:
             by_name = {column["name"]: item[0] for column, item in zip(sheet.get("columns", []), candidates)}
             really = dict(zip((str(column) for column in frame.columns),
                               masked_copy.really_masked(frame, [by_name.get(str(column)) for column in frame.columns])))
+        # 文件里真的换成了令牌的格子数（原文件已改成脱敏版时才数得出来；格式没法原地改的文件数不出来，是 0）
+        tokens = _token_counts(frame) if frame is not None else {}
         columns = []
         for column, (kind, source, reason) in zip(sheet.get("columns", []), candidates):
             key, pick = (name, column["name"]), picks.get((name, column["name"]))
@@ -69,13 +71,22 @@ def _describe(file_id: str) -> dict[str, Any]:
                 masked = kind is not None
             columns.append({"name": column["name"], "masked": masked, "choice": choice, "auto_kind": auto_kind,
                             "kind": kind if masked else None, "kind_label": KIND_LABELS.get(kind) if masked and kind else None,
-                            "source": source, "reason": reason})
+                            "source": source, "reason": reason, "tokens": tokens.get(column["name"], 0)})
         sheets.append({"sheet": name, "rows": int(sheet.get("rows") or 0), "columns": columns})
     # 手动脱敏时可选的类型；对应的规则在设置页里关掉了就不能选（关掉的规则不会脱敏任何东西）
     types = [{"id": "phone", "label": "电话号码", "enabled": guard is not None and not guard._off("phone")},
              {"id": "address", "label": "详细地址", "enabled": guard is not None and not guard._off("address")},
              {"id": "custom", "label": KIND_LABELS["custom"], "enabled": True}]
     return {"enabled": True, "file_id": file_id, "filename": filename, "sheets": sheets, "types": types}
+
+
+def _token_counts(frame: Any) -> dict[str, int]:
+    out = {}
+    for name in frame.columns:
+        series = frame[name]
+        if series.dtype == object or str(series.dtype).startswith("str"):
+            out[str(name)] = int(series.map(lambda value: isinstance(value, str) and bool(TOKEN_RE.search(value))).sum())
+    return out
 
 
 def masked_sheets(file_id: str, sheets: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -88,7 +99,8 @@ def masked_sheets(file_id: str, sheets: list[dict[str, Any]]) -> list[dict[str, 
     rows = {entry["sheet"]: entry["rows"] for entry in state["sheets"]}
     out, seen = [], set()
     for entry in sheets:
-        kept = [column for column in entry["columns"] if (entry["sheet"], column["name"]) in masked]
+        kept = [{**column, "values": masked[(entry["sheet"], column["name"])]["tokens"] or column["values"]}
+                for column in entry["columns"] if (entry["sheet"], column["name"]) in masked]
         seen.update((entry["sheet"], column["name"]) for column in kept)
         out.append({**entry, "columns": kept})
     for (sheet_name, name), item in masked.items():       # 维护页里是已脱敏、记录里没有明细的列（比如按别的文件里同名的列识别的）
@@ -97,7 +109,7 @@ def masked_sheets(file_id: str, sheets: list[dict[str, Any]]) -> list[dict[str, 
         action = ACTIONS.get(item["kind"], "tokenize")
         column = {"name": name, "kind": item["kind"], "kind_label": item["kind_label"] or KIND_LABELS.get(item["kind"], item["kind"]),
                   "action": action, "action_label": ACTION_LABELS.get(action, ""), "source": item["source"] or "rules",
-                  "reason": item["reason"] or "", "values": rows.get(sheet_name, 0)}
+                  "reason": item["reason"] or "", "values": item["tokens"] or rows.get(sheet_name, 0)}
         target = next((entry for entry in out if entry["sheet"] == sheet_name), None)
         if target is None:
             target = {"sheet": sheet_name, "rows": rows.get(sheet_name, 0), "columns": []}
