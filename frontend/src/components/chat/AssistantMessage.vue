@@ -90,13 +90,25 @@ function isFollowedByProcess(index: number): boolean {
   )?.kind === 'process'
 }
 const typing = computed(() => props.message.streaming || revealing.value)
+// 一步结束、下一步还没出现的空档：最后一行步骤保持「进行中」（图标转、标题流动渐变），不再另起一行「正在思考」，避免行来回跳。
+const busy = computed(() => props.message.streaming && !revealing.value && !props.message.privacyRunning)
+const lingeringKey = computed(() => {
+  if (!busy.value) return ''
+  const last = displayGroups.value.at(-1)
+  return last?.kind === 'process' && processHeaders.value.get(last.key)?.status !== 'running' ? last.key : ''
+})
+function stepActive(key: string): boolean {
+  return processHeaders.value.get(key)?.status === 'running' || key === lingeringKey.value
+}
 const activity = computed(() => {
-  if (!props.message.streaming || revealing.value || props.message.privacyRunning) return ''
+  if (!busy.value) return ''
   const loading = displayGroups.value.some((group) => group.kind === 'process'
     ? processHeaders.value.get(group.key)?.status === 'running'
     : !group.closed && !!group.text.trim())
   if (loading) return ''
-  return props.message.activity?.trim() || '正在思考'
+  const note = props.message.activity?.trim()        // 有具体说明（比如正在清理后台操作）时仍然显示
+  if (note) return note
+  return lingeringKey.value ? '' : '正在思考'
 })
 const audit = computed(() => auditLine(props.message.audit))
 const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
@@ -175,9 +187,9 @@ onBeforeUnmount(() => {
         <section v-if="group.kind === 'process'" class="assistant-stage space-y-2" :class="{ 'assistant-stage--before-process': isFollowedByProcess(index) }" :aria-label="processHeaders.get(group.key)?.title" :data-stage="group.stages[0]?.number">
           <details class="assistant-process group/process">
             <summary class="flex w-fit max-w-full cursor-pointer list-none items-start gap-1.5 rounded py-1 text-[13px] leading-5 text-mute transition hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink [&::-webkit-details-marker]:hidden" :title="processHeaders.get(group.key)?.title">
-              <LoaderCircle v-if="processHeaders.get(group.key)?.status === 'running'" class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
+              <LoaderCircle v-if="stepActive(group.key)" class="mt-[3px] size-3.5 shrink-0 animate-spin motion-reduce:animate-none" />
               <ChevronRight v-else class="mt-[3px] size-3.5 shrink-0 transition group-open/process:rotate-90" />
-              <span class="min-w-0 break-words [overflow-wrap:anywhere]" :class="{ 'process-title-running': processHeaders.get(group.key)?.status === 'running', 'text-error': processHeaders.get(group.key)?.status === 'error' }" aria-live="polite" aria-atomic="true">{{ processHeaders.get(group.key)?.title }}</span>
+              <span class="min-w-0 break-words [overflow-wrap:anywhere]" :class="{ 'process-title-running': stepActive(group.key), 'text-error': processHeaders.get(group.key)?.status === 'error' && !stepActive(group.key) }" aria-live="polite" aria-atomic="true">{{ processHeaders.get(group.key)?.title }}</span>
               <span v-if="processHeaders.get(group.key)?.status && !['running', 'done'].includes(processHeaders.get(group.key)!.status)" class="shrink-0 text-[11px]" :class="processHeaders.get(group.key)?.status === 'error' ? 'text-error' : 'text-faint'">{{ PLAN_STATUS_LABELS[processHeaders.get(group.key)!.status] }}</span>
             </summary>
             <div class="mb-3 ml-1.5 mt-2 space-y-3 border-l-2 border-line py-1 pl-3.5">
