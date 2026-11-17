@@ -708,7 +708,7 @@ function answer(option: string) {
             v-if="privacySwitch.enabled.value === false"
             to="/settings"
             class="flex shrink-0 items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-xs font-medium text-ink"
-            title="脱敏已关闭：不会识别、脱敏上传的文件；发给 AI 的内容仍会由模型脱敏。点击去设置"
+            title="脱敏已关闭：不会识别、脱敏上传的文件；发给模型的内容仍会脱敏。点击去设置"
             data-testid="privacy-off-notice"
           >
             <ShieldOff class="size-3.5" />脱敏已关闭

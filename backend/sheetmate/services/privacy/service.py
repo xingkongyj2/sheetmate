@@ -98,7 +98,7 @@ def _aggregate_text(kind: str, detail: dict[str, Any]) -> str | None:
         # 每次发送都带着整段对话，同一个值会在每次发送里都被换一次：这里数的是不同的值
         leaked = int(detail.get("leaked", 0))
         tail = f"模型脱敏 {leaked} 个值" if leaked else "无需脱敏"
-        return f"发给 AI {int(detail.get('requests', 1))} 次，{tail}"
+        return f"发给模型 {int(detail.get('requests', 1))} 次，{tail}"
     if kind == "还原":
         text = f"回复中 {int(detail.get('restored', 0))} 个令牌已还原"
         if detail.get("unknown"):

@@ -68,8 +68,8 @@ const failed = computed(() => overview.value?.files.some((file) => file.status =
 const sendStatus = computed(() => {
   const totals = overview.value?.totals
   if (!totals) return null
-  if (totals.blocked > 0) return { error: true, text: `${formatCount(totals.blocked)} 次发送被拦截，这些内容没有发给 AI` }
-  return { error: false, text: totals.requests ? `发给 AI 的 ${formatCount(totals.requests)} 次请求全部通过检查` : '还没有向 AI 发送请求' }
+  if (totals.blocked > 0) return { error: true, text: `${formatCount(totals.blocked)} 次发送被拦截，这些内容没有发给模型` }
+  return { error: false, text: totals.requests ? `发给模型的 ${formatCount(totals.requests)} 次请求全部通过检查` : '还没有向模型发送请求' }
 })
 // 两个环节分开：上传的文件先脱敏；之后每次发给 AI 前，再把文件之外的内容（对话、工具结果、说明）查一遍，文件之外的敏感内容在这里补上
 const fileNumbers = computed(() => {
@@ -128,7 +128,7 @@ function levelClass(level: PrivacyEventItem['level']): string {
         </div>
         <template v-else>
           <p v-if="failed" class="flex items-start gap-2 rounded-xl bg-error/5 px-3 py-2.5 text-[13px] leading-5 text-error" role="alert">
-            <ShieldAlert class="mt-0.5 size-4 shrink-0" aria-hidden="true" />有文件脱敏失败，相关处理已停止，没有数据发给 AI
+            <ShieldAlert class="mt-0.5 size-4 shrink-0" aria-hidden="true" />有文件脱敏失败，相关处理已停止，没有数据发给模型
           </p>
           <dl class="grid grid-cols-2 gap-2">
             <div v-for="item in fileNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
