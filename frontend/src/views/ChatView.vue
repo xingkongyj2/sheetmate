@@ -700,9 +700,10 @@ function answer(option: string) {
             @blur="saveTitle"
             @keydown.enter="saveTitle"
           />
-          <button v-else class="group flex max-w-full items-center gap-1.5 text-left" @click="startEditTitle">
+          <!-- 编辑图标平时不占位置（不然标题和后面的「脱敏已关闭」中间空出一大块），悬停时才展开 -->
+          <button v-else class="group flex max-w-full items-center text-left" @click="startEditTitle">
             <span class="truncate text-sm font-semibold">{{ detail?.title ?? '…' }}</span>
-            <Pencil class="size-3.5 shrink-0 text-faint opacity-0 group-hover:opacity-100" />
+            <Pencil class="size-3.5 max-w-0 shrink-0 text-faint opacity-0 transition-all group-hover:ml-1.5 group-hover:max-w-3.5 group-hover:opacity-100 group-focus-visible:ml-1.5 group-focus-visible:max-w-3.5 group-focus-visible:opacity-100" />
           </button>
           <RouterLink
             v-if="privacySwitch.enabled.value === false"
