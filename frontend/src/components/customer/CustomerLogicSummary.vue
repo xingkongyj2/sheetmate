@@ -4,7 +4,7 @@
  * 步骤、文件、要点各用最朴素的列表。不认识的结构按原 Markdown 展示，不丢内容。
  */
 import DOMPurify from 'dompurify'
-import { FileSpreadsheet } from '@lucide/vue'
+import { Sheet } from '@lucide/vue'
 import { computed } from 'vue'
 
 import MarkdownView from '@/components/common/MarkdownView.vue'
@@ -106,7 +106,7 @@ const subOf = (section: Section) => (section.kind === 'other' ? '' : titles[sect
         </ol>
         <ul v-else-if="section.kind === 'materials' && section.items" class="files">
           <li v-for="(item, i) in section.items" :key="i">
-            <span class="files-icon"><FileSpreadsheet class="size-4 text-fun-green" /></span>
+            <span class="files-icon"><Sheet class="size-4 text-[#4a4743]" /></span>
             <div class="min-w-0">
               <div v-if="item.title" class="files-name">{{ item.title }}</div>
               <!-- eslint-disable-next-line vue/no-v-html -->

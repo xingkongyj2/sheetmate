@@ -2,7 +2,7 @@
 /**
  * 助手消息：阶段回复与折叠的处理记录按发生顺序穿插，最后展示回答和交付结果。
  */
-import { Check, ChevronRight, CircleAlert, CircleHelp, Code, Copy, Download, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion, Table2 } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, CircleHelp, Code, Copy, Download, Eye, Sheet, LoaderCircle, MessageCircleQuestion, Table2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref } from 'vue'
 
 import { fileApi } from '@/api'
@@ -76,10 +76,21 @@ const fallbackReply = computed(() => {
   const content = recipeViewReply(props.message)
   return content.trim() ? content : recipeOutcomeSummary(props.message)
 })
-const replyGroups = computed<AssistantDisplayGroup[]>(() => [
-  ...groups.value,
-  ...(fallbackReply.value ? [{ kind: 'text' as const, key: `${props.message.key}_fallback`, text: fallbackReply.value, closed: !props.message.streaming }] : []),
-])
+const stopped = computed(() => executionNotice(props.message))
+// 已停止时后端会在正文末尾补一句「（已停止）」，下面的状态提示已经说了，正文里不再重复。
+const STOP_MARK = /\s*[（(]已停止[）)]\s*$/
+const replyGroups = computed<AssistantDisplayGroup[]>(() => {
+  const all: AssistantDisplayGroup[] = [
+    ...groups.value,
+    ...(fallbackReply.value ? [{ kind: 'text' as const, key: `${props.message.key}_fallback`, text: fallbackReply.value, closed: !props.message.streaming }] : []),
+  ]
+  if (!stopped.value) return all
+  return all.flatMap((group): AssistantDisplayGroup[] => {
+    if (group.kind !== 'text') return [group]
+    const text = group.text.replace(STOP_MARK, '')
+    return text.trim() ? [{ ...group, text }] : []
+  })
+})
 // Previously received text is immediate; only newly streamed text reveals progressively.
 const { groups: displayGroups, pending: revealing } = useProgressiveReply(
   () => replyGroups.value,
@@ -114,7 +125,6 @@ const activity = computed(() => {
 })
 const audit = computed(() => auditLine(props.message.audit))
 const errorMessage = computed(() => missingKeyError.value?.text ?? userFacingText(props.message.error, '处理遇到问题，请稍后重试。', 400))
-const stopped = computed(() => executionNotice(props.message))
 const showError = computed(() => !!missingKeyError.value || !!props.message.error && (!stopped.value || props.message.error.includes('设置') || props.message.error.includes('API Key')))
 
 function stageSummary(stage: AssistantStage): string {
@@ -228,7 +238,7 @@ onBeforeUnmount(() => {
         <div v-for="file in fileCards" :key="`file-${file.file_id}`" class="card-soft min-w-0 space-y-2.5 px-3.5 py-3" data-testid="file-delivery">
           <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
             <div class="flex min-w-0 flex-1 basis-48 items-center gap-2">
-              <FileSpreadsheet class="size-[18px] shrink-0 text-fun-green" aria-hidden="true" />
+              <Sheet class="size-[18px] shrink-0 text-[#4a4743]" aria-hidden="true" />
               <div class="min-w-0 truncate text-[15px] font-semibold leading-6" :title="file.filename">{{ file.filename }}</div>
               <span v-if="file.kind !== 'output' && fileKindLabel(file.kind)" class="tag shrink-0 whitespace-nowrap">{{ fileKindLabel(file.kind) }}</span>
             </div>
@@ -239,7 +249,7 @@ onBeforeUnmount(() => {
           </div>
           <ul v-if="file.sheets?.length" class="flex min-w-0 flex-wrap gap-1.5" aria-label="工作表">
             <li v-for="sheet in file.sheets" :key="sheet.sheet" class="inline-flex min-w-0 max-w-full items-start gap-1.5 rounded-md border border-line/70 bg-paper/60 px-2 py-0.5 text-[11px] leading-5 text-mute">
-              <Table2 class="mt-1 size-3 shrink-0 text-fun-green" aria-hidden="true" />
+              <Table2 class="mt-1 size-3 shrink-0 text-[#4a4743]" aria-hidden="true" />
               <span class="min-w-0 break-words [overflow-wrap:anywhere]">{{ sheet.sheet }}</span>
             </li>
           </ul>
@@ -289,7 +299,7 @@ onBeforeUnmount(() => {
         </section>
       </template>
 
-      <ExecutionStatusNotice v-if="!typing && !showError" :message="message" />
+      <ExecutionStatusNotice v-if="!typing && !showError" :message="message" compact />
 
       <div v-if="!typing && showError" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
         <CircleAlert class="mt-0.5 size-4 shrink-0" />

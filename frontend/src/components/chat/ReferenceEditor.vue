@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** Native text editing with atomic file and worksheet labels. */
-import { FileCheck2, FileSpreadsheet, Table2 } from '@lucide/vue'
+import { FileCheck2, Sheet, Table2 } from '@lucide/vue'
 import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, render as renderVNode, useId, watch } from 'vue'
 
 import {
@@ -44,7 +44,7 @@ function referenceIcon(kind: 'file' | 'table', reference: ComposerReference) {
   let template = referenceIcons.get(iconKind)
   if (!template) {
     const host = document.createElement('span')
-    const component = iconKind === 'table' ? Table2 : iconKind === 'expected' ? FileCheck2 : FileSpreadsheet
+    const component = iconKind === 'table' ? Table2 : iconKind === 'expected' ? FileCheck2 : Sheet
     renderVNode(h(component, {
       size: 14,
       strokeWidth: 1.8,
@@ -433,10 +433,10 @@ defineExpose({
           @pointerenter="activeSuggestion = index"
           @click="chooseSuggestion(suggestion)"
         >
-          <span class="flex size-7 shrink-0 items-center justify-center rounded-md" :class="suggestion.type === 'file' ? suggestion.reference.kind === 'expected' ? 'bg-[#fff5d9] text-[#b7860b]' : 'bg-[#e8f5ee] text-fun-green' : 'bg-[#e0ece5] text-[#3f6152]'">
+          <span class="flex size-7 shrink-0 items-center justify-center rounded-md" :class="'bg-paper text-[#4a4743]'">
             <Table2 v-if="suggestion.type === 'table'" class="size-4" :stroke-width="1.8" />
             <FileCheck2 v-else-if="suggestion.reference.kind === 'expected'" class="size-4" :stroke-width="1.8" />
-            <FileSpreadsheet v-else class="size-4" :stroke-width="1.8" />
+            <Sheet v-else class="size-4" :stroke-width="1.8" />
           </span>
           <span class="min-w-0 truncate">{{ suggestion.label }}</span>
           <span v-if="suggestion.reference.kind === 'input' || suggestion.reference.kind === 'expected'" class="ml-auto shrink-0 text-[10px] text-faint">{{ suggestion.reference.kind === 'expected' ? '人工结果' : '要处理的表' }}</span>
@@ -518,12 +518,12 @@ defineExpose({
   user-select: none;
 }
 .reference-editor :deep(.composer-reference__icon--input) {
-  color: var(--color-fun-green);
+  color: #4a4743;
 }
 .reference-editor :deep(.composer-reference__icon--expected) {
-  color: #b7860b;
+  color: #4a4743;
 }
 .reference-editor :deep(.composer-reference__icon--table) {
-  color: #4c7e67;
+  color: #4a4743;
 }
 </style>

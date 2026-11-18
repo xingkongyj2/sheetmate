@@ -3,7 +3,7 @@
  * 对话里的处理卡片：实时展示规划、执行（含自动修复）、校验和比对，按请求展示流程保存结果。
  * 执行已有流程（重复执行）也用这张卡片。
  */
-import { ChevronRight, CircleAlert, Download, ExternalLink, Eye, FileSpreadsheet, LoaderCircle, MessageCircleQuestion, ShieldCheck } from '@lucide/vue'
+import { ChevronRight, CircleAlert, Download, ExternalLink, Eye, Sheet, LoaderCircle, MessageCircleQuestion, ShieldCheck } from '@lucide/vue'
 import { computed, ref } from 'vue'
 
 import { fileApi } from '@/api'
@@ -155,7 +155,7 @@ const busyText = computed(() => {
           <!-- 输入识别 -->
           <div v-if="renames.length" class="space-y-1">
             <div v-for="inp in renames" :key="inp.alias" class="flex flex-wrap items-center gap-1.5 text-xs text-mute">
-              <FileSpreadsheet class="size-3.5" />
+              <Sheet class="size-3.5" />
               <span class="font-medium text-ink">{{ inp.alias }}</span> ← {{ inp.filename }}
               <span v-for="(std, raw) in inp.renames" :key="raw" class="rounded bg-info/10 px-1.5 text-info">{{ raw }} → {{ std }}</span>
               <span v-for="w in inp.warnings" :key="w" class="rounded bg-warning/10 px-1.5 text-[#8a5a00]">{{ w }}</span>

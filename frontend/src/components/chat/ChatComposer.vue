@@ -3,7 +3,7 @@
  * 输入框：文字 + 附件（要处理的表 / 人工做好的结果）+ 思考模式 + 发送/停止。
  * 中文输入法组字时按回车不会发送；支持选择、拖入和粘贴表格或图片。
  */
-import { ArrowUp, Brain, Eye, FileCheck2, FileSpreadsheet, Image, LoaderCircle, Plus, Square, X } from '@lucide/vue'
+import { ArrowUp, Brain, Eye, FileCheck2, Image, LoaderCircle, Plus, Sheet, Square, X } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 
 import { ATTACHMENT_ACCEPT, captureAttachmentPaste, filterAttachmentFiles, isImageFile } from '@/composables/attachmentFiles'
@@ -214,8 +214,10 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
         <LoaderCircle v-if="a.status === 'uploading'" class="size-4 shrink-0 animate-spin text-mute" />
         <img v-else-if="image(a) && previewUrl(a)" :src="previewUrl(a)" alt="" class="size-9 shrink-0 rounded-md object-cover" />
         <Image v-else-if="image(a)" class="size-4 shrink-0 text-info" />
-        <FileCheck2 v-else-if="a.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
-        <FileSpreadsheet v-else class="size-4 shrink-0 text-fun-green" />
+        <span v-else class="-ml-1 flex size-7 shrink-0 items-center justify-center rounded-lg border border-line bg-white text-[#4a4743]">
+          <FileCheck2 v-if="a.kind === 'expected'" class="size-4" />
+          <Sheet v-else class="size-4" />
+        </span>
         <div class="min-w-0">
           <button
             type="button"
@@ -226,9 +228,7 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
             @pointerdown.prevent="captureSelection"
             @click="insertFile(a)"
           >{{ a.name }}</button>
-          <div class="truncate text-[10px] text-faint">
-            {{ a.status === 'error' ? a.error : image(a) ? (a.kind === 'expected' ? '人工结果图片' : '图片附件') : a.kind === 'expected' ? '人工结果 · 让 AI 照着学' : a.tables?.length ? `已加载：${a.tables.join('、')}` : '要处理的表' }}
-          </div>
+          <div v-if="a.status === 'error'" class="truncate text-[10px] text-error">{{ a.error }}</div>
         </div>
         <button
           type="button"
@@ -278,11 +278,11 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
         <button class="icon-btn disabled:opacity-40" title="上传表格或图片" :disabled="busy" @click="menuOpen = !menuOpen"><Plus class="size-[18px]" /></button>
         <div v-if="menuOpen && !busy" class="absolute bottom-10 left-0 z-30 w-max max-w-[calc(100vw-3rem)] animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl" @mouseleave="menuOpen = false">
           <button class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper" @click="pick('input')">
-            <FileSpreadsheet class="size-4 text-fun-green" />
+            <Sheet class="size-4 text-[#4a4743]" />
             <span class="text-sm font-medium">要处理的文件</span>
           </button>
           <button class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper" @click="pick('expected')">
-            <FileCheck2 class="size-4 text-[#b7860b]" />
+            <FileCheck2 class="size-4 text-[#4a4743]" />
             <span class="text-sm font-medium">人工做好的文件</span>
           </button>
         </div>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 文件页里的一行文件：预览、改名、下载、删除。输入文件和输出文件共用；改名只改名字，扩展名固定。 */
-import { Check, Download, FileCheck2, FileSpreadsheet, LoaderCircle, Pencil, Trash2, X } from '@lucide/vue'
+import { Check, Download, FileCheck2, Sheet, LoaderCircle, Pencil, Trash2, X } from '@lucide/vue'
 import { computed, nextTick, ref } from 'vue'
 
 import { errorText } from '@/api/http'
@@ -66,8 +66,8 @@ async function save() {
 <template>
   <div class="-mx-2 rounded-xl px-2 py-2 text-sm transition hover:bg-paper">
     <form v-if="editing" class="flex items-center gap-2" @submit.prevent="save">
-      <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
-      <FileSpreadsheet v-else class="size-4 shrink-0 text-fun-green" />
+      <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
+      <Sheet v-else class="size-4 shrink-0 text-[#4a4743]" />
       <input ref="input" v-model="draft" class="input input-sm min-w-0 flex-1 rounded-xl" aria-label="文件名" :maxlength="MAX_STEM" :disabled="saving" @keydown.esc.stop.prevent="cancel" />
       <span v-if="extension" class="shrink-0 text-faint">{{ extension }}</span>
       <div class="flex shrink-0 items-center gap-0.5">
@@ -77,8 +77,8 @@ async function save() {
     </form>
     <div v-else class="flex items-center gap-3">
       <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :title="file.filename" :aria-label="`预览 ${file.filename}`" @click="emit('preview', file)">
-        <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
-        <FileSpreadsheet v-else class="size-4 shrink-0 text-fun-green" /><span class="truncate">{{ file.filename }}</span>
+        <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
+        <Sheet v-else class="size-4 shrink-0 text-[#4a4743]" /><span class="truncate">{{ file.filename }}</span>
       </button>
       <span v-if="badge" class="tag shrink-0 whitespace-nowrap" :class="badgeClass">{{ badge }}</span>
       <span class="shrink-0 text-xs text-faint">{{ timeAgo(file.created_at) }}</span>

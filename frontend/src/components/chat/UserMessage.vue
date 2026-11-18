@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Brain, Check, Copy, Download, FileCheck2, FileSpreadsheet, Image, MessageSquare } from '@lucide/vue'
+import { Brain, Check, Copy, Download, FileCheck2, Sheet, Image, MessageSquare } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref } from 'vue'
 
 import type { FileInfo, PlanStep } from '@/api/types'
@@ -85,11 +85,11 @@ function fileDetails(file: FileInfo) {
               :title="attachment.file.filename"
               @click="emit('preview', attachment.file)"
             >
-              <span class="flex size-10 shrink-0 items-center justify-center rounded-xl" :class="attachment.file.kind === 'expected' ? 'bg-fun-yellow/15 text-[#b7860b]' : 'bg-fun-green/10 text-fun-green'">
+              <span class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-paper text-[#4a4743]">
                 <img v-if="isImageFile(attachment.file.filename, attachment.file.media_type) && attachment.file.preview_url" :src="attachment.file.preview_url" alt="" loading="lazy" class="size-10 rounded-xl object-cover" />
                 <Image v-else-if="isImageFile(attachment.file.filename, attachment.file.media_type)" class="size-5" />
                 <FileCheck2 v-else-if="attachment.file.kind === 'expected'" class="size-5" />
-                <FileSpreadsheet v-else class="size-5" />
+                <Sheet v-else class="size-5" />
               </span>
               <span class="min-w-0 flex-1">
                 <span class="block break-words text-[13px] font-semibold leading-5 text-ink [overflow-wrap:anywhere]">{{ attachment.file.filename }}</span>
@@ -99,7 +99,7 @@ function fileDetails(file: FileInfo) {
             <a :href="attachment.file.download_url" class="icon-btn mr-1 shrink-0" :aria-label="`下载文件 ${attachment.file.filename}`" title="下载文件"><Download class="size-4" /></a>
           </template>
           <div v-else class="flex min-w-0 items-center gap-3 px-2 py-1.5 text-faint">
-            <span class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-paper"><FileSpreadsheet class="size-5" /></span>
+            <span class="flex size-10 shrink-0 items-center justify-center rounded-xl bg-paper"><Sheet class="size-5" /></span>
             <span class="min-w-0"><span class="block text-[13px] font-medium">文件不可用</span><span class="mt-0.5 block text-[11px]">可能已被删除</span></span>
           </div>
         </div>

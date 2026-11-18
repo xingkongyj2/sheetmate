@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 脱敏明细：文件 → 工作表 → 被保护的列（类型、处理方式、依据、来源、替换数）。聊天卡片和详情面板共用。 */
-import { ChevronRight, Download, Eye, FileSpreadsheet, LoaderCircle, Table2 } from '@lucide/vue'
+import { ChevronRight, Download, Eye, Sheet, LoaderCircle, Table2 } from '@lucide/vue'
 import { ref } from 'vue'
 
 import type { PrivacyFile, PrivacyFileState } from '@/api/types'
@@ -33,7 +33,7 @@ function canCopy(file: PrivacyFile | PrivacyFileState) {
       <details class="group/file rounded-xl border border-line bg-white" :open="openFirst && index === 0">
         <summary class="flex cursor-pointer list-none items-center gap-2 px-3 py-2 text-[13px] [&::-webkit-details-marker]:hidden">
           <ChevronRight class="size-3.5 shrink-0 text-faint transition group-open/file:rotate-90" aria-hidden="true" />
-          <FileSpreadsheet class="size-4 shrink-0 text-fun-green" aria-hidden="true" />
+          <Sheet class="size-4 shrink-0 text-[#4a4743]" aria-hidden="true" />
           <span class="min-w-0 flex-1 truncate font-medium" :title="file.filename">{{ file.filename }}</span>
           <LoaderCircle v-if="status(file) === 'pending'" class="size-3.5 shrink-0 animate-spin text-mute" aria-label="识别中" />
           <span v-else-if="status(file) === 'failed'" class="tag shrink-0 !bg-error/10 !text-error">识别失败</span>

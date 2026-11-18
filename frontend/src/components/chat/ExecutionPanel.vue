@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 客户/会话资源与单次回答的处理流程；表名按来源工作区定位。 */
-import { Download, Eye, FileCheck2, FileSpreadsheet, Maximize2, Trash2 } from '@lucide/vue'
+import { Download, Eye, FileCheck2, Sheet, Maximize2, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { conversationApi, fileApi } from '@/api'
@@ -270,8 +270,8 @@ onBeforeUnmount(() => {
         <div v-for="group in fileGroups" :key="group.key" class="mb-5">
           <div class="label-mini mb-2 flex items-center gap-2">{{ group.label }}<span class="font-normal tabular-nums tracking-normal">{{ group.files.length }}</span></div>
           <div v-for="file in group.files" :key="file.file_id" class="mb-1.5 flex items-center gap-2.5 rounded-xl border border-line px-3 py-2">
-            <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
-            <FileSpreadsheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-fun-green'" />
+            <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
+            <Sheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-[#4a4743]'" />
             <button type="button" class="min-w-0 flex-1 truncate rounded text-left text-[13px] font-medium underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink/40" :title="file.filename" :aria-label="`查看 ${file.filename}`" @click="emit('openFile', file)">{{ file.filename }}</button>
             <div class="-mr-1.5 flex shrink-0 items-center">
               <PrivacyStatusIcon :status="privacy[file.file_id]" :file="file" :conversation-id="detail?.id" class="size-7" />
@@ -287,8 +287,8 @@ onBeforeUnmount(() => {
           <div class="label-mini mb-2 flex items-center gap-2">中间数据<span class="font-normal tabular-nums tracking-normal">{{ tables.length }}</span></div>
           <div v-for="table in tables" :key="executionTableKey(table)" class="group mb-1.5 rounded-xl border border-line px-3 py-2.5 transition hover:border-ink/20">
             <div class="flex items-center gap-2">
-              <FileCheck2 v-if="table.role === 'expected'" class="size-4 shrink-0 text-[#b7860b]" />
-              <FileSpreadsheet v-else class="size-4 shrink-0 text-fun-green" />
+              <FileCheck2 v-if="table.role === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
+              <Sheet v-else class="size-4 shrink-0 text-[#4a4743]" />
               <span class="min-w-0 flex-1 truncate font-mono text-[13px] font-medium" :title="table.name">{{ table.name }}</span>
               <span class="shrink-0 font-mono text-[11px] text-faint">{{ table.preview_only ? '预览 · ' : '' }}{{ table.rows }}×{{ table.cols }}</span>
             </div>

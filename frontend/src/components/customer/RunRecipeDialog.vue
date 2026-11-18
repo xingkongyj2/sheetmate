@@ -4,7 +4,7 @@
  * 每个输入一个位置，默认是录制时的样例文件，也可以换成已有文件或上传新文件，选好直接执行。
  * 正常情况下不调用 AI；出错时可选让 AI 自动修复。
  */
-import { Check, ChevronDown, Download, Eye, FileSpreadsheet, LoaderCircle, Play, TriangleAlert, Upload, X } from '@lucide/vue'
+import { Check, ChevronDown, Download, Eye, Sheet, LoaderCircle, Play, TriangleAlert, Upload, X } from '@lucide/vue'
 import { computed, reactive, ref } from 'vue'
 
 import { conversationApi, customerApi, recipeApi } from '@/api'
@@ -178,7 +178,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
       </div>
       <div v-if="progress.inputs.length" class="space-y-1">
         <div v-for="i in progress.inputs" :key="i.alias" class="flex flex-wrap items-center gap-1.5 text-xs text-mute">
-          <FileSpreadsheet class="size-3.5" /><b class="font-medium text-ink">{{ i.alias }}</b> ← {{ i.filename }}<template v-if="i.kind !== 'file'"> · {{ i.sheet }}（{{ i.rows }} 行）</template><span v-else>（完整文件）</span>
+          <Sheet class="size-3.5" /><b class="font-medium text-ink">{{ i.alias }}</b> ← {{ i.filename }}<template v-if="i.kind !== 'file'"> · {{ i.sheet }}（{{ i.rows }} 行）</template><span v-else>（完整文件）</span>
           <span v-for="(std, raw) in i.renames" :key="raw" class="rounded bg-info/10 px-1.5 text-info">{{ raw }} → {{ std }}</span>
           <span v-for="w in i.warnings" :key="w" class="rounded bg-warning/10 px-1.5 text-[#8a5a00]">{{ w }}</span>
         </div>
@@ -193,7 +193,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
       <p v-else-if="progress.runSummary" class="text-sm text-mute">{{ progress.runSummary }}</p>
       <div v-if="outputFiles.length" class="space-y-2">
         <div v-for="file in outputFiles" :key="file.file_id" class="flex items-center gap-2 rounded-xl border border-line px-3 py-2">
-          <FileSpreadsheet class="size-4 shrink-0 text-fun-green" />
+          <Sheet class="size-4 shrink-0 text-[#4a4743]" />
           <span class="min-w-0 flex-1 truncate text-sm">{{ file.filename }}</span>
           <button class="btn-text text-xs" @click="previewOutput(file)"><Eye class="size-3.5" />查看</button>
           <a :href="file.download_url" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
@@ -217,7 +217,7 @@ const flow = computed(() => progressFlow({ ...progress, flow: props.recipe.flow 
       <ul class="-mx-2 space-y-0.5" role="listbox" aria-label="已上传的文件">
         <li v-for="file in uploaded(pickerInput)" :key="file.file_id" role="option" :aria-selected="file.file_id === choice[pickerInput.alias].fileId">
           <button type="button" class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper focus-visible:bg-paper focus-visible:outline-none" @click="select(pickerInput, file)">
-            <FileSpreadsheet class="size-4 shrink-0 text-fun-green" />
+            <Sheet class="size-4 shrink-0 text-[#4a4743]" />
             <span class="min-w-0 flex-1 truncate text-sm">{{ file.filename }}</span>
             <span class="shrink-0 text-xs text-faint">{{ timeAgo(file.created_at) }}</span>
             <Check v-if="file.file_id === choice[pickerInput.alias].fileId" class="size-4 shrink-0 text-success" />

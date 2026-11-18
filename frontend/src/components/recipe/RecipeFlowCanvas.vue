@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** Shared flow canvas; selection and inspection are managed by the containing view. */
-import { Check, CircleAlert, FileSpreadsheet, LoaderCircle, TriangleAlert, Wrench } from '@lucide/vue'
+import { Check, CircleAlert, Sheet, LoaderCircle, TriangleAlert, Wrench } from '@lucide/vue'
 import { computed } from 'vue'
 
 import type { FlowStep, RecipeFlowData } from '@/api/types'
@@ -133,7 +133,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
           :title="file.aliases.join('、') || file.name"
           @click="emit('selectFile', file)"
         >
-          <span class="recipe-flow-file-icon flex shrink-0 items-center justify-center rounded-lg bg-[#e9f8f0]" :class="compact ? 'size-7' : 'size-[26px]'"><FileSpreadsheet class="size-4 text-fun-green" /></span>
+          <span class="recipe-flow-file-icon flex shrink-0 items-center justify-center rounded-lg bg-paper" :class="compact ? 'size-7' : 'size-[26px]'"><Sheet class="size-4 text-[#4a4743]" /></span>
           <span class="min-w-0 leading-tight">
             <span class="recipe-flow-file-name block text-[13px] font-medium">{{ file.name }}</span>
           </span>
@@ -215,7 +215,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
         :aria-pressed="selectedFileKey === file.key"
         @click="emit('selectFile', file)"
       >
-        <span class="recipe-flow-file-icon flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-[#e9f8f0]"><FileSpreadsheet class="size-4 text-fun-green" /></span>
+        <span class="recipe-flow-file-icon flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-paper"><Sheet class="size-4 text-[#4a4743]" /></span>
         <span class="min-w-0 leading-tight">
           <span class="recipe-flow-file-name block text-[13px] font-medium">{{ file.name }}</span>
         </span>

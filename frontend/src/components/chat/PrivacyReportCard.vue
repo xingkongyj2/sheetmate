@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 助手回复的第一块内容：本轮对话开始前对文件做了什么脱敏。
  *  收起：一句话总结。展开：每个文件一张表——左上文件名、右上查看 / 下载；下面按工作表分 tab，表里是脱敏了哪些字段、多少个值。 */
-import { ChevronRight, Download, Eye, FileSpreadsheet, LoaderCircle, ShieldAlert, ShieldCheck } from '@lucide/vue'
+import { ChevronRight, Download, Eye, Sheet, LoaderCircle, ShieldAlert, ShieldCheck } from '@lucide/vue'
 import { computed, reactive, ref } from 'vue'
 
 import type { PrivacyFile, PrivacyReport, PrivacySheet } from '@/api/types'
@@ -53,7 +53,7 @@ const viewing = ref<{ fileId: string; filename: string } | null>(null)
         <div v-if="expandable" class="mb-1 mt-1.5 max-w-xl space-y-2.5">
           <article v-for="file in shownFiles" :key="file.file_id || file.filename" class="overflow-hidden rounded-xl border border-line bg-white">
             <header class="flex min-w-0 items-center gap-2 px-3.5 pb-2 pt-2.5">
-              <FileSpreadsheet class="size-4 shrink-0 text-fun-green" aria-hidden="true" />
+              <Sheet class="size-4 shrink-0 text-[#4a4743]" aria-hidden="true" />
               <span class="min-w-0 flex-1 truncate text-[13px] font-medium text-ink" :title="file.filename">{{ file.filename }}</span>
               <template v-if="!blocked && file.file_id">
                 <button type="button" class="privacy-action" title="查看 AI 看到的样子" :aria-label="`查看 ${file.filename} 脱敏后的样子`" @click="viewing = { fileId: file.file_id, filename: file.filename }">

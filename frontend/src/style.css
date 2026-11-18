@@ -66,7 +66,7 @@
   --color-line: #e8e6e3;
   --color-paper: #f3f2ef;
   --color-canvas: #f5f4f2; /* 主界面底层画布：侧边栏在上面，内容面板悬浮在上面 */
-  --color-panel: #fcfbf9;  /* 悬浮内容面板 */
+  --color-panel: #fdfdfc;  /* 悬浮内容面板 */
   --color-fun-orange: #ff7a1a;
   --color-fun-blue: #2f7bff;
   --color-fun-green: #22b573;
@@ -172,7 +172,7 @@ body {
   }
   /* 主界面右侧内容面板：一整块悬浮在底层画布上 */
   .app-panel {
-    border: 1px solid #e2e1df;
+    border: 1px solid #e4e3e1;
     box-shadow: 0 0 6px rgba(60, 50, 40, 0.05);
   }
   .card-soft {

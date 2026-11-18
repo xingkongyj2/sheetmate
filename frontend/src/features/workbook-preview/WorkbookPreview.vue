@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** Unified original-file preview. Images bypass the workbook parser. */
-import { ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, FileSpreadsheet, Image, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from '@lucide/vue'
+import { ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, Sheet, Image, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { fileApi } from '@/api'
@@ -200,7 +200,7 @@ onBeforeUnmount(() => {
     <div :class="page ? 'h-dvh w-full' : 'fixed inset-0 z-[6000] flex items-center justify-center bg-black/35 backdrop-blur-sm'" @click.self="!page && emit('close')">
       <section ref="panel" :role="page ? 'main' : 'dialog'" :aria-modal="page ? undefined : 'true'" aria-labelledby="workbook-preview-title" tabindex="-1" class="workbook-preview flex min-h-0 flex-col overflow-hidden bg-white outline-none" :class="page ? 'h-dvh w-full' : ['border border-line shadow-2xl', expanded ? 'h-[100dvh] w-full' : 'h-[90dvh] w-[96vw] max-w-[1600px] rounded-2xl']">
         <header class="flex shrink-0 items-center gap-2.5 border-b border-line px-4 py-1.5 sm:px-5">
-          <span class="rounded-lg bg-fun-green/10 p-1.5 text-fun-green"><Image v-if="image" class="size-4" /><FileSpreadsheet v-else class="size-4" /></span>
+          <span class="rounded-lg bg-paper p-1.5 text-[#4a4743]"><Image v-if="image" class="size-4" /><Sheet v-else class="size-4" /></span>
           <div class="min-w-0 flex-1">
             <h2 id="workbook-preview-title" class="truncate text-sm font-semibold" :title="filename">{{ filename }}</h2>
           </div>

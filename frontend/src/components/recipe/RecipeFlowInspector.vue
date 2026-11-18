@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ArrowDownToLine, ArrowLeft, Check, ChevronRight, Eye, FileSpreadsheet, LoaderCircle, Sparkles, Trash2, TriangleAlert } from '@lucide/vue'
+import { ArrowDownToLine, ArrowLeft, Check, ChevronRight, Eye, Sheet, LoaderCircle, Sparkles, Trash2, TriangleAlert } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { conversationApi, customerApi, fileApi, recipeApi, runApi, scriptApi } from '@/api'
@@ -350,7 +350,7 @@ function paramValue(value: unknown): string {
         <section v-if="stepFiles.length" class="flow-inspector-section">
           <h4>过程文件</h4>
           <div v-for="file in stepFiles" :key="file.file_id" class="flex items-center gap-2 rounded-xl bg-paper px-3 py-2.5">
-            <FileSpreadsheet class="size-4 shrink-0 text-fun-green" />
+            <Sheet class="size-4 shrink-0 text-[#4a4743]" />
             <span class="min-w-0 flex-1 truncate text-xs" :title="file.filename">{{ file.filename }}</span>
             <button type="button" class="shrink-0 text-xs text-[#6265dc] disabled:opacity-50" :disabled="!!openingFile" :aria-label="`查看过程文件 ${file.filename}`" @click="preview(file)"><LoaderCircle v-if="openingFile === file.file_id" class="size-3.5 animate-spin" /><template v-else>查看</template></button>
             <a :href="file.download_url" class="shrink-0 text-mute hover:text-[#6265dc]" :aria-label="`下载过程文件 ${file.filename}`" title="下载"><ArrowDownToLine class="size-3.5" /></a>
@@ -416,7 +416,7 @@ function paramValue(value: unknown): string {
       <template v-else-if="fileNode">
         <p v-if="loadingFiles" class="flex items-center gap-2 py-4 text-xs text-mute" role="status"><LoaderCircle class="size-3.5 animate-spin text-[#6265dc]" />正在查找文件…</p>
         <div v-for="file in matchedFiles" :key="file.file_id" class="fi-file">
-          <span class="fi-file-icon"><FileSpreadsheet class="size-[18px] text-fun-green" /></span>
+          <span class="fi-file-icon"><Sheet class="size-[18px] text-[#4a4743]" /></span>
           <ul class="fi-sheets">
             <li v-for="sheet in file.sheets" :key="sheet.sheet"><span class="min-w-0 break-words font-medium text-ink">{{ sheet.sheet }}</span><span class="shrink-0 tabular-nums"><b>{{ sheet.rows.toLocaleString() }}</b> 行<template v-if="sheet.cols"> · <b>{{ sheet.cols }}</b> 列</template></span></li>
             <li v-if="!file.sheets.length"><span class="min-w-0 break-words font-medium text-ink">{{ file.filename }}</span></li>

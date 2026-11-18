@@ -35,6 +35,7 @@ export function executionExportStatus(message: UiMessage): ExecutionStatus {
 }
 
 export interface ExecutionNotice {
+  status: ExecutionStatus
   title: string
   summary: string
   lastStep: string
@@ -74,7 +75,7 @@ export function executionNotice(message: UiMessage): ExecutionNotice | null {
     : state.last_step && typeof state.last_step === 'object' ? state.last_step.label ?? state.last_step.summary : ''
   const publicStep = typeof lastStep === 'string' && !/\b(?:table_info|run_sql|run_python_script|preview_table|build_recipe|ask_user)\b/.test(lastStep)
     ? userFacingText(lastStep, '', 160) : ''
-  return { title: titles[state.status],
+  return { status: state.status, title: titles[state.status],
     summary: REASONS[state.code ?? ''] ?? userFacingText(state.summary, fallback, 400),
     lastStep: publicStep,
     tone: state.status === 'failed' ? 'error' : state.status === 'waiting' ? 'info' : 'warning' }

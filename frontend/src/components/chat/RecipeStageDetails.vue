@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Check, ChevronRight, CircleAlert, FileSpreadsheet, LoaderCircle, ShieldCheck } from '@lucide/vue'
+import { Check, ChevronRight, CircleAlert, Sheet, LoaderCircle, ShieldCheck } from '@lucide/vue'
 import { computed } from 'vue'
 
 import type { RecipeProgress, StepState } from '@/composables/chatModel'
@@ -54,7 +54,7 @@ function repairs(step: StepState) {
   <div v-else class="space-y-3 text-[13px]">
     <div v-if="progress.inputs.length" class="space-y-1.5">
       <p v-for="input in progress.inputs" :key="`${input.alias}:${input.sheet}`" class="flex items-start gap-2 leading-5 text-mute">
-        <FileSpreadsheet class="mt-0.5 size-3.5 shrink-0 text-fun-green" />
+        <Sheet class="mt-0.5 size-3.5 shrink-0 text-[#4a4743]" />
         <span class="min-w-0 break-words">已读取 {{ input.filename }} · {{ input.sheet }} · {{ input.rows }} 行</span>
       </p>
     </div>

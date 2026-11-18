@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { FileCheck2, FileSpreadsheet, LoaderCircle, Upload } from '@lucide/vue'
+import { FileCheck2, Sheet, LoaderCircle, Upload } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 
 import { customerApi, fileApi } from '@/api'
@@ -147,11 +147,11 @@ async function remove(file: FileInfo) {
           <div v-if="uploadMenuOpen" class="fixed inset-0 z-30" @click="closeUploadMenu" />
           <div v-if="uploadMenuOpen" class="absolute right-0 top-full z-40 mt-2 w-max max-w-[calc(100vw-3rem)] animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl" role="group" aria-label="选择上传文件类型">
             <button ref="uploadFirstChoice" type="button" class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper focus-visible:bg-paper focus-visible:outline-none" @click="chooseUpload('input')">
-              <FileSpreadsheet class="size-4 shrink-0 text-fun-green" />
+              <Sheet class="size-4 shrink-0 text-[#4a4743]" />
               <span class="text-sm font-medium">要处理的文件</span>
             </button>
             <button type="button" class="flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-left hover:bg-paper focus-visible:bg-paper focus-visible:outline-none" @click="chooseUpload('expected')">
-              <FileCheck2 class="size-4 shrink-0 text-[#b7860b]" />
+              <FileCheck2 class="size-4 shrink-0 text-[#4a4743]" />
               <span class="text-sm font-medium">人工做好的文件</span>
             </button>
           </div>

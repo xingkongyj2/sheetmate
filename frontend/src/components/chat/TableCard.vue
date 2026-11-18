@@ -11,7 +11,7 @@ const props = defineProps<{ table: TableArtifact }>()
 <template>
   <div class="card-soft animate-rise overflow-hidden" data-testid="inline-table">
     <div class="flex flex-wrap items-center gap-2.5 px-4 py-2.5">
-      <Table2 class="size-4 shrink-0 text-fun-green" />
+      <Table2 class="size-4 shrink-0 text-[#4a4743]" />
       <span class="min-w-0 truncate text-[13px] font-semibold">{{ table.label || table.name }}</span>
       <span class="font-mono text-[11px] text-faint">{{ table.rows }} 行 × {{ table.cols }} 列</span>
     </div>
