@@ -486,7 +486,6 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
             if callable(snapshot):
                 event = {**event, "usage": snapshot()}
         event = externalize_script_references(event)
-        event = privacy_workspace.restore_for_display(event)   # 工作区和工具结果里是令牌版：给用户看的换回真实值
         if event.get("type") == "file" and event.get("delivery_status") == "candidate":
             if event.get("file_id") in delivery_candidates:
                 # 工具重复展示本轮候选时仍须等待交付确认，并沿用原始生成证据。
@@ -568,6 +567,8 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
                                   "scope": "task", "verified": False})
         delivery_finished = True
         await emit(manifest)
+        if confirmed:
+            privacy_service.identify_pending_outputs(conversation_id)      # 交付的结果文件和上传的一样：后台识别，脱敏面板里才看得到
         if status == "unverified":
             return "已生成文件，但最终交付版本尚未确认，本轮未交付正式结果。" + summary
         if status == "incomplete":

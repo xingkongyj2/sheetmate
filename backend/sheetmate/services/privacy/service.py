@@ -655,7 +655,7 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
     return report
 
 
-async def identify_uploaded(file_id: str) -> None:
+async def identify_uploaded(file_id: str, *, source: str = "upload") -> None:
     """文件上传后在后台识别一次，结果记在这个文件上：之后不管在哪个对话里用到它，都直接用这个结果，不用再等。
 
     客户页面里上传的文件没有对话可以展示过程，所以这里只写脱敏日志、记到文件上（面板和文件列表里能看到状态）。
@@ -671,16 +671,49 @@ async def identify_uploaded(file_id: str) -> None:
             item = {"id": record.id, "filename": record.filename, "profile": record.profile, "path": record.stored_path}
         try:
             model = await _open_model()
-            sheets, _, _ = await _identify(item["id"], item["filename"], item["profile"], model, source="upload", path=item["path"])
+            sheets, _, _ = await _identify(item["id"], item["filename"], item["profile"], model, source=source, path=item["path"])
             _remember(item["id"], item["profile"], sheets)
             await apply_masking(item["id"])
         except Exception as exc:
             reason = str(exc)[:300] or type(exc).__name__
             _save_failed(item["id"], reason)
             privacy.log.emit("warn", "识别", f"{item['filename']}：上传后识别未完成，使用时重试（{reason}）",
-                             file_id=item["id"], source="upload")
+                             file_id=item["id"], source=source)
     except Exception:   # 后台任务出任何问题都不能影响上传本身
         logging.getLogger(__name__).exception("上传后自动识别出现意外")
+
+
+_output_tasks: set[asyncio.Task] = set()      # 持有后台任务的引用，防止被垃圾回收
+
+
+def identify_pending_outputs(conversation_id: str) -> int:
+    """这个会话里已经交付、还没识别过的结果文件：后台识别一次（和上传的文件一样），脱敏面板才看得到、查看时才知道哪些列要显示成令牌。
+    必须在事件循环里调用；识别失败会记在文件上，不会反复重试。返回新开始识别的文件数。"""
+    if not privacy.enabled:
+        return 0
+    start()
+    with session_scope() as db:
+        known = set(db.scalars(select(PrivacyFile.file_id)))
+        ids = [record.id for record in db.scalars(select(FileRecord).where(
+                   FileRecord.conversation_id == conversation_id, FileRecord.kind == "output"))
+               if (record.profile or {}).get("sheets") and needs_scan(record.kind, record.profile)
+               and record.id not in known and record.id not in _running and record.id not in _output_scheduled]
+    for file_id in ids:
+        _output_scheduled.add(file_id)
+        task = asyncio.create_task(_identify_output(file_id))
+        _output_tasks.add(task)
+        task.add_done_callback(_output_tasks.discard)
+    return len(ids)
+
+
+_output_scheduled: set[str] = set()
+
+
+async def _identify_output(file_id: str) -> None:
+    try:
+        await identify_uploaded(file_id, source="chat")
+    finally:
+        _output_scheduled.discard(file_id)
 
 
 def file_statuses(user: User, file_ids: list[str]) -> dict[str, dict[str, Any]]:

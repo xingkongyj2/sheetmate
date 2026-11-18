@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from sheetmate.api.conversations.schemas import (
     CreateBody,
     UpdateBody,
@@ -22,7 +24,6 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from sheetmate.api.deps import current_user, sse_response
-from sheetmate.services.privacy.workspace import restore_for_display
 from sheetmate.db.session import get_db, session_scope
 from sheetmate.db.models import Run, User
 from sheetmate.core.observability.conversation_log import (
@@ -180,8 +181,8 @@ def table_page(conversation_id: str, name: str, offset: int = 0, limit: int = 50
                source_conversation_id: str | None = None,
                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     source = conv_service.table_source(db, user, conversation_id, source_conversation_id)
-    # 工作区里是令牌版；给用户看的换回真实值（数据本身不变）
-    return {"ok": True, "table": restore_for_display(conv_service.workspace(source.id).page(name, offset, min(limit, 500)))}
+    # 工作区里是令牌版，查看时原样给令牌：只有下载才还原
+    return {"ok": True, "table": conv_service.workspace(source.id).page(name, offset, min(limit, 500))}
 
 
 @router.delete("/{conversation_id}/tables/{name}")
@@ -204,10 +205,11 @@ def set_table_role(conversation_id: str, name: str, body: RoleBody, source_conve
 
 
 @router.get("/{conversation_id}/privacy")
-def privacy_overview(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+async def privacy_overview(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     """详情面板「脱敏」tab：这个会话的文件脱敏情况和最近的处理记录。"""
     conv_service.get_conversation(db, user, conversation_id)
-    return {"ok": True, "privacy": privacy_service.overview(user, conversation_id)}
+    privacy_service.identify_pending_outputs(conversation_id)       # 还没识别的结果文件（比如旧会话里的）补上
+    return {"ok": True, "privacy": await asyncio.to_thread(privacy_service.overview, user, conversation_id)}
 
 
 @router.get("/{conversation_id}/privacy/sends")

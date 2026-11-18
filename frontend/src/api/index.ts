@@ -197,8 +197,9 @@ export const fileApi = {
   rename: async (id: string, filename: string, scope: { customerId?: string; recipeId?: string } = {}) =>
     (await http.patch<{ old: string; filename: string; changed: boolean; recipes: { recipe_id: string; version: number; customer_id: string | null }[] }>(
       `/files/${id}`, { filename, customer_id: scope.customerId, recipe_id: scope.recipeId })).data,
+  /** 在线查看用的内容：脱敏的列是令牌（下载才是真实值）。 */
   content: async (id: string, signal?: AbortSignal) =>
-    (await http.get<ArrayBuffer>(`/files/${id}/download`, { responseType: 'arraybuffer', signal, params: { t: Date.now() } })).data,   // 脱敏状态随时会变，不能用浏览器里之前缓存的内容
+    (await http.get<ArrayBuffer>(`/files/${id}/content`, { responseType: 'arraybuffer', signal, params: { t: Date.now() } })).data,   // 脱敏状态随时会变，不能用浏览器里之前缓存的内容
   /** 文件列表里每个表格文件的脱敏状态；不是表格文件、或没有权限的文件不在返回里。 */
   privacyStatus: async (ids: string[]) =>
     (await http.post<{ status: Record<string, PrivacyFileStatus> }>('/files/privacy-status', { ids: ids.slice(0, 200) })).data.status ?? {},

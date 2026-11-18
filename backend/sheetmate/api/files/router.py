@@ -23,7 +23,7 @@ from sheetmate.services.files import inspection
 from sheetmate.services.privacy import columns as privacy_columns_service
 from sheetmate.services.privacy import masked_copy
 from sheetmate.services.privacy import service as privacy_service
-from sheetmate.services.privacy.workspace import restore_for_display, restored_download
+from sheetmate.services.privacy.workspace import restored_download
 from sheetmate.services.workflows import node_edit as node_edit_service
 from sheetmate.core.errors import Forbidden, NotFound, ServiceError
 
@@ -138,10 +138,23 @@ async def file_preview(file_id: str, sheet: str | None = None, offset: int = Que
                        db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     record = file_service.get_file(db, file_id)
     _check(db, user, record)
-    path, mode = await privacy_columns_service.viewable_path(user, record)    # 脱敏的列里就是令牌，不换回真实值
+    path, mode = await privacy_columns_service.viewable_path(user, record)    # 查看到的一律是令牌，不换回真实值（只有下载才还原）
     preview = await asyncio.to_thread(inspection.preview_file, record, sheet=sheet, offset=offset, limit=limit, raw=raw, path=path)
-    return JSONResponse({"ok": True, "preview": jsonable_encoder(preview if mode != "original" else restore_for_display(preview))},
+    return JSONResponse({"ok": True, "preview": jsonable_encoder(preview)},
                         headers={"Cache-Control": "no-store"})
+
+
+@router.get("/{file_id}/content")
+async def content(file_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> FileResponse:
+    """在线查看用的文件内容（预览页的表格查看器读这个）：和存下来的一致，脱敏的列里是令牌，不还原。下载走 /download。"""
+    record = file_service.get_file(db, file_id)
+    _check(db, user, record)
+    source, mode = await privacy_columns_service.viewable_path(user, record)
+    filename = record.filename
+    if mode == "copy" and source.suffix.lower() != Path(filename).suffix.lower():
+        filename = f"{Path(filename).stem}{source.suffix}"                     # .xls 的令牌版是 .xlsx
+    headers = {"Content-Disposition": f"inline; filename*=UTF-8''{quote(filename)}", "Cache-Control": "no-store"}
+    return FileResponse(source, headers=headers, media_type=file_service.file_media_type(record))
 
 
 @router.get("/{file_id}/download")

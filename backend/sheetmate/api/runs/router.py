@@ -18,7 +18,6 @@ from sheetmate.services.workflows import replay as replay_service
 from sheetmate.services.workflows import runs as run_service
 from sheetmate.services.identity.auth import can_access_customer, require_customer
 from sheetmate.core.errors import Forbidden, NotFound
-from sheetmate.services.privacy.workspace import restore_for_display
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -64,7 +63,7 @@ def run_table(run_id: str, name: str, offset: int = 0, limit: int = 50,
     _check(db, user, run)
     if not (settings.runs_dir / f"{run_id}.duckdb").exists():
         raise NotFound("这次运行的中间数据已经不在了")
-    return {"ok": True, "table": restore_for_display(run_service.run_workspaces.get(run_id).page(name, offset, min(limit, 500)))}
+    return {"ok": True, "table": run_service.run_workspaces.get(run_id).page(name, offset, min(limit, 500))}
 
 
 @router.post("/{run_id}/rerun/{step_id}")
