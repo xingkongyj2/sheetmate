@@ -90,6 +90,14 @@ _TOOL_RE = re.compile(r"<｜tool[\s\S]*?(?:<｜tool▁calls?▁end｜>|$)")
 _EXPLORE_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "list_files", "get_recipe"}
 _READ_OBSERVATION_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql"}
 _MAX_IDENTICAL_OBSERVATIONS = 4
+NO_PROGRESS_STOP_MESSAGE = (f"对相同版本输入已连续{_MAX_IDENTICAL_OBSERVATIONS}次重复读取或重复执行相同操作，本轮停止重复操作。"
+                            "0 行是有效查询结果，不需要反复重查；相同代码重复执行不会有新结果。"
+                            "请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。")
+NO_PROGRESS_WARNING_MESSAGE = ("（系统提醒）你已经连续多次重复相同的读取或执行，结果没有变化，再重复也不会有新信息。"
+                               "停止重复：先对照用户的要求，找出还没完成的部分（比如还没生成的结果文件），用工具直接去完成；"
+                               "某个细节确实查不清时，如实写进回答，不要继续在它上面反复尝试。再次重复将直接结束本轮。")
+RESUME_AFTER_NO_PROGRESS_MESSAGE = ("（系统提醒）上一段因为重复相同的操作被暂停，现在继续。已经得到的结果不要重查，"
+                                    "不要再重复之前的尝试；直接用工具完成用户要求里还没完成的部分，完成后再回答。")
 _OBSERVATION_HISTORY_LIMIT = 32
 _RECOVERABLE_MODEL_ERRORS = frozenset({
     "stream_incomplete", "empty_response", "tool_protocol", "connection_error", "timeout", "stream_idle_timeout",
@@ -554,6 +562,7 @@ class AgentExecutor:
         finish_reason: str | None = None
         stream_id = uuid4().hex
         no_progress = False
+        progress_warned = False      # 已经因为重复操作提醒过一次：再重复才强制收尾
         progress_pending = False
         compose_only = False
         progress_review: dict[str, Any] = {}
@@ -591,6 +600,7 @@ class AgentExecutor:
                                   (_SCRIPT_EXTRA_ITERATIONS if script_budget_added else 0))
             fallback_suggested, protocol_pending = saved.get("fallback_suggested", False), saved.get("protocol_pending", False)
             completion_retries, no_progress = saved.get("completion_retries", 0), saved.get("no_progress", False)
+            progress_warned = bool(saved.get("progress_warned", False))
             conflict_history = list(saved.get("conflict_history", []))
             conflict_rounds = int(saved.get("conflict_rounds", 0))
             progress_pending = bool(saved.get("progress_pending", False))
@@ -600,6 +610,15 @@ class AgentExecutor:
             failures = {(row[0], row[1]): row[2] for row in saved.get("failures", [])}
             reflected_failures = {tuple(row) for row in saved.get("reflected_failures", [])}
             pending_reflections = list(saved.get("pending_reflections", []))
+            if no_progress and not pending_response:
+                # 上一段因为重复操作停下了，这次是重新开始（用户点了继续，或服务重启后续跑）：给一个新的决策窗口。
+                # 去掉末尾那两条「停止重复 / 最后一步不能调工具」的提醒，不然恢复后仍只能回答、做不了剩下的事，恢复几次都一样
+                while len(msgs) > start and msgs[-1].get("role") == "user" and text_content(msgs[-1].get("content")) in {
+                        FINAL_ROUND_MESSAGE, NO_PROGRESS_STOP_MESSAGE}:
+                    msgs.pop()
+                no_progress, progress_warned, completion_retries, compose_only = False, False, 0, False
+                read_progress.observe(None)
+                msgs.append({"role": "user", "content": RESUME_AFTER_NO_PROGRESS_MESSAGE})
             if saved.get("terminal_events") and applied_revision == runtime.revision:
                 if transcript is not None:
                     transcript.extend(msgs[start:])
@@ -624,7 +643,7 @@ class AgentExecutor:
                 "fallback_suggested": fallback_suggested, "protocol_pending": protocol_pending,
                 "completion_retries": completion_retries, "recovery_finish_prompts": recovery_finish_prompts,
                 "conflict_history": conflict_history[-12:], "conflict_rounds": conflict_rounds,
-                "no_progress": no_progress,
+                "no_progress": no_progress, "progress_warned": progress_warned,
                 "progress_pending": progress_pending, "compose_only": compose_only,
                 "progress_review": progress_review,
                 "failures": [[*key, count] for key, count in failures.items()],
@@ -698,6 +717,13 @@ class AgentExecutor:
                     transcript.extend(msgs[start:])
                 yield {"type": "execution_steered", "scope": stop_scope, "revision": runtime.revision}
                 return
+            if no_progress and not progress_warned and pending_response is None and not parallel_batch:
+                # 第一次发现重复：先不收尾，核对还差哪些目标并提醒模型停止重复、去做剩下的事（工具照常可用）。
+                # 提醒之后还在重复，才进入只能回答的最后一步。
+                progress_warned, no_progress = True, False
+                read_progress.observe(None)
+                progress_pending = True
+                msgs.append({"role": "user", "content": NO_PROGRESS_WARNING_MESSAGE})
             if progress_pending and pending_response is None and not parallel_batch:
                 # Successful repetition is a decision problem, not a failed
                 # tool. Review remaining goals even if the model never stops
@@ -751,7 +777,7 @@ class AgentExecutor:
                              "max_iterations": "本轮执行轮数已达到上限，任务尚未确认全部完成。"}.get(limit_code, "")
             if final_round:
                 if no_progress:
-                    msgs.append({"role": "user", "content": f"对相同版本输入已连续{_MAX_IDENTICAL_OBSERVATIONS}次重复读取或重复执行相同操作，本轮停止重复操作。0 行是有效查询结果，不需要反复重查；相同代码重复执行不会有新结果。请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。"})
+                    msgs.append({"role": "user", "content": NO_PROGRESS_STOP_MESSAGE})
                 if budget_exhausted:
                     msgs.append({"role": "user", "content": RECOVERY_BUDGET_MESSAGE})
                 msgs.append({"role": "user", "content": FINAL_ROUND_MESSAGE})
