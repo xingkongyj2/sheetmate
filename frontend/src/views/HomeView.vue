@@ -160,7 +160,7 @@ async function send() {
     <div class="mx-auto flex w-full max-w-[680px] flex-1 flex-col justify-center px-6 pb-[26vh] pt-10">
       <h1 class="animate-rise flex items-center justify-center gap-3 text-center text-[30px] font-semibold leading-tight tracking-tight">
         <LogoMark :size="32" class="shrink-0" aria-hidden="true" />
-        <span class="min-w-0">你的专属表格Agent助手</span>
+        <span class="min-w-0"><span class="whitespace-nowrap">你的专属</span><span class="whitespace-nowrap"><span class="handbill">手工账单<svg class="handbill-rule" viewBox="0 0 126 10" preserveAspectRatio="none" aria-hidden="true"><path pathLength="1" d="M1.5 3.6 C 38 2.3, 83 2.9, 124.5 2.5" /><path pathLength="1" d="M11 8 C 48 7.1, 88 7.5, 117 7.2" /></svg></span>助手</span></span>
       </h1>
 
       <div class="mt-[112px]">
@@ -206,5 +206,6 @@ async function send() {
         <p v-else-if="ready && savingFiles" class="mt-3 text-center text-xs text-slate-400" role="status">正在保存附件…</p>
       </div>
     </div>
+    <footer class="shrink-0 pb-5 text-center text-xs tracking-wide text-faint">「数智结算工坊」</footer>
   </div>
 </template>
