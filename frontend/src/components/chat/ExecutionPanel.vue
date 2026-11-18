@@ -306,7 +306,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.execution-panel { position: relative; display: flex; height: 100%; flex: none; flex-direction: column; border-left: 1px solid var(--color-line); background: white; }
+.execution-panel { position: relative; display: flex; height: 100%; flex: none; flex-direction: column; border-left: 1px solid var(--color-line); background: var(--color-panel); }
 .execution-resizer { position: absolute; inset: 0 auto 0 0; z-index: 1; width: 8px; cursor: col-resize; touch-action: none; outline: none; }
 .execution-resizer::after { position: absolute; inset: 0 auto 0 0; width: 2px; background: transparent; content: ''; transition: background-color 150ms; }
 .execution-resizer:hover::after,

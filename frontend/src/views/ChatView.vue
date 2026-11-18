@@ -690,7 +690,7 @@ function answer(option: string) {
   <div class="chat-page flex h-full min-h-0">
     <div class="chat-workspace flex min-w-0 flex-1 flex-col">
       <!-- 顶部 -->
-      <header class="flex h-11 shrink-0 items-center gap-2 border-b border-line px-4">
+      <header class="flex h-11 shrink-0 items-center gap-2 px-4">
         <div class="flex min-w-0 flex-1 items-center gap-2">
           <input
             v-if="editingTitle"
@@ -922,7 +922,7 @@ function answer(option: string) {
   bottom: 0;
   z-index: 1;
   margin-top: auto;
-  background: #fff;
+  background: var(--color-panel);
 }
 .chat-messages {
   --chat-message-width: calc(680px - 3rem);

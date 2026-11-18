@@ -70,7 +70,7 @@ async function logout() {
 
 <template>
   <aside
-    class="flex h-full shrink-0 flex-col border-r border-line bg-paper/70 transition-[width] duration-200"
+    class="flex h-full shrink-0 flex-col transition-[width] duration-200"
     :class="collapsed ? 'w-[64px]' : 'w-[268px]'"
   >
     <!-- 顶部 -->
@@ -78,7 +78,7 @@ async function logout() {
       <RouterLink v-if="!collapsed" to="/" class="pl-1"><LogoMark with-text :size="26" /></RouterLink>
       <button
         type="button"
-        class="icon-btn"
+        class="icon-btn hover:bg-black/[0.05]"
         :title="collapsed ? '展开侧边栏' : '收起侧边栏'"
         :aria-label="collapsed ? '展开侧边栏' : '收起侧边栏'"
         :aria-expanded="!collapsed"
@@ -142,7 +142,7 @@ async function logout() {
             </span>
           </RouterLink>
           <button
-            class="absolute right-2 top-2.5 rounded-md p-1 text-faint opacity-0 transition hover:bg-white hover:text-error focus-visible:opacity-100 group-hover:opacity-100"
+            class="absolute right-2 top-2.5 rounded-md p-1 text-faint opacity-0 transition hover:bg-black/[0.05] hover:text-error focus-visible:opacity-100 group-hover:opacity-100"
             title="删除对话"
             :aria-label="`删除对话 ${conv.title}`"
             @click.prevent="remove(conv.id, conv.title)"
@@ -167,7 +167,7 @@ async function logout() {
           <RouterLink
             :to="statsDestination"
             class="icon-btn"
-            :class="route.name === 'stats' ? 'bg-black/[0.05] text-ink' : ''"
+            :class="route.name === 'stats' ? 'bg-black/[0.06] text-ink' : 'hover:bg-black/[0.05]'"
             title="统计"
             aria-label="统计"
           >
@@ -176,7 +176,7 @@ async function logout() {
           <RouterLink
             :to="settingsDestination"
             class="icon-btn"
-            :class="route.name === 'settings' ? 'bg-black/[0.05] text-ink' : ''"
+            :class="route.name === 'settings' ? 'bg-black/[0.06] text-ink' : 'hover:bg-black/[0.05]'"
             title="设置"
             aria-label="设置"
           >

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 主界面框架：左侧边栏 + 右侧内容（参考 ChatGPT / Qoder 的布局） */
+/** 主界面框架：侧边栏在底层画布上，右侧内容是一整块悬浮在画布上的面板 */
 import { computed, onMounted, shallowRef, watch } from 'vue'
 import { useRouter, type RouteLocationNormalizedLoaded } from 'vue-router'
 
@@ -37,9 +37,9 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="flex h-full overflow-hidden bg-white">
+  <div class="flex h-full overflow-hidden bg-canvas">
     <AppSidebar />
-    <main class="relative flex min-w-0 flex-1 flex-col">
+    <main class="app-panel relative my-2 mr-2 flex min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] bg-panel">
       <BackgroundPage
         v-if="backgroundRoute"
         :route="backgroundRoute"
@@ -49,7 +49,7 @@ onMounted(() => {
       <div
         v-if="settingsRoute"
         v-show="settingsOpen"
-        class="absolute inset-0 z-40 bg-white"
+        class="absolute inset-0 z-40 bg-panel"
         :inert="!settingsOpen"
         :aria-hidden="!settingsOpen || undefined"
         aria-label="设置"
@@ -60,7 +60,7 @@ onMounted(() => {
       <div
         v-if="statsRoute"
         v-show="statsOpen"
-        class="absolute inset-0 z-40 bg-white"
+        class="absolute inset-0 z-40 bg-panel"
         :inert="!statsOpen"
         :aria-hidden="!statsOpen || undefined"
         aria-label="统计"
