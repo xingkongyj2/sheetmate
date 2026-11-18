@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 模型脱敏明细，两页（都只显示令牌，真实内容只有下载文件时才还原）：
+/** 模型脱敏明细，两页（原文 → 令牌，原文在本机还原，模型只看到令牌）：
  *  脱敏——文件脱敏之后仍以原文出现、发给模型前才换成令牌的值（每个值只在第一次出现的那次发送里列一次）；
  *  拦截——停止发送的原因，以及没能处理掉的值。 */
 import { LoaderCircle, RotateCw } from '@lucide/vue'
@@ -79,8 +79,9 @@ function clock(iso: string | null): string {
           <table class="w-full text-[13px] leading-5">
             <tbody>
               <tr v-for="item in send.items" :key="item.token" class="border-t border-line/70 first:border-t-0">
-                <td class="w-full max-w-0 px-3.5 py-2">
-                  <code class="break-all font-mono text-[12px] text-ink">{{ item.token }}</code>
+                <td class="w-1/2 max-w-0 break-all px-3.5 py-2 text-ink">{{ item.value ?? '—' }}</td>
+                <td class="w-1/2 max-w-0 px-3.5 py-2">
+                  <code class="break-all font-mono text-[12px] text-mute">{{ item.token }}</code>
                 </td>
                 <td class="whitespace-nowrap px-3.5 py-2 text-right text-xs text-mute">{{ item.kind_label }}</td>
               </tr>
@@ -103,7 +104,8 @@ function clock(iso: string | null): string {
           <table v-if="block.items.length" class="w-full text-[13px] leading-5">
             <tbody>
               <tr v-for="item in block.items" :key="item.token" class="border-t border-line/70">
-                <td class="w-full max-w-0 break-all px-3.5 py-2"><code class="font-mono text-[12px] text-ink">{{ item.token }}</code></td>
+                <td class="w-1/2 max-w-0 break-all px-3.5 py-2 text-ink">{{ item.value ?? '—' }}</td>
+                <td class="w-1/2 max-w-0 break-all px-3.5 py-2"><code class="font-mono text-[12px] text-mute">{{ item.token }}</code></td>
                 <td class="whitespace-nowrap px-3.5 py-2 text-right text-xs text-mute">{{ item.kind_label }}</td>
               </tr>
             </tbody>

@@ -1020,14 +1020,20 @@ _KIND_ORDER = {"phone": 0, "landline": 1, "email": 2, "im": 3, "address": 4}
 
 
 def _sorted_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """明细里的值按类型分组（手机号、座机、邮箱、微信/QQ、地址、其他），同类型里按令牌排序，方便从上往下查。"""
-    return sorted(items, key=lambda item: (_KIND_ORDER.get(item["kind"], len(_KIND_ORDER)), item["token"]))
+    """明细里的值按类型分组（手机号、座机、邮箱、微信/QQ、地址、其他），同类型里按原文排序，方便从上往下查。"""
+    return sorted(items, key=lambda item: (_KIND_ORDER.get(item["kind"], len(_KIND_ORDER)), item.get("value") or "", item["token"]))
+
+
+def _with_values(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """给面板看的明细：令牌在本机换回原文，让用户看清「哪个值换成了哪个令牌」。原文只在这次响应里，不写进记录和日志。"""
+    vault = privacy.require().vault
+    return [{**item, "value": vault.reveal(item["token"])} for item in items]
 
 
 def sends(conversation_id: str) -> list[dict[str, Any]]:
     """文件脱敏漏掉、在发给 AI 前才补换掉的值：按第几次发送列出，每个值只在第一次出现的那次发送里列一次
     （对话记录每次都会重复带上，后面的发送里还会再换一次，不重复列）。
-    用户自己打的、之前回复里还原出来的不算漏掉，不列。记录里只存了令牌，面板里也只给令牌：真实值只有下载文件时才还原。"""
+    用户自己打的、之前回复里还原出来的不算漏掉，不列。记录里只存了令牌；面板里给出原文 → 令牌的对应（在本机还原）。"""
     start()
     with session_scope() as db:
         rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
@@ -1041,8 +1047,8 @@ def sends(conversation_id: str) -> list[dict[str, Any]]:
             continue
         out.append({
             "number": number, "time": send.get("time"), "messages": int(send.get("messages", 0)),
-            "items": _sorted_items([{"token": item[0], "kind": item[1],
-                                     "kind_label": KIND_LABELS.get(item[1], item[1])} for item in fresh]),
+            "items": _sorted_items(_with_values([{"token": item[0], "kind": item[1],
+                                                  "kind_label": KIND_LABELS.get(item[1], item[1])} for item in fresh])),
         })
     return out
 
@@ -1075,7 +1081,7 @@ def restores(conversation_id: str) -> list[dict[str, Any]]:
 
 
 def blocks(conversation_id: str) -> list[dict[str, Any]]:
-    """拦截明细：每次停止发送的原因；发送前检查没能处理掉的值也列出来（只给令牌，不还原成原文）。"""
+    """拦截明细：每次停止发送的原因；发送前检查没能处理掉的值也列出来（原文 → 令牌，原文在本机还原）。"""
     start()
     with session_scope() as db:
         rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
@@ -1083,9 +1089,9 @@ def blocks(conversation_id: str) -> list[dict[str, Any]]:
         raw = [(row.updated_at.isoformat(timespec="seconds"), row.detail or {}, row.text) for row in rows]
     out = []
     for number, (time, detail, text) in enumerate(raw, 1):
-        items = _sorted_items([{"token": item[0], "kind": item[1],
-                                "kind_label": KIND_LABELS.get(item[1], item[1])}
-                               for item in detail.get("tokens", []) if isinstance(item, list) and len(item) == 2])
+        items = _sorted_items(_with_values([{"token": item[0], "kind": item[1],
+                                             "kind_label": KIND_LABELS.get(item[1], item[1])}
+                                            for item in detail.get("tokens", []) if isinstance(item, list) and len(item) == 2]))
         reason = str(detail.get("reason") or text).removeprefix("已拦截：")
         out.append({"number": number, "time": time, "reason": reason, "items": items})
     return out
