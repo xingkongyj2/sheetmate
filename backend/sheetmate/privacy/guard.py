@@ -60,6 +60,22 @@ def _shadow(text: str) -> str:
     return fold(TOKEN_RE.sub(lambda match: "§" * len(match.group(0)), text))
 
 
+# 文字里逐条套用的规则（顺序有讲究）：先带标签的值——「电话：…」「微信 …」「收件地址：…」，不管值长什么格式都遮
+# （比格式规则更宽，又不会误伤没有标签的单号）；再按格式找邮箱、手机、座机
+_SCAN_STEPS: tuple[tuple[re.Pattern[str], str, str, int, Callable[[str], bool] | None], ...] = (
+    (ADDR_CTX_RE, "address", "context", 1, address_context_ok),
+    (IM_CTX_RE, "im", "context", 1, None),
+    (PHONE_CTX_RE, "phone", "context", 1, phone_context_ok),
+    (EMAIL_RE, "email", "pattern", 0, None),
+    (EMAIL_OBF_RE, "email", "pattern", 0, None),
+    (MOBILE_RE, "phone", "pattern", 0, None),
+    (MOBILE_MASKED_RE, "phone", "pattern", 0, None),
+    (LANDLINE_RE, "landline", "pattern", 0, None),
+    (LANDLINE_COMPACT_RE, "landline", "pattern", 0, None),
+    (LANDLINE_MASKED_RE, "landline", "pattern", 0, None),
+)
+
+
 class PrivacyBlocked(RuntimeError):
     """脱敏没有完成或检查没有通过：不能把这些内容交给正常模型。str(异常) 是给用户看的原因。
     leaks：发送前检查没能处理掉的值 [(类型, 原文)]，只在内存里，记录时换成令牌。"""
@@ -524,18 +540,17 @@ class Guard:
             if not split_address(segment)[1].strip():
                 continue                    # 只有省市，没有详细地址
             text = text[:start] + stats.note("address", "pattern", self.vault.token("address", segment.strip())) + text[end:]
-        # 带标签的值：「电话：…」「微信 …」「收件地址：…」，不管值长什么格式都遮（比格式规则更宽，又不会误伤没有标签的单号）
-        text = self._mask(text, ADDR_CTX_RE, "address", stats, "context", group=1, accept=address_context_ok)
-        text = self._mask(text, IM_CTX_RE, "im", stats, "context", group=1)
-        text = self._mask(text, PHONE_CTX_RE, "phone", stats, "context", group=1, accept=phone_context_ok)
-        for kind, pattern in (("email", EMAIL_RE), ("email", EMAIL_OBF_RE), ("phone", MOBILE_RE), ("phone", MOBILE_MASKED_RE),
-                              ("landline", LANDLINE_RE), ("landline", LANDLINE_COMPACT_RE), ("landline", LANDLINE_MASKED_RE)):
-            text = self._mask(text, pattern, kind, stats, "pattern")
+        # 「全角转半角 + 挖掉令牌」的找位置用文字只在内容变了之后才重新算（每条规则各算一遍，大文件上占了一半时间）
+        shadow = _shadow(text)
+        for pattern, kind, method, group, accept in _SCAN_STEPS:
+            changed = self._mask(text, pattern, kind, stats, method, group=group, accept=accept, shadow=shadow)
+            if changed != text:
+                text, shadow = changed, _shadow(changed)
         return text
 
     def _mask(self, text: str, pattern: re.Pattern[str], kind: str, stats: Stats, method: str, *, group: int = 0,
-              accept: Callable[[str], bool] | None = None) -> str:
-        spans = [(match.start(group), match.end(group)) for match in pattern.finditer(_shadow(text))]
+              accept: Callable[[str], bool] | None = None, shadow: str | None = None) -> str:
+        spans = [(match.start(group), match.end(group)) for match in pattern.finditer(_shadow(text) if shadow is None else shadow)]
         for start, end in reversed(spans):
             original = text[start:end]
             if TOKEN_RE.search(original) or (accept is not None and not accept(original)):
@@ -638,6 +653,29 @@ class Guard:
         if isinstance(value, (int, float)) and is_mobile(cell_text(value)):
             return self._token_cell("phone", value, stats, "copy")   # 数字格式的手机号：发给 AI 时同样会换
         return value
+
+    def protect_values(self, kind: str | None, values: Iterable[Any], stats: Stats,
+                       memo: dict[tuple[Any, ...], tuple[Any, Stats | None]] | None = None) -> list[Any]:
+        """一整列：结果和逐格调用 protect_cell 完全一样，但同样的值只算一次。
+        表格里大片重复的值（省市、商品、规格、日期、备注模板）很多，大文件逐格算要十几秒。
+        memo：同一次处理里多处共用的结果（比如生成一个副本时，整张表和表里的文字节点），只在这一次处理里有效。"""
+        done = {} if memo is None else memo
+        out = []
+        for value in values:
+            try:
+                key = (kind, value.__class__, value)
+                hit = done.get(key)
+            except TypeError:           # 不能做键的值（列表之类）：照常逐格算
+                out.append(self.protect_cell(kind, value, stats))
+                continue
+            if hit is None:
+                local = Stats()
+                result = self.protect_cell(kind, value, local)
+                hit = done[key] = (result, local if local.values or local.tokens else None)
+            if hit[1] is not None:
+                stats.merge(hit[1])     # 每一格都记一次，数量和逐格算时一样
+            out.append(hit[0])
+        return out
 
     def protect_message(self, message: dict[str, Any], stats: Stats) -> dict[str, Any]:
         out = dict(message)

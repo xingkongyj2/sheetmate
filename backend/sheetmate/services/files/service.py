@@ -31,6 +31,7 @@ from sheetmate.db.models import (
 from sheetmate.engine.workbooks.copies import temporary_file_copies
 from sheetmate.engine.workbooks.images import IMAGE_SUFFIXES, image_profile
 from sheetmate.engine.workbooks.profile import profile_workbook
+from sheetmate.engine.workbooks.cache import read_cached
 from sheetmate.engine.workbooks.reader import SUPPORTED_SUFFIXES, ReadError, SheetData, read_workbook
 from sheetmate.engine.tables.sql import frame_rows, sanitize_table_name
 from sheetmate.engine.tables.memory import restore_memory, seed_profile
@@ -283,8 +284,13 @@ def profile_file(path: Path, *, sheets: list[SheetData] | None = None) -> dict[s
 
 
 def _read_file_copy(path: Path) -> list[SheetData]:
-    with temporary_file_copies() as files:
-        return read_workbook(files.file_copy(path))
+    """读文件（先复制一份再读，不占着原文件）。同一个文件内容没变时直接用最近一次读的结果：
+    上传之后画像、识别、脱敏、载入工作区会接连读同一个文件，大文件每读一遍都要好几秒。"""
+    def load(source: Path) -> list[SheetData]:
+        with temporary_file_copies() as files:
+            return read_workbook(files.file_copy(source))
+
+    return read_cached(path, load)
 
 
 def read_file_sheets(path: Path) -> list[SheetData]:

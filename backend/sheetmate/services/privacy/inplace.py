@@ -26,7 +26,8 @@ from sheetmate.db.models import FileRecord, PrivacyFile
 from sheetmate.db.session import session_scope
 from sheetmate.engine.ooxml.errors import OoxmlUnsupported
 from sheetmate.engine.workbooks.atomic import replace_file
-from sheetmate.engine.workbooks.reader import _csv_delimiter, read_workbook
+from sheetmate.engine.workbooks.cache import read_cached
+from sheetmate.engine.workbooks.reader import _csv_delimiter
 from sheetmate.privacy import TOKEN_RE, Stats, privacy
 from sheetmate.privacy.guard import FORCED
 from sheetmate.services.memory.table_profiles import FILE_MEMORY_KEY, FILE_VERSION_KEY
@@ -92,7 +93,7 @@ def _desired(sheets: list[Any], report: list[dict[str, Any]], enabled: bool, ori
                 base = kind.rstrip(FORCED)
                 if base in _REGISTER:
                     guard.register_values(base, real.dropna().drop_duplicates().head(100_000).tolist())
-                frame.isetitem(position, real.map(lambda value, kind=kind: guard.protect_cell(kind, value, stats)).astype(object))
+                frame.isetitem(position, pd.Series(guard.protect_values(kind, real.tolist(), stats), index=real.index, dtype=object))
             else:
                 number = numbers.get(name) == "number"
                 frame.isetitem(position, series.map(lambda value, number=number: _restore_cell(guard, value, number)).astype(object))
@@ -108,7 +109,7 @@ def restore_types(file_id: str, source: Path, target: Path) -> bool:
         row = db.get(PrivacyFile, file_id)
         origin = {sheet: dict(columns) for sheet, columns in ((row.origin if row is not None else None) or {}).items()}
     desired = []
-    for sheet in read_workbook(source):
+    for sheet in read_cached(source):
         numbers, frame = origin.get(sheet.name, {}), sheet.df.copy()
         for position, name in enumerate(sheet.df.columns):
             number = numbers.get(str(name)) == "number"
@@ -187,7 +188,7 @@ def _sync_file(file_id: str, fingerprint_of: Callable[[dict[str, Any]], str] | N
         return "skip"
     if not enabled and not applied and not any(sheet["columns"] or sheet.get("kept") for sheet in report):
         return "skip"                                   # 总开关关着、也没有任何手动选择：本来就是真实内容，不处理
-    sheets = read_workbook(path)
+    sheets = read_cached(path)
     desired = _desired(sheets, report, enabled, origin)
     changed = any(masked_files._changed(sheet.df[column], frame[column]) for sheet, frame in desired for column in sheet.df.columns)
     state = "masked"

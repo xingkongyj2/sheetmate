@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 from sheetmate.agent.llm import aux_json
 from sheetmate.core.observability.conversation_log import bind_trace
-from sheetmate.engine.workbooks.reader import read_workbook
+from sheetmate.engine.workbooks.cache import read_cached
 from sheetmate.privacy import PrivacyBlocked, privacy
 from sheetmate.privacy.rules import is_id_like_header, is_label
 
@@ -29,7 +29,8 @@ BATCH = 40                  # 一次问模型多少条文本
 PARALLEL = 4                # 同时发几个请求
 MAX_TEXT_CHARS = 300        # 单条文本最多给模型看多少字
 MAX_VALUES = 20_000         # 一个文件最多逐个检查多少个不同的值（再多就均匀抽样，并如实标出「只检查了一部分」）
-MIN_DISTINCT = 8            # 一列至少有多少个不同的值才值得逐个检查（状态、省份这类只有几个取值的不用）
+MIN_DISTINCT = 8            # 数据表里一列至少有多少个不同的值才值得逐个检查（状态、省份这类只有几个取值的不用）
+SMALL_SHEET_ROWS = 200      # 不超过这么多行的工作表（说明页、公司信息页）：内容少，所有文字都逐个检查，不看取值多少
 MIN_CELL_CHARS = 3          # 太短的值（「到付」）里放不下联系方式或地址
 TIMEOUT = 180.0
 KINDS = frozenset({"phone", "landline", "email", "im", "address"})
@@ -111,14 +112,17 @@ def first_error(results: list[Any]) -> list[Any]:
 
 
 def candidates(profile: dict[str, Any], flagged: dict[str, dict[str, str]]) -> dict[str, list[str]]:
-    """哪些列要逐个检查：文字列、取值够多、不是单号编码、也没有被整列保护（整列保护的本来就全换成令牌了）。
+    """哪些列要逐个检查：文字列、不是单号编码、也没有被整列保护（整列保护的本来就全换成令牌了）。
+    工作表分两种：说明页（公司信息、填表说明，行数少、一段段文字）整页都查；数据表（表头 + 大片数据）只查取值够多的文字列
+    （备注、说明这类），省份、状态这种只有几个取值的列不用。
     只用画像里的统计判断，不需要读整个文件。flagged：{工作表: {列名: 已识别的类型}}。"""
     wanted: dict[str, list[str]] = {}
     for sheet in profile.get("sheets", []):
         sheet_flagged = flagged.get(sheet.get("sheet", ""), {})
+        minimum = 1 if int(sheet.get("rows") or 0) <= SMALL_SHEET_ROWS else MIN_DISTINCT
         for column in sheet.get("columns", []):
             name = column.get("name", "")
-            if column.get("dtype") != "text" or int(column.get("unique") or 0) < MIN_DISTINCT or is_id_like_header(name):
+            if column.get("dtype") != "text" or int(column.get("unique") or 0) < minimum or is_id_like_header(name):
                 continue
             if sheet_flagged.get(name) in KINDS:
                 continue
@@ -132,7 +136,7 @@ def candidates(profile: dict[str, Any], flagged: dict[str, dict[str, str]]) -> d
 def distinct_values(path: str, wanted: dict[str, list[str]]) -> dict[tuple[str, str], list[str]]:
     """读文件，取每个要检查的列里所有不同的值（去掉太短的）。放在线程里调用：大文件读一遍要几秒。"""
     result: dict[tuple[str, str], list[str]] = {}
-    for sheet in read_workbook(Path(path)):
+    for sheet in read_cached(Path(path)):
         for name in wanted.get(sheet.name, []):
             positions = [index for index, column in enumerate(sheet.df.columns) if str(column) == name]
             if not positions:

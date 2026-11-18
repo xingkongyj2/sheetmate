@@ -10,8 +10,6 @@ from __future__ import annotations
 import asyncio
 import io
 import re
-import threading
-from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +19,8 @@ from sheetmate.core.errors import ServiceError
 from sheetmate.db.models import FileRecord, PrivacyFile, User
 from sheetmate.db.session import session_scope
 from sheetmate.engine.tables.sql import frame_rows
-from sheetmate.engine.workbooks.reader import SheetData, read_workbook
+from sheetmate.engine.workbooks.cache import read_cached
+from sheetmate.engine.workbooks.reader import SheetData
 from sheetmate.privacy.guard import FORCED
 from sheetmate.privacy import ACTION_LABELS, ACTIONS, KIND_LABELS, TOKEN_RE, Scope, Stats, bind, privacy
 from sheetmate.privacy.rules import cell_text, is_numeric_cell
@@ -31,33 +30,16 @@ from sheetmate.services.privacy import service as privacy_service
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 _JOIN = "¦"   # 检查时把单元格连起来用的分隔符：不是空白、不是数字，不会让相邻两格拼出一个号码
 
-# 翻页时不用每次重新读文件：最近读过的两个工作簿（原始数据，不是脱敏后的）放在内存里，文件一变就失效
-_RAW: OrderedDict[tuple[str, int, int], list[SheetData]] = OrderedDict()
-_RAW_LOCK = threading.Lock()
-_RAW_MAX = 2
-
-
 def _read(path: str) -> list[SheetData]:
+    """翻页时不用每次重新读文件：最近读过的工作簿（原始数据，不是脱敏后的）放在内存里，文件一变就失效。"""
+    if not Path(path).is_file():
+        raise ServiceError("文件已经不存在，无法生成脱敏副本。")
     try:
-        stat = Path(path).stat()
-    except OSError as exc:
-        raise ServiceError("文件已经不存在，无法生成脱敏副本。") from exc
-    key = (path, stat.st_mtime_ns, stat.st_size)
-    with _RAW_LOCK:
-        hit = _RAW.get(key)
-        if hit is not None:
-            _RAW.move_to_end(key)
-            return hit
-    try:
-        sheets = read_workbook(Path(path))
+        sheets = read_cached(Path(path))
     except Exception as exc:  # 读取库的各种错误都归成一句人话
         raise ServiceError(f"文件无法读取，不能生成脱敏副本（{type(exc).__name__}）。") from exc
     if not sheets:
         raise ServiceError("这个文件里没有可显示的工作表。")
-    with _RAW_LOCK:
-        _RAW[key] = sheets
-        while len(_RAW) > _RAW_MAX:
-            _RAW.popitem(last=False)
     return sheets
 
 
@@ -154,7 +136,7 @@ def _may_hold_mobile(series: pd.Series) -> bool:
         return True
 
 
-def _mask(frame: pd.DataFrame, kinds: list[str | None], stats: Stats) -> pd.DataFrame:
+def _mask(frame: pd.DataFrame, kinds: list[str | None], stats: Stats, memo: dict[Any, Any] | None = None) -> pd.DataFrame:
     guard = privacy.require()
     out = frame.copy()
     for position, kind in enumerate(kinds):
@@ -163,7 +145,7 @@ def _mask(frame: pd.DataFrame, kinds: list[str | None], stats: Stats) -> pd.Data
             continue
         if kind is None and pd.api.types.is_numeric_dtype(series) and not _may_hold_mobile(series):
             continue
-        out.isetitem(position, series.map(lambda value, kind=kind: guard.protect_cell(kind, value, stats)).astype(object))
+        out.isetitem(position, pd.Series(guard.protect_values(kind, series.tolist(), stats, memo), index=series.index, dtype=object))
     return out
 
 

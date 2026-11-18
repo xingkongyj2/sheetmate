@@ -50,13 +50,14 @@ def _kinds(frame: pd.DataFrame, flagged: dict[str, dict[str, Any]], reported: bo
     return out
 
 
-def mask_frame(file_id: str | None, sheet: str, frame: pd.DataFrame, stats: Stats | None = None) -> tuple[pd.DataFrame, dict[str, str | None]]:
-    """一张表的令牌版，和每一列的类型。stats 传进来就能知道换了多少个值。"""
+def mask_frame(file_id: str | None, sheet: str, frame: pd.DataFrame, stats: Stats | None = None,
+               memo: dict[Any, Any] | None = None) -> tuple[pd.DataFrame, dict[str, str | None]]:
+    """一张表的令牌版，和每一列的类型。stats 传进来就能知道换了多少个值；memo 见 Guard.protect_values。"""
     found = masked_copy._fetch(file_id) if file_id else None
     reported = found is not None and found[2] == "ready"
     flagged = masked_copy._flagged(found[3], sheet) if reported else {}
     kinds = _kinds(frame, flagged, reported)
-    return masked_copy._mask(frame, kinds, stats or Stats()), {str(name): kind.rstrip("!") if kind else None for name, kind in zip(frame.columns, kinds)}
+    return masked_copy._mask(frame, kinds, stats or Stats(), memo), {str(name): kind.rstrip("!") if kind else None for name, kind in zip(frame.columns, kinds)}
 
 
 def mask_profile(sheet_profile: dict[str, Any], frame: pd.DataFrame) -> dict[str, Any]:
@@ -72,7 +73,7 @@ def _resync_uploaded(ws: Workspace) -> int:
     重新生成过的话，别的表（计算出来的）也重新检查一遍：新选了脱敏的列，它的真实值已经登记成已知值，会在这些表里被换掉。"""
     from sheetmate.db.models import FileRecord
     from sheetmate.db.session import session_scope
-    from sheetmate.engine.workbooks.reader import read_workbook
+    from sheetmate.engine.workbooks.cache import read_cached
     from sheetmate.services.privacy import choices
 
     rebuilt, books = 0, {}
@@ -87,7 +88,7 @@ def _resync_uploaded(ws: Workspace) -> int:
                 record = db.get(FileRecord, info.file_id)
                 path = Path(record.stored_path) if record is not None else None
             try:
-                books[info.file_id] = (path, {sheet.name: sheet for sheet in read_workbook(path)} if path and path.is_file() else {})
+                books[info.file_id] = (path, {sheet.name: sheet for sheet in read_cached(path)} if path and path.is_file() else {})
             except Exception:
                 logger.exception("按新的脱敏选择重新生成「%s」时读不了原文件", info.name)
                 books[info.file_id] = (path, {})

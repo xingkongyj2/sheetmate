@@ -26,7 +26,8 @@ from sheetmate.engine.ooxml.package import OoxmlPackage
 from sheetmate.engine.ooxml.parts import drop_calc_chain
 from sheetmate.engine.ooxml.sheetxml import SheetXml, cell_xml
 from sheetmate.engine.workbooks.atomic import replace_file
-from sheetmate.engine.workbooks.reader import SheetData, read_workbook
+from sheetmate.engine.workbooks.cache import read_cached
+from sheetmate.engine.workbooks.reader import SheetData
 from sheetmate.engine.workbooks.writer import SheetSpec, write_excel
 from sheetmate.privacy import Stats, privacy
 from sheetmate.services.privacy import choices, masked_copy
@@ -105,13 +106,15 @@ def _view_frame(file_id: str, sheet_name: str, frame: pd.DataFrame) -> pd.DataFr
     out, stats = frame.copy(), Stats()
     for position, kind in enumerate(kinds):
         if kind:
-            out.isetitem(position, out.iloc[:, position].map(lambda value, kind=kind: guard.protect_cell(kind, value, stats)).astype(object))
+            series = out.iloc[:, position]
+            out.isetitem(position, pd.Series(guard.protect_values(kind, series.tolist(), stats), index=series.index, dtype=object))
     return out
 
 
 def _build(file_id: str, source: Path, target: Path, view: bool = False) -> None:
-    sheets = read_workbook(source)
-    masked = [(sheet, _view_frame(file_id, sheet.name, sheet.df) if view else pw.mask_frame(file_id, sheet.name, sheet.df)[0])
+    sheets = read_cached(source)
+    memo: dict[Any, Any] = {}       # 表里的值和工作表 XML 里的文字大多是同一批：算过的不再算
+    masked = [(sheet, _view_frame(file_id, sheet.name, sheet.df) if view else pw.mask_frame(file_id, sheet.name, sheet.df, memo=memo)[0])
               for sheet in sheets]
     suffix = source.suffix.lower()
     if suffix == ".csv":
@@ -122,7 +125,7 @@ def _build(file_id: str, source: Path, target: Path, view: bool = False) -> None
         return
     if suffix in {".xlsx", ".xlsm"}:
         try:
-            _mask_package(source, target, masked, text_nodes=not view)
+            _mask_package(source, target, masked, text_nodes=not view, memo=memo)
             return
         except OoxmlUnsupported as exc:
             logger.warning("文件「%s」无法在原文件上换成令牌（%s），改用重新生成的令牌版", source.name, exc)
@@ -135,19 +138,20 @@ def _changed(original: pd.Series, masked: pd.Series) -> list[int]:
             if not (old is new or (pd.isna(old) and pd.isna(new)) or str(old) == str(new))]
 
 
-def _mask_text_nodes(xml: str) -> str:
+def _mask_text_nodes(xml: str, memo: dict[Any, Any] | None = None) -> str:
     guard = privacy.require()
-    stats = Stats()
+    stats, memo = Stats(), {} if memo is None else memo
 
     def replace(match: re.Match[str]) -> str:
         text = unescape(match.group(2))
-        masked = guard.protect_cell(None, text, stats) if len(text) >= 4 else text
+        masked = guard.protect_values(None, [text], stats, memo)[0] if len(text) >= 4 else text
         return match.group(0) if masked == text else f"{match.group(1)}{escape(str(masked))}{match.group(3)}"
 
     return _TEXT_NODE.sub(replace, xml)
 
 
-def _mask_package(source: Path, target: Path, masked: list[tuple[SheetData, pd.DataFrame]], *, text_nodes: bool = True) -> None:
+def _mask_package(source: Path, target: Path, masked: list[tuple[SheetData, pd.DataFrame]], *, text_nodes: bool = True,
+                  memo: dict[Any, Any] | None = None) -> None:
     removed_formula = False
     with OoxmlPackage(source) as package:
         parts = package.sheet_parts()
@@ -189,7 +193,7 @@ def _mask_package(source: Path, target: Path, masked: list[tuple[SheetData, pd.D
             if _TEXT_PARTS.match(name):
                 text = package.read_text(name)
                 if "<t" in text:
-                    updated = _mask_text_nodes(text)
+                    updated = _mask_text_nodes(text, memo)
                     if updated != text:
                         package.write(name, updated)
         if removed_formula:
