@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 
 import { conversationApi, customerApi } from '@/api'
 import type { ConversationBrief, CustomerCard } from '@/api/types'
-import { groupConversations } from '@/composables/conversationGroups'
+import { groupByCustomer, sortByRecent } from '@/composables/conversationGroups'
 
 export const useWorkspaceStore = defineStore('workspace', () => {
   const conversations = ref<ConversationBrief[]>([])
@@ -35,10 +35,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     conversations.value = conversations.value.filter((c) => c.id !== id)
   }
 
-  const grouped = computed(() => groupConversations(conversations.value))
+  const recent = computed(() => sortByRecent(conversations.value))
+  const customerGroups = computed(() => groupByCustomer(customers.value, conversations.value))
 
   return {
-    conversations, customers, loaded, grouped,
+    conversations, customers, loaded, recent, customerGroups,
     refreshConversations, refreshCustomers, upsertConversation, patchConversation, removeConversation,
   }
 })

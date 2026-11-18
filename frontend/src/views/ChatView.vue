@@ -690,7 +690,7 @@ function answer(option: string) {
   <div class="chat-page flex h-full min-h-0">
     <div class="chat-workspace flex min-w-0 flex-1 flex-col">
       <!-- 顶部 -->
-      <header class="flex h-11 shrink-0 items-center gap-2 px-4">
+      <header class="flex h-[52px] shrink-0 items-center gap-2 px-5">
         <div class="flex min-w-0 flex-1 items-center gap-2">
           <input
             v-if="editingTitle"
@@ -702,7 +702,7 @@ function answer(option: string) {
           />
           <!-- 编辑图标平时不占位置（不然标题和后面的「脱敏已关闭」中间空出一大块），悬停时才展开 -->
           <button v-else class="group flex max-w-full items-center text-left" @click="startEditTitle">
-            <span class="truncate text-sm font-semibold">{{ detail?.title ?? '…' }}</span>
+            <span class="truncate text-[15px] text-ink/85">{{ detail?.title ?? '…' }}</span>
             <Pencil class="size-3.5 max-w-0 shrink-0 text-faint opacity-0 transition-all group-hover:ml-1.5 group-hover:max-w-3.5 group-hover:opacity-100 group-focus-visible:ml-1.5 group-focus-visible:max-w-3.5 group-focus-visible:opacity-100" />
           </button>
           <RouterLink
@@ -721,7 +721,7 @@ function answer(option: string) {
           :to="{ name: 'customer', params: { id: customer.id } }"
           target="_blank"
           rel="noopener noreferrer"
-          class="flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-line py-0.5 pl-0.5 pr-2 text-xs transition hover:border-ink/30"
+          class="flex h-8 shrink-0 items-center gap-1.5 rounded-full py-0.5 pl-0.5 pr-2.5 text-xs text-mute transition hover:bg-black/[0.05] hover:text-ink"
           title="在新标签页打开客户详情"
         >
           <span class="flex size-5 shrink-0 items-center justify-center overflow-hidden rounded-full bg-paper">
@@ -729,15 +729,15 @@ function answer(option: string) {
           </span>
           <span class="max-w-[128px] truncate font-medium">{{ customer.name }}</span>
         </RouterLink>
-        <button v-else-if="detail" class="btn-line h-7 shrink-0 gap-1.5 whitespace-nowrap px-2.5 py-0 text-xs" title="把这次对话的数据、已保存的流程和记忆保存到客户" @click="saveOpen = true">
+        <button v-else-if="detail" class="btn-text h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-xs" title="把这次对话的数据、已保存的流程和记忆保存到客户" @click="saveOpen = true">
           <Save class="size-3.5" />保存到客户
         </button>
 
         <button
           v-if="checklist"
           type="button"
-          class="icon-btn size-7 shrink-0"
-          :class="{ '!bg-paper !text-ink': checklistOpen }"
+          class="icon-btn shrink-0"
+          :class="{ '!bg-black/[0.06] !text-ink': checklistOpen }"
           :title="checklistOpen ? '隐藏任务目录' : '显示任务目录'"
           aria-label="任务目录"
           :aria-expanded="checklistOpen"
@@ -748,8 +748,8 @@ function answer(option: string) {
         </button>
         <button
           type="button"
-          class="icon-btn size-7 shrink-0"
-          :class="{ '!bg-paper !text-ink': panelOpen }"
+          class="icon-btn shrink-0"
+          :class="{ '!bg-black/[0.06] !text-ink': panelOpen }"
           :title="panelOpen ? '收起工作区面板' : '展开工作区面板'"
           :aria-label="panelOpen ? '收起工作区面板' : '展开工作区面板'"
           :aria-expanded="panelOpen"

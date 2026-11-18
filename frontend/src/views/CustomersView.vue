@@ -36,19 +36,19 @@ async function onSaved(customer: CustomerCard) {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-8 sm:px-8 sm:py-10">
+    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-6 sm:px-8 sm:py-7">
       <div class="flex shrink-0 items-center gap-3 sm:gap-4">
-        <h1 class="shrink-0 text-2xl font-semibold tracking-tight sm:text-[28px]">客户库</h1>
+        <h1 class="shrink-0 text-xl font-semibold tracking-tight">客户库</h1>
         <div class="ml-auto flex min-w-0 items-center gap-2">
-          <label class="flex min-w-0 items-center gap-2 rounded-full bg-paper/80 px-3.5 py-2.5 sm:w-56">
-            <Search class="size-4 shrink-0 text-faint" />
-            <input v-model="query" aria-label="搜索客户" class="w-full min-w-0 bg-transparent text-sm outline-none placeholder:text-faint" placeholder="搜索客户" />
+          <label class="flex h-8 min-w-0 items-center gap-2 rounded-full bg-paper px-3 sm:w-48">
+            <Search class="size-3.5 shrink-0 text-faint" />
+            <input v-model="query" aria-label="搜索客户" class="w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-faint" placeholder="搜索客户" />
           </label>
-          <button class="btn-ink size-10 shrink-0 !p-0" title="新建客户" aria-label="新建客户" @click="creating = true"><Plus class="size-5" /></button>
+          <button class="btn-ink size-8 shrink-0 !p-0" title="新建客户" aria-label="新建客户" @click="creating = true"><Plus class="size-4" /></button>
         </div>
       </div>
 
-      <div v-if="list.length" class="mt-7 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+      <div v-if="list.length" class="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
         <RouterLink
           v-for="(c, i) in list"
           :key="c.id"

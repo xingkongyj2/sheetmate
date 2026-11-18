@@ -197,7 +197,7 @@ async function send() {
           </div>
         </div>
 
-        <div v-if="ready" class="animate-drawer relative mx-6 -mt-5 rounded-b-[22px] bg-white pt-5 shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.03)] transition focus-within:shadow-[0_6px_28px_rgba(0,0,0,0.09),0_2px_6px_rgba(0,0,0,0.04)]">
+        <div v-if="ready" class="animate-drawer relative mx-6 -mt-5 rounded-b-xl border border-t-0 border-[#eeeeed] bg-white pt-5 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_6px_20px_rgba(0,0,0,0.07)]">
           <CustomerPicker v-model="customerId" />
         </div>
         <div v-if="ready && cacheError" class="mt-3 flex items-center justify-center gap-2 text-xs text-amber-700" role="alert">

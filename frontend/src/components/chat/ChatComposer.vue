@@ -325,7 +325,7 @@ defineExpose({ focus: () => editor.value?.focus(), captureSelection })
       </div>
     </div>
     <p v-if="attachmentError" role="alert" class="px-4 pb-3 text-xs text-error">{{ attachmentError }}</p>
-    <div v-if="dragging" class="pointer-events-none absolute inset-0 flex items-center justify-center rounded-[22px] bg-white/80 text-sm font-medium">
+    <div v-if="dragging" class="pointer-events-none absolute inset-0 flex items-center justify-center rounded-xl bg-white/80 text-sm font-medium">
       松开即可上传表格或图片
     </div>
   </div>

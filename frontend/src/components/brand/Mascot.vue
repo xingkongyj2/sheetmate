@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 墨墨家族 IP 形象（原创）：圆团子身体 + 会眨眼、会跟着鼠标转的大眼睛 + 小配饰。
- * mood: idle 发呆 / thinking 思考（眼睛往上看 + 冒泡）/ happy 开心（眯眼笑）/ working 干活（上下晃）
+ * mood: idle 发呆 / thinking 思考（眼睛往上看 + 冒泡）/ happy 开心（眯眼笑）/ working 干活（上下晃）/ sleep 闭眼（弯弯的睡眼）
  */
 import { computed, onMounted, ref, useId } from 'vue'
 
@@ -13,7 +13,7 @@ const props = withDefaults(
   defineProps<{
     variant?: string | null
     size?: number
-    mood?: 'idle' | 'thinking' | 'happy' | 'working'
+    mood?: 'idle' | 'thinking' | 'happy' | 'working' | 'sleep'
     track?: boolean
     shadow?: boolean
   }>(),
@@ -187,6 +187,11 @@ const lineColor = computed(() => (style.value.dark ? 'rgba(255,255,255,.8)' : st
     <g v-if="mood === 'happy'" fill="none" :stroke="style.dark ? '#ffffff' : style.line" stroke-width="4.5" stroke-linecap="round">
       <path d="M38 64 Q47 54 56 64" />
       <path d="M64 64 Q73 54 82 64" />
+    </g>
+    <!-- 闭眼：两道向下弯的弧线（和开心的向上弯相反） -->
+    <g v-else-if="mood === 'sleep'" fill="none" :stroke="style.dark ? '#ffffff' : style.line" stroke-width="5" stroke-linecap="round">
+      <path d="M38 62 Q47 71 56 62" />
+      <path d="M64 62 Q73 71 82 62" />
     </g>
     <g v-else class="animate-blink" :style="{ transformOrigin: '60px 62px', transformBox: 'view-box', animationDelay: blinkDelay }">
       <ellipse v-if="!style.dark" cx="47" cy="63.4" rx="10.5" ry="13" :fill="style.shade" />

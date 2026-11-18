@@ -61,10 +61,10 @@
   --font-sans: "Outfit Variable", "PingFang SC", "HarmonyOS Sans SC", "Microsoft YaHei", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, monospace;
   --color-ink: #0b0b0c;
-  --color-mute: #6b6b73;
-  --color-faint: #a1a1aa;
-  --color-line: #ececef;
-  --color-paper: #f7f7f8;
+  --color-mute: #6f6b66;
+  --color-faint: #a8a49e;
+  --color-line: #e8e6e3;
+  --color-paper: #f3f2ef;
   --color-canvas: #f5f4f2; /* 主界面底层画布：侧边栏在上面，内容面板悬浮在上面 */
   --color-panel: #fcfbf9;  /* 悬浮内容面板 */
   --color-fun-orange: #ff7a1a;
@@ -178,9 +178,9 @@ body {
   .card-soft {
     @apply rounded-2xl border border-line bg-white;
   }
+  /* 输入框外框（取自参考图）：12px 圆角、1px 很浅的中性灰描边、偏向下方的柔和阴影。聚焦时外框不变化 */
   .chat-card {
-    @apply rounded-[22px] bg-white shadow-[0_4px_24px_rgba(0,0,0,0.06),0_1px_4px_rgba(0,0,0,0.03)]
-      transition focus-within:shadow-[0_6px_28px_rgba(0,0,0,0.09),0_2px_6px_rgba(0,0,0,0.04)];
+    @apply rounded-xl border border-[#eeeeed] bg-white shadow-[0_1px_2px_rgba(0,0,0,0.04),0_6px_20px_rgba(0,0,0,0.07)];
   }
   .chip {
     @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-white px-2.5 py-1 text-xs text-mute;

@@ -236,20 +236,20 @@ async function remove(f: LibraryFormula) {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-8 sm:px-8 sm:py-10">
+    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-6 sm:px-8 sm:py-7">
       <header class="flex shrink-0 flex-wrap items-center gap-3 sm:gap-4">
-        <h1 class="mr-auto text-2xl font-semibold tracking-tight sm:text-[28px]">公式库</h1>
-        <label class="flex min-w-0 flex-1 items-center gap-2 rounded-full bg-paper/80 px-3.5 py-2.5 sm:max-w-56">
-          <Search class="size-4 shrink-0 text-faint" />
-          <input v-model="query" aria-label="搜索公式" class="w-full min-w-0 bg-transparent text-sm outline-none" />
+        <h1 class="mr-auto text-xl font-semibold tracking-tight">公式库</h1>
+        <label class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-full bg-paper px-3 sm:max-w-48">
+          <Search class="size-3.5 shrink-0 text-faint" />
+          <input v-model="query" aria-label="搜索公式" placeholder="搜索公式" class="w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-faint" />
         </label>
-        <button class="btn-ink size-10 shrink-0 !bg-[#298c7a] !p-0 hover:!bg-[#227867]" title="AI 新增" aria-label="AI 新增公式" :disabled="loading || opening" @click="start"><Sparkles class="size-5" /></button>
+        <button class="btn-ink size-8 shrink-0 !p-0" title="AI 新增" aria-label="AI 新增公式" :disabled="loading || opening" @click="start"><Sparkles class="size-4" /></button>
       </header>
 
-      <div class="mt-7 flex shrink-0 flex-wrap items-center gap-3">
-        <div class="flex rounded-full bg-paper/80 p-1" role="tablist" aria-label="公式类型">
-          <button role="tab" :aria-selected="tab === 'customer'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'customer' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'customer'">客户公式 <span class="ml-1 text-xs text-faint">{{ custom.length }}</span></button>
-          <button role="tab" :aria-selected="tab === 'builtin'" class="rounded-full px-4 py-2 text-sm transition" :class="tab === 'builtin' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'builtin'">内置公式 <span class="ml-1 text-xs text-faint">{{ shownBuiltin.length }}</span></button>
+      <div class="mt-5 flex shrink-0 flex-wrap items-center gap-3">
+        <div class="flex rounded-full bg-paper p-1" role="tablist" aria-label="公式类型">
+          <button role="tab" :aria-selected="tab === 'customer'" class="rounded-full px-3.5 py-1.5 text-[13px] transition" :class="tab === 'customer' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'customer'">客户公式 <span class="ml-1 text-xs text-faint">{{ custom.length }}</span></button>
+          <button role="tab" :aria-selected="tab === 'builtin'" class="rounded-full px-3.5 py-1.5 text-[13px] transition" :class="tab === 'builtin' ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute'" @click="tab = 'builtin'">内置公式 <span class="ml-1 text-xs text-faint">{{ shownBuiltin.length }}</span></button>
         </div>
       </div>
 

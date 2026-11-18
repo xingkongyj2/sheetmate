@@ -221,7 +221,7 @@ export function newAssistant(): UiMessage {
 }
 
 export function newUser(content: string, meta: Record<string, unknown> = {}): UiMessage {
-  return { key: uid('m'), role: 'user', content, meta, streaming: false, timeline: [], artifacts: [] }
+  return { key: uid('m'), role: 'user', content, meta, streaming: false, timeline: [], artifacts: [], createdAt: new Date().toISOString() }
 }
 
 // ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 主界面框架：侧边栏在底层画布上，右侧内容是一整块悬浮在画布上的面板 */
-import { computed, onMounted, shallowRef, watch } from 'vue'
+import { computed, onMounted, shallowReactive, shallowRef, watch } from 'vue'
 import { useRouter, type RouteLocationNormalizedLoaded } from 'vue-router'
 
 import { useWorkspaceStore } from '@/stores/conversations'
@@ -10,23 +10,23 @@ import BackgroundPage from './BackgroundPage.vue'
 
 const store = useWorkspaceStore()
 const router = useRouter()
-// 「设置」和「统计」是同级的覆盖层：盖在当前页面上，各自保持实例，关闭只是隐藏。
-const settingsOpen = computed(() => router.currentRoute.value.name === 'settings')
-const statsOpen = computed(() => router.currentRoute.value.name === 'stats')
-const overlayOpen = computed(() => settingsOpen.value || statsOpen.value)
+// 「设置」「统计」是同级的覆盖层：盖在当前页面上，各自保持实例，关闭只是隐藏。
+const OVERLAYS = [
+  { name: 'settings', label: '设置' },
+  { name: 'stats', label: '统计' },
+] as const
+const isOverlay = (name: unknown) => OVERLAYS.some((overlay) => overlay.name === name)
+const overlayOpen = computed(() => isOverlay(router.currentRoute.value.name))
+const openName = computed(() => router.currentRoute.value.name)
 const backgroundRoute = shallowRef<RouteLocationNormalizedLoaded | null>(
   overlayOpen.value ? null : router.currentRoute.value,
 )
-const settingsRoute = shallowRef<RouteLocationNormalizedLoaded | null>(
-  settingsOpen.value ? router.currentRoute.value : null,
-)
-const statsRoute = shallowRef<RouteLocationNormalizedLoaded | null>(
-  statsOpen.value ? router.currentRoute.value : null,
+const overlayRoutes = shallowReactive<Record<string, RouteLocationNormalizedLoaded | null>>(
+  Object.fromEntries(OVERLAYS.map(({ name }) => [name, openName.value === name ? router.currentRoute.value : null])),
 )
 
 watch(router.currentRoute, (route) => {
-  if (route.name === 'settings') settingsRoute.value = route
-  else if (route.name === 'stats') statsRoute.value = route
+  if (isOverlay(route.name)) overlayRoutes[route.name as string] = route
   else if (route.matched[0]?.path === '/') backgroundRoute.value = route
 }, { flush: 'sync' })
 
@@ -46,28 +46,19 @@ onMounted(() => {
         :inert="overlayOpen"
         :aria-hidden="overlayOpen || undefined"
       />
-      <div
-        v-if="settingsRoute"
-        v-show="settingsOpen"
-        class="absolute inset-0 z-40 bg-panel"
-        :inert="!settingsOpen"
-        :aria-hidden="!settingsOpen || undefined"
-        aria-label="设置"
-        @keydown.stop
-      >
-        <RouterView :route="settingsRoute" />
-      </div>
-      <div
-        v-if="statsRoute"
-        v-show="statsOpen"
-        class="absolute inset-0 z-40 bg-panel"
-        :inert="!statsOpen"
-        :aria-hidden="!statsOpen || undefined"
-        aria-label="统计"
-        @keydown.stop
-      >
-        <RouterView :route="statsRoute" />
-      </div>
+      <template v-for="overlay in OVERLAYS" :key="overlay.name">
+        <div
+          v-if="overlayRoutes[overlay.name]"
+          v-show="openName === overlay.name"
+          class="absolute inset-0 z-40 bg-panel"
+          :inert="openName !== overlay.name"
+          :aria-hidden="openName !== overlay.name || undefined"
+          :aria-label="overlay.label"
+          @keydown.stop
+        >
+          <RouterView :route="overlayRoutes[overlay.name]!" />
+        </div>
+      </template>
     </main>
   </div>
 </template>

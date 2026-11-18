@@ -1,23 +1,38 @@
-import type { ConversationBrief } from '@/api/types'
+import type { ConversationBrief, CustomerCard } from '@/api/types'
 
-/** 按本地日历日期划分，近期分组只收纳尚未归入更近日期的对话。 */
-export function groupConversations(conversations: ConversationBrief[], now = new Date()) {
-  const dayStart = (daysAgo: number) =>
-    new Date(now.getFullYear(), now.getMonth(), now.getDate() - daysAgo).getTime()
-  const groups: { label: string; since: number; items: ConversationBrief[] }[] = [
-    { label: '今天', since: dayStart(0), items: [] },
-    { label: '昨天', since: dayStart(1), items: [] },
-    { label: '前天', since: dayStart(2), items: [] },
-    { label: '近 7 天', since: dayStart(6), items: [] },
-    { label: '近 30 天', since: dayStart(29), items: [] },
-    { label: '30 天前', since: -Infinity, items: [] },
-  ]
-  for (const conversation of conversations) {
-    const updatedAt = Date.parse(conversation.updated_at) || 0
-    groups.find((group) => updatedAt >= group.since)!.items.push(conversation)
+const time = (iso: string | null | undefined) => Date.parse(iso ?? '') || 0
+
+/** 全部对话，最近更新的在前。 */
+export function sortByRecent(conversations: ConversationBrief[]) {
+  return [...conversations].sort((a, b) => time(b.updated_at) - time(a.updated_at))
+}
+
+/** 侧边栏「客户」：每个客户带上自己的对话（最近的在前），有最近对话的客户排在前面。 */
+export function groupByCustomer(customers: CustomerCard[], conversations: ConversationBrief[]) {
+  const byCustomer = new Map<string, ConversationBrief[]>()
+  for (const conversation of sortByRecent(conversations)) {
+    const id = conversation.customer?.id
+    if (!id) continue
+    if (!byCustomer.has(id)) byCustomer.set(id, [])
+    byCustomer.get(id)!.push(conversation)
   }
-  return groups.filter((group) => group.items.length).map(({ label, items }) => ({
-    label,
-    items: items.sort((a, b) => (Date.parse(b.updated_at) || 0) - (Date.parse(a.updated_at) || 0)),
-  }))
+  return customers
+    .map((customer) => {
+      const items = byCustomer.get(customer.id) ?? []
+      return { customer, items, activeAt: Math.max(time(items[0]?.updated_at), time(customer.last_activity)) }
+    })
+    .sort((a, b) => b.activeAt - a.activeAt)
+}
+
+/** 列表里的短时间：今天显示时刻，昨天显示「昨天」，今年显示月/日，更早显示年/月/日。 */
+export function shortTime(at: number | string | null | undefined, now = new Date()): string {
+  const value = typeof at === 'number' ? at : time(at)
+  if (!value) return ''
+  const date = new Date(value)
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  if (value >= dayStart) return `${pad(date.getHours())}:${pad(date.getMinutes())}`
+  if (value >= dayStart - 86_400_000) return '昨天'
+  if (date.getFullYear() === now.getFullYear()) return `${date.getMonth() + 1}/${date.getDate()}`
+  return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
 }

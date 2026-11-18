@@ -1,18 +1,45 @@
 <script setup lang="ts">
-import { Brain, Download, FileCheck2, FileSpreadsheet, Image, MessageSquare } from '@lucide/vue'
-import { computed } from 'vue'
+import { Brain, Check, Copy, Download, FileCheck2, FileSpreadsheet, Image, MessageSquare } from '@lucide/vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 
 import type { FileInfo, PlanStep } from '@/api/types'
 import type { UiMessage } from '@/composables/chatModel'
 import { isImageFile } from '@/composables/attachmentFiles'
 import { renderMarkdown } from '@/composables/markdown'
+import { copyMarkdown } from '@/composables/markdown'
 import { fillChips, looksLikeMarkdown, markdownWithChips } from '@/composables/messageMarkdown'
 import { parseTableReferences } from '@/composables/tableReferences'
 import { recipeEditLabel, recipeEditReruns, storedRecipeEdit } from '@/composables/recipeEditing'
+import { useToast } from '@/composables/useToast'
 
 const props = defineProps<{ message: UiMessage; files: FileInfo[] }>()
 const emit = defineEmits<{ preview: [file: FileInfo] }>()
 const content = computed(() => parseTableReferences(props.message.content))
+const toast = useToast()
+
+/** 发送时间，只显示几点几分（本地时间） */
+const sentAt = computed(() => {
+  const date = new Date(props.message.createdAt ?? '')
+  if (Number.isNaN(date.getTime())) return ''
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+})
+
+// 复制：引用的表格、文件换成名字，其余保持原文
+const plainText = computed(() => content.value.map((segment) =>
+  segment.type === 'table' ? segment.reference.sheet : segment.type === 'file' ? segment.reference.filename : segment.text).join(''))
+const copied = ref(false)
+let copiedTimer = 0
+async function copyMessage() {
+  try {
+    await copyMarkdown(plainText.value, 'markdown')
+    copied.value = true
+    window.clearTimeout(copiedTimer)
+    copiedTimer = window.setTimeout(() => { copied.value = false }, 2000)
+  } catch (error) {
+    toast.error(error instanceof Error ? error.message : '复制失败，请重试')
+  }
+}
+onBeforeUnmount(() => window.clearTimeout(copiedTimer))
 // 带标题、列表等写法的消息按 Markdown 渲染（比如导入流程包时写进输入框的处理逻辑）；普通的一两句话保持原样。
 const markdownHtml = computed(() => {
   if (!looksLikeMarkdown(props.message.content)) return ''
@@ -41,8 +68,9 @@ function fileDetails(file: FileInfo) {
 </script>
 
 <template>
-  <div class="flex justify-end">
+  <div class="group/user flex justify-end">
     <div class="flex max-w-[85%] min-w-0 flex-col items-end gap-2">
+      <time v-if="sentAt" class="-mb-1 text-[11px] tabular-nums text-faint" :datetime="message.createdAt">{{ sentAt }}</time>
       <div v-if="markdownHtml" class="user-bubble prose-sm max-w-full break-words rounded-[14px] bg-ink px-3.5 py-2 text-white [overflow-wrap:anywhere]" v-html="markdownHtml" />
       <div v-else class="user-bubble max-w-full whitespace-pre-wrap break-words rounded-[14px] bg-ink px-3.5 py-2 text-[15px] leading-6 text-white [overflow-wrap:anywhere]"><template v-for="(segment, index) in content" :key="index"><span v-if="segment.type === 'table'" class="msg-chip mx-0.5 rounded-md px-1.5 py-0.5" :title="`${segment.reference.filename} / ${segment.reference.sheet}`">{{ segment.reference.sheet }}</span><span v-else-if="segment.type === 'file'" class="msg-chip mx-0.5 rounded-md px-1.5 py-0.5" :title="segment.reference.filename">{{ segment.reference.filename }}</span><template v-else>{{ segment.text }}</template></template></div>
       <p v-if="adopted" class="text-[11px] text-success">追加要求 · 已采纳</p>
@@ -78,6 +106,16 @@ function fileDetails(file: FileInfo) {
       </div>
       <div v-if="message.meta.thinking" class="flex items-center justify-end gap-1 text-[11px] text-faint"><Brain class="size-3" />思考模式</div>
       <div v-else-if="message.meta.plan" class="text-right text-[11px] text-faint">按计划执行（{{ (message.meta.plan as PlanStep[]).length }} 步）</div>
+      <button
+        type="button"
+        class="icon-btn -mt-1 !size-6 pointer-events-none opacity-0 transition-opacity group-hover/user:pointer-events-auto group-hover/user:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100"
+        :class="copied ? 'pointer-events-auto !opacity-100' : ''"
+        aria-label="复制消息"
+        title="复制"
+        @click="copyMessage"
+      >
+        <Check v-if="copied" class="size-3.5 text-success" /><Copy v-else class="size-3.5" />
+      </button>
     </div>
   </div>
 </template>

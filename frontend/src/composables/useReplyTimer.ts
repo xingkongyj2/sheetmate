@@ -24,6 +24,22 @@ export function formatReplyDuration(ms: number): string {
   return `${seconds} 秒`
 }
 
+/** 回复完成的时刻（毫秒时间戳）：优先用服务端记录的开始时间 + 耗时，没有就用本地封存的结束时间；还在回复时为空。 */
+export function replyFinishedAtMs(message: UiMessage): number | undefined {
+  if (message.streaming) return undefined
+  const execution = message.execution
+  if (validDuration(execution?.started_at) && validDuration(execution?.duration_ms)) return execution.started_at + execution.duration_ms
+  return validDuration(message.replyFinishedAt) ? message.replyFinishedAt : undefined
+}
+
+/** 只显示几点几分（本地时间），如 09:06。 */
+export function replyClockTime(message: UiMessage): string {
+  const finishedAt = replyFinishedAtMs(message)
+  if (finishedAt === undefined) return ''
+  const date = new Date(finishedAt)
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`
+}
+
 export function useReplyTimer(source: () => UiMessage) {
   const now = ref(Date.now())
   let timer: ReturnType<typeof setInterval> | undefined

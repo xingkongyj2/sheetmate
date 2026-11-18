@@ -27,7 +27,7 @@ import { auditLine } from '@/composables/thinkingPresentation'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
 import { useProgressiveReply } from '@/composables/useProgressiveReply'
-import { useReplyTimer } from '@/composables/useReplyTimer'
+import { replyClockTime, useReplyTimer } from '@/composables/useReplyTimer'
 
 import PrivacyReportCard from './PrivacyReportCard.vue'
 import RecipeStageDetails from './RecipeStageDetails.vue'
@@ -39,6 +39,7 @@ const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: Tab
 const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo]; refresh: [] }>()
 const toast = useToast()
 const { label: replyTime } = useReplyTimer(() => props.message)
+const finishedTime = computed(() => replyClockTime(props.message))
 const openingFile = ref<string | null>(null)
 
 async function previewFile(fileId: string) {
@@ -298,13 +299,14 @@ onBeforeUnmount(() => {
         </span>
       </div>
 
-      <div v-if="!typing && markdown" class="assistant-actions pointer-events-none flex items-center gap-1 pt-2 opacity-0 transition-opacity group-hover/message:pointer-events-auto group-hover/message:opacity-100 group-focus-within/message:pointer-events-auto group-focus-within/message:opacity-100">
-        <button type="button" class="icon-btn -ml-2 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含阶段回复、回答、正文表格和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
+      <div v-if="!typing && markdown" class="assistant-actions pointer-events-none -mt-1.5 flex items-center gap-1 opacity-0 transition-opacity group-hover/message:pointer-events-auto group-hover/message:opacity-100 group-focus-within/message:pointer-events-auto group-focus-within/message:opacity-100">
+        <button type="button" class="icon-btn -ml-2 !size-7 disabled:opacity-50" :disabled="copying" aria-label="复制带格式的回复" title="复制带格式的回复，含阶段回复、回答、正文表格和文件链接，可粘贴到支持富文本的编辑器" @click="copyReply('formatted')">
           <Check v-if="copied === 'formatted'" class="size-4 text-success" /><Copy v-else class="size-4" />
         </button>
-        <button type="button" class="icon-btn disabled:opacity-50" :disabled="copying" aria-label="复制 Markdown" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
+        <button type="button" class="icon-btn !size-7 disabled:opacity-50" :disabled="copying" aria-label="复制 Markdown" title="复制原生 Markdown，保留标题、列表和表格语法" @click="copyReply('markdown')">
           <Check v-if="copied === 'markdown'" class="size-4 text-success" /><Code v-else class="size-4" />
         </button>
+        <time v-if="finishedTime" class="ml-1.5 text-[11px] tabular-nums text-faint" data-testid="reply-finished-time">{{ finishedTime }}</time>
       </div>
     </div>
   </div>

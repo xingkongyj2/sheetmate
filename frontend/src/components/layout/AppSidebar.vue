@@ -1,32 +1,29 @@
 <script setup lang="ts">
 /**
- * 侧边栏：新对话、客户，下面是按时间分组的对话列表（显示绑定的客户），底部是用户名与账号操作。
+ * 侧边栏：搜索、新对话、客户库、公式库（统一的线条图标），下面是「客户」和「对话」两块列表，
+ * 底部是头像和名字（点开是统计 / 设置 / 退出登录）。
  */
-import { ChartColumn, ChevronLeft, ChevronRight, LoaderCircle, LogOut, Plus, Search, Settings, Trash2 } from '@lucide/vue'
+import { ChartColumn, LogOut, PanelLeft, Search, Settings, SquareFunction, SquarePen, Users } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { conversationApi } from '@/api'
-import ConversationEmptyIcon from '@/components/brand/ConversationEmptyIcon.vue'
-import CustomerLibraryIcon from '@/components/brand/CustomerLibraryIcon.vue'
-import FormulaLibraryIcon from '@/components/brand/FormulaLibraryIcon.vue'
 import LogoMark from '@/components/brand/LogoMark.vue'
-import { mascotStyle } from '@/components/brand/mascots'
-import { useConfirm } from '@/composables/useConfirm'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
 
 import SearchDialog from './SearchDialog.vue'
+import SidebarConversationList from './SidebarConversationList.vue'
 
 const store = useWorkspaceStore()
 const auth = useAuthStore()
 const route = useRoute()
 const router = useRouter()
-const { confirmDelete } = useConfirm()
 const narrowScreen = window.matchMedia('(max-width: 767px)')
 const collapsed = ref(narrowScreen.matches)
 const menuOpen = ref(false)
+const accountBox = ref<HTMLElement | null>(null)
 const searchOpen = ref(false)
+
 const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'
 
 function onShortcut(event: KeyboardEvent) {
@@ -55,27 +52,24 @@ function collapseOnNarrowScreen(event: MediaQueryListEvent) {
   if (event.matches) collapsed.value = true
 }
 
+// 账号菜单：点外面或按 Esc 关闭
+function closeMenu(event: Event) {
+  if (event instanceof KeyboardEvent ? event.key === 'Escape' : !accountBox.value?.contains(event.target as Node)) menuOpen.value = false
+}
+
 onMounted(() => {
   narrowScreen.addEventListener('change', collapseOnNarrowScreen)
   window.addEventListener('keydown', onShortcut)
+  window.addEventListener('pointerdown', closeMenu)
+  window.addEventListener('keydown', closeMenu)
 })
 onBeforeUnmount(() => {
   narrowScreen.removeEventListener('change', collapseOnNarrowScreen)
   window.removeEventListener('keydown', onShortcut)
+  window.removeEventListener('pointerdown', closeMenu)
+  window.removeEventListener('keydown', closeMenu)
   stopTrackingSettings()
 })
-
-async function remove(id: string, title: string) {
-  if (!await confirmDelete({
-    title: '删除这段对话？',
-    target: title,
-    description: '对话记录和对话里的临时数据将一起删除，删除后无法恢复。',
-    confirmText: '删除对话',
-    action: () => conversationApi.remove(id),
-  })) return
-  store.removeConversation(id)
-  if (route.params.id === id) router.push({ name: 'home' })
-}
 
 async function logout() {
   await auth.logout()
@@ -99,147 +93,85 @@ async function logout() {
         :aria-expanded="!collapsed"
         @click="collapsed = !collapsed"
       >
-        <ChevronRight v-if="collapsed" class="size-4" aria-hidden="true" />
-        <ChevronLeft v-else class="size-4" aria-hidden="true" />
+        <PanelLeft class="size-[18px]" aria-hidden="true" />
       </button>
     </div>
 
-    <div class="mt-2 px-3">
-      <RouterLink :to="{ name: 'home' }" class="btn-ink w-full" :class="collapsed ? 'px-0' : ''" title="新对话">
-        <Plus class="size-4" /><span v-if="!collapsed">新对话</span>
-      </RouterLink>
-    </div>
-
-    <nav class="mt-3 space-y-0.5 px-3">
+    <nav class="mt-1 space-y-0.5 px-3" aria-label="主导航">
       <button
         type="button"
-        class="flex w-full items-center gap-2.5 rounded-xl py-2 text-sm text-mute transition hover:bg-black/[0.04]"
-        :class="[collapsed ? 'justify-center px-0' : 'px-3', searchOpen ? 'bg-black/[0.05] text-ink' : '']"
+        class="nav-row text-ink/80"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', searchOpen ? 'bg-black/[0.06] text-ink' : '']"
         :title="`搜索（${shortcutLabel}）`"
         aria-label="搜索"
         aria-haspopup="dialog"
         @click="searchOpen = true"
       >
-        <span class="flex size-6 shrink-0 items-center justify-center"><Search class="size-[18px]" aria-hidden="true" /></span>
+        <span class="nav-icon"><Search aria-hidden="true" /></span>
         <template v-if="!collapsed">
           <span>搜索</span>
           <kbd class="ml-auto rounded-md border border-black/[0.08] px-1.5 font-sans text-[11px] leading-5 text-faint">{{ shortcutLabel }}</kbd>
         </template>
       </button>
       <RouterLink
+        :to="{ name: 'home' }"
+        class="nav-row text-ink/80"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'home' ? 'bg-black/[0.06] text-ink' : '']"
+        title="新对话"
+      >
+        <span class="nav-icon"><SquarePen aria-hidden="true" /></span><span v-if="!collapsed">新对话</span>
+      </RouterLink>
+      <RouterLink
         :to="{ name: 'customers' }"
-        class="flex items-center gap-2.5 rounded-xl py-2 text-sm transition hover:bg-black/[0.04]"
-        :class="[collapsed ? 'justify-center px-0' : 'px-3', String(route.name).startsWith('customer') ? 'bg-black/[0.05] font-medium text-ink' : 'text-mute']"
+        class="nav-row text-ink/80"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'customers' ? 'bg-black/[0.06] text-ink' : '']"
         title="客户库"
       >
-        <CustomerLibraryIcon class="shrink-0" /><span v-if="!collapsed">客户库</span>
+        <span class="nav-icon"><Users aria-hidden="true" /></span><span v-if="!collapsed">客户库</span>
         <span v-if="!collapsed && store.customers.length" class="ml-auto text-xs text-faint">{{ store.customers.length }}</span>
       </RouterLink>
       <RouterLink
         :to="{ name: 'formulas' }"
-        class="flex items-center gap-2.5 rounded-xl py-2 text-sm transition hover:bg-black/[0.04]"
-        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'formulas' ? 'bg-black/[0.05] font-medium text-ink' : 'text-mute']"
+        class="nav-row text-ink/80"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'formulas' ? 'bg-black/[0.06] text-ink' : '']"
         title="公式库"
       >
-        <FormulaLibraryIcon class="shrink-0" /><span v-if="!collapsed">公式库</span>
+        <span class="nav-icon"><SquareFunction aria-hidden="true" /></span><span v-if="!collapsed">公式库</span>
       </RouterLink>
     </nav>
 
-    <!-- 对话列表 -->
-    <div
-      v-if="!collapsed"
-      class="mt-4 min-h-0 flex-1 overflow-y-auto px-3 pb-3"
-      :class="{ 'flex items-center justify-center': store.loaded && !store.conversations.length }"
-    >
-      <div v-for="group in store.grouped" :key="group.label" class="mb-3">
-        <div class="label-mini px-3 pb-1.5 pt-2">{{ group.label }}</div>
-        <div v-for="conv in group.items" :key="conv.id" class="group relative">
-          <RouterLink
-            :to="{ name: 'chat', params: { id: conv.id } }"
-            class="flex flex-col rounded-xl px-3 py-2 transition hover:bg-black/[0.04]"
-            :class="route.params.id === conv.id ? 'bg-black/[0.06]' : ''"
-          >
-            <span class="flex items-center gap-1.5 pr-6 text-sm text-ink">
-              <LoaderCircle v-if="conv.running" class="size-3.5 shrink-0 animate-spin text-info" />
-              <span class="truncate">{{ conv.title }}</span>
-            </span>
-            <span class="mt-0.5 flex items-center gap-1.5 text-[11px] text-faint">
-              <template v-if="conv.customer">
-                <span class="size-2 rounded-full" :style="{ background: mascotStyle(conv.customer.mascot).body }" />
-                <span class="truncate">{{ conv.customer.name }}</span>
-              </template>
-              <span v-else>无客户</span>
-            </span>
-          </RouterLink>
-          <button
-            class="absolute right-2 top-2.5 rounded-md p-1 text-faint opacity-0 transition hover:bg-black/[0.05] hover:text-error focus-visible:opacity-100 group-hover:opacity-100"
-            title="删除对话"
-            :aria-label="`删除对话 ${conv.title}`"
-            @click.prevent="remove(conv.id, conv.title)"
-          >
-            <Trash2 class="size-3.5" />
-          </button>
-        </div>
-      </div>
-      <div v-if="store.loaded && !store.conversations.length" class="flex flex-col items-center gap-2 px-3 py-6 text-xs leading-relaxed text-faint">
-        <ConversationEmptyIcon class="size-8 shrink-0" />
-        <span>暂无对话</span>
-      </div>
-    </div>
+    <SidebarConversationList v-if="!collapsed" />
     <div v-else class="flex-1" />
 
     <!-- 账号 -->
-    <div class="relative px-3 pb-2.5 pt-1">
-      <div v-if="!collapsed" class="flex min-w-0 items-center gap-2.5 pl-3 pr-1">
-        <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
-        <span class="min-w-0 flex-1 truncate text-sm text-ink" :title="username">{{ username }}</span>
-        <div class="flex shrink-0 items-center gap-0.5">
-          <RouterLink
-            :to="statsDestination"
-            class="icon-btn size-7"
-            :class="route.name === 'stats' ? 'bg-black/[0.06] text-ink' : 'hover:bg-black/[0.05]'"
-            title="统计"
-            aria-label="统计"
-          >
-            <ChartColumn class="size-4" />
-          </RouterLink>
-          <RouterLink
-            :to="settingsDestination"
-            class="icon-btn size-7"
-            :class="route.name === 'settings' ? 'bg-black/[0.06] text-ink' : 'hover:bg-black/[0.05]'"
-            title="设置"
-            aria-label="设置"
-          >
-            <Settings class="size-4" />
-          </RouterLink>
-          <button type="button" class="icon-btn size-7 hover:bg-error/5 hover:text-error" title="退出登录" aria-label="退出登录" @click="logout">
-            <LogOut class="size-4" />
-          </button>
-        </div>
+    <div ref="accountBox" class="relative px-3 pb-2.5 pt-1">
+      <div class="flex min-w-0 items-center" :class="collapsed ? 'justify-center' : 'gap-1'">
+        <button
+          type="button"
+          class="flex min-w-0 items-center rounded-xl py-1.5 transition hover:bg-black/[0.05]"
+          :class="collapsed ? 'w-full justify-center' : 'flex-1 gap-2.5 pl-3 pr-2 text-left'"
+          :title="username"
+          aria-label="账号菜单"
+          aria-haspopup="menu"
+          :aria-expanded="menuOpen"
+          @click="menuOpen = !menuOpen"
+        >
+          <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
+          <span v-if="!collapsed" class="min-w-0 flex-1 truncate text-sm text-ink">{{ username }}</span>
+        </button>
       </div>
-      <button
-        v-else
-        type="button"
-        class="flex w-full items-center justify-center rounded-xl py-1.5 transition hover:bg-black/[0.05]"
-        :title="username"
-        aria-label="账号菜单"
-        :aria-expanded="menuOpen"
-        @click="menuOpen = !menuOpen"
-      >
-        <span class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
-      </button>
       <div
-        v-if="collapsed && menuOpen"
+        v-if="menuOpen"
         class="absolute bottom-12 left-3 z-30 w-52 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl"
-        @mouseleave="menuOpen = false"
+        role="menu"
       >
-        <RouterLink :to="statsDestination" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
+        <RouterLink :to="statsDestination" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
           <ChartColumn class="size-4" />统计
         </RouterLink>
-        <RouterLink :to="settingsDestination" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
+        <RouterLink :to="settingsDestination" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
           <Settings class="size-4" />设置
         </RouterLink>
-        <button class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
+        <button role="menuitem" class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
           <LogOut class="size-4" />退出登录
         </button>
       </div>
@@ -247,3 +179,11 @@ async function logout() {
     <SearchDialog v-if="searchOpen" @close="searchOpen = false" />
   </aside>
 </template>
+
+<style scoped>
+/* 侧栏导航行：线条图标 + 文字，图标统一 18px */
+.nav-row { display: flex; width: 100%; align-items: center; gap: 0.625rem; border-radius: 0.75rem; padding-block: 0.5rem; font-size: 0.875rem; transition: background-color .15s; }
+.nav-row:hover { background-color: rgb(0 0 0 / 0.04); }
+.nav-icon { display: flex; width: 1.5rem; height: 1.5rem; flex-shrink: 0; align-items: center; justify-content: center; }
+.nav-icon :deep(svg) { width: 18px; height: 18px; stroke-width: 1.75; }
+</style>
