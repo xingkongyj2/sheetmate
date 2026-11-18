@@ -295,6 +295,8 @@ def _restore_workbook(guard: Any, path: Path) -> bool:
         except BaseException:
             temporary.unlink(missing_ok=True)
             raise
-    os.replace(temporary, path)
+    from sheetmate.engine.workbooks.atomic import replace_file
+
+    replace_file(temporary, path)
     privacy.log.emit("info", "还原", f"{path.name}：令牌已还原", file=path.name)
     return True

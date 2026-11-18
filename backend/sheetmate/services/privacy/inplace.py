@@ -25,6 +25,7 @@ from sheetmate.core.config.settings import settings
 from sheetmate.db.models import FileRecord, PrivacyFile
 from sheetmate.db.session import session_scope
 from sheetmate.engine.ooxml.errors import OoxmlUnsupported
+from sheetmate.engine.workbooks.atomic import replace_file
 from sheetmate.engine.workbooks.reader import _csv_delimiter, read_workbook
 from sheetmate.privacy import TOKEN_RE, Stats, privacy
 from sheetmate.privacy.guard import FORCED
@@ -197,10 +198,17 @@ def _sync_file(file_id: str, fingerprint_of: Callable[[dict[str, Any]], str] | N
                 _write_csv(path, staging, desired)
             else:
                 masked_files._mask_package(path, staging, desired, text_nodes=False)
-            staging.replace(path)
+            replace_file(staging, path)
         except OoxmlUnsupported as exc:
             logger.warning("文件「%s」无法在原文件上改成脱敏版（%s），原文件保持不变，AI 和查看使用脱敏副本", path.name, exc)
             privacy.log.emit("warn", "识别", f"{record.filename}：无法直接修改原文件，改用脱敏副本（{exc}）",
+                             file_id=file_id)
+            state = "copy"
+        except PermissionError:
+            # Windows：原文件一直被别的程序占着（比如正在被读取、被杀毒软件扫描），等了也替换不了。
+            # 不算失败：原文件保持不变，AI 和查看改用脱敏副本，保护照样有效
+            logger.warning("文件「%s」被占用，无法直接修改原文件，AI 和查看使用脱敏副本", path.name, exc_info=True)
+            privacy.log.emit("warn", "识别", f"{record.filename}：文件正被占用，暂时无法直接修改原文件，改用脱敏副本",
                              file_id=file_id)
             state = "copy"
         finally:

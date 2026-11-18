@@ -25,6 +25,7 @@ from sheetmate.engine.ooxml.errors import OoxmlUnsupported
 from sheetmate.engine.ooxml.package import OoxmlPackage
 from sheetmate.engine.ooxml.parts import drop_calc_chain
 from sheetmate.engine.ooxml.sheetxml import SheetXml, cell_xml
+from sheetmate.engine.workbooks.atomic import replace_file
 from sheetmate.engine.workbooks.reader import SheetData, read_workbook
 from sheetmate.engine.workbooks.writer import SheetSpec, write_excel
 from sheetmate.privacy import Stats, privacy
@@ -82,7 +83,7 @@ def masked_path(file_id: str, source: Path, *, view: bool = False) -> Path:
         staging = target.with_name(f".{target.name}.part")
         try:
             _build(file_id, source, staging, view)
-            staging.replace(target)
+            replace_file(staging, target)
         finally:
             staging.unlink(missing_ok=True)
         for old in _directory().glob(f"{file_id}_{'v' if view else 'a'}*"):      # 同一个文件的旧版本副本用不到了

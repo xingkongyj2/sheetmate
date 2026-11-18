@@ -338,7 +338,9 @@ def _write_workbook(workbook: openpyxl.Workbook, path: Path, plans: list[OutputP
         staging = Path(temporary.name)
     try:
         workbook.save(staging)
-        staging.replace(path)
+        from sheetmate.engine.workbooks.atomic import replace_file
+
+        replace_file(staging, path)
     finally:
         staging.unlink(missing_ok=True)
     return written

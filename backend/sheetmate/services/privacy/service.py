@@ -673,11 +673,19 @@ async def identify_uploaded(file_id: str, *, source: str = "upload") -> None:
             model = await _open_model()
             sheets, _, _ = await _identify(item["id"], item["filename"], item["profile"], model, source=source, path=item["path"])
             _remember(item["id"], item["profile"], sheets)
-            await apply_masking(item["id"])
         except Exception as exc:
             reason = str(exc)[:300] or type(exc).__name__
             _save_failed(item["id"], reason)
             privacy.log.emit("warn", "识别", f"{item['filename']}：上传后识别未完成，使用时重试（{reason}）",
+                             file_id=item["id"], source=source)
+            return
+        try:
+            await apply_masking(item["id"])
+        except Exception as exc:
+            # 识别已经完成，只是把原文件改成脱敏版没成功：识别结果保留（不能标成识别失败，否则对话里会整份重新识别），
+            # 对话开始时会再改一次
+            reason = str(exc)[:300] or type(exc).__name__
+            privacy.log.emit("warn", "识别", f"{item['filename']}：识别已完成，原文件暂未改成脱敏版，使用时重试（{reason}）",
                              file_id=item["id"], source=source)
     except Exception:   # 后台任务出任何问题都不能影响上传本身
         logging.getLogger(__name__).exception("上传后自动识别出现意外")
@@ -780,7 +788,8 @@ def _unfinished_files(conversation_id: str) -> list[str]:
                 if file_id not in ready or (not ready[file_id] and inplace.modifiable(*paths[file_id]))]
 
 
-async def ensure_complete(conversation_id: str) -> None:
+async def ensure_complete(conversation_id: str,
+                          notify: Callable[[str], Awaitable[None]] | None = None) -> None:
     """每次调用正常模型之前确认：这个会话里的表格文件都已脱敏。
 
     对话进行中新生成的结果文件会在这里当场识别；识别不成功（或超时）就抛出 PrivacyBlocked，本次对话直接结束，
@@ -790,10 +799,38 @@ async def ensure_complete(conversation_id: str) -> None:
     pending = await asyncio.to_thread(_unfinished_files, conversation_id)
     if not pending:
         return
+    ticker = asyncio.create_task(_report_progress(pending, notify)) if notify is not None else None
     try:
         await prepare_files(conversation_id=conversation_id, files=[{"file_id": file_id} for file_id in pending], emit=_silent)
     except PrivacyBlocked as exc:
         raise PrivacyBlocked(f"脱敏未完成，无法继续，已结束本次对话（没有任何内容发给模型）：{exc}") from exc
+    finally:
+        if ticker is not None:
+            ticker.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await ticker
+
+
+PROGRESS_INTERVAL = 3       # 对话中途补做脱敏时，多久更新一次界面上的进度（秒）
+
+
+async def _report_progress(file_ids: list[str], notify: Callable[[str], Awaitable[None]]) -> None:
+    """补做脱敏可能要好几分钟（大文件逐个检查自由文本）：期间界面显示在做什么、做到哪了，而不是「模型暂未返回新内容」。"""
+    with session_scope() as db:
+        names = {record.id: record.filename for record in records_by_id(db, file_ids)}
+    last = ""
+    while True:
+        parts = []
+        for file_id in file_ids:
+            done = _progress.get(file_id)
+            name = names.get(file_id, "文件")
+            parts.append(f"「{name}」已检查 {done[0]:,}/{done[1]:,} 个值" if done else f"「{name}」")
+        text = "正在给文件脱敏：" + "；".join(parts)
+        if text != last:
+            with contextlib.suppress(Exception):          # 界面提示失败不能影响脱敏本身
+                await notify(text)
+            last = text
+        await asyncio.sleep(PROGRESS_INTERVAL)
 
 
 class PrivacyPrepareError(ServiceError):
@@ -855,6 +892,8 @@ def _save_failed(file_id: str, reason: str) -> None:
     """识别没有完成：记下原因（文件列表和面板里显示「识别失败」），对话里用到这个文件时会重新识别。"""
     with session_scope() as db:
         row = db.get(PrivacyFile, file_id)
+        if row is not None and row.status == "ready":
+            return              # 别的地方（比如对话里）已经识别完成：后来的这次失败不能把好的结果抹掉
         if row is None:
             row = PrivacyFile(file_id=file_id, fingerprint="")
             db.add(row)

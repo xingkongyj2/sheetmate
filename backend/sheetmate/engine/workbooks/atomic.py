@@ -8,9 +8,29 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+
+REPLACE_WAIT_SECONDS = 30          # Windows 上目标文件被占用时最多等多久
+_RETRY_LOCKED = os.name == "nt"     # 只有 Windows 会因为「别的程序正打开着这个文件」而替换失败
+
+
+def replace_file(source: Path | str, target: Path | str, *, wait: float = REPLACE_WAIT_SECONDS) -> None:
+    """os.replace，Windows 上遇到「拒绝访问」（目标或临时文件正被杀毒软件、索引服务、正在读这个文件的请求短暂占用）时
+    隔一会儿再试，最多等 wait 秒；还不行就照常抛出 PermissionError，由调用方决定怎么办。"""
+    deadline, delay = time.monotonic() + wait, 0.05
+    while True:
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if not _RETRY_LOCKED or time.monotonic() >= deadline:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 1.0)
 
 
 @contextmanager
@@ -22,7 +42,7 @@ def atomic_path(path: Path) -> Iterator[Path]:
         staging = Path(handle.name)
     try:
         yield staging
-        os.replace(staging, path)
+        replace_file(staging, path)
     finally:
         staging.unlink(missing_ok=True)
 
