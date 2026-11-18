@@ -259,9 +259,8 @@ async function test(provider: LLMProviderConfig) {
 </script>
 
 <template>
-  <section :class="embedded ? '' : 'mt-8'" :aria-labelledby="`${ns}providers-heading`">
-    <component :is="embedded ? 'h3' : 'h2'" :id="`${ns}providers-heading`"
-               :class="embedded ? 'px-5 pt-5 text-[15px] font-semibold sm:px-6' : 'mb-3 text-lg font-semibold tracking-tight'">{{ title }}</component>
+  <section :class="embedded ? '' : 'mt-8'" :aria-labelledby="embedded ? undefined : `${ns}providers-heading`" :aria-label="embedded ? title : undefined">
+    <h2 v-if="!embedded" :id="`${ns}providers-heading`" class="mb-3 text-lg font-semibold tracking-tight">{{ title }}</h2>
     <p v-if="description" class="-mt-1.5 mb-3 text-[13px] leading-5 text-mute">{{ description }}</p>
     <div :class="embedded ? '' : 'card-soft overflow-hidden'">
       <div v-if="tabIds.length > 1" class="px-5 pt-5 sm:px-6 sm:pt-6">
@@ -401,6 +400,8 @@ async function test(provider: LLMProviderConfig) {
       </div>
     </div>
   </section>
+
+  <slot />
 
   <template v-if="!loading && !loadError && showProtocol">
     <template v-for="provider in orderedProviders" :key="provider.id">

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 设置：资料、对话用的大模型、脱敏（总开关和规则）、脱敏专用的模型（两份模型配置同构，各自保存） */
+/** 设置：资料、对话用的大模型、脱敏（总开关、规则和脱敏专用模型，放在大模型与结构协议之间；两份模型配置同构，各自保存） */
 import { settingsApi } from '@/api'
 import LLMConfigPanel from '@/components/settings/LLMConfigPanel.vue'
 import PrivacyCard from '@/components/settings/PrivacyCard.vue'
@@ -19,22 +19,22 @@ const privacyModelApi = { load: settingsApi.getPrivacyLLM, save: settingsApi.sav
         <ProfileCard />
       </section>
 
-      <LLMConfigPanel title="大模型" :api="chatModelApi" />
-
-      <section class="mt-8" aria-labelledby="privacy-heading">
-        <h2 id="privacy-heading" class="mb-3 text-lg font-semibold tracking-tight">脱敏</h2>
-        <PrivacyCard>
-          <LLMConfigPanel
-            embedded
-            title="脱敏模型"
-            id-prefix="privacy-"
-            default-provider="custom"
-            :providers="['custom']"
-            :show-protocol="false"
-            :api="privacyModelApi"
-          />
-        </PrivacyCard>
-      </section>
+      <LLMConfigPanel title="大模型" :api="chatModelApi">
+        <section class="mt-8" aria-labelledby="privacy-heading">
+          <h2 id="privacy-heading" class="mb-3 text-lg font-semibold tracking-tight">脱敏</h2>
+          <PrivacyCard>
+            <LLMConfigPanel
+              embedded
+              title="脱敏模型"
+              id-prefix="privacy-"
+              default-provider="custom"
+              :providers="['custom']"
+              :show-protocol="false"
+              :api="privacyModelApi"
+            />
+          </PrivacyCard>
+        </section>
+      </LLMConfigPanel>
     </div>
   </div>
 </template>
