@@ -47,6 +47,6 @@ export function fillChips(html: string, chips: MessageChip[]): string {
     const chip = chips[Number(index)]
     if (!chip) return ''
     const colors = chip.kind === 'file' ? 'bg-[#e4eaf2] text-[#42566f]' : 'bg-[#e0ece5] text-[#3f6152]'
-    return `<span class="mx-0.5 rounded-md px-1.5 py-0.5 ${colors}" title="${escapeHtml(chip.title)}">${escapeHtml(chip.label)}</span>`
+    return `<span class="msg-chip mx-0.5 rounded-md px-1.5 py-0.5 ${colors}" title="${escapeHtml(chip.title)}">${escapeHtml(chip.label)}</span>`
   })
 }

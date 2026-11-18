@@ -841,7 +841,6 @@ function answer(option: string) {
             :busy="streaming || reconnecting"
             :allow-steer="streaming && !reconnecting"
             :steer-pending="sendingSteer"
-            large
             appearance="card"
             :placeholder="recipeEdit ? recipeEditPlaceholder(recipeEdit.request) : '继续提问...'"
             @attach="attach"

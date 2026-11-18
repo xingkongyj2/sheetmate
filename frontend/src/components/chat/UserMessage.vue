@@ -43,8 +43,8 @@ function fileDetails(file: FileInfo) {
 <template>
   <div class="flex justify-end">
     <div class="flex max-w-[85%] min-w-0 flex-col items-end gap-2">
-      <div v-if="markdownHtml" class="prose-sm max-w-full break-words rounded-[20px] rounded-br-md bg-paper px-4 py-2.5 [overflow-wrap:anywhere]" v-html="markdownHtml" />
-      <div v-else class="max-w-full whitespace-pre-wrap break-words rounded-[20px] rounded-br-md bg-paper px-4 py-2.5 text-[15px] leading-relaxed [overflow-wrap:anywhere]"><template v-for="(segment, index) in content" :key="index"><span v-if="segment.type === 'table'" class="mx-0.5 rounded-md bg-[#e0ece5] px-1.5 py-0.5 text-[#3f6152]" :title="`${segment.reference.filename} / ${segment.reference.sheet}`">{{ segment.reference.sheet }}</span><span v-else-if="segment.type === 'file'" class="mx-0.5 rounded-md bg-[#e4eaf2] px-1.5 py-0.5 text-[#42566f]" :title="segment.reference.filename">{{ segment.reference.filename }}</span><template v-else>{{ segment.text }}</template></template></div>
+      <div v-if="markdownHtml" class="user-bubble prose-sm max-w-full break-words rounded-[14px] bg-ink px-3.5 py-2 text-white [overflow-wrap:anywhere]" v-html="markdownHtml" />
+      <div v-else class="user-bubble max-w-full whitespace-pre-wrap break-words rounded-[14px] bg-ink px-3.5 py-2 text-[15px] leading-6 text-white [overflow-wrap:anywhere]"><template v-for="(segment, index) in content" :key="index"><span v-if="segment.type === 'table'" class="msg-chip mx-0.5 rounded-md px-1.5 py-0.5" :title="`${segment.reference.filename} / ${segment.reference.sheet}`">{{ segment.reference.sheet }}</span><span v-else-if="segment.type === 'file'" class="msg-chip mx-0.5 rounded-md px-1.5 py-0.5" :title="segment.reference.filename">{{ segment.reference.filename }}</span><template v-else>{{ segment.text }}</template></template></div>
       <p v-if="adopted" class="text-[11px] text-success">追加要求 · 已采纳</p>
       <p v-if="recipeEdit" class="flex max-w-full items-center gap-1.5 break-words text-[11px] text-[#6265dc]"><MessageSquare class="size-3 shrink-0" />{{ recipeEditLabel(recipeEdit) }} · v{{ recipeEdit.version }}<template v-if="recipeEditReruns(recipeEdit)"> · 修改后重跑</template></p>
       <div v-if="attachments.length" class="flex w-[320px] max-w-full flex-col gap-2" aria-label="消息附件">
@@ -81,3 +81,28 @@ function fileDetails(file: FileInfo) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* 用户消息：黑底白字气泡，里面的 Markdown、引用标签、选中文字都换成适合深色底的颜色 */
+.user-bubble.prose-sm { color: #fff; }
+.user-bubble ::selection,
+.user-bubble::selection { background: rgb(255 255 255 / 0.3); color: #fff; }
+.user-bubble :deep(.msg-chip),
+.user-bubble .msg-chip { background: rgb(255 255 255 / 0.16); color: #fff; }
+.user-bubble :deep(h1),
+.user-bubble :deep(h2),
+.user-bubble :deep(h3),
+.user-bubble :deep(h4) { color: #fff; }
+.user-bubble :deep(code),
+.user-bubble :deep(pre) { background: rgb(255 255 255 / 0.12); }
+.user-bubble :deep(pre code) { background: transparent; }
+.user-bubble :deep(blockquote) { border-color: rgb(255 255 255 / 0.3); color: rgb(255 255 255 / 0.75); }
+.user-bubble :deep(hr) { border-color: rgb(255 255 255 / 0.2); }
+.user-bubble :deep(.markdown-table-scroll),
+.user-bubble :deep(table) { border-color: rgb(255 255 255 / 0.2); background: transparent; }
+.user-bubble :deep(th),
+.user-bubble :deep(td) { border-color: rgb(255 255 255 / 0.16); background: transparent; color: inherit; }
+.user-bubble.prose-sm :deep(tbody tr:nth-child(n)),
+.user-bubble.prose-sm :deep(tbody tr:nth-child(n) td) { background: transparent; }
+.user-bubble :deep(th) { background: rgb(255 255 255 / 0.08); color: rgb(255 255 255 / 0.8); }
+</style>

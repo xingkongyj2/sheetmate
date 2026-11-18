@@ -2,7 +2,7 @@
 /**
  * 侧边栏：新对话、客户，下面是按时间分组的对话列表（显示绑定的客户），底部是用户名与账号操作。
  */
-import { ChartColumn, ChevronLeft, ChevronRight, LoaderCircle, LogOut, Plus, Settings, Trash2 } from '@lucide/vue'
+import { ChartColumn, ChevronLeft, ChevronRight, LoaderCircle, LogOut, Plus, Search, Settings, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -16,6 +16,8 @@ import { useConfirm } from '@/composables/useConfirm'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
 
+import SearchDialog from './SearchDialog.vue'
+
 const store = useWorkspaceStore()
 const auth = useAuthStore()
 const route = useRoute()
@@ -24,6 +26,15 @@ const { confirmDelete } = useConfirm()
 const narrowScreen = window.matchMedia('(max-width: 767px)')
 const collapsed = ref(narrowScreen.matches)
 const menuOpen = ref(false)
+const searchOpen = ref(false)
+const shortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘K' : 'Ctrl K'
+
+function onShortcut(event: KeyboardEvent) {
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'k') {
+    event.preventDefault()
+    searchOpen.value = !searchOpen.value
+  }
+}
 // 「设置」和「统计」是同级的覆盖层：再点一次同一个图标回到打开前的页面，点另一个图标直接切换。
 const overlayReturnPath = ref('/')
 const isOverlay = (name: unknown) => name === 'settings' || name === 'stats'
@@ -44,9 +55,13 @@ function collapseOnNarrowScreen(event: MediaQueryListEvent) {
   if (event.matches) collapsed.value = true
 }
 
-onMounted(() => narrowScreen.addEventListener('change', collapseOnNarrowScreen))
+onMounted(() => {
+  narrowScreen.addEventListener('change', collapseOnNarrowScreen)
+  window.addEventListener('keydown', onShortcut)
+})
 onBeforeUnmount(() => {
   narrowScreen.removeEventListener('change', collapseOnNarrowScreen)
+  window.removeEventListener('keydown', onShortcut)
   stopTrackingSettings()
 })
 
@@ -96,6 +111,21 @@ async function logout() {
     </div>
 
     <nav class="mt-3 space-y-0.5 px-3">
+      <button
+        type="button"
+        class="flex w-full items-center gap-2.5 rounded-xl py-2 text-sm text-mute transition hover:bg-black/[0.04]"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', searchOpen ? 'bg-black/[0.05] text-ink' : '']"
+        :title="`搜索（${shortcutLabel}）`"
+        aria-label="搜索"
+        aria-haspopup="dialog"
+        @click="searchOpen = true"
+      >
+        <span class="flex size-6 shrink-0 items-center justify-center"><Search class="size-[18px]" aria-hidden="true" /></span>
+        <template v-if="!collapsed">
+          <span>搜索</span>
+          <kbd class="ml-auto rounded-md border border-black/[0.08] px-1.5 font-sans text-[11px] leading-5 text-faint">{{ shortcutLabel }}</kbd>
+        </template>
+      </button>
       <RouterLink
         :to="{ name: 'customers' }"
         class="flex items-center gap-2.5 rounded-xl py-2 text-sm transition hover:bg-black/[0.04]"
@@ -159,14 +189,14 @@ async function logout() {
     <div v-else class="flex-1" />
 
     <!-- 账号 -->
-    <div class="relative p-3">
-      <div v-if="!collapsed" class="flex min-w-0 items-center gap-2 py-1 pl-3 pr-1.5">
-        <span aria-hidden="true" class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-sm font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
-        <span class="min-w-0 flex-1 truncate text-sm font-medium" :title="username">{{ username }}</span>
-        <div class="flex shrink-0 items-center gap-1">
+    <div class="relative px-3 pb-2.5 pt-1">
+      <div v-if="!collapsed" class="flex min-w-0 items-center gap-2.5 pl-3 pr-1">
+        <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
+        <span class="min-w-0 flex-1 truncate text-sm text-ink" :title="username">{{ username }}</span>
+        <div class="flex shrink-0 items-center gap-0.5">
           <RouterLink
             :to="statsDestination"
-            class="icon-btn"
+            class="icon-btn size-7"
             :class="route.name === 'stats' ? 'bg-black/[0.06] text-ink' : 'hover:bg-black/[0.05]'"
             title="统计"
             aria-label="统计"
@@ -175,14 +205,14 @@ async function logout() {
           </RouterLink>
           <RouterLink
             :to="settingsDestination"
-            class="icon-btn"
+            class="icon-btn size-7"
             :class="route.name === 'settings' ? 'bg-black/[0.06] text-ink' : 'hover:bg-black/[0.05]'"
             title="设置"
             aria-label="设置"
           >
             <Settings class="size-4" />
           </RouterLink>
-          <button type="button" class="icon-btn hover:bg-error/5 hover:text-error" title="退出登录" aria-label="退出登录" @click="logout">
+          <button type="button" class="icon-btn size-7 hover:bg-error/5 hover:text-error" title="退出登录" aria-label="退出登录" @click="logout">
             <LogOut class="size-4" />
           </button>
         </div>
@@ -190,17 +220,17 @@ async function logout() {
       <button
         v-else
         type="button"
-        class="flex w-full items-center justify-center rounded-xl py-1.5 transition hover:bg-black/[0.04]"
+        class="flex w-full items-center justify-center rounded-xl py-1.5 transition hover:bg-black/[0.05]"
         :title="username"
         aria-label="账号菜单"
         :aria-expanded="menuOpen"
         @click="menuOpen = !menuOpen"
       >
-        <span class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-sm font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
+        <span class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
       </button>
       <div
         v-if="collapsed && menuOpen"
-        class="absolute bottom-16 left-3 z-30 w-52 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl"
+        class="absolute bottom-12 left-3 z-30 w-52 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl"
         @mouseleave="menuOpen = false"
       >
         <RouterLink :to="statsDestination" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
@@ -214,5 +244,6 @@ async function logout() {
         </button>
       </div>
     </div>
+    <SearchDialog v-if="searchOpen" @close="searchOpen = false" />
   </aside>
 </template>
