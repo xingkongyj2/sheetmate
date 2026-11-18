@@ -259,11 +259,11 @@ async function test(provider: LLMProviderConfig) {
 </script>
 
 <template>
-  <section :class="embedded ? 'mt-3' : 'mt-8'" :aria-labelledby="`${ns}providers-heading`">
+  <section :class="embedded ? '' : 'mt-8'" :aria-labelledby="`${ns}providers-heading`">
     <component :is="embedded ? 'h3' : 'h2'" :id="`${ns}providers-heading`"
-               :class="embedded ? 'mb-2 px-1 text-sm font-medium text-mute' : 'mb-3 text-lg font-semibold tracking-tight'">{{ title }}</component>
+               :class="embedded ? 'px-5 pt-5 text-[15px] font-semibold sm:px-6' : 'mb-3 text-lg font-semibold tracking-tight'">{{ title }}</component>
     <p v-if="description" class="-mt-1.5 mb-3 text-[13px] leading-5 text-mute">{{ description }}</p>
-    <div class="card-soft overflow-hidden">
+    <div :class="embedded ? '' : 'card-soft overflow-hidden'">
       <div v-if="tabIds.length > 1" class="px-5 pt-5 sm:px-6 sm:pt-6">
         <div class="flex gap-1 rounded-xl bg-paper p-1" role="tablist" :aria-label="title" @keydown="onTabKeydown">
           <button

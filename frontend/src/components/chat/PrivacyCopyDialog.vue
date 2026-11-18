@@ -69,7 +69,7 @@ function cell(value: string | number | null): string {
       <div class="min-w-0">
         <div class="flex min-w-0 items-center gap-1.5">
           <h3 class="truncate text-base font-semibold" :title="filename">{{ filename }}</h3>
-          <button type="button" class="icon-btn size-7 shrink-0" :disabled="!!downloading" title="下载脱敏副本" :aria-label="`下载 ${filename} 的脱敏副本`" @click="download(fileId, filename)">
+          <button type="button" class="icon-btn size-7 shrink-0" :disabled="!!downloading" title="下载" :aria-label="`下载 ${filename}`" @click="download(fileId, filename)">
             <LoaderCircle v-if="downloading === fileId" class="size-4 animate-spin motion-reduce:animate-none" />
             <Download v-else class="size-4" />
           </button>

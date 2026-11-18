@@ -224,12 +224,8 @@ def register_output(db: Session, *, path: Path, filename: str, customer_id: str 
                     sheets: list[SheetData] | None = None) -> FileRecord:
     """登记系统生成的结果文件。sheets 为调用方刚读取的同一文件内容时可避免重复解析。
 
-    正式交付（delivery_status 为 final）的文件里如果有令牌（AI 和工具处理的是令牌版数据），在这里换回真实值；
-    候选和中间文件保持令牌，确认成正式结果时才还原（见 finalize_delivery）。没有令牌就不动。"""
-    from sheetmate.services.privacy import workspace as privacy_workspace
-
-    if delivery_status == "final" and privacy_workspace.restore_file(path):
-        sheets = None                      # 调用方读到的是令牌版，文件已经换成真实值：重新读
+    结果文件和上传的文件一样，存下来的一直是令牌版（AI 和工具处理的就是令牌版数据）：这里不还原，
+    查看（聊天页、文件页）看到的都是令牌，只有下载时才自动换回真实值（见 api/files 的 download）。"""
     try:
         profile = profile_file(path, sheets=sheets)
     except ReadError:
@@ -358,18 +354,9 @@ def finalize_delivery(db: Session, *, conversation_id: str, candidate_file_ids: 
     retired = [record for record in replacements_to_check
                if _replacement_visible_to_all_references(db, record, [candidates[file_id] for file_id in finals])]
     # 所有归属与文件状态检查通过后再修改，避免某一目标无效时部分退休。
-    from sheetmate.services.privacy import workspace as privacy_workspace
-
     for file_id, record in candidates.items():
         record.profile = {**(record.profile or {}), "delivery_status": "final" if file_id in finals else "intermediate",
                           "intermediate": file_id not in finals, "delivery_summary": summary[:1000]}
-        if file_id in finals and privacy_workspace.restore_file(Path(record.stored_path)):
-            # 确认成正式结果：令牌换回真实值，画像也按真实内容重算（size 同步更新）
-            try:
-                record.profile = {**record.profile, **profile_file(Path(record.stored_path))}
-            except ReadError:
-                pass
-            record.size = Path(record.stored_path).stat().st_size
     for record in retired:
         record.profile = {**(record.profile or {}), "delivery_status": "superseded", "intermediate": True,
                           "superseded_by_file_ids": finals}

@@ -213,16 +213,6 @@ export const fileApi = {
     (await http.get<{ preview: PrivacyCopyPreview }>(`/files/${id}/privacy-preview`, {
       params: { sheet: options.sheet, offset: options.offset ?? 0, limit: options.limit ?? 50, conversation_id: options.conversationId },
     })).data.preview,
-  /** 下载脱敏副本（xlsx）。文件名取响应头 Content-Disposition，取不到时返回 null，由调用方用「原名_脱敏.xlsx」。 */
-  privacyCopy: async (id: string, conversationId?: string) => {
-    const response = await http.get<Blob>(`/files/${id}/privacy-copy`, { params: { conversation_id: conversationId }, responseType: 'blob' })
-    const disposition = String(response.headers['content-disposition'] ?? '')
-    const encoded = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(disposition)?.[1]
-    const plain = /filename\s*=\s*"?([^";]+)"?/i.exec(disposition)?.[1]
-    let filename: string | null = null
-    try { filename = encoded ? decodeURIComponent(encoded) : plain ?? null } catch { filename = plain ?? null }
-    return { blob: response.data, filename }
-  },
   preview: async (id: string, sheet?: string, offset = 0, limit = 50) =>
     (await http.get<{ preview: { filename: string; sheet: string; sheets: string[]; total: number; columns: string[]; rows: unknown[][] } }>(
       `/files/${id}/preview`, { params: { sheet, offset, limit } })).data.preview,

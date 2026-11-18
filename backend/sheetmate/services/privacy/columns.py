@@ -237,10 +237,11 @@ def _refresh_workspaces(file_id: str) -> None:
 async def viewable_path(user: User, record: FileRecord) -> tuple[Path, str]:
     """用户查看、下载这个文件时给的内容。返回 (路径, 方式)：
 
-    original：原文件（没有脱敏，或交付给用户的结果文件）；
+    original：原文件（里面没有需要脱敏的列）；
     inplace：原文件本身（已经按脱敏设置改成了脱敏版，里面脱敏的列就是令牌）；
-    copy：文件格式没法原地改，给一份只有脱敏的列换成令牌的副本。
-    总开关关着时不自动识别，已经脱敏的文件和手动的选择照常生效。交付给用户的结果文件不按自动识别处理（里面要的是真实内容），只有用户在维护页里手动选过的才按选择来。"""
+    copy：文件格式没法原地改（xls，或系统生成的结果文件），给一份只有脱敏的列换成令牌的副本。
+    结果文件和上传的文件一样：存的是令牌版，查看时看到的也是令牌，真实内容只在下载时还原。
+    总开关关着时不自动识别，已经脱敏的文件和手动的选择照常生效。"""
     from sheetmate.core.config.privacy_switch import sync_privacy_settings
     from sheetmate.services.privacy import inplace, masked_files
 
@@ -250,8 +251,6 @@ async def viewable_path(user: User, record: FileRecord) -> tuple[Path, str]:
     privacy_service.start()
     enabled = sync_privacy_settings()
     manual = bool(await asyncio.to_thread(choices.load, record.id))
-    if record.kind == "output" and not manual:
-        return path, "original"
     if enabled:
         await masked_copy._ready(user, record.id, None)          # 总开关关着时不自动识别，按已有的结果和手动的选择给
     if inplace.modifiable(record.kind, path):

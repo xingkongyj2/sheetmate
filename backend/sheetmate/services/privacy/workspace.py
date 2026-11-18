@@ -1,9 +1,10 @@
-"""工作区里的数据一律是令牌版：载入时脱敏，交付时还原，展示给用户时还原。
+"""工作区里的数据一律是令牌版：上传就脱敏，中间所有环节都是令牌，只有下载时才还原。
 
 - 载入：上传的文件载入工作区时，识别出的联系方式、地址列（和格子里夹着的号码、地址）换成令牌。AI 和所有工具、脚本、中间文件
   从头到尾只碰令牌；同一个真实值永远得到同一个令牌，所以分组、关联、去重照常能用。
-- 交付：结果文件登记时，里面的令牌换回真实值（没有令牌就不动）。
-- 展示：给用户看的表格分页、聊天里的事件，令牌也换回真实值（数据本身仍是令牌）。
+- 结果文件：登记和交付时不还原，存下来的、聊天页和文件页里查看的都是令牌版，和上传的文件一致。
+- 下载：统一在下载时把令牌换回真实值（见 restored_download）。
+- 聊天里的事件文字、对话里的表格分页仍按展示需要把令牌换回真实值（数据本身仍是令牌）。
 """
 
 from __future__ import annotations
@@ -252,15 +253,26 @@ def _has_tokens(path: Path) -> bool:
     return False
 
 
-def restored_download(path: Path) -> tuple[Path, bool]:
-    """下载给用户的文件：里面还有令牌（还没确认成正式结果的文件）就给一份换回真实值的临时副本。返回 (路径, 是不是临时副本)。"""
+def restored_download(path: Path, file_id: str | None = None) -> tuple[Path, bool]:
+    """下载给用户的文件：里面的令牌（上传时脱敏的、系统生成的结果文件）统一换回真实值，给一份临时副本。
+    返回 (路径, 是不是临时副本)；没有令牌就直接给原文件。file_id 用来把原本是数字的列还原成数字。"""
     if privacy.guard is None or not _has_tokens(path):
         return path, False
     folder = settings.data_dir / "privacy" / "downloads"
     folder.mkdir(parents=True, exist_ok=True)
     copy = folder / f"{secrets.token_hex(8)}{path.suffix}"
-    shutil.copyfile(path, copy)
-    restore_file(copy)
+    typed = False
+    if file_id and path.suffix.lower() in {".xlsx", ".xlsm"}:
+        from sheetmate.services.privacy import inplace
+
+        try:
+            typed = inplace.restore_types(file_id, path, copy)
+        except Exception:      # 按类型还原不了就退回逐个令牌替换（文字照样还原，只是数字列变成文本）
+            logger.exception("按列类型还原下载文件失败，改为直接替换令牌：%s", path)
+            copy.unlink(missing_ok=True)
+    if not typed:
+        shutil.copyfile(path, copy)
+    restore_file(copy)          # 剩下的令牌（批注、内联文字里的）也换回来
     return copy, True
 
 

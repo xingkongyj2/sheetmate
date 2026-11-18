@@ -44,7 +44,7 @@ function canCopy(file: PrivacyFile | PrivacyFileState) {
             <button type="button" class="icon-btn size-7 shrink-0" title="查看 AI 看到的样子" :aria-label="`查看 ${file.filename} 脱敏后的样子`" @click.stop.prevent="viewing = { fileId: file.file_id, filename: file.filename }">
               <Eye class="size-4" />
             </button>
-            <button type="button" class="icon-btn size-7 shrink-0" :disabled="!!downloading" title="下载脱敏副本" :aria-label="`下载 ${file.filename} 的脱敏副本`" @click.stop.prevent="download(file.file_id, file.filename)">
+            <button type="button" class="icon-btn size-7 shrink-0" :disabled="!!downloading" title="下载" :aria-label="`下载 ${file.filename}`" @click.stop.prevent="download(file.file_id, file.filename)">
               <LoaderCircle v-if="downloading === file.file_id" class="size-4 animate-spin motion-reduce:animate-none" />
               <Download v-else class="size-4" />
             </button>

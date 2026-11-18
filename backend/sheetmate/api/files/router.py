@@ -146,18 +146,14 @@ async def file_preview(file_id: str, sheet: str | None = None, offset: int = Que
 
 @router.get("/{file_id}/download")
 async def download(file_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> FileResponse:
+    """下载一律是真实内容：存下来的文件（上传时脱敏的、系统生成的结果）里的令牌在这里统一还原。
+    xls 这类没法原地改的文件，原文件本来就是真实内容。"""
     record = file_service.get_file(db, file_id)
     _check(db, user, record)
-    source, mode = await privacy_columns_service.viewable_path(user, record)
-    filename = record.filename
-    if mode == "copy" and source.suffix.lower() != Path(filename).suffix.lower():
-        filename = f"{Path(filename).stem}{source.suffix}"                     # .xls 的令牌版是 .xlsx
+    privacy_service.start()                                                    # 还原要用到本机的令牌库
     # 脱敏状态随时会变（开关、手动选择）：浏览器不能缓存，每次都取最新的
-    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}", "Cache-Control": "no-store"}
-    if mode != "original":
-        return FileResponse(source, headers=headers, media_type=file_service.file_media_type(record))
-    # 还没确认成正式结果的文件里是令牌版内容：下载给用户的是换回真实值的副本，下载完删除
-    path, temporary = restored_download(source)
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(record.filename)}", "Cache-Control": "no-store"}
+    path, temporary = await asyncio.to_thread(restored_download, Path(record.stored_path), record.id)
     return FileResponse(path, headers=headers, media_type=file_service.file_media_type(record),
                         background=BackgroundTask(path.unlink, missing_ok=True) if temporary else None)
 

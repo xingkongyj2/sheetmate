@@ -59,7 +59,7 @@ const viewing = ref<{ fileId: string; filename: string } | null>(null)
                 <button type="button" class="privacy-action" title="查看 AI 看到的样子" :aria-label="`查看 ${file.filename} 脱敏后的样子`" @click="viewing = { fileId: file.file_id, filename: file.filename }">
                   <Eye class="size-4" />
                 </button>
-                <button type="button" class="privacy-action" :disabled="!!downloading" title="下载脱敏副本" :aria-label="`下载 ${file.filename} 的脱敏副本`" @click="download(file.file_id, file.filename)">
+                <button type="button" class="privacy-action" :disabled="!!downloading" title="下载" :aria-label="`下载 ${file.filename}`" @click="download(file.file_id, file.filename)">
                   <LoaderCircle v-if="downloading === file.file_id" class="size-4 animate-spin motion-reduce:animate-none" />
                   <Download v-else class="size-4" />
                 </button>

@@ -3,8 +3,9 @@
 - 脱敏的列（自动识别的、用户在维护页里选的）：每一格换成令牌，写回原文件（xlsx 只改这些单元格，样式、合并、公式、图表都不动）；
 - 没有脱敏的列：里面如果有令牌（之前脱敏过、现在关掉了），换回真实值；
 - 设置页的总开关和规则开关只管「处理文件时要不要自动先识别、脱敏」，已经脱敏的文件不受影响，手动的选择也不受影响。
-只处理上传的输入文件和期望结果（交付给用户的结果文件要的是真实内容，不动）。xls、格式没法原地改的文件不动原文件，AI 和查看用脱敏副本。
+只处理上传的输入文件和期望结果；系统生成的结果文件存下来的本来就是令牌版，不用改。xls、格式没法原地改的文件不动原文件，AI 和查看用脱敏副本。
 令牌和真实值的对应关系在本机加密的令牌库里，所以不需要另外留一份原文件。
+下载时统一还原成真实内容（见 restore_types 和 workspace.restored_download）：存下来的、查看的都是令牌，只有下载给用户的才是真实值。
 """
 
 from __future__ import annotations
@@ -96,6 +97,26 @@ def _desired(sheets: list[Any], report: list[dict[str, Any]], enabled: bool, ori
                 frame.isetitem(position, series.map(lambda value, number=number: _restore_cell(guard, value, number)).astype(object))
         out.append((sheet, frame))
     return out
+
+
+def restore_types(file_id: str, source: Path, target: Path) -> bool:
+    """下载用：把原地改成脱敏版的 xlsx 里的令牌换回真实值，写到 target；原来是数字的列（比如存成数字的手机号）还原成数字。
+    只改令牌所在的格子，其余原样。返回有没有改动（没有改动时 target 不会生成）。"""
+    guard = privacy.require()
+    with session_scope() as db:
+        row = db.get(PrivacyFile, file_id)
+        origin = {sheet: dict(columns) for sheet, columns in ((row.origin if row is not None else None) or {}).items()}
+    desired = []
+    for sheet in read_workbook(source):
+        numbers, frame = origin.get(sheet.name, {}), sheet.df.copy()
+        for position, name in enumerate(sheet.df.columns):
+            number = numbers.get(str(name)) == "number"
+            frame.isetitem(position, sheet.df.iloc[:, position].map(lambda value, number=number: _restore_cell(guard, value, number)).astype(object))
+        desired.append((sheet, frame))
+    if not any(masked_files._changed(sheet.df[column], frame[column]) for sheet, frame in desired for column in sheet.df.columns):
+        return False
+    masked_files._mask_package(source, target, desired, text_nodes=False)
+    return True
 
 
 def _write_csv(source: Path, target: Path, desired: list[tuple[Any, pd.DataFrame]]) -> None:

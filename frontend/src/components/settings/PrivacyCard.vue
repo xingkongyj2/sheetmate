@@ -85,6 +85,8 @@ async function save(payload: { enabled?: boolean; rules?: Record<string, boolean
       />
     </div>
 
+    <slot />
+
     <BaseModal v-if="viewing" :title="viewing.name" width="max-w-2xl" @close="viewing = null">
       <div class="space-y-6" data-testid="privacy-rule-logic">
         <section v-for="section in viewing.logic" :key="section.title">

@@ -23,16 +23,17 @@ const privacyModelApi = { load: settingsApi.getPrivacyLLM, save: settingsApi.sav
 
       <section class="mt-8" aria-labelledby="privacy-heading">
         <h2 id="privacy-heading" class="mb-3 text-lg font-semibold tracking-tight">脱敏</h2>
-        <PrivacyCard />
-        <LLMConfigPanel
-          embedded
-          title="脱敏模型"
-          id-prefix="privacy-"
-          default-provider="custom"
-          :providers="['custom']"
-          :show-protocol="false"
-          :api="privacyModelApi"
-        />
+        <PrivacyCard>
+          <LLMConfigPanel
+            embedded
+            title="脱敏模型"
+            id-prefix="privacy-"
+            default-provider="custom"
+            :providers="['custom']"
+            :show-protocol="false"
+            :api="privacyModelApi"
+          />
+        </PrivacyCard>
       </section>
     </div>
   </div>
