@@ -185,7 +185,7 @@ async function send() {
             large
             autofocus
             appearance="card"
-            placeholder="表格的一切，交给我"
+            placeholder="账单的一切，交给我"
             @attach="attach"
             @remove="remove"
             @preview="preview"
