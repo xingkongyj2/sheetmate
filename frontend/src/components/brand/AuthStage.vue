@@ -7,7 +7,7 @@ import FloatingObjects from './FloatingObjects.vue'
 import Mascot from './Mascot.vue'
 
 withDefaults(defineProps<{ headline?: string[]; mood?: 'idle' | 'thinking' | 'happy' | 'working'; fullScreen?: boolean }>(), {
-  headline: () => ['SHAPE YOUR', 'SHEETS WITH', 'SHEETMATE'],
+  headline: () => ['MAKE EVERY', 'BILL', 'ADD UP'],
   mood: 'idle',
   fullScreen: false,
 })

@@ -1,6 +1,6 @@
 /**
- * 路由：登录 / 引导 / 主界面（新对话、对话、客户、客户详情、公式库、设置、统计）。
- * 守卫：未登录 → 登录页；登录后还没做引导 → 引导页。
+ * 路由：登录 / 主界面（新对话、对话、客户、客户详情、公式库、设置、统计）。
+ * 守卫：未登录 → 登录页；注册或登录后直接进首页。
  */
 import { createRouter, createWebHistory } from 'vue-router'
 
@@ -11,7 +11,6 @@ const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
-    { path: '/welcome', name: 'onboarding', component: () => import('@/views/OnboardingView.vue') },
     {
       path: '/',
       component: () => import('@/components/layout/AppShell.vue'),
@@ -36,7 +35,6 @@ router.beforeEach(async (to) => {
   const user = await auth.ensure()
   if (to.meta.public) return user ? { name: 'home' } : true
   if (!user) return { name: 'login', query: to.fullPath !== '/' ? { next: to.fullPath } : undefined }
-  if (!user.onboarded && to.name !== 'onboarding') return { name: 'onboarding' }
   return true
 })
 

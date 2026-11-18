@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /** 登录 / 注册 */
 import { ArrowRight, LoaderCircle } from '@lucide/vue'
-import { computed, ref } from 'vue'
+import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { errorText } from '@/api/http'
 import AuthStage from '@/components/brand/AuthStage.vue'
+import HandbillWord from '@/components/brand/HandbillWord.vue'
 import LogoMark from '@/components/brand/LogoMark.vue'
 import { useAuthStore } from '@/stores/auth'
 
@@ -21,8 +22,6 @@ const loading = ref(false)
 const error = ref('')
 const hidingEyes = ref(false) // 输入密码时墨墨闭眼，不偷看
 
-const title = computed(() => (mode.value === 'login' ? '欢迎回来' : '创建账号'))
-
 async function submit() {
   error.value = ''
   if (!account.value.trim() || !password.value) {
@@ -34,7 +33,7 @@ async function submit() {
     if (mode.value === 'login') await auth.login(account.value.trim(), password.value)
     else await auth.register(account.value.trim(), password.value, displayName.value.trim())
     const next = typeof route.query.next === 'string' ? route.query.next : '/'
-    router.replace(auth.user?.onboarded ? next : { name: 'onboarding' })
+    router.replace(next)
   } catch (err) {
     error.value = errorText(err)
   } finally {
@@ -45,11 +44,13 @@ async function submit() {
 
 <template>
   <AuthStage :mood="hidingEyes ? 'happy' : 'idle'" full-screen>
-    <div class="flex justify-center pt-4"><LogoMark :size="40" /></div>
+    <div class="flex items-center justify-center gap-2.5 pt-7 select-none">
+      <LogoMark :size="44" />
+      <span class="text-[38px] font-semibold tracking-tight">SheetMate</span>
+    </div>
 
-    <div class="mx-auto mt-12 w-full max-w-[360px]">
-      <h1 class="text-center text-[28px] font-semibold tracking-tight">{{ title }}</h1>
-      <p class="mt-2 text-center text-sm text-mute">SheetMate · 会分析、会改表、会记住流程的 Excel 助手</p>
+    <div class="mx-auto mt-3 w-full max-w-[360px] lg:mb-[16vh]">
+      <p class="text-center text-sm text-mute">你的专属<HandbillWord class="text-ink" />助手</p>
 
       <form class="mt-10 space-y-4" @submit.prevent="submit">
         <label class="block">
@@ -90,6 +91,6 @@ async function submit() {
       </p>
     </div>
 
-    <p class="mt-8 text-center text-xs text-faint">默认管理员 admin / admin123</p>
+    <footer class="mt-10 text-center text-xs tracking-wide text-faint lg:absolute lg:inset-x-0 lg:bottom-5 lg:mt-0">本产品归属「数智结算工坊」</footer>
   </AuthStage>
 </template>
