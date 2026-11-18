@@ -51,7 +51,7 @@ async function save(payload: { enabled?: boolean; rules?: Record<string, boolean
 <template>
   <section class="card-soft divide-y divide-line" aria-label="脱敏" data-testid="privacy-card">
     <label class="flex cursor-pointer items-center gap-4 p-5 sm:px-6">
-      <span class="min-w-0 flex-1 text-[15px] font-semibold">脱敏</span>
+      <span class="min-w-0 flex-1 text-[15px] font-semibold">启用</span>
       <LoaderCircle v-if="saving" class="size-4 shrink-0 animate-spin text-mute" />
       <input
         type="checkbox"
