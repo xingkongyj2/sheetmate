@@ -3,7 +3,7 @@
  * 侧边栏：搜索、新对话、客户库、公式库（统一的线条图标），下面是「客户」和「对话」两块列表，
  * 底部是头像和名字（点开是统计 / 设置 / 退出登录）。
  */
-import { ChartColumn, Component as FormulaIcon, LogOut, PanelLeft, Search, Settings, SquarePen, Users } from '@lucide/vue'
+import { ChartColumn, CircleUserRound, Component as FormulaIcon, LogOut, PanelLeft, Search, Settings, SquarePen } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -127,7 +127,7 @@ async function logout() {
         :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'customers' ? 'bg-black/[0.06] text-ink' : '']"
         title="客户库"
       >
-        <span class="nav-icon"><Users aria-hidden="true" /></span><span v-if="!collapsed">客户库</span>
+        <span class="nav-icon"><CircleUserRound aria-hidden="true" /></span><span v-if="!collapsed">客户库</span>
         <span v-if="!collapsed && store.customers.length" class="ml-auto text-xs text-faint">{{ store.customers.length }}</span>
       </RouterLink>
       <RouterLink
