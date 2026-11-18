@@ -54,6 +54,16 @@ def _manual_column(name: str, kind: str, values: int) -> dict[str, Any]:
             "source": "manual", "reason": "用户手动设置脱敏", "values": values}
 
 
+def clean_reason(text: str | None) -> str | None:
+    """识别依据里常带着样例值（脱敏模型要写依据）：给用户看的也只能是令牌，不能出现真实内容。"""
+    guard = privacy.guard
+    if not text or guard is None:
+        return text
+    from sheetmate.privacy import Stats
+
+    return guard.protect_text(text, Stats())
+
+
 def effective(file_id: str, sheets: list[dict[str, Any]], *, for_masking: bool = False) -> list[dict[str, Any]]:
     """自动识别结果 + 用户的选择。for_masking：给「生成令牌版」用，不脱敏的列也要记下来（不然会按列名被别处的识别结果误伤）。"""
     picks = load(file_id)

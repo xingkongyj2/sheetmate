@@ -724,12 +724,12 @@ export interface PrivacyCopyPreview {
 }
 
 /** 详情面板「脱敏」tab：当前会话的整体情况 */
-/** 文件脱敏漏掉、在第 number 次发给 AI 前才补换掉的值（每个值只在第一次出现时列一次；value 是在本机还原出来的原文） */
+/** 文件脱敏漏掉、在第 number 次发给 AI 前才补换掉的值（每个值只在第一次出现时列一次；只有令牌，不还原成原文） */
 export interface PrivacySend {
   number: number
   time: string | null
   messages: number
-  items: { token: string; value: string | null; kind: string; kind_label: string }[]
+  items: { token: string; kind: string; kind_label: string }[]
 }
 
 /** 第 number 条模型回复里，令牌换回原文的明细（value 是在本机还原出来的原文；known 为 false 是不认识的令牌） */
@@ -743,7 +743,7 @@ export interface PrivacyBlock {
   number: number
   time: string | null
   reason: string
-  items: { token: string; value: string | null; kind: string; kind_label: string }[]
+  items: { token: string; kind: string; kind_label: string }[]
 }
 
 export interface PrivacyOverview {
@@ -753,7 +753,7 @@ export interface PrivacyOverview {
   model: string | null
   model_configured: boolean
   /** sent_values：文件脱敏漏掉、在发给 AI 前才补换掉的不同值的个数 */
-  totals: { files: number; columns: number; values: number; requests: number; blocked: number; restored: number; sent_values?: number }
+  totals: { files: number; columns: number; values: number; requests: number; blocked: number; sent_values?: number }
   files: PrivacyFileState[]
   events: PrivacyEventItem[]
 }

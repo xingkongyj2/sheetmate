@@ -42,8 +42,9 @@ def active_kinds(enabled_rules: Iterable[str]) -> frozenset[str]:
     return frozenset(kind for rule in RULES if rule.id in wanted for kind in rule.kinds) | {"mixed", "custom"}
 
 
-# 令牌前缀：手机和座机共用 TEL，AI 不需要区分
+# 令牌前缀：手机和座机共用 TEL，AI 不需要区分。以后加新的脱敏类型，在这里加一项，令牌识别和给 AI 的加密格式说明会自动跟上
 KIND_PREFIX = {"phone": "TEL", "landline": "TEL", "email": "MAIL", "im": "IM", "address": "ADDR", "custom": "TXT"}
+TOKEN_LABELS = {"custom": "其他敏感内容"}      # 给 AI 的加密格式说明里的叫法；没写的用 KIND_LABELS
 ACTION_LABELS = {
     "tokenize": "整列替换为令牌",
     "address_detail": "整个详细地址替换为令牌（只有省市的不动）",

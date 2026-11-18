@@ -84,19 +84,18 @@ const sendNumbers = computed(() => {
   return totals ? [
     { label: '发送次数', value: totals.requests, warn: false },
     { label: '脱敏', value: totals.sent_values ?? 0, warn: false },
-    { label: '还原', value: totals.restored, warn: false },
     { label: '拦截', value: totals.blocked, warn: totals.blocked > 0 },
   ] : []
 })
-type DetailTab = 'sends' | 'restores' | 'blocks'
+type DetailTab = 'sends' | 'blocks'
 const showSends = ref<false | DetailTab>(false)
 const hasDetail = computed(() => { const totals = overview.value?.totals
-  return (totals?.sent_values ?? 0) > 0 || (totals?.restored ?? 0) > 0 || (totals?.blocked ?? 0) > 0 })
+  return (totals?.sent_values ?? 0) > 0 || (totals?.blocked ?? 0) > 0 })
 const firstTab = computed<DetailTab>(() => { const totals = overview.value?.totals
-  return (totals?.sent_values ?? 0) > 0 ? 'sends' : (totals?.restored ?? 0) > 0 ? 'restores' : 'blocks' })
-// 处理记录里的「发送检查」「还原」「拦截」可以点开，直接看对应的明细
+  return (totals?.sent_values ?? 0) > 0 ? 'sends' : 'blocks' })
+// 处理记录里的「发送检查」「拦截」可以点开，直接看对应的明细
 function detailTab(event: PrivacyEventItem): DetailTab | null {
-  return event.kind === '发送检查' ? 'sends' : event.kind === '还原' ? 'restores' : event.kind === '拦截' ? 'blocks' : null
+  return event.kind === '发送检查' ? 'sends' : event.kind === '拦截' ? 'blocks' : null
 }
 
 // 输入（含期望结果）和输出分开列；没有脱敏的文件后端已经去掉
@@ -168,7 +167,7 @@ function levelClass(level: PrivacyEventItem['level']): string {
           <ShieldCheck v-else class="mt-0.5 size-4 shrink-0 text-[#318b76]" aria-hidden="true" />
           <span class="min-w-0 break-words">{{ sendStatus.text }}</span>
         </div>
-        <dl class="grid grid-cols-4 gap-2">
+        <dl class="grid grid-cols-3 gap-2">
           <div v-for="item in sendNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
             <dd class="text-xl font-medium tabular-nums tracking-tight" :class="item.warn ? 'text-error' : ''">{{ formatCount(item.value) }}</dd>
             <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>

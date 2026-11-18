@@ -205,14 +205,6 @@ def protect_workspace(ws: Workspace) -> int:
 # ---------------------------------------------------------------------------
 
 
-def restore_for_display(value: Any) -> Any:
-    """给用户看的内容（事件、表格分页）：令牌换回真实值。模块没准备好时原样返回。"""
-    guard = privacy.guard
-    if guard is None:
-        return value
-    return guard.restore_object(value)
-
-
 def _restore_xml(guard: Any, text: str) -> str:
     return TOKEN_RE.sub(lambda match: escape(guard.restore_text(match.group(0))), text)
 

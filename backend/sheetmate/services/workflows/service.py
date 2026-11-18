@@ -42,13 +42,11 @@ def save_recipe(db: Session, recipe: Recipe, *, conversation_id: str | None = No
     previous_mapping = (get_record(db, recipe.id).body or {}).get("field_mapping", {}) if latest else {}
     recipe.version = latest + 1
     recipe.updated_at = now().isoformat()
-    # 对话里的数据是令牌版：步骤参数、条件里如果写进了令牌，保存时换回真实值，之后在新月份的真实文件上重放才对得上
-    from sheetmate.services.privacy.workspace import restore_for_display as restore_tokens
-
+    # 对话里的数据是令牌版：步骤参数、条件里写进的令牌原样保存。新月份的文件上传时也会换成同样的令牌，重放照样对得上
     record = RecipeRecord(
         recipe_id=recipe.id, version=recipe.version, name=recipe.name, scope=recipe.scope, customer_id=recipe.customer_id,
         conversation_id=conversation_id or (recipe.learned_from or {}).get("conversation_id"),
-        created_by=recipe.created_by, body=restore_tokens(recipe.to_dict()),
+        created_by=recipe.created_by, body=recipe.to_dict(),
     )
     db.add(record)
     db.flush()

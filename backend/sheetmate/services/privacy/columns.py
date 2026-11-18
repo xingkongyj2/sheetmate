@@ -71,7 +71,7 @@ def _describe(file_id: str) -> dict[str, Any]:
                 masked = kind is not None
             columns.append({"name": column["name"], "masked": masked, "choice": choice, "auto_kind": auto_kind,
                             "kind": kind if masked else None, "kind_label": KIND_LABELS.get(kind) if masked and kind else None,
-                            "source": source, "reason": reason, "tokens": tokens.get(column["name"], 0)})
+                            "source": source, "reason": choices.clean_reason(reason), "tokens": tokens.get(column["name"], 0)})
         sheets.append({"sheet": name, "rows": int(sheet.get("rows") or 0), "columns": columns})
     # 手动脱敏时可选的类型；对应的规则在设置页里关掉了就不能选（关掉的规则不会脱敏任何东西）
     types = [{"id": "phone", "label": "电话号码", "enabled": guard is not None and not guard._off("phone")},
@@ -99,7 +99,7 @@ def masked_sheets(file_id: str, sheets: list[dict[str, Any]]) -> list[dict[str, 
     rows = {entry["sheet"]: entry["rows"] for entry in state["sheets"]}
     out, seen = [], set()
     for entry in sheets:
-        kept = [{**column, "values": masked[(entry["sheet"], column["name"])]["tokens"] or column["values"]}
+        kept = [{**column, "reason": choices.clean_reason(column.get("reason")), "values": masked[(entry["sheet"], column["name"])]["tokens"] or column["values"]}
                 for column in entry["columns"] if (entry["sheet"], column["name"]) in masked]
         seen.update((entry["sheet"], column["name"]) for column in kept)
         out.append({**entry, "columns": kept})

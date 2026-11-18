@@ -2,20 +2,19 @@
 
 get_llm() 是项目里调用 AI 的唯一入口，这里把它拿到的模型（真实的或测试用的假模型）包一层：
   发出去：消息、提示词先过 Guard，联系方式和地址换成令牌；检查不通过就不发（PrivacyBlockedError）
-  回来的：回复文字和工具调用参数里的令牌，在本机换回真实值，后面的代码完全不用关心令牌
+  回来的：回复里的令牌原样保留，不在本机还原——数据从上传起就是令牌，只有下载文件时才换回真实值
 底线：宁可不处理，也不能让没脱敏的数据被正常模型读到。
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
 from sheetmate.agent.llm.client import LLMError
 from sheetmate.core.config.settings import settings
 from sheetmate.core.config.privacy_switch import sync_privacy_settings
-from sheetmate.privacy import KIND_LABELS, PrivacyBlocked, Stats, current_scope, privacy
+from sheetmate.privacy import KIND_LABELS, PrivacyBlocked, Stats, current_scope, privacy, token_legend
 
 
 class PrivacyBlockedError(LLMError):
@@ -23,6 +22,14 @@ class PrivacyBlockedError(LLMError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="privacy_blocked")
+
+
+def _with_legend(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """在系统提示末尾附上加密格式说明（放在末尾，前面不变的系统提示仍能命中模型的提示缓存）；没有系统提示就加一条。"""
+    legend = token_legend()
+    if messages and messages[0].get("role") == "system" and isinstance(messages[0].get("content"), str):
+        return [{**messages[0], "content": f"{messages[0]['content']}\n\n{legend}"}, *messages[1:]]
+    return [{"role": "system", "content": legend}, *messages]
 
 
 def _ensure_ready() -> None:
@@ -129,7 +136,7 @@ class GuardedLLM:
         except Exception as exc:  # 处理过程出任何错，都不能把原文发出去
             raise self._block(f"脱敏处理出错（{type(exc).__name__}），为保护数据已停止发送。") from exc
         self._report(stats, len(messages))
-        return guard, protected
+        return guard, _with_legend(protected)
 
     def _protect_strings(self, *texts: str | None) -> tuple[Any, list[str | None]]:
         guard = self._guard()
@@ -143,101 +150,25 @@ class GuardedLLM:
         self._report(stats, sum(1 for text in texts if isinstance(text, str)))
         return guard, out
 
-    # ------------------------------------------------------------------ 回来之后
-
-    @staticmethod
-    def _report_restore(counter: Counter[str]) -> None:
-        restored, unknown = counter.get("restored", 0), counter.get("unknown", 0)
-        if restored or unknown:
-            text = f"回复中 {restored} 个令牌已还原"
-            if unknown:
-                text += f"，{unknown} 个未识别"
-            # tokens：这条回复里还原了哪些令牌（ok）、哪些不认识（unknown）；只有令牌，原文打开明细时才在本机还原
-            tokens = [[key[1:], "ok" if key[0] == "§" else "unknown"] for key in counter if key[:1] in {"§", "¿"}]
-            privacy.log.emit("warn" if unknown else "info", "还原", text, restored=restored, unknown=unknown,
-                             tokens=tokens[:SEND_TOKENS_MAX])
-
-    def _restore_message(self, guard: Any, message: Any, counter: Counter[str]) -> None:
-        for attr in ("content", "reasoning_content"):
-            value = getattr(message, attr, None)
-            if isinstance(value, str) and value:
-                setattr(message, attr, guard.restore_text(value, counter=counter))
-        # 工具调用的参数不还原：工作区里的数据是令牌版，参数里的令牌正好和它对得上；要展示给用户时再还原
-
     # ------------------------------------------------------------------ 模型接口
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, **extra: Any) -> Any:
         self._sync_rules()
         await self._verify_files()
         guard, protected = self._protect_messages(messages)
-        message = await self._inner.chat(protected, tools, **extra)
-        counter: Counter[str] = Counter()
-        self._restore_message(guard, message, counter)
-        self._report_restore(counter)
-        return message
+        return await self._inner.chat(protected, tools, **extra)       # 回来的内容原样给，令牌不还原
 
     async def stream_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                           *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
         self._sync_rules()
         await self._verify_files()
-        guard, protected = self._protect_messages(messages)
-        counter: Counter[str] = Counter()
-        content, reasoning = guard.restorer(counter=counter), guard.restorer(counter=counter)
-        calls: dict[int, Any] = {}
-        try:
-            async for chunk in self._inner.stream_chat(protected, tools, *args, **kwargs):
-                choice = chunk.choices[0] if getattr(chunk, "choices", None) else None
-                if choice is not None:
-                    delta = choice.delta
-                    if getattr(delta, "content", None):
-                        delta.content = content.feed(delta.content)
-                    if getattr(delta, "reasoning_content", None):
-                        delta.reasoning_content = reasoning.feed(delta.reasoning_content)
-                    if getattr(choice, "finish_reason", None) is not None:
-                        self._flush_into(delta, content, reasoning, calls)
-                yield chunk
-            tail = self._tail_chunk(content, reasoning, calls)
-            if tail is not None:
-                yield tail
-        finally:
-            self._report_restore(counter)
-
-    @staticmethod
-    def _flush_into(delta: Any, content: Any, reasoning: Any, calls: dict[int, Any]) -> None:
-        """流结束时，把还留着的半截内容补进最后一个片段，不能丢。"""
-        tail = content.flush()
-        if tail:
-            delta.content = (getattr(delta, "content", None) or "") + tail
-        tail = reasoning.flush()
-        if tail:
-            delta.reasoning_content = (getattr(delta, "reasoning_content", None) or "") + tail
-        pending = {index: restorer.flush() for index, restorer in calls.items()}
-        pending = {index: text for index, text in pending.items() if text}
-        if pending:
-            existing = list(getattr(delta, "tool_calls", None) or [])
-            for index, text in pending.items():
-                match = next((c for c in existing if c.index == index), None)
-                if match is not None:
-                    match.function.arguments = (match.function.arguments or "") + text
-                else:
-                    existing.append(SimpleNamespace(index=index, id=None, type="function",
-                                                    function=SimpleNamespace(name=None, arguments=text)))
-            delta.tool_calls = existing
-
-    @staticmethod
-    def _tail_chunk(content: Any, reasoning: Any, calls: dict[int, Any]) -> Any | None:
-        delta = SimpleNamespace(content=None, reasoning_content=None, tool_calls=None, role=None)
-        GuardedLLM._flush_into(delta, content, reasoning, calls)
-        if not (delta.content or delta.reasoning_content or delta.tool_calls):
-            return None
-        return SimpleNamespace(choices=[SimpleNamespace(index=0, finish_reason=None, delta=delta)], usage=None, model=None)
+        _, protected = self._protect_messages(messages)
+        async for chunk in self._inner.stream_chat(protected, tools, *args, **kwargs):
+            yield chunk                                                # 回来的内容原样给，令牌不还原
 
     async def complete_json(self, prompt: str, system: str | None = None, *args: Any, **kwargs: Any) -> Any:
         self._sync_rules()
         await self._verify_files()
-        guard, (prompt_p, system_p) = self._protect_strings(prompt, system)
-        value = await self._inner.complete_json(prompt_p, system_p, *args, **kwargs)
-        counter: Counter[str] = Counter()
-        value = guard.restore_object(value, counter)
-        self._report_restore(counter)
-        return value
+        _, (prompt_p, system_p) = self._protect_strings(prompt, system)
+        system_p = f"{system_p}\n\n{token_legend()}" if system_p else token_legend()
+        return await self._inner.complete_json(prompt_p, system_p, *args, **kwargs)     # 令牌不还原

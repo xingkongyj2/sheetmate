@@ -257,7 +257,7 @@ def _read_verdicts(value: Any, batch: dict[str, list[Any]]) -> tuple[str, dict[s
         category = str(item.get("category") or "").strip().lower()
         if category not in _CATEGORIES:
             return f"列「{item['name']}」的类别不在允许范围内", None
-        reason = str(item.get("reason") or "").strip()[:80] or "脱敏模型判断"
+        reason = (choices.clean_reason(str(item.get("reason") or "").strip()) or "脱敏模型判断")[:80]
         verdicts[item["name"]] = None if category == "none" else Finding(category, "model", reason)
     missing = [name for name in batch if name not in verdicts]
     if missing:
@@ -932,11 +932,11 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
                           "error": row.error if row is not None else None})
         events = [event for event in db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id)
                                                 .order_by(PrivacyEvent.id.desc()).limit(200))
-                  if not (event.detail or {}).get("cached")][:50]      # 旧版本存下的「沿用识别结果」也不显示
+                  if not (event.detail or {}).get("cached") and event.kind != "还原"][:50]   # 旧版本存下的「沿用识别结果」「回复已还原」也不显示
         # 统计只需要类型和计数两列，不把整条记录都读出来
         counted = db.execute(select(PrivacyEvent.kind, PrivacyEvent.detail).where(
-            PrivacyEvent.conversation_id == conversation_id, PrivacyEvent.kind.in_(("发送检查", "拦截", "还原"))))
-        requests = blocked = restored = 0
+            PrivacyEvent.conversation_id == conversation_id, PrivacyEvent.kind.in_(("发送检查", "拦截"))))
+        requests = blocked = 0
         sent_tokens: set[str] = set()
         for kind, detail in counted:
             detail = detail or {}
@@ -945,8 +945,6 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
                 sent_tokens.update(item[0] for send in detail.get("sends", []) for item in send.get("tokens", []) if _leaked(item))
             elif kind == "拦截":
                 blocked += 1
-            elif kind == "还原":
-                restored += int(detail.get("restored", 0))
         # 取最近 50 条，按时间从早到晚排（面板里从上往下读）
         # 有发送明细的记录按现在的说法重新生成文字（文案改过，存下的旧文字不再用）
         listed = [{"id": e.id, "time": e.updated_at.isoformat(timespec="seconds"), "level": e.level, "kind": e.kind,
@@ -975,7 +973,7 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
     return {"enabled": privacy.enabled, "mode": "model_rules" if configured else "rules", "model": used or (cfg.model if cfg else None),
             "model_configured": configured,
             "totals": {"files": len(files), "columns": columns, "values": values, "requests": requests, "blocked": blocked,
-                       "restored": restored, "sent_values": len(sent_tokens)},
+                       "sent_values": len(sent_tokens)},
             "files": files, "events": listed}
 
 
@@ -983,17 +981,15 @@ _KIND_ORDER = {"phone": 0, "landline": 1, "email": 2, "im": 3, "address": 4}
 
 
 def _sorted_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """明细里的值按类型分组（手机号、座机、邮箱、微信/QQ、地址、其他），同类型里按原文排序，方便从上往下查。"""
-    return sorted(items, key=lambda item: (_KIND_ORDER.get(item["kind"], len(_KIND_ORDER)), item["value"] is None,
-                                           item["value"] or item["token"]))
+    """明细里的值按类型分组（手机号、座机、邮箱、微信/QQ、地址、其他），同类型里按令牌排序，方便从上往下查。"""
+    return sorted(items, key=lambda item: (_KIND_ORDER.get(item["kind"], len(_KIND_ORDER)), item["token"]))
 
 
 def sends(conversation_id: str) -> list[dict[str, Any]]:
     """文件脱敏漏掉、在发给 AI 前才补换掉的值：按第几次发送列出，每个值只在第一次出现的那次发送里列一次
     （对话记录每次都会重复带上，后面的发送里还会再换一次，不重复列）。
-    用户自己打的、之前回复里还原出来的不算漏掉，不列。记录里只存了令牌，真实值在这里用本机的令牌库还原出来给用户看。"""
+    用户自己打的、之前回复里还原出来的不算漏掉，不列。记录里只存了令牌，面板里也只给令牌：真实值只有下载文件时才还原。"""
     start()
-    guard = privacy.require()
     with session_scope() as db:
         rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
                                                           PrivacyEvent.kind == "发送检查").order_by(PrivacyEvent.id)))
@@ -1006,7 +1002,7 @@ def sends(conversation_id: str) -> list[dict[str, Any]]:
             continue
         out.append({
             "number": number, "time": send.get("time"), "messages": int(send.get("messages", 0)),
-            "items": _sorted_items([{"token": item[0], "value": guard.vault.reveal(item[0]), "kind": item[1],
+            "items": _sorted_items([{"token": item[0], "kind": item[1],
                                      "kind_label": KIND_LABELS.get(item[1], item[1])} for item in fresh]),
         })
     return out
@@ -1016,9 +1012,8 @@ _PREFIX_KIND = {"TEL": "phone", "MAIL": "email", "IM": "im", "ADDR": "address", 
 
 
 def restores(conversation_id: str) -> list[dict[str, Any]]:
-    """模型回复里的令牌换回原文的明细：按第几条回复列出。记录里只存了令牌，原文在这里用本机的令牌库还原给用户看。"""
+    """模型回复里的令牌换回原文的明细：按第几条回复列出。记录里只存了令牌。回复里的令牌不再还原，新的会话里这里是空的，只剩旧记录。"""
     start()
-    guard = privacy.require()
     with session_scope() as db:
         rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
                                                           PrivacyEvent.kind == "还原").order_by(PrivacyEvent.id)))
@@ -1031,7 +1026,7 @@ def restores(conversation_id: str) -> list[dict[str, Any]]:
                 continue
             token, state = item
             kind = _PREFIX_KIND.get(str(token).split("_", 1)[0], "custom")
-            items.append({"token": token, "value": guard.vault.reveal(token) if state == "ok" else None, "known": state == "ok",
+            items.append({"token": token, "known": state == "ok",
                           "kind": kind, "kind_label": KIND_LABELS.get(kind, kind)})
         if items:
             # 认识的在前、不认识的在后；各自按类型和原文排
@@ -1041,16 +1036,15 @@ def restores(conversation_id: str) -> list[dict[str, Any]]:
 
 
 def blocks(conversation_id: str) -> list[dict[str, Any]]:
-    """拦截明细：每次停止发送的原因；发送前检查没能处理掉的值也列出来（原文在这里用本机的令牌库还原给用户看）。"""
+    """拦截明细：每次停止发送的原因；发送前检查没能处理掉的值也列出来（只给令牌，不还原成原文）。"""
     start()
-    guard = privacy.require()
     with session_scope() as db:
         rows = list(db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id,
                                                           PrivacyEvent.kind == "拦截").order_by(PrivacyEvent.id)))
         raw = [(row.updated_at.isoformat(timespec="seconds"), row.detail or {}, row.text) for row in rows]
     out = []
     for number, (time, detail, text) in enumerate(raw, 1):
-        items = _sorted_items([{"token": item[0], "value": guard.vault.reveal(item[0]), "kind": item[1],
+        items = _sorted_items([{"token": item[0], "kind": item[1],
                                 "kind_label": KIND_LABELS.get(item[1], item[1])}
                                for item in detail.get("tokens", []) if isinstance(item, list) and len(item) == 2])
         reason = str(detail.get("reason") or text).removeprefix("已拦截：")

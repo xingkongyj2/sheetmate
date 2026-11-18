@@ -1,4 +1,4 @@
-"""脱敏模块：把联系方式和地址换成令牌后才交给正常模型，模型回来的内容在本机还原。
+"""脱敏模块：把联系方式和地址换成令牌后才交给正常模型；令牌只在下载文件时才在本机还原。
 
 这是一个独立的模块：只用标准库，不依赖项目里的其他任何部分；别处只通过本文件导出的接口调用它。
 真实值永远只留在本机（令牌库 vault.db 和密钥 privacy.key 都在数据目录下）。
@@ -18,12 +18,12 @@ from sheetmate.privacy.detect import ACTIONS, Finding, classify_column, merge, r
 from sheetmate.privacy.events import KINDS, PrivacyLog, Scope, bind, current_scope
 from sheetmate.privacy.guard import Guard, PrivacyBlocked, Registry, Stats, StreamRestorer
 from sheetmate.privacy.rules import ACTION_LABELS, KIND_LABELS, RULES, RULES_VERSION, Rule, active_kinds, header_kind
-from sheetmate.privacy.vault import TOKEN_RE, Vault
+from sheetmate.privacy.vault import TOKEN_RE, Vault, token_legend
 
 __all__ = [
     "ACTIONS", "ACTION_LABELS", "KINDS", "KIND_LABELS", "RULES_VERSION", "TOKEN_RE", "Finding", "Guard", "Privacy",
     "PrivacyBlocked", "PrivacyLog", "Registry", "Scope", "Stats", "StreamRestorer", "Vault", "bind", "classify_column", "region_only_column",
-    "RULES", "Rule", "active_kinds", "current_scope", "header_kind", "merge", "privacy",
+    "RULES", "Rule", "active_kinds", "current_scope", "header_kind", "merge", "privacy", "token_legend",
 ]
 
 

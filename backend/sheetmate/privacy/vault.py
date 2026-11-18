@@ -21,12 +21,29 @@ import time
 from pathlib import Path
 from typing import Iterable
 
-from sheetmate.privacy.rules import KIND_PREFIX
+from sheetmate.privacy.rules import KIND_LABELS, KIND_PREFIX, TOKEN_LABELS
 
 MIN_KNOWN_CHARS = 4
 MAX_TOKEN_ATTEMPTS = 64
 TOKEN_BODY = 13  # 8 字节 → 13 个字母数字，碰撞概率可以忽略
-TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(TEL|MAIL|IM|ADDR|TXT)_([A-Z2-7]{%d})(?![A-Za-z0-9_])" % TOKEN_BODY)
+PREFIXES = tuple(dict.fromkeys(KIND_PREFIX.values()))          # 按前缀表生成：以后加了新的类型，这里自动认得
+TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_])(%s)_([A-Z2-7]{%d})(?![A-Za-z0-9_])" % ("|".join(PREFIXES), TOKEN_BODY))
+_EXAMPLE_BODY = "K7Q2MX4PZ3WRDB5HTN6YC"[:TOKEN_BODY]               # 示例用的令牌主体：格式对，但不对应任何真实值
+
+
+def token_legend() -> str:
+    """告诉模型「这种样子的内容是什么加密」：按现有的全部类型自动生成，再给一个示例。只说样子，不说怎么来的、怎么处理。"""
+    meanings: dict[str, list[str]] = {}
+    for kind, prefix in KIND_PREFIX.items():
+        label = TOKEN_LABELS.get(kind) or KIND_LABELS.get(kind, kind)
+        if label not in meanings.setdefault(prefix, []):
+            meanings[prefix].append(label)
+    lines = [f"- {prefix}_ 开头：加密后的{'、'.join(labels)}" for prefix, labels in meanings.items()]
+    first = next(iter(meanings))
+    example = f"{first}_{_EXAMPLE_BODY}"
+    return ("【加密内容说明】数据里有些内容是加密后的样子：大写前缀 + 下划线 + "
+            f"{TOKEN_BODY} 位大写字母或数字。\n" + "\n".join(lines)
+            + f"\n示例：{example} 是一个加密后的{'或'.join(meanings[first])}。")
 
 
 def normalize(kind: str, value: object) -> str:
