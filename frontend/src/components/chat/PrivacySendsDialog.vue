@@ -89,8 +89,7 @@ function clock(iso: string | null): string {
                     <code class="shrink-0 font-mono text-[11px] text-mute">{{ item.token }}</code>
                   </div>
                 </td>
-                <td class="whitespace-nowrap px-3.5 py-2 text-xs text-mute">{{ item.kind_label }}</td>
-                <td class="whitespace-nowrap px-3.5 py-2 text-right text-xs text-faint">{{ item.method_label }}</td>
+                <td class="whitespace-nowrap px-3.5 py-2 text-right text-xs text-mute">{{ item.kind_label }}</td>
               </tr>
             </tbody>
           </table>

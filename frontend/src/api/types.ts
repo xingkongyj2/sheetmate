@@ -729,7 +729,7 @@ export interface PrivacySend {
   number: number
   time: string | null
   messages: number
-  items: { token: string; value: string | null; kind: string; kind_label: string; method_label: string }[]
+  items: { token: string; value: string | null; kind: string; kind_label: string }[]
 }
 
 /** 第 number 条模型回复里，令牌换回原文的明细（value 是在本机还原出来的原文；known 为 false 是不认识的令牌） */

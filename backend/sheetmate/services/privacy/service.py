@@ -946,11 +946,13 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
             "files": files, "events": listed}
 
 
-METHOD_LABELS = {
-    "pattern": "号码、地址格式", "context": "标签后面的值", "text_table": "表格里的敏感列", "json_table": "表格里的敏感列",
-    "json_key": "敏感字段", "json_samples": "敏感列的样本", "json_number": "数字格式的手机号", "sample_line": "敏感列的样本",
-    "top_values": "敏感列的常见值", "known_value": "已识别过的敏感值", "learned": "脱敏模型发现的片段", "copy": "敏感列",
-}
+_KIND_ORDER = {"phone": 0, "landline": 1, "email": 2, "im": 3, "address": 4}
+
+
+def _sorted_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """明细里的值按类型分组（手机号、座机、邮箱、微信/QQ、地址、其他），同类型里按原文排序，方便从上往下查。"""
+    return sorted(items, key=lambda item: (_KIND_ORDER.get(item["kind"], len(_KIND_ORDER)), item["value"] is None,
+                                           item["value"] or item["token"]))
 
 
 def sends(conversation_id: str) -> list[dict[str, Any]]:
@@ -971,9 +973,8 @@ def sends(conversation_id: str) -> list[dict[str, Any]]:
             continue
         out.append({
             "number": number, "time": send.get("time"), "messages": int(send.get("messages", 0)),
-            "items": [{"token": item[0], "value": guard.vault.reveal(item[0]), "kind": item[1],
-                       "kind_label": KIND_LABELS.get(item[1], item[1]), "method_label": METHOD_LABELS.get(item[2], item[2])}
-                      for item in fresh],
+            "items": _sorted_items([{"token": item[0], "value": guard.vault.reveal(item[0]), "kind": item[1],
+                                     "kind_label": KIND_LABELS.get(item[1], item[1])} for item in fresh]),
         })
     return out
 
@@ -1000,6 +1001,8 @@ def restores(conversation_id: str) -> list[dict[str, Any]]:
             items.append({"token": token, "value": guard.vault.reveal(token) if state == "ok" else None, "known": state == "ok",
                           "kind": kind, "kind_label": KIND_LABELS.get(kind, kind)})
         if items:
+            # 认识的在前、不认识的在后；各自按类型和原文排
+            items = _sorted_items([item for item in items if item["known"]]) + _sorted_items([item for item in items if not item["known"]])
             out.append({"number": number, "time": reply.get("time"), "items": items})
     return out
 
@@ -1014,9 +1017,9 @@ def blocks(conversation_id: str) -> list[dict[str, Any]]:
         raw = [(row.updated_at.isoformat(timespec="seconds"), row.detail or {}, row.text) for row in rows]
     out = []
     for number, (time, detail, text) in enumerate(raw, 1):
-        items = [{"token": item[0], "value": guard.vault.reveal(item[0]), "kind": item[1],
-                  "kind_label": KIND_LABELS.get(item[1], item[1])}
-                 for item in detail.get("tokens", []) if isinstance(item, list) and len(item) == 2]
+        items = _sorted_items([{"token": item[0], "value": guard.vault.reveal(item[0]), "kind": item[1],
+                                "kind_label": KIND_LABELS.get(item[1], item[1])}
+                               for item in detail.get("tokens", []) if isinstance(item, list) and len(item) == 2])
         reason = str(detail.get("reason") or text).removeprefix("已拦截：")
         out.append({"number": number, "time": time, "reason": reason, "items": items})
     return out
