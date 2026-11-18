@@ -113,8 +113,10 @@ def bounded_history(history: list[dict[str, Any]], budget: int = HISTORY_TOKEN_B
 
 async def make_title(llm: Any, message: str, answer: str) -> str:
     try:
-        msg = await llm.chat([{"role": "user", "content": TITLE_PROMPT.format(
-            message=redact_derived_text(message)[:500], answer=redact_derived_text(answer)[:300])}],
+        prompt = TITLE_PROMPT.format(message=redact_derived_text(message)[:500], answer=redact_derived_text(answer)[:300])
+        if not answer.strip():                      # 刚开始还没有回答：只按用户这句话起标题
+            prompt = prompt.replace("这段对话", "这个请求").replace("助手：\n", "")
+        msg = await llm.chat([{"role": "user", "content": prompt}],
                              max_tokens=TITLE_MODEL_MAX_TOKENS, _stage="title", _auxiliary=True)
         title = re.sub(r"[\"'“”‘’《》。！!？?]", "", redact_derived_text(msg.content or "").strip()).strip()
         return title[:24] or fallback_title(message)

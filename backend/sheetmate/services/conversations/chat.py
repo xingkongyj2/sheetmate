@@ -716,6 +716,8 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
             await job.emit({"type": "done"})
             return
         llm = get_llm()
+        if not resumed:
+            _start_early_title(job, user_id, conversation_id, llm, message)    # 标题不等回答：和正式处理同时生成
         ctx, host = build_context(user_id, conversation_id, llm)
         if control:
             from sheetmate.agent.memory.short_term.runtime import AgentRuntime
@@ -1756,6 +1758,26 @@ async def _finish_background(llm: Any, user_id: int, conversation_id: str, custo
         _persist_llm_usage(conversation_id, assistant_message_id, llm, pending=False)
         record_event("chat.background.done", "sheetmate.services.conversations.chat._finish_background",
                      {"elapsed_seconds": round(time.monotonic() - started_at, 3), "source_message_id": source_message_id})
+
+
+def _start_early_title(job: Job, user_id: int, conversation_id: str, llm: Any, message: str) -> None:
+    """新对话一开始就按用户这句话起标题，和正式处理同时进行，起好马上推给页面（不用等整轮回答结束）。
+    只发用户自己打的这句话（照常经过发送前检查），不带任何文件内容，所以不用等文件脱敏完成。
+    回答结束后的那次生成仍保留作兜底：标题已经有了就自动跳过。"""
+    with session_scope() as db:
+        conv = db.get(Conversation, conversation_id)
+        if conv is None or conv.title not in {"新对话", ""} or conversation_id in _titles_inflight:
+            return
+
+    async def run() -> None:
+        with privacy_bind(PrivacyScope(conversation_id=conversation_id, user_id=user_id, required=True, ready=True)):
+            title = await _maybe_title(conversation_id, llm, message, "")
+        if title:
+            await job.emit({"type": "title", "title": title})
+
+    task = asyncio.create_task(run())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 async def _maybe_title(conversation_id: str, llm: Any, message: str, answer: str) -> str | None:
