@@ -79,6 +79,7 @@ onBeforeUnmount(() => {
             <ChevronRight class="size-4 shrink-0 text-faint" />
           </span>
           <span class="mt-1.5 block break-words text-[13px] leading-6 text-mute">{{ run.request_text || run.summary || run.tool_sequence || '查看每一步的执行详情' }}</span>
+          <span v-if="run.input_files?.length" class="mt-0.5 block truncate text-xs text-mute" :title="run.input_files.map((file) => file.filename).join('、')">输入：{{ run.input_files.map((file) => file.filename).join('、') }}</span>
           <span class="mt-1 block text-xs text-faint">比对 {{ run.verification ? percent(run.verification.overall_match_rate) : '—' }} · 耗时 {{ duration(run.duration_ms) || '—' }}</span>
         </button>
         <div v-if="run.output_file_id" class="mt-1 flex items-center gap-1">

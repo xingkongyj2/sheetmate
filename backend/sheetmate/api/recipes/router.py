@@ -109,7 +109,8 @@ def match_inputs(recipe_id: str, body: MatchBody, user: User = Depends(current_u
 async def run_recipe(recipe_id: str, body: RunBody, user: User = Depends(current_user)):
     """用新文件重复执行流程（SSE 推送每一步的进度）。"""
     job = replay_service.start_replay(user, recipe_id, file_ids=body.file_ids, inputs=body.inputs,
-                                      allow_repair=body.allow_repair, version=body.version, save_recipe=body.save_recipe)
+                                      allow_repair=body.allow_repair, version=body.version, save_recipe=body.save_recipe,
+                                      scoped=body.scoped, label=body.label)
     return sse_response(job)
 
 

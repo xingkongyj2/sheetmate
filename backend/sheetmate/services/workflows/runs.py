@@ -109,6 +109,8 @@ def finish_run(db: Session, run_id: str, report: dict[str, Any], *, verification
         validation["recipe_deleted"] = True
     if (run.validation or {}).get("resumed_from"):
         validation["resumed_from"] = run.validation["resumed_from"]
+    if (run.validation or {}).get("scope"):
+        validation["scope"] = run.validation["scope"]
     if outputs_metrics:
         validation["metrics"] = outputs_metrics
     if diff:
@@ -224,6 +226,7 @@ def run_dict(run: Run, *, with_steps: bool = True) -> dict[str, Any]:
         ids = {artifact["file_id"] for artifact in [*snapshots, *step_files] if artifact.get("file_id")}
         if run.output_file_id:
             ids.add(run.output_file_id)
+        ids.update(run.input_file_ids or [])
         records = {record.id: record for record in db.scalars(select(FileRecord).where(FileRecord.id.in_(ids)))} if ids else {}
 
         def current_file(artifact: dict[str, Any]) -> dict[str, Any]:
@@ -237,6 +240,8 @@ def run_dict(run: Run, *, with_steps: bool = True) -> dict[str, Any]:
             profile = (record.profile or {}) if record else {}
             return record is not None and not profile.get("intermediate") and profile.get("delivery_status") not in {"candidate", "intermediate", "superseded"}
 
+        data["input_files"] = [{"file_id": file_id, "filename": records[file_id].filename}
+                               for file_id in run.input_file_ids or [] if file_id in records]
         if not delivered(run.output_file_id):
             data["output_file_id"] = next((item["file_id"] for item in reversed(snapshots)
                                            if delivered(item.get("file_id"))), None)

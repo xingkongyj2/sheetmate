@@ -24,6 +24,8 @@ class RunBody(BaseModel):
     allow_repair: bool = True
     version: int | None = None
     save_recipe: bool = False
+    scoped: bool = False          # 客户页「执行」发起：输入输出只记在这次执行里，不进文件页
+    label: str | None = None      # 结果文件名里带上的标识（批量执行时用输入文件名区分每次的结果）
 
 
 class NodeEditBody(BaseModel):

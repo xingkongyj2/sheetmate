@@ -458,6 +458,23 @@ def retain_for_recipe(db: Session, record: FileRecord, customer_id: str, recipe_
     db.flush()
 
 
+RUN_SCOPE = "run"   # Run.validation["scope"]：用户在客户页「执行」发起的运行，输入输出只记在这次执行里，不进文件页
+
+
+def run_scoped_condition():
+    return Run.validation["scope"].as_string() == RUN_SCOPE
+
+
+def exclude_run_scoped(db: Session, records: list[FileRecord]) -> list[FileRecord]:
+    """去掉只属于某次执行的文件：执行时新上传的输入，以及这次执行产生的全部输出（含中间文件）。
+
+    执行很多次、每次换一批输入时，文件页不会被撑满；这些文件在对应的执行记录里查看。"""
+    run_ids = {record.run_id for record in records if record.run_id}
+    scoped = set(db.scalars(select(Run.id).where(Run.id.in_(run_ids), run_scoped_condition()))) if run_ids else set()
+    return [record for record in records
+            if not (record.run_id in scoped or (record.profile or {}).get("run_input"))]
+
+
 def _recipe_file_ids(db: Session, customer_id: str, recipe_id: str) -> set[str]:
     ids: set[str] = set()
     exact_inputs: set[str] = set(db.scalars(select(FileRecipe.file_id).where(
@@ -472,7 +489,8 @@ def _recipe_file_ids(db: Session, customer_id: str, recipe_id: str) -> set[str]:
             if file_id:
                 exact_inputs.add(str(file_id))
                 resolved_aliases.add(alias)
-    runs = list(db.scalars(select(Run).where(Run.recipe_id == recipe_id, Run.customer_id == customer_id)))
+    runs = list(db.scalars(select(Run).where(Run.recipe_id == recipe_id, Run.customer_id == customer_id,
+                                             func.coalesce(Run.validation["scope"].as_string(), "") != RUN_SCOPE)))
     for run in runs:
         exact_inputs.update(run.input_file_ids or [])
         for item in (run.validation or {}).get("inputs", []):
@@ -516,7 +534,7 @@ def _recipe_file_ids(db: Session, customer_id: str, recipe_id: str) -> set[str]:
 
 def recipe_files(db: Session, customer_id: str, recipe_id: str, *, primary_recipe_id: str | None = None) -> list[FileRecord]:
     """用流程引用、执行记录和原始输入绑定还原完整资料；旧公共资料只归主流程。"""
-    available = list_files(db, customer_id=customer_id)
+    available = exclude_run_scoped(db, list_files(db, customer_id=customer_id))
     links = list(db.scalars(select(FileRecipe).where(FileRecipe.customer_id == customer_id)))
     own = {link.file_id: link for link in links if link.recipe_id == recipe_id}
     ids = _recipe_file_ids(db, customer_id, recipe_id) | {file_id for file_id, link in own.items() if not link.excluded}

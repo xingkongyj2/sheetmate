@@ -95,7 +95,8 @@ def match(user: User, recipe_id: str, file_ids: list[str]) -> dict[str, Any]:
 
 
 def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dict[str, str] | None = None,
-                 allow_repair: bool = True, version: int | None = None, save_recipe: bool = False) -> Job:
+                 allow_repair: bool = True, version: int | None = None, save_recipe: bool = False,
+                 scoped: bool = False, label: str | None = None) -> Job:
     with session_scope() as db:
         recipe = _load_recipe_for_user(db, user, recipe_id, version)
         records = {fid: _file_for_user(db, user, fid) for fid in file_ids}
@@ -127,6 +128,9 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
         run = run_service.create_run(db, kind="replay", user_id=user.id, customer_id=recipe.customer_id, conversation_id=None,
                                      recipe_id=recipe.id, recipe_version=recipe.version,
                                      request_text=f"用新文件执行「{recipe.name}」", input_file_ids=list(records))
+        if scoped:
+            run.validation = {"scope": file_service.RUN_SCOPE}
+        label = Path(file_service.safe_filename(label)).stem[:60] if label and label.strip() else ""
         out_path = run_service.output_path(run, file_service.safe_filename(f"{recipe.name}_结果.xlsx"))
         run_id = run.id
         history = run_service.history_metrics(db, recipe.id)
@@ -160,7 +164,7 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
             elif event.get("type") == "recipe_run_done":
                 event = {**event, "recipe_persisted": not runner.recipe_changed}
             await job.emit(event)
-        await _finish(job, user.id, runner, runner.output_path or out_path, note="执行时自动修复", save_recipe=save_recipe)
+        await _finish(job, user.id, runner, runner.output_path or out_path, note="执行时自动修复", save_recipe=save_recipe, label=label)
 
     return jobs.start(f"run:{run_id}", work)
 
@@ -200,6 +204,8 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
                                          recipe_version=run.recipe_version, input_file_ids=list(run.input_file_ids or []),
                                          request_text=f"从第 {step_id} 步重跑「{recipe.name}」")
         resumed.validation = {"resumed_from": {"run_id": run.id, "step_id": step_id}}
+        if (run.validation or {}).get("scope") == file_service.RUN_SCOPE:
+            resumed.validation["scope"] = file_service.RUN_SCOPE   # 从某一步重跑：结果同样只记在执行里
         resumed_run_id = resumed.id
         out_path = run_service.output_path(resumed, file_service.safe_filename(f"{recipe.name}_结果_重跑_{uuid4().hex[:8]}.xlsx"))
     edited = False
@@ -240,7 +246,8 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
     return jobs.start(f"run:{resumed_run_id}", work)
 
 
-async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, note: str, *, save_recipe: bool = False) -> None:
+async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, note: str, *, save_recipe: bool = False,
+                  label: str = "") -> None:
     """登记本次输出和执行快照；只有用户要求时才把变更存为重复流程。"""
     report = runner.report
     with session_scope() as db:
@@ -259,7 +266,8 @@ async def _finish(job: Job, user_id: int, runner: RecipeRunner, out_path: Path, 
             # 脚本交付只认 runner 完整执行后公布的 files，不能发布失败步骤留下的半成品。
             if out_path.is_file() and str(out_path.resolve()) not in artifact_paths:
                 suffix = ("_结果" if report["status"] in {"success", "warning"} else "_结果_未通过校验") + out_path.suffix
-                record = file_service.register_output(db, path=out_path, filename=f"{runner.recipe.name}{suffix}",
+                stem = f"{runner.recipe.name}_{label}" if label else runner.recipe.name
+                record = file_service.register_output(db, path=out_path, filename=f"{stem}{suffix}",
                                                       customer_id=run.customer_id, conversation_id=run.conversation_id,
                                                       run_id=run.id, user_id=user_id)
                 file_infos.append(file_service.file_dict(record))

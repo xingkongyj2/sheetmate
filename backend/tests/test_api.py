@@ -319,6 +319,25 @@ def test_save_analysis_as_recipe_then_bind_new_customer(client, samples, fake_ll
     file_event = next(e for e in run_events if e["type"] == "file")
     assert client.get(file_event["download_url"]).status_code == 200
 
+    # 客户页「执行」：临时上传的输入和这次的结果只记在执行记录里，文件页不增加
+    before = client.get(f"/api/customers/{customer_id}").json()["customer"]
+    recipe_before = before["recipes"][0]
+    upload = client.post(f"/api/customers/{customer_id}/files", params={"recipe_id": saved["recipe_id"], "for_run": True},
+                         files={"file": ("运费明细_重跑.xlsx", samples["fees_sep"].read_bytes())}).json()["file"]
+    scoped_events = read_sse(client.post(f"/api/recipes/{saved['recipe_id']}/run", json={
+        "file_ids": [upload["file_id"]], "allow_repair": False, "scoped": True, "label": "运费明细_重跑"}))
+    scoped_file = next(e for e in scoped_events if e["type"] == "file")
+    assert "运费明细_重跑" in scoped_file["filename"]
+    after = client.get(f"/api/customers/{customer_id}").json()["customer"]
+    recipe_after = after["recipes"][0]
+    assert {f["file_id"] for f in recipe_after["files"]} == {f["file_id"] for f in recipe_before["files"]}
+    assert {f["file_id"] for f in recipe_after["output_files"]} == {f["file_id"] for f in recipe_before["output_files"]}
+    assert upload["file_id"] not in {f["file_id"] for f in after["files"]}
+    scoped_run = next(r for r in recipe_after["runs"] if r["run_id"] == next(e["run_id"] for e in scoped_events if e["type"] == "done"))
+    assert scoped_run["input_files"] == [{"file_id": upload["file_id"], "filename": upload["filename"]}]
+    assert scoped_run["output_file_id"] == scoped_file["file_id"]
+    assert client.get(scoped_file["download_url"]).status_code == 200   # 结果仍可从执行记录下载
+
 
 # ---------------------------------------------------------------------------
 # 修改模式：生成处理步骤 → 执行 → 修复 → 比对；只有明确要求才保存重复流程

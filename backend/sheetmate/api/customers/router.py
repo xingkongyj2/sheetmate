@@ -88,13 +88,16 @@ async def refresh_summary(customer_id: str, only_if_outdated: bool = False, reci
 
 @router.post("/{customer_id}/files")
 async def upload_customer_file(customer_id: str, background: BackgroundTasks, file: UploadFile = File(...),
-                               kind: str = Form("input"), recipe_id: str | None = None,
+                               kind: str = Form("input"), recipe_id: str | None = None, for_run: bool = False,
                                db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     require_customer(db, user, customer_id)
     recipe = recipe_service.resolve_customer_recipe(db, customer_id, recipe_id)
     record = file_service.save_upload(db, data=await file.read(), filename=file.filename or "file", user=user,
                                       customer_id=customer_id, kind=kind)
-    if recipe:
+    if for_run:
+        # 执行流程时临时上传的输入：只记在那次执行里，不进客户的文件页（批量执行时文件很多）
+        record.profile = {**(record.profile or {}), "run_input": True}
+    elif recipe:
         file_service.retain_for_recipe(db, record, customer_id, recipe.recipe_id)
     db.commit()   # 后台识别要读到刚保存的文件
     background.add_task(privacy_service.identify_uploaded, record.id)   # 上传后自动识别敏感列，对话时直接用结果

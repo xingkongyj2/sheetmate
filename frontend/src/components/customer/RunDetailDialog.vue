@@ -111,6 +111,15 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
       <ExecutionStatusNotice v-if="executionMessage" :message="executionMessage" />
       <div v-if="run.summary || run.error && !executionMessage" class="whitespace-pre-wrap rounded-xl px-3 py-2.5 text-[13px]" :class="run.error && !executionMessage ? 'bg-error/5 text-error' : 'bg-paper text-mute'">{{ run.summary || run.error }}</div>
 
+      <div v-if="run.input_files?.length" class="space-y-2">
+        <div class="label-mini">输入文件</div>
+        <div v-for="file in run.input_files" :key="file.file_id" class="flex items-center gap-2 rounded-xl border border-line px-3 py-2">
+          <span class="min-w-0 flex-1 truncate text-sm">{{ file.filename }}</span>
+          <button class="btn-text text-xs" @click="previewOutput(file.file_id)"><Eye class="size-3.5" />查看</button>
+          <a :href="fileApi.downloadUrl(file.file_id)" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
+        </div>
+      </div>
+
       <div v-if="run.steps.length">
         <div class="label-mini mb-2">每一步{{ hasTables ? '（点开可以查看中间表、修改参数后从这一步重跑）' : '' }}</div>
         <div class="space-y-1.5">

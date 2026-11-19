@@ -94,11 +94,11 @@ export const customerApi = {
     (await http.post<{ summary: string; updated: boolean; summary_by: 'ai' | 'human' }>(
       `/customers/${id}/summary`, {}, { params: { only_if_outdated: true, recipe_id: recipeId }, timeout: 0 },
     )).data,
-  uploadFile: async (id: string, file: File, kind = 'input', recipeId?: string) => {
+  uploadFile: async (id: string, file: File, kind = 'input', recipeId?: string, forRun = false) => {
     const form = new FormData()
     form.append('file', file)
     form.append('kind', kind)
-    return (await http.post<{ file: FileInfo }>(`/customers/${id}/files`, form, { params: { recipe_id: recipeId } })).data.file
+    return (await http.post<{ file: FileInfo }>(`/customers/${id}/files`, form, { params: { recipe_id: recipeId, for_run: forRun || undefined } })).data.file
   },
   saveMapping: async (id: string, mapping: Record<string, string[]>, recipeId?: string) =>
     (await http.put<{ mapping: Record<string, string[]> }>(`/customers/${id}/field-mapping`, { mapping }, { params: { recipe_id: recipeId } })).data.mapping,
@@ -251,7 +251,7 @@ export const recipeApi = {
   match: async (id: string, fileIds: string[]) =>
     (await http.post<{ inputs: { alias: string; kind?: 'table' | 'file'; description: string; file_pattern: string; required_columns: string[]; match: { key: string; score: number; filename: string; sheet: string | null } | null }[]; candidates: { key: string; kind?: 'table' | 'file'; filename: string; sheet: string | null; rows: number }[] }>(
       `/recipes/${id}/match`, { file_ids: fileIds })).data,
-  run: (id: string, body: { file_ids: string[]; inputs?: Record<string, string>; allow_repair?: boolean; version?: number }, onEvent: (e: AgentEvent) => void) =>
+  run: (id: string, body: { file_ids: string[]; inputs?: Record<string, string>; allow_repair?: boolean; version?: number; scoped?: boolean; label?: string }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/recipes/${id}/run`, body, onEvent),
   /** 修改流程名称：原地改名，不产生新版本（所有版本里的名字一起改）；名称没变时 saved 为 false。 */
   rename: async (id: string, name: string) =>

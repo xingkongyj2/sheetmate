@@ -170,10 +170,11 @@ def _first_paragraph(markdown: str) -> str:
 
 def detail(db: Session, customer: Customer) -> dict[str, Any]:
     primary_id = recipe_service.ensure_primary_recipe(db, customer)
-    files = file_service.list_files(db, customer_id=customer.id)
+    files = file_service.exclude_run_scoped(db, file_service.list_files(db, customer_id=customer.id))
+    scoped_runs = select(Run.id).where(Run.customer_id == customer.id, file_service.run_scoped_condition())
     output_count = db.scalar(select(func.count()).select_from(FileRecord).where(
         file_service.customer_file_condition(customer.id), file_service.current_file_condition(),
-        FileRecord.kind == "output")) or 0
+        FileRecord.kind == "output", or_(FileRecord.run_id.is_(None), FileRecord.run_id.not_in(scoped_runs)))) or 0
     records = recipe_service.latest_records(db, customer_id=customer.id)
     recipes = []
     for record in records:
@@ -227,7 +228,8 @@ def _summary_inputs(db: Session, customer: Customer, recipe_id: str | None = Non
         files = [file_service.file_dict(f) for f in resources if f.kind != "output"]
         recipes = [recipe_service.record_to_recipe(record)]
     else:
-        files = [file_service.file_dict(f) for f in file_service.list_files(db, customer_id=customer.id) if f.kind != "output"]
+        files = [file_service.file_dict(f) for f in file_service.exclude_run_scoped(
+            db, file_service.list_files(db, customer_id=customer.id)) if f.kind != "output"]
         recipes = [recipe_service.record_to_recipe(r) for r in recipe_service.latest_records(db, customer_id=customer.id)]
     memories = memory_service.customer_memories(db, customer.id, recipe_id=recipe_id, source="human")
     memory_text = "\n".join(f"- {item['value']}" for item in memories)

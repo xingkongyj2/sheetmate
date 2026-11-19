@@ -244,6 +244,7 @@ export interface RunBrief {
   error: string
   summary: string
   output_file_id: string | null
+  input_files?: { file_id: string; filename: string }[]
   duration_ms: number
   created_at: string
   finished_at: string | null
