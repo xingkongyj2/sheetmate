@@ -340,7 +340,7 @@ onBeforeUnmount(() => {
 <template>
   <div class="recipe-flow-viewer min-w-0">
     <div v-if="toolbarPlacement !== 'hidden'" class="recipe-flow-toolbar flex min-h-6 items-center justify-end gap-1" :class="toolbarPlacement === 'inline' ? 'mb-2' : 'recipe-flow-toolbar--card'">
-      <span v-if="running && toolbarPlacement === 'inline'" class="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-[#6265DC]" role="status"><LoaderCircle class="size-3 shrink-0 animate-spin" /><span class="truncate">{{ currentStep?.name || '执行中' }}</span></span>
+      <span v-if="running && toolbarPlacement === 'inline'" class="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-[#6265DC]" role="status"><LoaderCircle class="size-3 shrink-0 animate-spin" /><span class="truncate"><template v-if="context.batch">第 {{ context.batch.index }}/{{ context.batch.total }} 次 · </template>{{ currentStep?.name || '执行中' }}</span></span>
       <!-- 对话消息里的流程卡片只留全屏，修改和执行都在全屏里 -->
       <button v-if="canEdit && toolbarPlacement !== 'card'" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageSquare class="size-3.5" />对话修改</button>
       <button v-if="canReplay && toolbarPlacement !== 'card'" type="button" class="btn-text gap-1 px-2 py-1 text-[11px]" :disabled="running" @click="prepareRun"><Play class="size-3.5" />重新执行</button>
@@ -359,6 +359,11 @@ onBeforeUnmount(() => {
                 <div class="flow-header-title">
                   <h2 class="truncate text-[22px] font-semibold leading-tight" :title="context.title || '处理流程'">{{ context.title || '处理流程' }}</h2>
                   <span v-if="context.version" class="tag shrink-0 !bg-ink !px-2 !py-1 !text-xs !text-white">v{{ context.version }}</span>
+                  <span v-if="context.batch" class="flow-batch-tag" role="status" :title="`第 ${context.batch.index}/${context.batch.total} 次 · ${context.batch.filename}`">
+                    <LoaderCircle v-if="running" class="size-3.5 shrink-0 animate-spin text-[#6265DC]" />
+                    <span class="shrink-0 tabular-nums">第 {{ context.batch.index }}/{{ context.batch.total }} 次</span>
+                    <span class="truncate text-mute">{{ context.batch.filename }}</span>
+                  </span>
                 </div>
                 <div class="flow-header-actions">
                   <button v-if="canEdit" type="button" class="flow-action" aria-label="对话修改" title="对话修改" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageCircleMore class="size-5" /></button>
@@ -413,6 +418,7 @@ onBeforeUnmount(() => {
 /* 没有顶栏：标题和按钮直接浮在画布上，点击穿透到画布（拖动不受影响），只有按钮自己接收点击。 */
 .flow-header { position: absolute; inset: 0 0 auto 0; z-index: 3; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 18px 20px; pointer-events: none; }
 .flow-header-title { display: flex; min-width: 0; max-width: min(60vw, 560px); grid-column: 2; align-items: center; justify-content: center; gap: 8px; }
+.flow-batch-tag { display: inline-flex; min-width: 0; max-width: 260px; align-items: center; gap: 6px; border-radius: 9999px; background: #6265DC14; padding: 4px 12px; font-size: 12px; line-height: 1.4; color: #3c3f9e; }
 .flow-header-actions { display: flex; grid-column: 3; align-items: center; justify-content: flex-end; gap: 10px; }
 .flow-action { display: inline-flex; width: 42px; height: 42px; flex: none; align-items: center; justify-content: center; border: 1px solid #ececef; border-radius: 9999px; background: white; color: #0b0b0c; pointer-events: auto; transition: border-color .2s, color .2s; }
 .flow-action:hover { border-color: #0b0b0c4d; }

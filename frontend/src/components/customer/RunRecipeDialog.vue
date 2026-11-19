@@ -56,13 +56,15 @@ const expectedName = (input: RunInput) => input.source_file || sampleOf(input)?.
 const sampleOf = (input: RunInput) => sampleFile(props.recipe.recipe, input, pool.value)
 
 const stage = ref<'pick' | 'run'>('pick')
-const uploading = ref<{ alias: string; done: number; total: number } | null>(null)
+const uploading = ref<{ alias: string; done: number; total: number; batch: boolean } | null>(null)
 const canUpload = computed(() => !!(props.customerId || props.conversationId))
 const allowRepair = true  // 出错时让 AI 自动修复，始终开启
 const items = ref<RunItem[]>([])
 const running = ref(false)
 const stopping = ref(false)
 const detailRunId = ref<string | null>(null)
+const activeIndex = ref(0)           // 正在跑（或最后跑过）的那一次：流程图默认跟着它
+const viewing = ref<number | null>(null)   // 手动点开查看的某一次；下一次开始执行时回到自动跟随
 const openFilePreview = useFilePreview()
 onBeforeUnmount(() => { stopping.value = true })   // 关掉窗口：当前这个跑完后不再启动后面的
 
@@ -105,25 +107,32 @@ const dragging = ref<string | null>(null)
 const menuFor = ref<string | null>(null)  // 正在从已上传文件里选择的输入
 const pickerInput = computed(() => inputs.value.find((input) => input.alias === menuFor.value) ?? null)
 
+/** 「上传」：单个文件，替换当前选择（选多个也只取第一个）。 */
 function pick(input: RunInput, e: Event) {
+  const target = e.target as HTMLInputElement
+  const file = target.files?.[0]
+  target.value = ''
+  if (file) void upload(input, [file])
+}
+
+/** 「批量执行」：一次选多个文件，每个文件单独执行一次；已经是批量时继续添加。 */
+function pickBatch(input: RunInput, e: Event) {
   const target = e.target as HTMLInputElement
   const files = [...(target.files ?? [])]
   target.value = ''
-  if (files.length) void upload(input, files)
+  if (files.length) void upload(input, files, true)
 }
 
 function drop(input: RunInput, e: DragEvent) {
   dragging.value = null
-  const files = [...(e.dataTransfer?.files ?? [])]
-  if (files.length && canUpload.value && uploading.value === null) void upload(input, files)
+  const file = e.dataTransfer?.files?.[0]
+  if (file && canUpload.value && uploading.value === null) void upload(input, [file])
 }
 
-/** 上传一个或多个文件：已经是批量（多个文件）时继续添加，否则替换当前选择。 */
-async function upload(input: RunInput, picked: File[]) {
-  const files = batchable.value ? picked : picked.slice(0, 1)
-  const append = entries(input).length > 1
+async function upload(input: RunInput, files: File[], batch = false) {
+  const append = batch && entries(input).length > 1
   const added: FileInfo[] = []
-  uploading.value = { alias: input.alias, done: 0, total: files.length }
+  uploading.value = { alias: input.alias, done: 0, total: files.length, batch }
   try {
     for (const file of files) {
       const info = props.customerId
@@ -177,6 +186,8 @@ async function execute(indices: number[]) {
       const item = items.value[index]
       if (stopping.value) { item.state = 'skipped'; continue }
       item.state = 'run'
+      activeIndex.value = index
+      viewing.value = null
       Object.assign(item.progress, newProgress('replay'))
       item.files = []
       const fileIds = [...new Set(Object.values(item.mapping).map((key) => key.split('::')[0]))]
@@ -209,6 +220,8 @@ async function execute(indices: number[]) {
 function run() {
   if (!ready.value || running.value) return
   items.value = buildItems()
+  activeIndex.value = 0
+  viewing.value = null
   stage.value = 'run'
   void execute(items.value.map((_, i) => i))
 }
@@ -219,11 +232,18 @@ function retryFailed() {
   if (indices.length) void execute(indices)
 }
 
-// 单次执行：直接展示流程图的进度；批量：一行一次执行
+// 单次执行：流程图 + 进度；批量：流程图跟着正在跑的那一次（可点下面的某一行查看那一次），下面一行一次执行
 const single = computed(() => (items.value.length === 1 ? items.value[0] : null))
-const progress = computed(() => single.value?.progress ?? newProgress('replay'))
-const outputFiles = computed(() => single.value?.files ?? [])
+const viewIndex = computed(() => viewing.value ?? activeIndex.value)
+const viewItem = computed<RunItem | null>(() => items.value[viewIndex.value] ?? null)
+const progress = computed(() => viewItem.value?.progress ?? newProgress('replay'))
+const outputFiles = computed(() => viewItem.value?.files ?? [])
 const flow = computed(() => progressFlow({ ...progress.value, flow: props.recipe.flow }))
+/** 批量执行时告诉流程图：现在展示的是第几次、哪个文件 */
+const batchInfo = computed(() => (items.value.length > 1 && viewItem.value
+  ? { index: viewIndex.value + 1, total: items.value.length, filename: viewItem.value.title } : undefined))
+const viewRunning = computed(() => (single.value ? running.value : viewItem.value?.state === 'run'))
+const viewFailed = computed(() => failedOf(progress.value))
 const finished = computed(() => items.value.filter((item) => item.state === 'done' || item.state === 'failed').length)
 const failedCount = computed(() => items.value.filter((item) => item.state === 'failed').length)
 const retryable = computed(() => items.value.filter((item) => item.state === 'failed' || item.state === 'skipped').length)
@@ -255,14 +275,12 @@ const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.
               <button type="button" class="icon-btn shrink-0" title="清除选择" :aria-label="`清除 ${input.alias} 的全部文件`" @click="clear(input)"><X class="size-4" /></button>
             </template>
             <p v-else class="min-w-0 flex-1 text-sm text-mute">请上传新的文件：<span class="break-all font-medium text-ink">{{ expectedName(input) }}</span></p>
-            <label v-if="canUpload" class="btn-line h-8 shrink-0 cursor-pointer gap-1.5 px-3 py-0 text-xs" :title="!batchable ? '上传文件' : entries(input).length > 1 ? '继续添加文件' : '可以一次选多个文件，批量执行'">
-              <LoaderCircle v-if="uploading?.alias === input.alias" class="size-3.5 animate-spin" /><Upload v-else class="size-3.5" />
-              <template v-if="uploading?.alias === input.alias && uploading.total > 1">{{ uploading.done }}/{{ uploading.total }}</template>
-              <template v-else>{{ entries(input).length > 1 ? '添加' : entries(input).length ? '重新上传' : '上传' }}</template>
-              <input type="file" :multiple="batchable" class="hidden" accept=".xlsx,.xlsm,.xls,.csv" :disabled="uploading !== null" @change="pick(input, $event)" />
+            <label v-if="canUpload" class="btn-line h-8 shrink-0 cursor-pointer gap-1.5 px-3 py-0 text-xs">
+              <LoaderCircle v-if="uploading?.alias === input.alias" class="size-3.5 animate-spin" /><Upload v-else class="size-3.5" />{{ entries(input).length ? '重新上传' : '上传' }}
+              <input type="file" class="hidden" accept=".xlsx,.xlsm,.xls,.csv" :disabled="uploading !== null" @change="pick(input, $event)" />
             </label>
-            <button v-if="uploaded(input).length" type="button" class="btn-text h-8 shrink-0 gap-1 px-2 py-0 text-xs" aria-haspopup="dialog" @click="menuFor = input.alias">已上传<ChevronDown class="size-3.5" /></button>
-            <button v-if="sampleOf(input) && !(entries(input).length === 1 && entries(input)[0].fileId === sampleOf(input)!.file_id)" type="button" class="btn-text h-8 shrink-0 px-2 py-0 text-xs" @click="select(input, sampleOf(input)!)">样例文件</button>
+            <button v-if="uploaded(input).length" type="button" class="btn-line h-8 shrink-0 gap-1.5 px-3 py-0 text-xs" aria-haspopup="dialog" @click="menuFor = input.alias">已上传<ChevronDown class="size-3.5" /></button>
+            <button v-if="sampleOf(input) && !(entries(input).length === 1 && entries(input)[0].fileId === sampleOf(input)!.file_id)" type="button" class="btn-line h-8 shrink-0 gap-1.5 px-3 py-0 text-xs" @click="select(input, sampleOf(input)!)">样例文件</button>
           </div>
           <ol v-if="entries(input).length > 1" class="mt-2 max-h-44 space-y-0.5 overflow-y-auto pr-1">
             <li v-for="(item, index) in entries(input)" :key="item.fileId" class="group flex items-center gap-2 rounded-lg px-2 py-1 text-[13px] hover:bg-paper">
@@ -287,12 +305,21 @@ const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.
       <p v-if="total > 1" class="px-1 text-xs leading-relaxed text-mute">共 {{ total }} 个文件，每个文件单独执行一次。</p>
     </div>
 
-    <!-- 2. 执行：一次是流程图进度，批量是一行一次 -->
-    <div v-else-if="single" class="space-y-4">
+    <!-- 2. 执行：流程图跟着正在跑的那一次；批量时下面是一行一次 -->
+    <div v-else class="space-y-4">
       <div class="flex items-center gap-2">
         <span class="font-medium">{{ recipe.name }}</span>
-        <StatusPill :status="running ? 'running' : progress.status === 'failed' ? 'failed' : progress.runStatus ?? 'running'" />
+        <StatusPill v-if="single" :status="running ? 'running' : progress.status === 'failed' ? 'failed' : progress.runStatus ?? 'running'" />
+        <template v-else>
+          <span class="text-xs tabular-nums text-mute">{{ finished }}/{{ items.length }}<template v-if="failedCount">，{{ failedCount }} 个失败</template></span>
+          <LoaderCircle v-if="running" class="size-3.5 animate-spin text-info" />
+        </template>
       </div>
+      <p v-if="batchInfo" class="-mt-2 flex items-center gap-1.5 text-xs text-mute" role="status">
+        <LoaderCircle v-if="viewRunning" class="size-3 shrink-0 animate-spin text-info" />
+        <span class="shrink-0 tabular-nums font-medium text-ink">第 {{ batchInfo.index }}/{{ batchInfo.total }} 次</span>
+        <span class="min-w-0 truncate">{{ batchInfo.filename }}</span>
+      </p>
       <div v-if="progress.inputs.length" class="space-y-1">
         <div v-for="i in progress.inputs" :key="i.alias" class="flex flex-wrap items-center gap-1.5 text-xs text-mute">
           <Sheet class="size-3.5" /><b class="font-medium text-ink">{{ i.alias }}</b> ← {{ i.filename }}<template v-if="i.kind !== 'file'"> · {{ i.sheet }}（{{ i.rows }} 行）</template><span v-else>（完整文件）</span>
@@ -303,12 +330,12 @@ const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.
       <RecipeFlow :flow="flow" :states="progress.steps" :context="{
         title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId, conversationId,
         recipe: recipe.recipe, files: pool, resultFiles: outputFiles,
-        runId: progress.runId, running, failed: progress.status === 'failed' || !!progress.failed,
+        runId: progress.runId, running: viewRunning, failed: viewFailed, batch: batchInfo,
       }" @changed="emit('done')" />
       <p v-if="progress.validation" class="text-xs text-mute">运行校验：{{ progress.validation.summary }}</p>
-      <div v-if="progress.escalation || progress.failed" class="whitespace-pre-wrap rounded-xl bg-error/5 px-3 py-2.5 text-[13px] leading-relaxed text-error">{{ progress.escalation || progress.failed }}</div>
-      <p v-else-if="progress.runSummary" class="text-sm text-mute">{{ progress.runSummary }}</p>
-      <div v-if="outputFiles.length" class="space-y-2">
+      <div v-if="single && (progress.escalation || progress.failed)" class="whitespace-pre-wrap rounded-xl bg-error/5 px-3 py-2.5 text-[13px] leading-relaxed text-error">{{ progress.escalation || progress.failed }}</div>
+      <p v-else-if="single && progress.runSummary" class="text-sm text-mute">{{ progress.runSummary }}</p>
+      <div v-if="single && outputFiles.length" class="space-y-2">
         <div v-for="file in outputFiles" :key="file.file_id" class="flex items-center gap-2 rounded-xl border border-line px-3 py-2">
           <Sheet class="size-4 shrink-0 text-[#4a4743]" />
           <span class="min-w-0 flex-1 truncate text-sm">{{ file.filename }}</span>
@@ -316,19 +343,11 @@ const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.
           <a :href="file.download_url" class="btn-text text-xs"><Download class="size-3.5" />下载</a>
         </div>
       </div>
-    </div>
-
-    <div v-else class="space-y-3">
-      <div class="flex items-center gap-2">
-        <span class="font-medium">{{ recipe.name }}</span>
-        <span class="text-xs tabular-nums text-mute">{{ finished }}/{{ items.length }}<template v-if="failedCount">，{{ failedCount }} 个失败</template></span>
-        <LoaderCircle v-if="running" class="size-3.5 animate-spin text-info" />
-      </div>
-      <ol class="divide-y divide-line rounded-2xl border border-line">
-        <li v-for="(item, index) in items" :key="index" class="px-4 py-2.5">
+      <ol v-if="!single" class="divide-y divide-line rounded-2xl border border-line">
+        <li v-for="(item, index) in items" :key="index" class="px-4 py-2.5 transition-colors" :class="viewIndex === index ? 'bg-paper/70' : ''">
           <div class="flex items-center gap-3">
             <span class="w-5 shrink-0 text-right text-xs tabular-nums text-faint">{{ index + 1 }}</span>
-            <span class="min-w-0 flex-1 truncate text-sm" :title="item.title">{{ item.title }}</span>
+            <button type="button" class="min-w-0 flex-1 truncate text-left text-sm" :class="item.state === 'wait' ? 'cursor-default text-mute' : 'hover:underline underline-offset-4'" :title="item.state === 'wait' ? item.title : `查看第 ${index + 1} 次的流程图：${item.title}`" :aria-current="viewIndex === index ? 'true' : undefined" @click="item.state !== 'wait' && (viewing = index)">{{ item.title }}</button>
             <span v-if="item.state === 'wait'" class="shrink-0 text-xs text-faint">等待</span>
             <span v-else-if="item.state === 'skipped'" class="shrink-0 text-xs text-faint">已跳过</span>
             <span v-else-if="item.state === 'run'" class="inline-flex shrink-0 items-center gap-1.5 text-xs text-info">
@@ -345,6 +364,15 @@ const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.
         </li>
       </ol>
     </div>
+
+    <template v-if="stage === 'pick' && batchable && canUpload" #header-actions>
+      <label class="btn-line h-8 cursor-pointer gap-1.5 px-3 py-0 text-xs" title="一次选多个文件，每个文件单独执行一次">
+        <LoaderCircle v-if="uploading?.batch" class="size-3.5 animate-spin" /><Files v-else class="size-3.5" />
+        <template v-if="uploading?.batch">{{ uploading.done }}/{{ uploading.total }}</template>
+        <template v-else>{{ entries(inputs[0]).length > 1 ? '继续添加文件' : '批量执行' }}</template>
+        <input type="file" multiple class="hidden" accept=".xlsx,.xlsm,.xls,.csv" :disabled="uploading !== null" @change="pickBatch(inputs[0], $event)" />
+      </label>
+    </template>
 
     <template #footer>
       <template v-if="stage === 'pick'">

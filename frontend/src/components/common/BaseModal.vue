@@ -24,7 +24,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <div class="min-w-0">
             <slot name="title"><h3 class="truncate text-base font-semibold">{{ title }}</h3></slot>
           </div>
-          <button class="icon-btn" aria-label="关闭" @click="emit('close')"><X class="size-4" /></button>
+          <div class="flex shrink-0 items-center gap-2">
+            <slot name="header-actions" />
+            <button class="icon-btn" aria-label="关闭" @click="emit('close')"><X class="size-4" /></button>
+          </div>
         </div>
         <div class="max-h-[75vh] overflow-y-auto px-6 py-5">
           <slot />

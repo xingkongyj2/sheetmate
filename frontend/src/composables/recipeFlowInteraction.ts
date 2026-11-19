@@ -28,4 +28,6 @@ export interface RecipeFlowContext {
   running?: boolean
   failed?: boolean
   deleted?: boolean
+  /** 批量执行时，流程图当前展示的是第几次、用的哪个文件（全屏标题后会显示） */
+  batch?: { index: number; total: number; filename: string }
 }
