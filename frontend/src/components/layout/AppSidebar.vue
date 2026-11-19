@@ -185,5 +185,5 @@ async function logout() {
 .nav-row { display: flex; width: 100%; align-items: center; gap: 0.625rem; border-radius: 0.75rem; padding-block: 0.5rem; font-size: 0.875rem; transition: background-color .15s; }
 .nav-row:hover { background-color: rgb(0 0 0 / 0.04); }
 .nav-icon { display: flex; width: 1.5rem; height: 1.5rem; flex-shrink: 0; align-items: center; justify-content: center; }
-.nav-icon :deep(svg) { width: 18px; height: 18px; stroke-width: 1.75; }
+.nav-icon :deep(svg) { width: 18px; height: 18px; stroke-width: 2.25; }
 </style>

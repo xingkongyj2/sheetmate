@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 侧边栏里的一条对话：图标 + 标题 + 时间；绑定了客户的，对话图标按客户颜色染色（客户下面的对话不重复显示）。悬停时时间换成删除按钮。客户下面的对话，图标对齐客户头像、标题对齐客户名。 */
+/** 侧边栏里的一条对话：图标 + 标题 + 时间；绑定了客户的，对话图标整个（描边和填充）染成客户颜色（客户下面的对话不重复显示）。悬停时时间换成删除按钮。客户下面的对话，图标对齐客户头像、标题对齐客户名。 */
 import { LoaderCircle, MessageSquare, Trash2 } from '@lucide/vue'
 import { computed } from 'vue'
 
@@ -27,7 +27,7 @@ const emit = defineEmits<{ remove: [] }>()
         v-else
         class="size-4 shrink-0"
         :class="tint ? '' : active ? 'text-ink' : 'text-faint'"
-        :style="tint ? { color: tint, fill: `color-mix(in srgb, ${tint} 18%, transparent)` } : undefined"
+        :style="tint ? { color: tint, fill: tint } : undefined"
         aria-hidden="true"
       />
       <span class="min-w-0 flex-1 truncate">{{ conversation.title }}</span>
