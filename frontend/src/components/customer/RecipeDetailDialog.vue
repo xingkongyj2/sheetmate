@@ -11,6 +11,7 @@ import { errorText } from '@/api/http'
 import type { CustomerDetail } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { percent, timeAgo } from '@/composables/chatModel'
+import { recipeStepTitle } from '@/composables/recipeTools'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
 
@@ -162,7 +163,7 @@ async function removeRecipe() {
           <li v-for="(step, i) in steps" :key="step.id" class="grid grid-cols-[1.75rem_minmax(0,1fr)]">
             <span class="text-sm font-bold leading-6 tabular-nums text-[#6265dc]">{{ i + 1 }}</span>
             <div class="min-w-0">
-              <div class="flex items-center gap-2"><span class="text-sm font-semibold leading-6">{{ step.name }}</span><span class="tag">{{ kindLabel(step.kind) }}</span></div>
+              <div class="flex items-center gap-2"><span class="text-sm font-semibold leading-6" :title="step.name">{{ recipeStepTitle(step) }}</span><span class="tag">{{ kindLabel(step.kind) }}</span></div>
               <p v-if="step.description" class="break-words text-[13px] leading-6 text-mute">{{ step.description }}</p>
             </div>
           </li>

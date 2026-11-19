@@ -614,7 +614,7 @@ class RecipeRunner:
 
     async def _run_step(self, step: RecipeStep) -> AsyncIterator[dict[str, Any]]:
         if step.kind == "python":
-            step.params = script_params(step.params, title=step.name[:20])
+            step.params = script_params(step.params, title=step.name)
         formula_name = self._formula_name(step.formula)
         yield {"type": "recipe_step_start", "step_id": step.id, "name": step.name, "formula": step.formula,
                "kind": step.kind, "formula_name": formula_name, "description": step.description,
@@ -656,7 +656,7 @@ class RecipeRunner:
                     yield {"type": "_step_failed"}
                     return
                 if fixed.kind == "python":
-                    fixed.params = script_params(fixed.params, title=fixed.name[:20])
+                    fixed.params = script_params(fixed.params, title=fixed.name)
                 if _same_step_content(fixed, current):
                     # 修复器交回来的步骤和刚才失败的完全一样：再执行一次只会得到同样的错误。
                     # 继续循环是在白白烧模型调用（以前同一个错误会重复到上限 30 次）。

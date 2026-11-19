@@ -411,10 +411,10 @@ def compile_script(ws: Workspace, library: FormulaLibrary, *, run_id: str, code:
         params["script_id"] = script_id
     if script_title:
         params["script_title"] = script_title
-    params = script_params(params, title=(script_title or description or "Python 处理")[:20])
+    params = script_params(params, title=script_title or description or "Python 处理")
     if output_files is not None:
         params["output_files"] = [{"name": item["name"], "ref": item["ref"]} for item in output_files]
-    compiler.append(RecipeStep(id=1, name=description[:40] or "Python 处理", kind="python", formula="python_script",
+    compiler.append(RecipeStep(id=1, name=params["script_title"], kind="python", formula="python_script",
                               output=output, description=description, explanation="保存实际执行的代码、输入依赖与校验",
                               params=params))
     outputs = [OutputSheet(name=str(label)[:31], source=table) for label, table in output_tables.items()

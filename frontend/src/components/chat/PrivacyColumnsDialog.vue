@@ -9,7 +9,7 @@ import { errorText } from '@/api/http'
 import type { PrivacyColumnChange, PrivacyColumns, PrivacyColumnState } from '@/api/types'
 import BaseModal from '@/components/common/BaseModal.vue'
 
-const props = defineProps<{ fileId: string; filename: string; conversationId?: string }>()
+const props = defineProps<{ fileId: string; filename: string; conversationId?: string; elevated?: boolean }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
 
 const data = ref<PrivacyColumns | null>(null)
@@ -55,7 +55,7 @@ const setKind = (column: PrivacyColumnState, kind: PrivacyColumnChange['kind']) 
 </script>
 
 <template>
-  <BaseModal title="脱敏" width="max-w-xl" @close="emit('close')">
+  <BaseModal title="脱敏" width="max-w-xl" :elevated="elevated" @close="emit('close')">
     <template #title>
       <h3 class="truncate text-base font-semibold" :title="filename">脱敏 · {{ filename }}</h3>
     </template>

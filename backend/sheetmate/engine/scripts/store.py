@@ -13,7 +13,9 @@ from sheetmate.core.config.settings import settings
 
 _SCRIPT_ID = re.compile(r"scr_[0-9a-f]{32}\Z")
 MAX_SCRIPT_BYTES = 100_000
-MAX_TITLE_LENGTH = 20
+MAX_TITLE_LENGTH = 15      # 脚本标题（以及 Python 步骤的名字）最多 15 个字
+_TITLE_BREAKS = "，,、；;。：:（("
+_BRACKETS = {"（": "）", "(": ")", "「": "」", "《": "》", "【": "】", "[": "]"}
 _BIND_LOCK = threading.RLock()
 
 
@@ -23,12 +25,31 @@ def _folder() -> Path:
     return folder
 
 
+def close_brackets(text: str) -> str:
+    """截断后括号 / 引号没写完时，退回到第一个没配对的开括号前面，不留下半个括号。"""
+    stack: list[tuple[int, str]] = []
+    for index, char in enumerate(text):
+        if char in _BRACKETS:
+            stack.append((index, _BRACKETS[char]))
+        elif stack and char == stack[-1][1]:
+            stack.pop()
+    return text[:stack[0][0]] if stack else text
+
+
 def normalize_script_title(value: str) -> str:
-    """Use the same concise title for explicit names and generated fallbacks."""
+    """Use the same concise title for explicit names and generated fallbacks.
+
+    最多 MAX_TITLE_LENGTH 个字：过长时优先在最后一个标点处断开（不留半句话），断点太靠前或没有标点再按字数截断。"""
     if not isinstance(value, str):
         raise ValueError("脚本标题必须是文字")
-    value = " ".join(value.split()) or "Python 脚本"
-    return value[:MAX_TITLE_LENGTH]
+    text = " ".join(value.split()) or "Python 脚本"
+    if len(text) <= MAX_TITLE_LENGTH:
+        return text
+    window = text[:MAX_TITLE_LENGTH + 1]
+    cut = max(window.rfind(mark) for mark in _TITLE_BREAKS)
+    kept = window[:cut] if cut >= MAX_TITLE_LENGTH // 2 else text[:MAX_TITLE_LENGTH]
+    kept = close_brackets(kept).rstrip(" " + _TITLE_BREAKS + "-—_")
+    return kept or text[:MAX_TITLE_LENGTH]
 
 
 def _source(code: str) -> str:

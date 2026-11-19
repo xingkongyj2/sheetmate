@@ -45,6 +45,57 @@ const fullscreen = ref(false)
 const selection = ref<FlowSelection | null>(null)
 const openFilePreview = useFilePreview()
 const dialog = ref<HTMLElement | null>(null)
+// 右侧节点详情面板：默认宽一点，可以拖左边缘调宽度（记住上次的宽度）
+const SIDE_KEY = 'sheetmate.flow.sidePanelWidth'
+const SIDE_DEFAULT = 460
+const SIDE_MIN = 360
+const SIDE_MAX = 960
+const SIDE_CANVAS_MIN = 320   // 至少给流程图留的宽度
+function loadSideWidth(): number {
+  try {
+    const saved = Number(localStorage.getItem(SIDE_KEY))
+    return Number.isFinite(saved) && saved >= SIDE_MIN && saved <= SIDE_MAX ? saved : SIDE_DEFAULT
+  } catch {
+    return SIDE_DEFAULT
+  }
+}
+const sideWidth = ref(loadSideWidth())
+const workspaceEl = ref<HTMLElement | null>(null)
+const resizingSide = ref(false)
+function clampSide(width: number): number {
+  const room = (workspaceEl.value?.clientWidth ?? Infinity) - SIDE_CANVAS_MIN
+  return Math.round(Math.max(SIDE_MIN, Math.min(SIDE_MAX, room, width)))
+}
+function saveSideWidth() {
+  try { localStorage.setItem(SIDE_KEY, String(sideWidth.value)) } catch { /* 存不了就只在这次生效 */ }
+}
+function startSideResize(event: PointerEvent) {
+  if (event.button !== 0) return
+  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  resizingSide.value = true
+  event.preventDefault()
+}
+function moveSideResize(event: PointerEvent) {
+  if (!resizingSide.value || !workspaceEl.value) return
+  sideWidth.value = clampSide(workspaceEl.value.getBoundingClientRect().right - event.clientX)
+}
+function endSideResize() {
+  if (!resizingSide.value) return
+  resizingSide.value = false
+  saveSideWidth()
+}
+function keySideResize(event: KeyboardEvent) {
+  const step = event.shiftKey ? 80 : 24
+  if (event.key === 'ArrowLeft') sideWidth.value = clampSide(sideWidth.value + step)
+  else if (event.key === 'ArrowRight') sideWidth.value = clampSide(sideWidth.value - step)
+  else return
+  event.preventDefault()
+  saveSideWidth()
+}
+function resetSideWidth() {
+  sideWidth.value = clampSide(SIDE_DEFAULT)
+  saveSideWidth()
+}
 const viewport = ref<HTMLElement | null>(null)
 const canvas = ref<HTMLElement | null>(null)
 const zoom = ref(1)
@@ -353,7 +404,7 @@ onBeforeUnmount(() => {
     <div class="flow-layer" :class="{ 'flow-layer--detail': !fullscreen }" @click.self="closeDialog">
       <section ref="dialog" role="dialog" aria-modal="true" :aria-label="fullscreen ? `${context.title || '处理流程'} · 全屏流程图` : '流程节点详情'" tabindex="-1" class="flow-dialog" :class="fullscreen ? 'flow-dialog--full' : 'flow-dialog--detail'">
         <template v-if="fullscreen">
-          <div class="flow-workspace">
+          <div ref="workspaceEl" class="flow-workspace" :class="{ 'is-resizing': resizingSide }">
             <div class="flow-canvas-area">
               <header class="flow-header">
                 <div class="flow-header-title">
@@ -392,9 +443,16 @@ onBeforeUnmount(() => {
                 <span class="shrink-0 tabular-nums text-faint">{{ completed }}/{{ shownFlow.steps.length }}</span>
               </div>
             </div>
-            <aside v-if="selection" class="flow-side-panel" aria-label="节点详情">
-              <RecipeFlowInspector v-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="selection = null" @preview="openFilePreview" />
-            </aside>
+            <div v-if="selection" class="flow-side" :style="{ '--side-w': `${sideWidth}px` }">
+              <div
+                class="flow-side-resizer" :class="{ 'is-active': resizingSide }" role="separator" aria-orientation="vertical" aria-label="调整详情面板宽度"
+                :aria-valuenow="sideWidth" :aria-valuemin="SIDE_MIN" :aria-valuemax="SIDE_MAX" tabindex="0" title="拖动调整宽度，双击恢复默认"
+                @pointerdown="startSideResize" @pointermove="moveSideResize" @pointerup="endSideResize" @pointercancel="endSideResize" @keydown="keySideResize" @dblclick="resetSideWidth"
+              />
+              <aside class="flow-side-panel" aria-label="节点详情">
+                <RecipeFlowInspector v-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="selection = null" @preview="openFilePreview" />
+              </aside>
+            </div>
           </div>
         </template>
         <RecipeFlowInspector v-else-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="closeDialog" @preview="openFilePreview" />
@@ -433,13 +491,21 @@ onBeforeUnmount(() => {
 .flow-canvas { position: absolute; width: max-content; transform-origin: top left; padding: 4px; }
 .flow-tools { position: absolute; left: 20px; bottom: 20px; display: flex; align-items: center; padding: 4px; border: 1px solid #ececef; border-radius: 13px; background: white; box-shadow: 0 3px 18px #22224208; }
 .flow-run-status { position: absolute; right: 20px; bottom: 26px; display: flex; max-width: calc(100% - 280px); align-items: center; gap: 8px; border: 1px solid #ececef; border-radius: 12px; padding: 9px 12px; background: white; font-size: 12px; }
-.flow-side-panel { width: 390px; min-height: 0; flex: none; overflow-y: auto; border-left: 1px solid #ececef; background: white; }
+.flow-workspace.is-resizing { cursor: col-resize; user-select: none; }
+.flow-side { position: relative; width: var(--side-w, 460px); min-width: 360px; max-width: calc(100% - 320px); min-height: 0; flex: none; }
+.flow-side-panel { width: 100%; height: 100%; min-height: 0; overflow-y: auto; border-left: 1px solid #ececef; background: white; }
+/* 拖动条：压在面板左边缘，比看得见的那条线宽，方便抓；悬停和拖动时显示一条细线 */
+.flow-side-resizer { position: absolute; top: 0; bottom: 0; left: -5px; z-index: 3; width: 10px; cursor: col-resize; touch-action: none; }
+.flow-side-resizer::after { content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; background: transparent; transition: background .15s; }
+.flow-side-resizer:hover::after, .flow-side-resizer.is-active::after, .flow-side-resizer:focus-visible::after { background: #6265dc; }
+.flow-side-resizer:focus-visible { outline: none; }
 @media (max-width: 760px) {
   .recipe-flow-toolbar--card { top: 10px; right: 10px; }
   .flow-header { padding: 12px; }
   .flow-header h2 { font-size: 17px; }
   .flow-workspace { position: relative; }
-  .flow-side-panel { position: absolute; inset: 0 0 0 auto; z-index: 2; width: min(390px, 100%); box-shadow: -12px 0 40px #22224210; }
+  .flow-side { position: absolute; inset: 0 0 0 auto; z-index: 2; width: min(390px, 100%); min-width: 0; max-width: 100%; box-shadow: -12px 0 40px #22224210; }
+  .flow-side-resizer { display: none; }
   .flow-tools { left: 12px; bottom: 12px; }
   .flow-run-status { top: 12px; right: 12px; bottom: auto; max-width: calc(100% - 24px); }
   .flow-layer--detail { padding: 12px; }

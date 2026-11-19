@@ -20,7 +20,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 from sheetmate.engine.formulas import FormulaLibrary
-from sheetmate.engine.scripts.store import resolve_script_code, script_params
+from sheetmate.engine.scripts.store import MAX_TITLE_LENGTH, close_brackets, resolve_script_code, script_params
 from sheetmate.engine.tables.sql import sql_table_refs
 
 
@@ -32,6 +32,7 @@ def _now() -> str:
 REMOVED_OUTPUT_REFS = "removed_output_refs"
 MAX_RECIPE_NAME = 30  # 流程名最多 30 个字：AI 起的名字常常写成一整句话，列表和标题里放不下
 MAX_STEP_NAME = 30  # 节点（步骤）名同样最多 30 个字；详细做法写在说明里，不放进名字
+MAX_SCRIPT_STEP_NAME = MAX_TITLE_LENGTH  # Python 脚本步骤的名字就是脚本标题，最多 15 个字
 
 
 def new_recipe_id() -> str:
@@ -103,13 +104,19 @@ class RecipeStep(BaseModel):
                 code = params.get("code")
                 # 旧流程和模型新生成的代码只物化一次；无效代码仍交给 check_recipe 汇总错误。
                 if isinstance(code, str) and code.strip() and len(code.encode("utf-8")) <= 100_000:
-                    value["params"] = script_params(params, title=str(value.get("name") or "Python 脚本")[:20])
+                    value["params"] = script_params(params, title=str(value.get("name") or "Python 脚本"))
         return value
 
     @field_validator("name")
     @classmethod
     def _short_name(cls, value: str) -> str:
         return shorten_step_name(value)
+
+    @model_validator(mode="after")
+    def _short_script_name(self) -> "RecipeStep":
+        if self.kind == "python":
+            self.name = shorten_step_name(self.name, MAX_SCRIPT_STEP_NAME)
+        return self
 
     @field_validator("output")
     @classmethod
@@ -177,6 +184,7 @@ def shorten_step_name(name: str, limit: int = MAX_STEP_NAME) -> str:
         window = text[:limit + 1]
         cut = max(window.rfind(mark) for mark in _PHRASE_BREAKS)
         text = window[:cut] if cut >= limit // 2 else text[:limit]
+        text = close_brackets(text)
     return text.rstrip(" " + _PHRASE_BREAKS + "-—_") or "未命名步骤"
 
 
@@ -225,10 +233,11 @@ class Recipe(BaseModel):
     def to_dict(self) -> dict[str, Any]:
         # model_copy(update=...) 和断点重跑允许直接改参数，保存前同样转换为不可变脚本引用。
         for step in self.steps:
-            step.name = shorten_step_name(step.name)  # 保存前统一收短：改节点名等直接赋值的路径不经过校验
+            # 保存前统一收短：改节点名等直接赋值的路径不经过校验（Python 步骤的名字最多 15 个字，其他最多 30 个字）
+            step.name = shorten_step_name(step.name, MAX_SCRIPT_STEP_NAME if step.kind == "python" else MAX_STEP_NAME)
             if step.kind == "python":
                 try:
-                    step.params = script_params(step.params, title=step.name[:20])
+                    step.params = script_params(step.params, title=step.name)
                 except (OSError, ValueError):
                     if "code" not in step.params:
                         # 只引用脚本文件、文件已经不在了：没有可转换的内容，保留这条引用，
@@ -236,7 +245,7 @@ class Recipe(BaseModel):
                         continue
                     # 带着完整代码、只是旧的脚本 ID 失效了：丢掉失效的 ID，按这份代码重新保存。
                     step.params = script_params({k: v for k, v in step.params.items() if k != "script_id"},
-                                                title=step.name[:20])
+                                                title=step.name)
         return self.model_dump(mode="json")
 
     def flow(self) -> dict[str, Any]:

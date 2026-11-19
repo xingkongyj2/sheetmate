@@ -656,6 +656,8 @@ export interface PrivacyColumnState {
   kind_label: string | null
   source: 'rules' | 'model' | 'both' | 'manual' | null
   reason: string | null
+  /** 文件里真的换成令牌的格子数（原文件没法原地改的格式是 0） */
+  tokens?: number
 }
 
 export interface PrivacyColumns {

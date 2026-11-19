@@ -8,7 +8,7 @@ import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
 import { formulaArt, percent, type StepState } from '@/composables/chatModel'
 import { flowInputFiles, flowOutputFiles } from '@/composables/recipeFlow'
 import type { FlowFileNode } from '@/composables/recipeFlowInteraction'
-import { recipeToolKind, recipeToolLabel } from '@/composables/recipeTools'
+import { recipeStepTitle, recipeToolKind, recipeToolLabel } from '@/composables/recipeTools'
 
 const props = withDefaults(
   defineProps<{
@@ -166,7 +166,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
             <FunObject :kind="art(step)" :size="compact ? 34 : 22" />
             <span v-if="!compact" class="tag ml-auto" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">{{ recipeToolLabel(step) }}</span>
           </span>
-          <span class="recipe-flow-step-name mt-2 block text-[13.5px] font-semibold leading-snug">{{ step.name }}</span>
+          <span class="recipe-flow-step-name mt-2 block text-[13.5px] font-semibold leading-snug" :title="step.name">{{ recipeStepTitle(step) }}</span>
           <span v-if="!compact" class="mt-1 line-clamp-2 text-xs leading-relaxed text-mute">{{ step.description }}</span>
           <span v-if="!compact && state(step.id)" class="mt-auto flex w-full items-center gap-1.5 pt-2.5 text-[11px] text-faint">
             <component :is="stateIcon(step.id)" v-if="stateIcon(step.id)" class="recipe-flow-status size-3.5 shrink-0" :class="[`is-${stepTone(step.id)}`, { 'flow-spinner': state(step.id)?.status === 'running' }]" aria-hidden="true" />
@@ -245,7 +245,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
           @click="emit('select', step.id)"
         >
           <span class="flex w-full min-w-0 items-center gap-1.5">
-            <span class="min-w-0 break-words text-[13px] font-medium">{{ step.name }}</span>
+            <span class="min-w-0 break-words text-[13px] font-medium" :title="step.name">{{ recipeStepTitle(step) }}</span>
             <span class="tag ml-auto shrink-0" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">{{ recipeToolLabel(step) }}</span>
           </span>
           <span class="mt-1 line-clamp-2 text-xs text-mute">{{ step.description }}</span>

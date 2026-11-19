@@ -10,7 +10,8 @@ import { privacyStatusText } from '@/composables/privacyPresentation'
 
 import PrivacyColumnsDialog from './PrivacyColumnsDialog.vue'
 
-const props = defineProps<{ status?: PrivacyFileStatus | null; file: { file_id: string; filename: string }; conversationId?: string }>()
+const props = defineProps<{ status?: PrivacyFileStatus | null; file: { file_id: string; filename: string }; conversationId?: string; elevated?: boolean }>()
+const emit = defineEmits<{ changed: [] }>()
 const open = ref(false)
 const live = ref<PrivacyFileStatus | null>(null)       // 在弹窗里改过之后拉到的最新状态（列表里的状态是缓存的）
 const shown = computed(() => live.value ?? props.status ?? null)
@@ -26,6 +27,7 @@ async function refresh() {
 async function close() {
   open.value = false
   await refresh()
+  emit('changed')   // 外面显示着脱敏明细的（比如流程图里的文件详情）据此重新取
 }
 </script>
 
@@ -39,5 +41,5 @@ async function close() {
     <ShieldCheck v-else-if="shown.state === 'ready'" class="size-4" :class="shown.columns > 0 ? 'text-[#318b76]' : 'text-faint'" aria-hidden="true" />
     <Shield v-else class="size-4 text-faint/60" stroke-dasharray="2.5 2.5" aria-hidden="true" />
   </button>
-  <PrivacyColumnsDialog v-if="open" :file-id="file.file_id" :filename="file.filename" :conversation-id="conversationId" @close="close" @changed="refresh" />
+  <PrivacyColumnsDialog v-if="open" :file-id="file.file_id" :filename="file.filename" :conversation-id="conversationId" :elevated="elevated" @close="close" @changed="refresh" />
 </template>

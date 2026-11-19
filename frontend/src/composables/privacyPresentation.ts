@@ -60,6 +60,14 @@ export function privacyStatusText(status: PrivacyFileStatus): string {
   return '已检查：没有发现联系方式或地址'
 }
 
+/** 文件详情里脱敏的一句话汇总（用词和聊天页一致；完整说明在 privacyStatusText，放在提示里） */
+export function privacyStatusShort(status: PrivacyFileStatus): string {
+  if (status.state === 'running') return '识别中…'
+  if (status.state === 'failed') return '识别未完成'
+  if (status.state === 'none') return '未识别'
+  return status.columns > 0 ? `已脱敏 ${status.columns} 列` : '无需替换'
+}
+
 /** privacy_report 事件 → 卡片数据；事件不合法返回 null */
 export function readPrivacyReport(event: AgentEvent): PrivacyReport | null {
   if (event.type !== 'privacy_report') return null

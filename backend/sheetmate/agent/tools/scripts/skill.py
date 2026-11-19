@@ -9,14 +9,14 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
-from sheetmate.engine.scripts.store import normalize_script_title
+from sheetmate.engine.scripts.store import MAX_TITLE_LENGTH, normalize_script_title
 
 
 class ScriptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     code: StrictStr = Field(min_length=1, max_length=64_000, description="Python 完整脚本。按业务通用规则计算，从实际输入动态取得数据与范围；除用户明确指定的常量外，不写死本次月份、行数、名单或计算结果。可用 pd、np、openpyxl、tables、files、OUTPUT_DIR、result_tables、result、check(condition,message)、deliver_files 和 display_tables；后两者默认空列表，只显式列入需要用户查看的最终文件/结果表。")
-    title: StrictStr = Field(default="", max_length=20, description="脚本文件的简短标题，应概括这次处理的目标；超过 20 个字符会自动截断。")
+    title: StrictStr = Field(default="", max_length=MAX_TITLE_LENGTH, description=f"脚本的简短标题，概括这次处理的目标，最多 {MAX_TITLE_LENGTH} 个字（超过会自动收短），例如「按发货地汇总金额」。")
     script_id: StrictStr | None = Field(default=None, pattern=r"^scr_[0-9a-f]{32}$", description="已有脚本文件的唯一 ID；通常由系统自动填写。修改代码后会保存为新的脚本文件。")
     description: StrictStr = Field(min_length=1, max_length=2000, description="本次脚本要完成的用户目标及关键校验。")
     input_tables: list[StrictStr] | None = Field(default=None, max_length=20, description="可选：要传入 tables 的工作区表名；指定 input_files 时默认不传表，否则默认当前可见非期望结果表。建议显式选择实际依赖，[] 表示不传表。")

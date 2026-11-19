@@ -28,7 +28,7 @@ EDIT_ITEM_SCHEMA = _obj({
     "file_pattern": {**_STR, "description": "rename_input_file：新的文件名匹配规则，例如 订单表*"},
     "source_file": {**_STR, "description": "rename_input_file：新的来源文件名（仅记录，运行时按 file_pattern 匹配）"},
     "step_id": {"type": "integer", "minimum": 1, "description": "update_step / rename_script / edit_script：真实步骤编号"},
-    "title": {**_STR, "description": "rename_script：新脚本名（最多 20 字）"},
+    "title": {**_STR, "description": "rename_script：新脚本名（最多 15 字）"},
     "enabled": {"type": "boolean", "description": "update_step：启用或停用步骤"},
     "explanation": {"type": "string", "description": "update_step：推断依据"},
     "params": {"type": "object", "description": "update_step：要合并进步骤参数的键值，null 表示删除该参数；脚本内容不能放这里"},

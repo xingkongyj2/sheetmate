@@ -1,9 +1,33 @@
 import type { ScriptReference } from '../api/types.ts'
 
-/** Titles count Unicode characters, including a whole supplementary character. */
+/** 脚本标题（以及 Python 步骤的名字）最多 15 个字，和后端 MAX_TITLE_LENGTH 一致 */
+export const SCRIPT_TITLE_LIMIT = 15
+const TITLE_BREAKS = '，,、；;。：:（('
+const TITLE_BRACKETS: Record<string, string> = { '（': '）', '(': ')', '「': '」', '《': '》', '【': '】', '[': ']' }
+
+/** 截断后括号 / 引号没写完时，退回到第一个没配对的开括号前面 */
+function closeBrackets(chars: string[]): string[] {
+  const stack: { index: number; close: string }[] = []
+  chars.forEach((char, index) => {
+    if (TITLE_BRACKETS[char]) stack.push({ index, close: TITLE_BRACKETS[char] })
+    else if (stack.length && char === stack[stack.length - 1]!.close) stack.pop()
+  })
+  return stack.length ? chars.slice(0, stack[0]!.index) : chars
+}
+
+/** 收短到 limit 个字以内：优先在最后一个标点处断开（不留半句话），没有合适的标点再按字数截断；按 Unicode 字符计数 */
+export function shortenTitle(value: unknown, limit = SCRIPT_TITLE_LIMIT, fallback = ''): string {
+  const text = (typeof value === 'string' ? value : '').split(/\s+/).filter(Boolean).join(' ')
+  const chars = Array.from(text)
+  if (chars.length <= limit) return text || fallback
+  const window = chars.slice(0, limit + 1)
+  const cut = Math.max(...Array.from(TITLE_BREAKS, (mark) => window.lastIndexOf(mark)))
+  const kept = closeBrackets(cut >= Math.floor(limit / 2) ? window.slice(0, cut) : chars.slice(0, limit)).join('').replace(/[\s，,、；;。：:（(\-—_]+$/u, '')
+  return kept || chars.slice(0, limit).join('')
+}
+
 export function scriptTitle(value: unknown): string {
-  const title = typeof value === 'string' ? value.trim() : ''
-  return Array.from(title || 'Python 脚本').slice(0, 20).join('')
+  return shortenTitle(value, SCRIPT_TITLE_LIMIT, 'Python 脚本')
 }
 
 /** Find file references in parameters, reports and JSON tool results without loading source. */

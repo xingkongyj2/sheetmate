@@ -3,8 +3,8 @@
 import { computed } from 'vue'
 
 const props = withDefaults(
-  defineProps<{ columns: string[]; rows: unknown[][]; maxHeight?: string; offset?: number; dense?: boolean }>(),
-  { maxHeight: '320px', offset: 0, dense: false },
+  defineProps<{ columns: string[]; rows: unknown[][]; maxHeight?: string; offset?: number; dense?: boolean; flat?: boolean }>(),
+  { maxHeight: '320px', offset: 0, dense: false, flat: false },
 )
 
 const numericCols = computed(() =>
@@ -19,7 +19,7 @@ function show(value: unknown): string {
 </script>
 
 <template>
-  <div class="overflow-auto rounded-xl border border-line bg-white" :style="{ maxHeight }">
+  <div class="overflow-auto bg-white" :class="{ 'rounded-xl border border-line': !flat }" :style="{ maxHeight }">
     <table class="w-full border-separate border-spacing-0 text-left" :class="dense ? 'text-[12px]' : 'text-[13px]'">
       <thead>
         <tr>
