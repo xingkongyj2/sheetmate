@@ -80,7 +80,7 @@ watch(() => route.query.flow, (flow) => {
 const refreshingUsage = ref(false)
 const selectedKey = ref<string | null>(null)
 const viewing = ref<TableBrief | null>(null)
-const openFilePreview = useFilePreview()
+const openFilePreview = useFilePreview(() => props.id)
 const saveOpen = ref(false)
 const editingTitle = ref(false)
 const titleDraft = ref('')

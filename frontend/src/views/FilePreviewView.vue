@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /** 文件预览页：在新的标签页里整页展示一个文件（表格或图片）。刷新、复制地址都停在这个文件。 */
 import { CircleAlert, LoaderCircle } from '@lucide/vue'
-import { defineAsyncComponent, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { fileApi } from '@/api'
@@ -14,6 +14,10 @@ const router = useRouter()
 const file = ref<FileInfo>()
 const localFile = ref<File>()
 const error = ref('')
+const conversationId = computed(() => {
+  const fromQuery = typeof route.query.conversation === 'string' ? route.query.conversation.trim() : ''
+  return fromQuery || file.value?.conversation_id || undefined
+})
 
 async function load() {
   error.value = ''
@@ -45,7 +49,7 @@ onMounted(load)
 </script>
 
 <template>
-  <WorkbookPreview v-if="file || localFile" :file="file" :local-file="localFile" page @close="close" />
+  <WorkbookPreview v-if="file || localFile" :file="file" :local-file="localFile" :conversation-id="conversationId" page @close="close" />
   <div v-else-if="error" class="flex h-dvh flex-col items-center justify-center gap-4 px-6 text-center">
     <CircleAlert class="size-8 text-mute" />
     <p role="alert" class="max-w-lg text-sm leading-6 text-mute">{{ error }}</p>
