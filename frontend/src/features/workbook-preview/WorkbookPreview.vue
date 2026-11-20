@@ -13,6 +13,7 @@ import { isImageFile } from '@/composables/attachmentFiles'
 import type { SheetMeta } from './excel'
 import type { WorkbookViewer } from './viewer'
 import { openInWorker, type PreviewSession } from './worker-client'
+import ZoomControl from './ZoomControl.vue'
 
 // page：作为独立页面整页展示（新标签页里的预览页）；否则是盖在当前页面上的弹层
 const props = defineProps<{ file?: FileInfo; localFile?: File; conversationId?: string; page?: boolean }>()
@@ -66,7 +67,9 @@ const busyText = computed(() => dataMode.value ? '正在读取当前页数据…
 const hasNextPage = computed(() => legacyPage.value?.has_more ?? (legacyOffset.value + 100 < (legacyPage.value?.total ?? 0)))
 let controller: AbortController | null = null
 let viewer: WorkbookViewer | null = null
+let zoomUnsub: (() => void) | null = null
 let session: PreviewSession | null = null
+const zoom = ref(1)
 let sheetRequest = 0
 let baseWarnings: string[] = []
 const sheetWarnings = new Map<number, string[]>()
@@ -120,8 +123,11 @@ async function load(preferData = false) {
   controller?.abort()
   controller = new AbortController()
   const signal = controller.signal
+  zoomUnsub?.()
+  zoomUnsub = null
   viewer?.dispose()
   viewer = null
+  zoom.value = 1
   session?.dispose()
   session = null
   sheets.value = []
@@ -182,6 +188,9 @@ async function load(preferData = false) {
     const { createViewer } = await viewerModule
     if (signal.aborted || id !== loadId || !host.value) return
     viewer = createViewer(host.value)
+    zoomUnsub = viewer.onZoom((ratio) => {
+      zoom.value = ratio
+    })
     // 第一张表读不出来（比如超出完整样式的范围）就整体退到分页预览；其余表单独提示，不影响别的表
     await openSheet(opened.active, true)
     if (signal.aborted || id !== loadId) return
@@ -189,6 +198,8 @@ async function load(preferData = false) {
   } catch (err) {
     if (signal.aborted || id !== loadId) return
     if (canFallBack && supportsDataPreview.value) {
+      zoomUnsub?.()
+      zoomUnsub = null
       viewer?.dispose()
       viewer = null
       host.value?.replaceChildren()
@@ -215,6 +226,7 @@ async function openSheet(index: number, first = false) {
     if (request !== sheetRequest || id !== loadId) return
     await shown.show(parsed.workbook)
     if (request !== sheetRequest || id !== loadId) return
+    zoom.value = shown.getZoom()
     sheetWarnings.set(index, parsed.warnings)
     warnings.value = [...new Set([...baseWarnings, ...[...sheetWarnings.values()].flat()])]
     const color = Object.values(parsed.workbook.sheets)[0]?.tabColor
@@ -225,6 +237,27 @@ async function openSheet(index: number, first = false) {
     sheetError.value = errorText(err)
   } finally {
     if (request === sheetRequest) sheetBusy.value = false
+  }
+}
+
+function applyZoom(ratio: number) {
+  zoom.value = ratio
+  viewer?.setZoom(ratio)
+}
+
+function selectTab(index: number, event?: Event) {
+  ;(event?.currentTarget as HTMLElement | null)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  if (index !== selectedSheet.value || sheetError.value) {
+    void openSheet(index)
+  }
+}
+
+function onTabsWheel(event: WheelEvent) {
+  const el = event.currentTarget as HTMLElement | null
+  if (!el || el.scrollWidth <= el.clientWidth) return
+  if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+    event.preventDefault()
+    el.scrollLeft += event.deltaY
   }
 }
 
@@ -274,6 +307,8 @@ onMounted(() => {
 onBeforeUnmount(() => {
   ++loadId
   controller?.abort()
+  zoomUnsub?.()
+  zoomUnsub = null
   session?.dispose()
   viewer?.dispose()
   if (localImageUrl) URL.revokeObjectURL(localImageUrl)
@@ -335,12 +370,17 @@ onBeforeUnmount(() => {
               <div class="flex gap-2"><button type="button" class="btn-line" @click="openSheet(selectedSheet)"><RotateCw class="size-4" />重试</button><button v-if="supportsDataPreview" type="button" class="btn-line" @click="load(true)">改用分页预览</button></div>
             </div>
           </div>
-          <nav v-if="tabs.length" class="sheet-tabs flex shrink-0 items-stretch gap-0.5 overflow-x-auto border-t border-line bg-paper px-2" role="tablist" aria-label="工作表">
-            <button v-for="(sheet, position) in tabs" :key="sheet.index" type="button" role="tab" :aria-selected="selectedSheet === sheet.index" :tabindex="selectedSheet === sheet.index ? 0 : -1" :title="sheet.name"
-              class="sheet-tab" :class="{ 'is-on': selectedSheet === sheet.index }" @click="openSheet(sheet.index)" @keydown="onTabKey($event, position)">
-              <span class="sheet-dot" :style="tabColors[sheet.index] ? { background: tabColors[sheet.index] } : undefined" aria-hidden="true" /><span class="truncate">{{ sheet.name }}</span>
-            </button>
-          </nav>
+          <footer v-if="tabs.length" class="relative z-30 flex h-10 shrink-0 items-center border-t border-line bg-[#fafaf9] px-2.5">
+            <nav class="sheet-tabs flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-1 pr-2" role="tablist" aria-label="工作表" @wheel="onTabsWheel">
+              <button v-for="(sheet, position) in tabs" :key="sheet.index" type="button" role="tab" :aria-selected="selectedSheet === sheet.index" :tabindex="selectedSheet === sheet.index ? 0 : -1" :title="sheet.name"
+                class="sheet-tab" :class="{ 'is-on': selectedSheet === sheet.index }" @click="selectTab(sheet.index, $event)" @keydown="onTabKey($event, position)">
+                <span class="sheet-dot" :style="tabColors[sheet.index] ? { background: tabColors[sheet.index] } : undefined" aria-hidden="true" /><span class="truncate">{{ sheet.name }}</span>
+              </button>
+            </nav>
+            <div class="flex shrink-0 items-center border-l border-line/80 pl-2.5">
+              <ZoomControl :model-value="zoom" :disabled="phase !== 'ready' || sheetBusy || !!sheetError" @update:model-value="applyZoom" />
+            </div>
+          </footer>
         </div>
       </section>
     </div>
@@ -349,10 +389,34 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .workbook-preview :deep(.univer-workbench) { height: 100%; }
-.sheet-tab { display: inline-flex; max-width: 14rem; flex: none; align-items: center; gap: 6px; border-radius: 0 0 8px 8px; padding: 7px 14px; color: #6b6b7a; font-size: 12px; white-space: nowrap; transition: background-color .15s, color .15s; }
-.sheet-tab:hover { color: #14141c; }
-.sheet-tab.is-on { background: #fff; color: #14141c; font-weight: 600; box-shadow: inset 0 -2px 0 #14141c; }
-.sheet-tab:focus-visible { outline: 2px solid #14141c; outline-offset: -2px; }
-.sheet-dot { display: none; width: 8px; height: 8px; flex: none; border-radius: 9999px; }
+.sheet-tabs {
+  scrollbar-width: none;
+}
+.sheet-tabs::-webkit-scrollbar {
+  display: none;
+}
+.sheet-tab {
+  display: inline-flex;
+  height: 28px;
+  max-width: 16rem;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 0 11px;
+  color: #6b6863;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: background-color .15s, color .15s, box-shadow .15s;
+}
+.sheet-tab:hover { background: rgb(11 11 12 / 0.045); color: #14141c; }
+.sheet-tab.is-on {
+  background: #fff;
+  color: #111111;
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 0 0 1px rgb(11 11 12 / 0.08);
+}
+.sheet-tab:focus-visible { outline: 2px solid rgb(11 11 12 / 0.35); outline-offset: 1px; }
+.sheet-dot { display: none; width: 6px; height: 6px; flex: none; border-radius: 9999px; }
 .sheet-dot[style] { display: inline-block; }
 </style>

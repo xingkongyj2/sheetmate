@@ -20,15 +20,18 @@ export interface CompareViewer {
   show(snapshot: IWorkbookData, options?: { preserveScroll?: boolean }): Promise<void>
   getScrollState(): ScrollSyncState | null
   setScrollState(state: ScrollSyncState): void
+  setZoom(ratio: number): void
+  getZoom(): number
   focusCell(row: number, col: number, scroll?: boolean): void
   onScroll(handler: (state: ScrollSyncState) => void): () => void
   onSelection(handler: (pos: CellPos) => void): () => void
+  onZoom(handler: (ratio: number) => void): () => void
   dispose(): void
 }
 
 /**
  * 专用于双栏比对的只读 Univer 查看器。
- * 隐藏重复的编辑工具栏、公式栏和原生 Sheet 标签栏，暴露滚动与选区同步钩子。
+ * 隐藏编辑工具栏、公式栏和原生底栏，由比对页在同一行统一提供 Sheet 标签与双栏同步缩放。
  */
 export function createCompareViewer(container: HTMLElement): CompareViewer {
   const { univer, univerAPI } = createUniver({
@@ -41,19 +44,23 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
       contextMenu: false,
       disableAutoFocus: true,
       formulaBar: false,
-      footer: { sheetBar: false, statisticBar: false, menus: false, zoomSlider: true },
+      footer: false,
     })],
   })
 
   let currentUnitId: string | undefined
   let currentSheetId: string | undefined
+  let unitSeq = 0
   let suppressScroll = false
   let suppressSelection = false
+  let suppressZoom = false
   let scrollReleaseTimer: ReturnType<typeof setTimeout> | undefined
   let selectionReleaseTimer: ReturnType<typeof setTimeout> | undefined
+  let zoomReleaseTimer: ReturnType<typeof setTimeout> | undefined
 
   const scrollListeners = new Set<(state: ScrollSyncState) => void>()
   const selectionListeners = new Set<(pos: CellPos) => void>()
+  const zoomListeners = new Set<(ratio: number) => void>()
 
   function readScrollState(): ScrollSyncState | null {
     const workbook = univerAPI.getActiveWorkbook()
@@ -83,6 +90,31 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
     const pos: CellPos = { row: first.startRow, col: first.startColumn }
     for (const fn of selectionListeners) fn(pos)
   })
+
+  const zoomSub = univerAPI.addEvent(univerAPI.Event.SheetZoomChanged, (params) => {
+    if (suppressZoom || !zoomListeners.size) return
+    const ratio = params.zoom
+    if (typeof ratio === 'number' && Number.isFinite(ratio)) {
+      for (const fn of zoomListeners) fn(ratio)
+    }
+  })
+
+  function setZoom(ratio: number) {
+    const sheet = univerAPI.getActiveWorkbook()?.getActiveSheet()
+    if (!sheet) return
+    const clamped = Math.min(2, Math.max(0.5, ratio))
+    suppressZoom = true
+    clearTimeout(zoomReleaseTimer)
+    try {
+      sheet.zoom(clamped)
+    } finally {
+      zoomReleaseTimer = setTimeout(() => { suppressZoom = false }, 50)
+    }
+  }
+
+  function getZoom(): number {
+    return univerAPI.getActiveWorkbook()?.getActiveSheet()?.getZoom() ?? 1
+  }
 
   function setScrollState(state: ScrollSyncState) {
     if (!currentUnitId || !currentSheetId) return
@@ -138,7 +170,12 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
       clearTimeout(scrollReleaseTimer)
       clearTimeout(selectionReleaseTimer)
 
-      const workbook = univerAPI.createWorkbook(snapshot)
+      // 始终分配新的 unit id：Worker 缓存复用的同一快照或重试加载不会与尚未销毁的旧 unit 冲突
+      const nextSnapshot: IWorkbookData = {
+        ...snapshot,
+        id: `${snapshot.id || 'cmp'}-${++unitSeq}`,
+      }
+      const workbook = univerAPI.createWorkbook(nextSnapshot)
       const previous = currentUnitId
       currentUnitId = workbook.getId()
       currentSheetId = workbook.getActiveSheet()?.getSheetId()
@@ -157,6 +194,8 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
     },
     getScrollState: readScrollState,
     setScrollState,
+    setZoom,
+    getZoom,
     focusCell,
     onScroll(handler) {
       scrollListeners.add(handler)
@@ -166,13 +205,20 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
       selectionListeners.add(handler)
       return () => selectionListeners.delete(handler)
     },
+    onZoom(handler) {
+      zoomListeners.add(handler)
+      return () => zoomListeners.delete(handler)
+    },
     dispose() {
       clearTimeout(scrollReleaseTimer)
       clearTimeout(selectionReleaseTimer)
+      clearTimeout(zoomReleaseTimer)
       scrollListeners.clear()
       selectionListeners.clear()
+      zoomListeners.clear()
       scrollSub.dispose()
       selectionSub.dispose()
+      zoomSub.dispose()
       univer.dispose()
     },
   }

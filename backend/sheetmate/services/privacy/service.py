@@ -553,14 +553,19 @@ def _remember(file_id: str, profile: dict[str, Any], sheets: list[dict[str, Any]
 
 
 def needs_scan(kind: str, profile: dict[str, Any] | None) -> bool:
-    """哪些文件要在对话开头脱敏：上传的原件、样例，和之前交付过的结果文件（再拿来分析时它们是输入，里面是还原后的真实内容）。
+    """哪些文件需要脱敏：上传的原件、期望样例，以及正式交付的输出文件。
 
-    处理过程中产生的中间文件、还没交付的候选结果不用：它们是从已脱敏的数据算出来的，发给 AI 时仍逐条检查；
-    本轮刚生成的结果要到被再次分析时才需要脱敏。"""
+    处理过程中产生的中间数据文件（intermediate / step_id）、未交付候选结果（candidate）
+    与已被替换的旧结果（superseded）一律不脱敏，也不出现在脱敏面板中。"""
     if kind in {"input", "expected"}:
         return True
     profile = profile or {}
-    return kind == "output" and not profile.get("intermediate") and profile.get("delivery_status") in {None, "final"}
+    return (
+        kind == "output"
+        and not profile.get("intermediate")
+        and profile.get("step_id") is None
+        and profile.get("delivery_status") in {None, "final"}
+    )
 
 
 def _is_ready(item: dict[str, Any], model: "_Model") -> bool:
@@ -589,7 +594,7 @@ async def prepare_files(*, conversation_id: str, files: list[dict[str, Any]], em
     with session_scope() as db:
         snapshot = [{"id": record.id, "filename": record.filename, "profile": record.profile or {}, "path": record.stored_path}
                     for record in db.scalars(select(FileRecord).where(FileRecord.id.in_(ids)))
-                    if (record.profile or {}).get("sheets") and (not sources_only or needs_scan(record.kind, record.profile))]
+                    if (record.profile or {}).get("sheets") and needs_scan(record.kind, record.profile)]
     if not snapshot:
         return None
 
@@ -669,8 +674,8 @@ async def identify_uploaded(file_id: str, *, source: str = "upload") -> None:
             return                                        # 脱敏已关闭：上传时不识别，之后重新打开，对话里用到时会自动识别
         with session_scope() as db:
             record = db.get(FileRecord, file_id)
-            if record is None or not (record.profile or {}).get("sheets"):
-                return                                    # 不是表格（或已经被删了），没有可识别的内容
+            if record is None or not (record.profile or {}).get("sheets") or not needs_scan(record.kind, record.profile):
+                return                                    # 非表格、已删除或中间数据文件，不做脱敏识别
             item = {"id": record.id, "filename": record.filename, "profile": record.profile, "path": record.stored_path}
         try:
             model = await _open_model()
@@ -698,15 +703,17 @@ _output_tasks: set[asyncio.Task] = set()      # 持有后台任务的引用，�
 
 
 def identify_pending_outputs(conversation_id: str) -> int:
-    """这个会话里已经交付、还没识别过的结果文件：后台识别一次（和上传的文件一样），脱敏面板才看得到、查看时才知道哪些列要显示成令牌。
-    必须在事件循环里调用；识别失败会记在文件上，不会反复重试。返回新开始识别的文件数。"""
+    """这个会话可见范围内已正式交付、还没识别过的输出文件：后台识别一次（和上传的文件一样），
+    脱敏面板立即在「输出文件」下展示。中间过程文件不识别。返回新开始识别的文件数。"""
     if not privacy.enabled:
         return 0
     start()
     with session_scope() as db:
+        conversation = db.get(Conversation, conversation_id)
+        records = file_service.list_files(db, customer_id=conversation.customer_id if conversation else None,
+                                          conversation_id=conversation_id, kinds=("output",))
         known = set(db.scalars(select(PrivacyFile.file_id)))
-        ids = [record.id for record in db.scalars(select(FileRecord).where(
-                   FileRecord.conversation_id == conversation_id, FileRecord.kind == "output"))
+        ids = [record.id for record in records
                if (record.profile or {}).get("sheets") and needs_scan(record.kind, record.profile)
                and record.id not in known and record.id not in _running and record.id not in _output_scheduled]
     for file_id in ids:
@@ -737,7 +744,9 @@ def file_statuses(user: User, file_ids: list[str]) -> dict[str, dict[str, Any]]:
         rows = {row.file_id: row for row in db.scalars(select(PrivacyFile).where(PrivacyFile.file_id.in_(file_ids)))}
         for file_id in dict.fromkeys(file_ids):
             record = records.get(file_id)
-            if record is None or not (record.profile or {}).get("sheets") or not file_service.can_access_file(db, user, record):
+            if (record is None or not (record.profile or {}).get("sheets")
+                    or not needs_scan(record.kind, record.profile)
+                    or not file_service.can_access_file(db, user, record)):
                 continue
             row = rows.get(file_id)
             state = "running" if file_id in _running else "none" if row is None else "ready" if row.status == "ready" else "failed"
@@ -852,7 +861,7 @@ async def protecting(file_ids: Iterable[str] = (), *, workspace: Any = None, con
         if ids:
             try:
                 await prepare_files(conversation_id=conversation_id or "", files=[{"file_id": file_id} for file_id in ids],
-                                    emit=_silent, workspace=workspace)
+                                    emit=_silent, workspace=workspace, sources_only=True)
             except PrivacyBlocked as exc:
                 raise PrivacyPrepareError(str(exc)) from exc
         scope.ready = True
@@ -935,11 +944,20 @@ event.listen(FileRecord, "after_delete", _file_deleted)   # 只要走 ORM 删除
 
 
 def _prune_orphans() -> None:
-    """删掉已经没有对应文件的识别记录，再用剩下的文件重新生成全局的敏感列名。
-    列名是全局共用的（任何文件里的同名列都会按敏感处理），不清理的话，删掉的文件留下的列名会一直影响其他客户的同名列。"""
+    """删掉已删除文件或中间数据文件残留的识别记录，再用剩下的正式文件重新生成全局敏感列名。
+    列名是全局共用的（任何文件里的同名列都会按敏感处理），不清理的话，删掉的文件或中间文件留下的列名会一直影响其他客户。"""
     with session_scope() as db:
         alive = select(FileRecord.id)
         db.execute(delete(PrivacyFile).where(PrivacyFile.file_id.not_in(alive)))
+        stale_ids = [
+            record.id
+            for record in db.scalars(
+                select(FileRecord).where(FileRecord.id.in_(select(PrivacyFile.file_id)))
+            )
+            if not needs_scan(record.kind, record.profile)
+        ]
+        if stale_ids:
+            db.execute(delete(PrivacyFile).where(PrivacyFile.file_id.in_(stale_ids)))
     _reload_registry()
 
 
@@ -949,27 +967,29 @@ def _prune_orphans() -> None:
 
 
 def overview(user: User, conversation_id: str) -> dict[str, Any]:
-    """详情面板「脱敏」tab：这个会话涉及的文件的脱敏情况 + 最近的处理记录。"""
+    """详情面板「脱敏」tab：仅展示当前会话的正式输入文件与正式输出文件的脱敏情况（不含中间数据文件）。"""
     start()
     configured = privacy_llm_configured()
     with session_scope() as db:
         conversation = db.get(Conversation, conversation_id)
-        records = file_service.list_files(db, customer_id=conversation.customer_id if conversation else None,
-                                          conversation_id=conversation_id, kinds=("input", "expected", "output"))
+        records = [
+            record for record in file_service.list_files(
+                db, customer_id=conversation.customer_id if conversation else None,
+                conversation_id=conversation_id, kinds=("input", "expected", "output"),
+            )
+            if (record.profile or {}).get("sheets") and needs_scan(record.kind, record.profile)
+        ]
         rows = {row.file_id: row for row in db.scalars(select(PrivacyFile).where(PrivacyFile.file_id.in_([r.id for r in records])))}
         files = []
         for record in records:
-            if not (record.profile or {}).get("sheets"):
-                continue
             row = rows.get(record.id)
-            if row is None and record.kind == "output":
-                continue          # 还没轮到脱敏的结果文件（中间文件、本轮刚交付的）：不列出，不显示成「识别中」
             ready = row is not None and row.status == "ready"
+            running = record.id in _running or record.id in _output_scheduled
             files.append({"file_id": record.id, "filename": record.filename, "kind": record.kind, "cached": False,
                           "source": row.source if row is not None else None,
                           "sheets": choices.effective(record.id, list((row.sheets if row is not None else []) or [])),
-                          # pending 只表示「此刻正在识别」；没有识别记录、也没在识别的（比如脱敏开关关着时上传的）是 none，不显示转圈
-                          "status": "ready" if ready else "failed" if row is not None else "pending" if record.id in _running else "none",
+                          # pending 表示正在或即将识别；没有识别记录、也没在识别的（比如脱敏开关关着时上传的）是 none
+                          "status": "ready" if ready else "failed" if row is not None else "pending" if running else "none",
                           "updated_at": row.updated_at.isoformat(timespec="seconds") if row is not None else None,
                           "error": row.error if row is not None else None})
         events = [event for event in db.scalars(select(PrivacyEvent).where(PrivacyEvent.conversation_id == conversation_id)
@@ -1001,8 +1021,10 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
                 item["sheets"] = privacy_columns.masked_sheets(item["file_id"], item["sheets"])
             except Exception:
                 logger.exception("按维护页的判断整理脱敏概览失败：%s", item["file_id"])
-    # 识别完成、但没有任何列真的脱敏的文件不列出；识别中、识别失败的照常列出（要让用户知道）
-    files = [item for item in files if item["status"] in {"pending", "failed"}
+    # 正式生成的输出文件直接展示在「输出文件」标题下（含识别中/已完成/无需替换）；
+    # 输入文件仅列出有脱敏列、识别中或识别失败的。
+    files = [item for item in files if item["kind"] == "output"
+             or item["status"] in {"pending", "failed"}
              or (item["status"] == "ready" and any(sheet["columns"] for sheet in item["sheets"]))]
     if not privacy.enabled:
         files = []          # 脱敏开关关着：不分析文件，文件脱敏这一块整个不展示（模型脱敏照常）

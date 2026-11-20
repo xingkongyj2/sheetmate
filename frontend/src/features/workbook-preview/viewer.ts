@@ -7,12 +7,15 @@ import '@univerjs/preset-sheets-core/lib/index.css'
 export interface WorkbookViewer {
   /** 显示一张工作表：换掉当前显示的内容，不重新创建整个查看器 */
   show(snapshot: IWorkbookData): Promise<void>
+  setZoom(ratio: number): void
+  getZoom(): number
+  onZoom(handler: (ratio: number) => void): () => void
   dispose(): void
 }
 
 /**
  * Viewer-only preset. Permission enforcement also covers keyboard editing.
- * 一次只显示一张工作表（只含这张表的快照），所以不用 Univer 自带的工作表标签，由页面自己提供。
+ * 一次只显示一张工作表（只含这张表的快照），原生底栏已关闭，由页面在同一行统一提供 Sheet 标签与缩放控件。
  */
 export function createViewer(container: HTMLElement): WorkbookViewer {
   const { univer, univerAPI } = createUniver({
@@ -25,14 +28,47 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
       contextMenu: false,
       disableAutoFocus: true,
       formulaBar: true,
-      footer: { sheetBar: false, statisticBar: true, menus: false, zoomSlider: true },
+      footer: false,
     })],
   })
   let current: string | undefined
+  let unitSeq = 0
+  let suppressZoom = false
+  let zoomTimer: ReturnType<typeof setTimeout> | undefined
+  const zoomListeners = new Set<(ratio: number) => void>()
+
+  const zoomSub = univerAPI.addEvent(univerAPI.Event.SheetZoomChanged, (params) => {
+    if (suppressZoom || !zoomListeners.size) return
+    const ratio = params.zoom
+    if (typeof ratio === 'number' && Number.isFinite(ratio)) {
+      for (const fn of zoomListeners) fn(ratio)
+    }
+  })
+
+  function setZoom(ratio: number) {
+    const sheet = univerAPI.getActiveWorkbook()?.getActiveSheet()
+    if (!sheet) return
+    const clamped = Math.min(2, Math.max(0.5, ratio))
+    suppressZoom = true
+    clearTimeout(zoomTimer)
+    try {
+      sheet.zoom(clamped)
+    } finally {
+      zoomTimer = setTimeout(() => { suppressZoom = false }, 50)
+    }
+  }
+
+  function getZoom(): number {
+    return univerAPI.getActiveWorkbook()?.getActiveSheet()?.getZoom() ?? 1
+  }
+
   return {
     async show(snapshot) {
-      // 先建新的、再销毁旧的：任何时候界面上都有一个工作簿，不会闪一下空白
-      const workbook = univerAPI.createWorkbook(snapshot)
+      // 先建新的、再销毁旧的：分配唯一 unit id 防止缓存复用快照与未销毁的旧 unit 冲突
+      const workbook = univerAPI.createWorkbook({
+        ...snapshot,
+        id: `${snapshot.id || 'preview'}-${++unitSeq}`,
+      })
       const previous = current
       current = workbook.getId()
       try {
@@ -42,6 +78,17 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
         if (previous) univerAPI.disposeUnit(previous)
       }
     },
-    dispose: () => univer.dispose(),
+    setZoom,
+    getZoom,
+    onZoom(handler) {
+      zoomListeners.add(handler)
+      return () => zoomListeners.delete(handler)
+    },
+    dispose() {
+      clearTimeout(zoomTimer)
+      zoomListeners.clear()
+      zoomSub.dispose()
+      univer.dispose()
+    },
   }
 }

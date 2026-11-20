@@ -297,7 +297,8 @@ async def viewable_path(user: User, record: FileRecord) -> tuple[Path, str]:
     from sheetmate.services.privacy import inplace, masked_files
 
     path = Path(record.stored_path)
-    if path.suffix.lower() not in TABLE_SUFFIXES or not (record.profile or {}).get("sheets"):
+    if (path.suffix.lower() not in TABLE_SUFFIXES or not (record.profile or {}).get("sheets")
+            or not privacy_service.needs_scan(record.kind, record.profile)):
         return path, "original"
     privacy_service.start()
     enabled = sync_privacy_settings()

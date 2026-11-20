@@ -1905,8 +1905,9 @@ async def clarify(user: User, conversation_id: str, message: str, *, http_reques
         try:
             llm = get_llm()
             ctx, host = build_context(user.id, conversation_id, llm)
-            # 澄清判断要看这个会话里的文件：同样先脱敏，成功了才放行
-            files = [item["file_id"] for item in host.list_files() if item.get("file_id")]
+            # 澄清判断要看这个会话里的文件：只给正式输入和输出文件脱敏，不扫描中间过程文件
+            files = [item["file_id"] for item in host.list_files()
+                     if item.get("file_id") and privacy_service.needs_scan(item.get("kind", ""), item)]
             async with privacy_service.protecting(files, workspace=ctx.ws, conversation_id=conversation_id, user_id=user.id):
                 result = await check_clarification(llm, ctx, message)
             record_event("chat.output", "sheetmate.services.conversations.chat.clarify", result)

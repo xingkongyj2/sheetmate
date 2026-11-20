@@ -1,37 +1,35 @@
 <script setup lang="ts">
 /**
  * 极简双栏表格比对页：
- * 左侧为改前（基准），右侧输入另一个表格链接或选择本地文件载入改后（目标）。
- * 一切采用默认配置（保留原样式、智能对齐、同步滚动与选区），直接清晰展示差异。
+ * - 顶部居中展示左右两个文件名，点击可直接从当前聊天页面的输入/输出文件中切换；
+ * - 仅允许选择当前聊天页面「工作区面板 → 文件」中的输入与输出表格文件；
+ * - 默认保留原样式并高亮差异，左右双栏同步滚动与选区联动。
  */
 import {
   ArrowLeftRight,
   ArrowRight,
   Check,
+  ChevronDown,
   CircleAlert,
-  Columns2,
-  FileSpreadsheet,
-  GitCompareArrows,
-  Link2,
+  FileCheck2,
   LoaderCircle,
-  Minus,
-  Plus,
   RotateCw,
   Sheet,
-  Upload,
-  X,
 } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
-import { fileApi } from '@/api'
+import { conversationApi, fileApi } from '@/api'
 import { errorText } from '@/api/http'
+import type { FileInfo } from '@/api/types'
 import { isImageFile } from '@/composables/attachmentFiles'
+import { executionFileGroups, executionFileSize } from '@/composables/executionPresentation'
 
 import type { SheetMeta } from '../workbook-preview/excel'
+import ZoomControl from '../workbook-preview/ZoomControl.vue'
 import type { CellPos, CompareViewer, ScrollSyncState } from './compare-viewer'
 import { buildSheetPairs } from './diff'
-import type { CellDiffEntry, CompareSource, DiffOptions, SheetDiffResult, SheetDiffStats, SheetPair } from './types'
-import { isSameCompareSource, parseCompareTargetInput } from './url'
+import type { CellDiffEntry, CompareSource, DiffOptions, SheetDiffResult, SheetPair } from './types'
+import { isSameCompareSource } from './url'
 import { createCompareWorker, type CompareSide, type CompareWorkerClient } from './worker-client'
 
 const DEFAULT_DIFF_OPTIONS: DiffOptions = {
@@ -44,18 +42,31 @@ const DEFAULT_DIFF_OPTIONS: DiffOptions = {
 const props = defineProps<{
   initialLeft: CompareSource | null
   initialRight: CompareSource | null
+  conversationId: string | null
 }>()
 
 const emit = defineEmits<{
-  'update-sources': [payload: { left: CompareSource | null; right: CompareSource | null }]
+  'update-sources': [payload: { left: CompareSource | null; right: CompareSource | null; conversationId?: string | null }]
 }>()
 
 interface SideFileMeta {
   name: string
   size: number
   source: CompareSource
-  fileId?: string
+  fileId: string
 }
+
+interface CandidateGroup {
+  key: string
+  label: string
+  files: FileInfo[]
+}
+
+// ---- 当前聊天会话的文件列表（与工作区面板「文件」Tab 一致） ----
+const activeConversationId = ref<string | null>(props.conversationId)
+const conversationFiles = ref<FileInfo[]>([])
+const filesLoading = ref(false)
+const filesError = ref('')
 
 // ---- 左右文件状态 ----
 const leftMeta = ref<SideFileMeta | null>(null)
@@ -70,43 +81,57 @@ const rightLoading = ref(false)
 const leftError = ref('')
 const rightError = ref('')
 
-// ---- 右侧 URL 输入与更换 ----
-const urlInput = ref('')
-const urlInputError = ref('')
-const editingRight = ref(false)
-const fileInputRef = ref<HTMLInputElement>()
-const leftFileInputRef = ref<HTMLInputElement>()
+// ---- 顶部居中下拉选择器 ----
+const openMenu = ref<CompareSide | null>(null)
+const switcherRef = ref<HTMLElement>()
 
 // ---- 比对结果 ----
 const activePairKey = ref('')
 const diffBusy = ref(false)
 const diffError = ref('')
 const diffResult = ref<SheetDiffResult | null>(null)
-const pairSummaries = ref<Record<string, SheetDiffStats | 'loading'>>({})
-
-// 单侧预览（右侧尚未选表时，左侧可正常切表查看）
 const singleLeftSheet = ref(0)
-
-// 选中差异格（仅在点中差异格时展示一行改前/改后对照）
 const selectedDiff = ref<CellDiffEntry | null>(null)
 
-// DOM 与 Univer 实例
+// ---- DOM 与 Univer 实例 ----
 const leftHost = ref<HTMLElement>()
 const rightHost = ref<HTMLElement>()
+const zoom = ref(1)
 let leftViewer: CompareViewer | null = null
 let rightViewer: CompareViewer | null = null
 let leftScrollUnsub: (() => void) | null = null
 let rightScrollUnsub: (() => void) | null = null
 let leftSelUnsub: (() => void) | null = null
 let rightSelUnsub: (() => void) | null = null
+let leftZoomUnsub: (() => void) | null = null
+let rightZoomUnsub: (() => void) | null = null
 
 let worker: CompareWorkerClient | null = null
 let viewerModulePromise: Promise<typeof import('./compare-viewer')> | null = null
 let leftAbort: AbortController | null = null
 let rightAbort: AbortController | null = null
 let diffRequestSeq = 0
-let summaryEpoch = 0
 let singleRequestSeq = 0
+let filesRequestSeq = 0
+
+function isComparableFile(file: FileInfo): boolean {
+  return !isImageFile(file.filename, file.media_type) && /\.(xlsx|xlsm|csv)$/i.test(file.filename)
+}
+
+const candidateGroups = computed<CandidateGroup[]>(() => {
+  return executionFileGroups(conversationFiles.value)
+    .map((group) => ({
+      key: group.key,
+      label: group.label,
+      files: group.files.filter(isComparableFile),
+    }))
+    .filter((group) => group.files.length > 0)
+})
+
+const totalCandidates = computed(() => candidateGroups.value.reduce((sum, g) => sum + g.files.length, 0))
+const hasOtherCandidateForRight = computed(() =>
+  candidateGroups.value.some((g) => g.files.some((f) => f.file_id !== leftMeta.value?.fileId)),
+)
 
 const hasBothFiles = computed(() => Boolean(leftMeta.value && rightMeta.value && leftSheets.value.length && rightSheets.value.length))
 
@@ -153,6 +178,10 @@ async function ensureLeftViewer(): Promise<CompareViewer | null> {
       rightViewer?.focusCell(pos.row, pos.col, false)
       handleSelectionChange(pos)
     })
+    leftZoomUnsub = leftViewer.onZoom((ratio: number) => {
+      zoom.value = ratio
+      if (hasBothFiles.value) rightViewer?.setZoom(ratio)
+    })
   }
   return leftViewer
 }
@@ -172,6 +201,10 @@ async function ensureRightViewer(): Promise<CompareViewer | null> {
       leftViewer?.focusCell(pos.row, pos.col, false)
       handleSelectionChange(pos)
     })
+    rightZoomUnsub = rightViewer.onZoom((ratio: number) => {
+      zoom.value = ratio
+      if (hasBothFiles.value) leftViewer?.setZoom(ratio)
+    })
   }
   return rightViewer
 }
@@ -179,11 +212,28 @@ async function ensureRightViewer(): Promise<CompareViewer | null> {
 function disposeRightViewer() {
   rightScrollUnsub?.()
   rightSelUnsub?.()
+  rightZoomUnsub?.()
   rightScrollUnsub = null
   rightSelUnsub = null
+  rightZoomUnsub = null
   rightViewer?.dispose()
   rightViewer = null
   rightHost.value?.replaceChildren()
+}
+
+function applyZoom(ratio: number) {
+  zoom.value = ratio
+  leftViewer?.setZoom(ratio)
+  rightViewer?.setZoom(ratio)
+}
+
+function onTabsWheel(event: WheelEvent) {
+  const el = event.currentTarget as HTMLElement | null
+  if (!el || el.scrollWidth <= el.clientWidth) return
+  if (Math.abs(event.deltaY) > Math.abs(event.deltaX)) {
+    event.preventDefault()
+    el.scrollLeft += event.deltaY
+  }
 }
 
 function handleSelectionChange(pos: CellPos) {
@@ -191,51 +241,43 @@ function handleSelectionChange(pos: CellPos) {
   selectedDiff.value = diffResult.value?.cellDiffMap[key] ?? null
 }
 
+async function loadConversationFiles(convId: string) {
+  const req = ++filesRequestSeq
+  activeConversationId.value = convId
+  filesLoading.value = true
+  filesError.value = ''
+  try {
+    const detail = await conversationApi.get(convId)
+    if (req !== filesRequestSeq) return
+    conversationFiles.value = detail.files ?? []
+  } catch (err) {
+    if (req !== filesRequestSeq) return
+    filesError.value = errorText(err)
+  } finally {
+    if (req === filesRequestSeq) filesLoading.value = false
+  }
+}
+
 function validateFileName(filename: string, mediaType?: string) {
   if (isImageFile(filename, mediaType)) {
     throw new Error(`「${filename}」是图片文件，暂不支持表格比对。`)
   }
   if (/\.xls$/i.test(filename)) {
-    throw new Error(`「${filename}」是旧版 .xls 格式，暂不支持在线表格比对，请另存为 .xlsx 后再比对。`)
+    throw new Error(`「${filename}」是旧版 .xls 格式，暂不支持在线表格比对。`)
   }
   if (!/\.(xlsx|xlsm|csv)$/i.test(filename)) {
-    throw new Error(`「${filename}」不是支持的表格格式（支持 .xlsx、.xlsm、.csv）。`)
+    throw new Error(`「${filename}」不是支持的表格格式。`)
   }
-}
-
-async function fetchSourceBuffer(
-  source: CompareSource,
-  signal: AbortSignal,
-): Promise<{ buffer: ArrayBuffer; name: string; size: number; fileId?: string }> {
-  if (source.kind === 'file') {
-    validateFileName(source.file.name, source.file.type)
-    if (source.file.size > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂不支持浏览器端直接比对。')
-    const buffer = await source.file.arrayBuffer()
-    return { buffer, name: source.file.name, size: source.file.size }
-  }
-  if (source.kind === 'local') {
-    validateFileName(source.name)
-    let blob: Blob
-    try {
-      blob = await (await fetch(source.blobUrl, { signal })).blob()
-    } catch (err) {
-      if (signal.aborted) throw err
-      throw new Error('本地文件地址已失效，请回到原页面重新打开，或直接选择本地文件。')
-    }
-    if (blob.size > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂不支持浏览器端直接比对。')
-    const buffer = await blob.arrayBuffer()
-    return { buffer, name: source.name, size: blob.size }
-  }
-  const info = await fileApi.get(source.fileId)
-  if (signal.aborted) throw new DOMException('已取消加载', 'AbortError')
-  validateFileName(info.filename, info.media_type)
-  if (info.size > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂不支持浏览器端直接比对。')
-  const buffer = await fileApi.content(info.file_id, signal)
-  if (buffer.byteLength > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂不支持浏览器端直接比对。')
-  return { buffer, name: info.filename, size: info.size, fileId: info.file_id }
 }
 
 async function loadSide(side: CompareSide, source: CompareSource, syncUrl = true) {
+  if (source.kind !== 'remote') {
+    const msg = '仅支持比对当前聊天页面中的输入和输出表格文件。'
+    if (side === 'left') leftError.value = msg
+    else rightError.value = msg
+    return
+  }
+
   const isLeft = side === 'left'
   if (isLeft) {
     leftAbort?.abort()
@@ -247,23 +289,33 @@ async function loadSide(side: CompareSide, source: CompareSource, syncUrl = true
     rightAbort = new AbortController()
     rightLoading.value = true
     rightError.value = ''
-    urlInputError.value = ''
   }
   const signal = (isLeft ? leftAbort : rightAbort)!.signal
 
   try {
     void loadViewerModule()
-    const payload = await fetchSourceBuffer(source, signal)
+    const info = await fileApi.get(source.fileId)
     if (signal.aborted) return
 
-    const opened = await ensureWorker().open(side, payload.buffer, payload.name)
+    // 若 URL 未携带 conversation，从文件所属会话自动补全并拉取当前对话文件列表
+    if (!activeConversationId.value && info.conversation_id) {
+      void loadConversationFiles(info.conversation_id)
+    }
+
+    validateFileName(info.filename, info.media_type)
+    if (info.size > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂不支持在线比对。')
+    const buffer = await fileApi.content(info.file_id, signal)
+    if (signal.aborted) return
+    if (buffer.byteLength > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂不支持在线比对。')
+
+    const opened = await ensureWorker().open(side, buffer, info.filename)
     if (signal.aborted) return
 
     const meta: SideFileMeta = {
-      name: payload.name,
-      size: payload.size,
+      name: info.filename,
+      size: info.size,
       source,
-      fileId: payload.fileId,
+      fileId: info.file_id,
     }
 
     if (isLeft) {
@@ -275,10 +327,8 @@ async function loadSide(side: CompareSide, source: CompareSource, syncUrl = true
       rightMeta.value = meta
       rightSheets.value = opened.sheets
       rightActiveIndex.value = opened.active
-      editingRight.value = false
     }
 
-    pairSummaries.value = {}
     diffResult.value = null
     selectedDiff.value = null
 
@@ -286,6 +336,7 @@ async function loadSide(side: CompareSide, source: CompareSource, syncUrl = true
       emit('update-sources', {
         left: leftMeta.value?.source ?? null,
         right: rightMeta.value?.source ?? null,
+        conversationId: activeConversationId.value,
       })
     }
 
@@ -298,7 +349,6 @@ async function loadSide(side: CompareSide, source: CompareSource, syncUrl = true
         ?? pairs[0]
       activePairKey.value = preferred?.key ?? ''
       await runDiffForCurrentSheet()
-      void computeAllSheetSummaries()
     } else if (isLeft && leftSheets.value.length) {
       await showSingleSheet('left', opened.active)
     } else if (!isLeft && rightSheets.value.length) {
@@ -332,6 +382,9 @@ async function showSingleSheet(side: CompareSide, index: number) {
     const viewer = side === 'left' ? await ensureLeftViewer() : await ensureRightViewer()
     if (req !== singleRequestSeq || hasBothFiles.value || !viewer) return
     await viewer.show(parsed.workbook)
+    if (req !== singleRequestSeq || hasBothFiles.value) return
+    if (zoom.value !== 1) viewer.setZoom(zoom.value)
+    else zoom.value = viewer.getZoom()
   } catch (err) {
     if (req !== singleRequestSeq) return
     if (side === 'left') leftError.value = errorText(err)
@@ -357,7 +410,6 @@ async function runDiffForCurrentSheet() {
     if (req !== diffRequestSeq) return
 
     diffResult.value = result
-    pairSummaries.value = { ...pairSummaries.value, [pair.key]: result.stats }
 
     const [lv, rv] = await Promise.all([ensureLeftViewer(), ensureRightViewer()])
     if (req !== diffRequestSeq) return
@@ -366,6 +418,11 @@ async function runDiffForCurrentSheet() {
       lv?.show(result.leftWorkbook),
       rv?.show(result.rightWorkbook),
     ])
+    if (req !== diffRequestSeq) return
+    if (zoom.value !== 1) {
+      lv?.setZoom(zoom.value)
+      rv?.setZoom(zoom.value)
+    }
   } catch (err) {
     if (req !== diffRequestSeq) return
     diffError.value = errorText(err)
@@ -374,62 +431,37 @@ async function runDiffForCurrentSheet() {
   }
 }
 
-async function computeAllSheetSummaries() {
-  if (!hasBothFiles.value) return
-  const epoch = ++summaryEpoch
-  const pairs = [...sheetPairs.value]
-
-  for (const pair of pairs) {
-    if (epoch !== summaryEpoch) return
-    if (pair.key === activePairKey.value && diffResult.value) {
-      pairSummaries.value = { ...pairSummaries.value, [pair.key]: diffResult.value.stats }
-      continue
-    }
-    if (pairSummaries.value[pair.key] && pairSummaries.value[pair.key] !== 'loading') continue
-    pairSummaries.value = { ...pairSummaries.value, [pair.key]: 'loading' }
-    try {
-      const stats = await ensureWorker().diffSummary(pair.leftIndex, pair.rightIndex, DEFAULT_DIFF_OPTIONS.alignMode)
-      if (epoch !== summaryEpoch) return
-      pairSummaries.value = { ...pairSummaries.value, [pair.key]: stats }
-    } catch {
-      if (epoch !== summaryEpoch) return
-      const next = { ...pairSummaries.value }
-      delete next[pair.key]
-      pairSummaries.value = next
-    }
-  }
-}
-
-function selectPair(key: string) {
+function selectPair(key: string, event?: Event) {
+  ;(event?.currentTarget as HTMLElement | null)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
   if (key === activePairKey.value) return
   activePairKey.value = key
   void runDiffForCurrentSheet()
 }
 
-async function submitRightUrl() {
-  urlInputError.value = ''
-  const parsed = parseCompareTargetInput(urlInput.value)
-  if (!parsed.ok) {
-    urlInputError.value = parsed.error
-    return
+function selectSingleLeftTab(index: number, event?: Event) {
+  ;(event?.currentTarget as HTMLElement | null)?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  if (index !== singleLeftSheet.value || leftError.value) {
+    void showSingleSheet('left', index)
   }
-  if (leftMeta.value && isSameCompareSource(leftMeta.value.source, parsed.source)) {
-    urlInputError.value = '输入的链接与左侧是同一个文件，请输入另一个表格的链接。'
-    return
-  }
-  await loadSide('right', parsed.source, true)
 }
 
-function onPickLocalFile(side: CompareSide, event: Event) {
-  const input = event.target as HTMLInputElement
-  const file = input.files?.[0]
-  input.value = ''
-  if (!file) return
-  void loadSide(side, { kind: 'file', file }, true)
+function chooseFileForSide(side: CompareSide, file: FileInfo) {
+  const otherId = side === 'left' ? rightMeta.value?.fileId : leftMeta.value?.fileId
+  if (otherId && file.file_id === otherId) return
+  openMenu.value = null
+  const currentId = side === 'left' ? leftMeta.value?.fileId : rightMeta.value?.fileId
+  if (currentId === file.file_id) return
+  void loadSide(side, { kind: 'remote', fileId: file.file_id }, true)
+}
+
+function toggleMenu(side: CompareSide) {
+  if (!totalCandidates.value) return
+  openMenu.value = openMenu.value === side ? null : side
 }
 
 async function swapSides() {
   if (!leftMeta.value || !rightMeta.value || leftLoading.value || rightLoading.value || diffBusy.value) return
+  openMenu.value = null
   await ensureWorker().swap()
 
   const prevLeftMeta = leftMeta.value
@@ -444,7 +476,6 @@ async function swapSides() {
   rightSheets.value = prevLeftSheets
   rightActiveIndex.value = prevLeftActive
 
-  pairSummaries.value = {}
   selectedDiff.value = null
 
   const current = currentPair.value
@@ -458,27 +489,36 @@ async function swapSides() {
   emit('update-sources', {
     left: leftMeta.value?.source ?? null,
     right: rightMeta.value?.source ?? null,
+    conversationId: activeConversationId.value,
   })
   updateDocumentTitle()
   await runDiffForCurrentSheet()
-  void computeAllSheetSummaries()
-}
-
-function openChangeRight() {
-  urlInput.value = ''
-  urlInputError.value = ''
-  editingRight.value = true
 }
 
 function updateDocumentTitle() {
   if (leftMeta.value && rightMeta.value) {
-    document.title = `比对：${leftMeta.value.name} vs ${rightMeta.value.name}`
+    document.title = `${leftMeta.value.name} 对比 ${rightMeta.value.name}`
   } else if (leftMeta.value) {
-    document.title = `比对：${leftMeta.value.name}`
+    document.title = `比对 · ${leftMeta.value.name}`
   } else {
     document.title = '表格比对'
   }
 }
+
+function closeMenuOutside(event: Event) {
+  if (!openMenu.value) return
+  if (event instanceof KeyboardEvent) {
+    if (event.key === 'Escape') openMenu.value = null
+    return
+  }
+  if (!switcherRef.value?.contains(event.target as Node)) openMenu.value = null
+}
+
+watch(() => props.conversationId, (next) => {
+  if (next && next !== activeConversationId.value) {
+    void loadConversationFiles(next)
+  }
+})
 
 watch(() => props.initialLeft, (next) => {
   if (next && !isSameCompareSource(next, leftMeta.value?.source ?? null)) {
@@ -494,18 +534,24 @@ watch(() => props.initialRight, (next) => {
 
 onMounted(() => {
   document.title = '表格比对'
+  window.addEventListener('pointerdown', closeMenuOutside)
+  window.addEventListener('keydown', closeMenuOutside)
+  if (props.conversationId) void loadConversationFiles(props.conversationId)
   if (props.initialLeft) void loadSide('left', props.initialLeft, false)
   if (props.initialRight) void loadSide('right', props.initialRight, false)
 })
 
 onBeforeUnmount(() => {
-  summaryEpoch++
   diffRequestSeq++
   singleRequestSeq++
+  filesRequestSeq++
   leftAbort?.abort()
   rightAbort?.abort()
+  window.removeEventListener('pointerdown', closeMenuOutside)
+  window.removeEventListener('keydown', closeMenuOutside)
   leftScrollUnsub?.()
   leftSelUnsub?.()
+  leftZoomUnsub?.()
   leftViewer?.dispose()
   disposeRightViewer()
   worker?.dispose()
@@ -514,85 +560,133 @@ onBeforeUnmount(() => {
 
 <template>
   <main class="workbook-compare flex h-dvh w-full flex-col overflow-hidden bg-white">
-    <!-- 顶部极简栏：只保留左右文件信息、对调与更换 -->
-    <header class="flex shrink-0 items-center gap-2 border-b border-line bg-white px-3.5 py-2 sm:px-4">
-      <span class="flex size-7 shrink-0 items-center justify-center rounded-lg bg-ink text-white">
-        <GitCompareArrows class="size-4" />
-      </span>
+    <!-- 顶部居中双文件栏：克制纤细，点击文件名可直接在当前会话的输入/输出文件中切换 -->
+    <header class="relative z-30 flex h-9 shrink-0 items-center justify-center border-b border-line bg-white px-4">
+      <div ref="switcherRef" class="flex min-w-0 max-w-full items-center justify-center gap-1 sm:gap-1.5">
+        <!-- 左侧文件下拉触发器 -->
+        <div class="relative min-w-0">
+          <button
+            type="button"
+            class="file-trigger"
+            :class="{ 'is-open': openMenu === 'left' }"
+            :disabled="!totalCandidates && !leftMeta"
+            :title="leftMeta?.name || '选择改前表格'"
+            aria-haspopup="menu"
+            :aria-expanded="openMenu === 'left'"
+            @click="toggleMenu('left')"
+          >
+            <span class="shrink-0 text-[11px] font-normal text-faint">改前</span>
+            <LoaderCircle v-if="leftLoading" class="size-3.5 shrink-0 animate-spin text-mute" />
+            <span v-else class="min-w-0 max-w-[30vw] truncate sm:max-w-[260px]" :class="leftMeta ? 'font-medium text-ink' : 'text-faint'">
+              {{ leftMeta?.name || '选择表格' }}
+            </span>
+            <ChevronDown v-if="totalCandidates" class="size-3.5 shrink-0 text-faint transition-transform" :class="{ 'rotate-180': openMenu === 'left' }" />
+          </button>
 
-      <div class="flex min-w-0 items-center gap-1.5 rounded-lg border border-line bg-paper/60 px-2.5 py-1">
-        <span class="shrink-0 rounded bg-white px-1.5 py-0.5 text-[10px] font-semibold text-mute">改前</span>
-        <span v-if="leftMeta" class="max-w-[200px] truncate text-xs font-medium text-ink sm:max-w-[280px]" :title="leftMeta.name">{{ leftMeta.name }}</span>
-        <span v-else-if="leftLoading" class="flex items-center gap-1 text-xs text-mute"><LoaderCircle class="size-3 animate-spin" />加载中…</span>
-        <button v-else type="button" class="text-xs text-ink underline underline-offset-2" @click="leftFileInputRef?.click()">选择文件</button>
-      </div>
+          <!-- 左侧文件下拉菜单 -->
+          <div v-if="openMenu === 'left'" class="file-menu left-0 sm:left-1/2 sm:-translate-x-1/2" role="menu">
+            <div v-for="group in candidateGroups" :key="group.key" class="mb-1.5 last:mb-0">
+              <div class="px-2.5 py-1 text-[10px] font-medium tracking-wide text-faint">{{ group.label }}</div>
+              <button
+                v-for="file in group.files"
+                :key="file.file_id"
+                type="button"
+                role="menuitem"
+                class="file-menu-item"
+                :class="{
+                  'is-selected': leftMeta?.fileId === file.file_id,
+                  'is-disabled': rightMeta?.fileId === file.file_id,
+                }"
+                :disabled="rightMeta?.fileId === file.file_id"
+                @click="chooseFileForSide('left', file)"
+              >
+                <FileCheck2 v-if="file.kind === 'expected'" class="size-3.5 shrink-0 text-mute" />
+                <Sheet v-else class="size-3.5 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-mute'" />
+                <span class="min-w-0 flex-1 truncate" :title="file.filename">{{ file.filename }}</span>
+                <Check v-if="leftMeta?.fileId === file.file_id" class="size-3.5 shrink-0 text-ink" />
+                <span v-else-if="rightMeta?.fileId === file.file_id" class="shrink-0 text-[10px] text-faint">当前改后</span>
+              </button>
+            </div>
+          </div>
+        </div>
 
-      <button
-        type="button"
-        class="icon-btn size-7 shrink-0"
-        :disabled="!hasBothFiles || diffBusy"
-        title="对调改前与改后文件"
-        aria-label="对调改前与改后文件"
-        @click="swapSides"
-      >
-        <ArrowLeftRight class="size-3.5" />
-      </button>
-
-      <div class="flex min-w-0 items-center gap-1.5 rounded-lg border border-line bg-paper/60 px-2.5 py-1">
-        <span class="shrink-0 rounded bg-ink px-1.5 py-0.5 text-[10px] font-semibold text-white">改后</span>
-        <span v-if="rightMeta" class="max-w-[200px] truncate text-xs font-medium text-ink sm:max-w-[280px]" :title="rightMeta.name">{{ rightMeta.name }}</span>
-        <span v-else-if="rightLoading" class="flex items-center gap-1 text-xs text-mute"><LoaderCircle class="size-3 animate-spin" />加载中…</span>
-        <span v-else class="text-xs text-faint">待输入目标表格链接</span>
+        <!-- 中央对调按钮 -->
         <button
-          v-if="rightMeta"
           type="button"
-          class="ml-0.5 rounded px-1.5 py-0.5 text-[11px] text-mute transition hover:bg-white hover:text-ink"
-          title="更换要对比的表格"
-          @click="openChangeRight"
+          class="flex size-6 shrink-0 items-center justify-center rounded-full text-faint transition hover:bg-black/[0.045] hover:text-ink disabled:cursor-default disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-faint"
+          :disabled="!hasBothFiles || diffBusy"
+          title="对调左右文件"
+          aria-label="对调左右文件"
+          @click="swapSides"
         >
-          更换
+          <ArrowLeftRight class="size-3" />
         </button>
+
+        <!-- 右侧文件下拉触发器 -->
+        <div class="relative min-w-0">
+          <button
+            type="button"
+            class="file-trigger"
+            :class="{ 'is-open': openMenu === 'right' }"
+            :disabled="!totalCandidates"
+            :title="rightMeta?.name || '选择改后表格'"
+            aria-haspopup="menu"
+            :aria-expanded="openMenu === 'right'"
+            @click="toggleMenu('right')"
+          >
+            <span class="shrink-0 text-[11px] font-normal text-faint">改后</span>
+            <LoaderCircle v-if="rightLoading" class="size-3.5 shrink-0 animate-spin text-mute" />
+            <span v-else class="min-w-0 max-w-[30vw] truncate sm:max-w-[260px]" :class="rightMeta ? 'font-medium text-ink' : 'text-mute'">
+              {{ rightMeta?.name || '选择对比表格' }}
+            </span>
+            <ChevronDown v-if="totalCandidates" class="size-3.5 shrink-0 text-faint transition-transform" :class="{ 'rotate-180': openMenu === 'right' }" />
+          </button>
+
+          <!-- 右侧文件下拉菜单 -->
+          <div v-if="openMenu === 'right'" class="file-menu right-0 sm:left-1/2 sm:right-auto sm:-translate-x-1/2" role="menu">
+            <div v-for="group in candidateGroups" :key="group.key" class="mb-1.5 last:mb-0">
+              <div class="px-2.5 py-1 text-[10px] font-medium tracking-wide text-faint">{{ group.label }}</div>
+              <button
+                v-for="file in group.files"
+                :key="file.file_id"
+                type="button"
+                role="menuitem"
+                class="file-menu-item"
+                :class="{
+                  'is-selected': rightMeta?.fileId === file.file_id,
+                  'is-disabled': leftMeta?.fileId === file.file_id,
+                }"
+                :disabled="leftMeta?.fileId === file.file_id"
+                @click="chooseFileForSide('right', file)"
+              >
+                <FileCheck2 v-if="file.kind === 'expected'" class="size-3.5 shrink-0 text-mute" />
+                <Sheet v-else class="size-3.5 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-mute'" />
+                <span class="min-w-0 flex-1 truncate" :title="file.filename">{{ file.filename }}</span>
+                <Check v-if="rightMeta?.fileId === file.file_id" class="size-3.5 shrink-0 text-ink" />
+                <span v-else-if="leftMeta?.fileId === file.file_id" class="shrink-0 text-[10px] text-faint">当前改前</span>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </header>
 
-    <!-- 更换右侧表格浮条 -->
-    <div v-if="editingRight && rightMeta" class="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-paper/70 px-4 py-2">
-      <Link2 class="size-4 shrink-0 text-mute" />
-      <form class="flex min-w-0 flex-1 items-center gap-2" @submit.prevent="submitRightUrl">
-        <input
-          v-model="urlInput"
-          type="text"
-          placeholder="粘贴新的表格浏览页链接（/preview/...）或文件 ID"
-          class="h-8 min-w-[220px] flex-1 rounded-lg border border-line bg-white px-3 text-xs text-ink outline-none focus:border-ink/40"
-          autofocus
-        >
-        <button type="submit" class="btn-ink !h-8 !px-4 !py-0 text-xs" :disabled="rightLoading">载入比对</button>
-        <button type="button" class="btn-line !h-8 !px-3 !py-0 text-xs" @click="fileInputRef?.click()">
-          <Upload class="size-3.5" />本地文件
-        </button>
-        <button type="button" class="icon-btn size-7" aria-label="取消更换" @click="editingRight = false; urlInputError = ''">
-          <X class="size-3.5" />
-        </button>
-      </form>
-      <p v-if="urlInputError || rightError" class="w-full text-xs text-error">{{ urlInputError || rightError }}</p>
-    </div>
-
     <!-- 点中差异单元格时，轻展示一行改前/改后值与公式对照 -->
-    <div v-if="hasBothFiles && selectedDiff" class="flex shrink-0 flex-wrap items-center gap-2 border-b border-line bg-paper/45 px-4 py-1.5 text-xs">
+    <div v-if="hasBothFiles && selectedDiff" class="flex shrink-0 flex-wrap items-center justify-center gap-2 border-b border-line bg-[#fafaf9] px-4 py-1.5 text-xs">
       <span class="rounded bg-ink px-1.5 py-0.5 font-mono text-[11px] font-medium text-white">{{ selectedDiff.addressLabel }}</span>
-      <span class="text-mute">改前：</span>
-      <span class="max-w-[34vw] truncate rounded bg-rose-50 px-1.5 py-0.5 text-rose-900" :title="selectedDiff.beforeValue || '（空）'">
+      <span class="text-mute">改前</span>
+      <span class="max-w-[32vw] truncate rounded bg-rose-50 px-1.5 py-0.5 text-rose-900" :title="selectedDiff.beforeValue || '（空）'">
         {{ selectedDiff.beforeValue || '（空）' }}
       </span>
-      <span v-if="selectedDiff.beforeFormula" class="max-w-[24vw] truncate font-mono text-[11px] text-mute" :title="selectedDiff.beforeFormula">
+      <span v-if="selectedDiff.beforeFormula" class="max-w-[22vw] truncate font-mono text-[11px] text-mute" :title="selectedDiff.beforeFormula">
         {{ selectedDiff.beforeFormula }}
       </span>
       <ArrowRight class="size-3.5 shrink-0 text-faint" />
-      <span class="text-mute">改后：</span>
-      <span class="max-w-[34vw] truncate rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-950" :title="selectedDiff.afterValue || '（空）'">
+      <span class="text-mute">改后</span>
+      <span class="max-w-[32vw] truncate rounded bg-emerald-50 px-1.5 py-0.5 font-medium text-emerald-950" :title="selectedDiff.afterValue || '（空）'">
         {{ selectedDiff.afterValue || '（空）' }}
       </span>
-      <span v-if="selectedDiff.afterFormula" class="max-w-[24vw] truncate font-mono text-[11px] text-blue-800" :title="selectedDiff.afterFormula">
+      <span v-if="selectedDiff.afterFormula" class="max-w-[22vw] truncate font-mono text-[11px] text-blue-800" :title="selectedDiff.afterFormula">
         {{ selectedDiff.afterFormula }}
       </span>
     </div>
@@ -600,133 +694,167 @@ onBeforeUnmount(() => {
     <!-- 主体：全宽左右双栏同步表格 -->
     <div class="grid min-h-0 flex-1 grid-cols-1 divide-y divide-line overflow-hidden md:grid-cols-2 md:divide-x md:divide-y-0">
       <!-- 左侧：改前 -->
-      <section class="relative flex min-h-0 flex-col bg-white" aria-label="改前表格">
-        <div class="flex h-7 shrink-0 items-center border-b border-line bg-paper/50 px-3 text-[11px] text-mute">
-          <span class="flex items-center gap-1.5 font-medium text-ink">
-            <Sheet class="size-3.5 text-mute" />改前
-            <span v-if="currentPair?.leftName" class="font-normal text-mute">· {{ currentPair.leftName }}</span>
-          </span>
-        </div>
+      <section class="relative min-h-0 bg-white" aria-label="改前表格">
+        <div ref="leftHost" class="absolute inset-0" data-testid="compare-left-canvas" />
 
-        <div class="relative min-h-0 flex-1">
-          <div ref="leftHost" class="absolute inset-0" data-testid="compare-left-canvas" />
+        <!-- 左侧未选择文件时：直接展示当前会话文件选择器 -->
+        <div v-if="!leftMeta && !leftLoading && !leftError" class="absolute inset-0 z-10 flex items-center justify-center bg-[#fafaf9] p-6">
+          <div class="w-full max-w-[400px] rounded-2xl border border-line bg-white p-5 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
+            <h2 class="text-sm font-semibold text-ink">选择改前表格</h2>
+            <p class="mt-0.5 text-xs text-mute">从当前对话的输入与输出文件中选择</p>
 
-          <div v-if="!leftMeta && !leftLoading && !leftError" class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white px-6 text-center">
-            <FileSpreadsheet class="size-9 text-faint" />
-            <p class="text-sm font-medium text-ink">请先选择改前表格</p>
-            <button type="button" class="btn-line text-xs" @click="leftFileInputRef?.click()">
-              <Upload class="size-3.5" />选择本地 Excel / CSV
-            </button>
-          </div>
-
-          <div v-if="leftLoading" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2.5 bg-white/95" role="status">
-            <LoaderCircle class="size-6 animate-spin text-mute" />
-            <span class="text-xs text-mute">正在读取表格…</span>
-          </div>
-
-          <div v-else-if="leftError" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white px-6 text-center">
-            <CircleAlert class="size-7 text-mute" />
-            <p class="max-w-md text-xs leading-5 text-mute">{{ leftError }}</p>
-            <button v-if="props.initialLeft" type="button" class="btn-line !h-8 text-xs" @click="loadSide('left', props.initialLeft, false)">
-              <RotateCw class="size-3.5" />重试
-            </button>
-          </div>
-
-          <div v-else-if="hasBothFiles && currentPair?.kind === 'added'" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-paper/80">
-            <div class="rounded-2xl border border-line bg-white px-5 py-4 text-center shadow-xs">
-              <p class="text-sm font-semibold text-ink">改前文件无此工作表</p>
-              <p class="mt-1 text-xs text-mute">「{{ currentPair.name }}」为改后新增的工作表</p>
+            <div v-if="filesLoading" class="flex items-center justify-center gap-2 py-10 text-xs text-mute">
+              <LoaderCircle class="size-4 animate-spin" />正在获取当前对话文件…
+            </div>
+            <div v-else-if="filesError" class="py-8 text-center text-xs text-error">{{ filesError }}</div>
+            <div v-else-if="!activeConversationId" class="py-8 text-center text-xs leading-5 text-mute">
+              请从聊天页面打开表格后再进入比对。
+            </div>
+            <div v-else-if="!candidateGroups.length" class="py-8 text-center text-xs text-mute">
+              当前对话中暂无可比对的表格文件。
+            </div>
+            <div v-else class="mt-4 max-h-[52vh] space-y-4 overflow-y-auto pr-0.5">
+              <div v-for="group in candidateGroups" :key="group.key">
+                <div class="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-faint">
+                  <span>{{ group.label }}</span>
+                  <span class="tabular-nums">{{ group.files.length }}</span>
+                </div>
+                <div class="space-y-1.5">
+                  <button
+                    v-for="file in group.files"
+                    :key="file.file_id"
+                    type="button"
+                    class="picker-row"
+                    :class="{ 'is-disabled': rightMeta?.fileId === file.file_id }"
+                    :disabled="rightMeta?.fileId === file.file_id"
+                    @click="chooseFileForSide('left', file)"
+                  >
+                    <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
+                    <Sheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-[#4a4743]'" />
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate text-[13px] font-medium text-ink" :title="file.filename">{{ file.filename }}</div>
+                      <div v-if="file.size" class="text-[11px] text-faint">{{ executionFileSize(file.size) }}</div>
+                    </div>
+                    <span v-if="rightMeta?.fileId === file.file_id" class="shrink-0 text-[11px] text-faint">当前改后</span>
+                    <ArrowRight v-else class="picker-arrow size-3.5 shrink-0 text-faint" />
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
+        </div>
 
-          <div v-if="diffBusy && hasBothFiles" class="absolute inset-0 z-20 flex items-center justify-center bg-white/65" role="status">
-            <LoaderCircle class="size-6 animate-spin text-mute" />
+        <div v-if="leftLoading" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2.5 bg-white/95" role="status">
+          <LoaderCircle class="size-6 animate-spin text-mute" />
+          <span class="text-xs text-mute">正在读取表格…</span>
+        </div>
+
+        <div v-else-if="leftError" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white px-6 text-center">
+          <CircleAlert class="size-7 text-mute" />
+          <p class="max-w-md text-xs leading-5 text-mute">{{ leftError }}</p>
+          <button v-if="props.initialLeft" type="button" class="btn-line !h-8 text-xs" @click="loadSide('left', props.initialLeft, false)">
+            <RotateCw class="size-3.5" />重试
+          </button>
+        </div>
+
+        <div v-else-if="hasBothFiles && currentPair?.kind === 'added'" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-[#fafaf9]/85">
+          <div class="rounded-2xl border border-line bg-white px-5 py-4 text-center shadow-xs">
+            <p class="text-sm font-semibold text-ink">改前文件无此工作表</p>
+            <p class="mt-1 text-xs text-mute">「{{ currentPair.name }}」为改后新增的工作表</p>
           </div>
+        </div>
+
+        <div v-if="diffBusy && hasBothFiles" class="absolute inset-0 z-20 flex items-center justify-center bg-white/65" role="status">
+          <LoaderCircle class="size-6 animate-spin text-mute" />
         </div>
       </section>
 
-      <!-- 右侧：改后 或 URL 输入区 -->
-      <section class="relative flex min-h-0 flex-col bg-white" aria-label="改后表格">
-        <div class="flex h-7 shrink-0 items-center border-b border-line bg-paper/50 px-3 text-[11px] text-mute">
-          <span class="flex items-center gap-1.5 font-medium text-ink">
-            <Columns2 class="size-3.5 text-mute" />改后
-            <span v-if="currentPair?.rightName" class="font-normal text-mute">· {{ currentPair.rightName }}</span>
-          </span>
-        </div>
+      <!-- 右侧：改后 或 当前对话文件选择面板 -->
+      <section class="relative min-h-0 bg-white" aria-label="改后表格">
+        <div v-if="rightMeta" ref="rightHost" class="absolute inset-0" data-testid="compare-right-canvas" />
 
-        <div class="relative min-h-0 flex-1">
-          <div v-if="rightMeta" ref="rightHost" class="absolute inset-0" data-testid="compare-right-canvas" />
+        <div v-else-if="!rightLoading" class="absolute inset-0 z-10 flex items-center justify-center bg-[#fafaf9] p-6">
+          <div class="w-full max-w-[400px] rounded-2xl border border-line bg-white p-5 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
+            <h2 class="text-sm font-semibold text-ink">选择对比表格</h2>
+            <p class="mt-0.5 text-xs text-mute">仅显示当前对话工作区中的输入和输出表格</p>
 
-          <div v-else-if="!rightLoading" class="absolute inset-0 z-10 flex items-center justify-center bg-paper/35 p-6">
-            <div class="w-full max-w-md rounded-2xl border border-line bg-white p-6 shadow-xs">
-              <div class="flex items-center gap-2.5">
-                <span class="flex size-9 items-center justify-center rounded-xl bg-paper text-ink">
-                  <Link2 class="size-4" />
-                </span>
-                <div>
-                  <h2 class="text-sm font-semibold text-ink">输入要对比的另一个表格链接</h2>
-                  <p class="text-xs text-mute">打开另一个表格的浏览页，复制浏览器地址栏粘贴到下方</p>
-                </div>
-              </div>
+            <p v-if="rightError" role="alert" class="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">{{ rightError }}</p>
 
-              <form class="mt-4 space-y-3" @submit.prevent="submitRightUrl">
-                <input
-                  v-model="urlInput"
-                  type="text"
-                  placeholder="例如：http://.../preview/f_xxxxxxxxxx 或直接粘贴文件 ID"
-                  class="field !py-2 text-xs"
-                  autofocus
-                >
-                <p v-if="urlInputError || rightError" role="alert" class="text-xs leading-5 text-error">
-                  {{ urlInputError || rightError }}
-                </p>
-                <button type="submit" class="btn-ink w-full !py-2 text-xs" :disabled="!urlInput.trim() || rightLoading">
-                  <GitCompareArrows class="size-4" />开始比对
-                </button>
-              </form>
-
-              <div class="my-4 flex items-center gap-3 text-[11px] text-faint">
-                <span class="h-px flex-1 bg-line" />
-                <span>或者</span>
-                <span class="h-px flex-1 bg-line" />
-              </div>
-
-              <button type="button" class="btn-line w-full !py-2 text-xs" @click="fileInputRef?.click()">
-                <Upload class="size-3.5" />从电脑选择本地 Excel / CSV 文件
+            <div v-if="filesLoading" class="flex items-center justify-center gap-2 py-10 text-xs text-mute">
+              <LoaderCircle class="size-4 animate-spin" />正在获取当前对话文件…
+            </div>
+            <div v-else-if="filesError" class="flex flex-col items-center gap-3 py-8 text-center">
+              <p class="text-xs text-error">{{ filesError }}</p>
+              <button v-if="activeConversationId" type="button" class="btn-line !h-8 text-xs" @click="loadConversationFiles(activeConversationId)">
+                <RotateCw class="size-3.5" />重新加载
               </button>
             </div>
-          </div>
-
-          <div v-if="rightLoading" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2.5 bg-white/95" role="status">
-            <LoaderCircle class="size-6 animate-spin text-mute" />
-            <span class="text-xs text-mute">正在读取并比对…</span>
-          </div>
-
-          <div v-else-if="hasBothFiles && currentPair?.kind === 'deleted'" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-paper/80">
-            <div class="rounded-2xl border border-line bg-white px-5 py-4 text-center shadow-xs">
-              <p class="text-sm font-semibold text-ink">改后已删除此工作表</p>
-              <p class="mt-1 text-xs text-mute">「{{ currentPair.name }}」仅存在于改前文件</p>
+            <div v-else-if="!activeConversationId" class="py-8 text-center text-xs leading-5 text-mute">
+              请从聊天页面打开表格后再进入比对。
+            </div>
+            <div v-else-if="!hasOtherCandidateForRight" class="py-8 text-center text-xs leading-5 text-mute">
+              当前对话中暂无其他可比对的表格文件。
+            </div>
+            <div v-else class="mt-4 max-h-[56vh] space-y-4 overflow-y-auto pr-0.5">
+              <div v-for="group in candidateGroups" :key="group.key">
+                <div class="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-faint">
+                  <span>{{ group.label }}</span>
+                  <span class="tabular-nums">{{ group.files.length }}</span>
+                </div>
+                <div class="space-y-1.5">
+                  <button
+                    v-for="file in group.files"
+                    :key="file.file_id"
+                    type="button"
+                    class="picker-row"
+                    :class="{ 'is-disabled': leftMeta?.fileId === file.file_id }"
+                    :disabled="leftMeta?.fileId === file.file_id"
+                    @click="chooseFileForSide('right', file)"
+                  >
+                    <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
+                    <Sheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-[#4a4743]'" />
+                    <div class="min-w-0 flex-1">
+                      <div class="truncate text-[13px] font-medium text-ink" :title="file.filename">{{ file.filename }}</div>
+                      <div v-if="file.size" class="text-[11px] text-faint">{{ executionFileSize(file.size) }}</div>
+                    </div>
+                    <span v-if="leftMeta?.fileId === file.file_id" class="shrink-0 text-[11px] text-faint">当前改前</span>
+                    <ArrowRight v-else class="picker-arrow size-3.5 shrink-0 text-faint" />
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
+        </div>
 
-          <div v-else-if="diffError && hasBothFiles" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white px-6 text-center">
-            <CircleAlert class="size-7 text-mute" />
-            <p class="max-w-md text-xs leading-5 text-mute">{{ diffError }}</p>
-            <button type="button" class="btn-line !h-8 text-xs" @click="runDiffForCurrentSheet()">
-              <RotateCw class="size-3.5" />重新比对
-            </button>
-          </div>
+        <div v-if="rightLoading" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2.5 bg-white/95" role="status">
+          <LoaderCircle class="size-6 animate-spin text-mute" />
+          <span class="text-xs text-mute">正在读取并比对…</span>
+        </div>
 
-          <div v-if="diffBusy && hasBothFiles" class="absolute inset-0 z-20 flex items-center justify-center bg-white/65" role="status">
-            <LoaderCircle class="size-6 animate-spin text-mute" />
+        <div v-else-if="hasBothFiles && currentPair?.kind === 'deleted'" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-[#fafaf9]/85">
+          <div class="rounded-2xl border border-line bg-white px-5 py-4 text-center shadow-xs">
+            <p class="text-sm font-semibold text-ink">改后已删除此工作表</p>
+            <p class="mt-1 text-xs text-mute">「{{ currentPair.name }}」仅存在于改前文件</p>
           </div>
+        </div>
+
+        <div v-else-if="diffError && hasBothFiles" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white px-6 text-center">
+          <CircleAlert class="size-7 text-mute" />
+          <p class="max-w-md text-xs leading-5 text-mute">{{ diffError }}</p>
+          <button type="button" class="btn-line !h-8 text-xs" @click="runDiffForCurrentSheet()">
+            <RotateCw class="size-3.5" />重新比对
+          </button>
+        </div>
+
+        <div v-if="diffBusy && hasBothFiles" class="absolute inset-0 z-20 flex items-center justify-center bg-white/65" role="status">
+          <LoaderCircle class="size-6 animate-spin text-mute" />
         </div>
       </section>
     </div>
 
-    <!-- 底部极简工作表标签栏 -->
-    <footer class="flex shrink-0 items-stretch border-t border-line bg-paper px-2">
-      <nav v-if="hasBothFiles" class="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto" role="tablist" aria-label="比对工作表">
+    <!-- 底部单行栏：左侧可左右滑动的 Sheet 标签，右侧固定宽度的缩放百分比控件 -->
+    <footer class="relative z-30 flex h-10 shrink-0 items-center border-t border-line bg-[#fafaf9] px-2.5">
+      <nav v-if="hasBothFiles" class="sheet-strip flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-1 pr-2" role="tablist" aria-label="比对工作表" @wheel="onTabsWheel">
         <button
           v-for="pair in sheetPairs"
           :key="pair.key"
@@ -735,33 +863,16 @@ onBeforeUnmount(() => {
           :aria-selected="currentPair?.key === pair.key"
           class="sheet-tab"
           :class="{ 'is-on': currentPair?.key === pair.key }"
-          :title="pair.name"
-          @click="selectPair(pair.key)"
+          :title="pair.kind === 'added' ? `${pair.name}（新增）` : pair.kind === 'deleted' ? `${pair.name}（已删除）` : pair.name"
+          @click="selectPair(pair.key, $event)"
         >
-          <Plus v-if="pair.kind === 'added'" class="size-3 shrink-0 text-emerald-600" />
-          <Minus v-else-if="pair.kind === 'deleted'" class="size-3 shrink-0 text-rose-600" />
+          <span v-if="pair.kind === 'added'" class="size-1.5 shrink-0 rounded-full bg-emerald-500" />
+          <span v-else-if="pair.kind === 'deleted'" class="size-1.5 shrink-0 rounded-full bg-rose-500" />
           <span class="truncate">{{ pair.name }}</span>
-
-          <span v-if="pair.kind === 'added'" class="rounded bg-emerald-100 px-1 py-0.5 text-[10px] font-medium text-emerald-800">新增</span>
-          <span v-else-if="pair.kind === 'deleted'" class="rounded bg-rose-100 px-1 py-0.5 text-[10px] font-medium text-rose-800">删除</span>
-          <template v-else>
-            <LoaderCircle v-if="pairSummaries[pair.key] === 'loading'" class="size-3 shrink-0 animate-spin text-faint" />
-            <span
-              v-else-if="pairSummaries[pair.key] && typeof pairSummaries[pair.key] === 'object' && (pairSummaries[pair.key] as SheetDiffStats).total > 0"
-              class="rounded-full bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-amber-900"
-            >
-              {{ (pairSummaries[pair.key] as SheetDiffStats).total }}
-            </span>
-            <Check
-              v-else-if="pairSummaries[pair.key] && typeof pairSummaries[pair.key] === 'object'"
-              class="size-3 shrink-0 text-emerald-600"
-              title="无差异"
-            />
-          </template>
         </button>
       </nav>
 
-      <nav v-else-if="leftVisibleTabs.length" class="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto" role="tablist" aria-label="工作表">
+      <nav v-else-if="leftVisibleTabs.length" class="sheet-strip flex min-w-0 flex-1 items-center gap-1 overflow-x-auto py-1 pr-2" role="tablist" aria-label="工作表" @wheel="onTabsWheel">
         <button
           v-for="sheet in leftVisibleTabs"
           :key="sheet.index"
@@ -770,33 +881,144 @@ onBeforeUnmount(() => {
           :aria-selected="singleLeftSheet === sheet.index"
           class="sheet-tab"
           :class="{ 'is-on': singleLeftSheet === sheet.index }"
-          @click="showSingleSheet('left', sheet.index)"
+          @click="selectSingleLeftTab(sheet.index, $event)"
         >
           <span class="truncate">{{ sheet.name }}</span>
         </button>
       </nav>
-    </footer>
 
-    <input ref="fileInputRef" type="file" accept=".xlsx,.xlsm,.csv" class="hidden" @change="onPickLocalFile('right', $event)">
-    <input ref="leftFileInputRef" type="file" accept=".xlsx,.xlsm,.csv" class="hidden" @change="onPickLocalFile('left', $event)">
+      <div v-else class="flex-1" />
+
+      <div v-if="leftMeta || rightMeta" class="flex shrink-0 items-center border-l border-line/80 pl-2.5">
+        <ZoomControl
+          :model-value="zoom"
+          :disabled="diffBusy || leftLoading || rightLoading"
+          @update:model-value="applyZoom"
+        />
+      </div>
+    </footer>
   </main>
 </template>
 
 <style scoped>
 .workbook-compare :deep(.univer-workbench) { height: 100%; }
+
+/* 顶部居中文件名选择器：纯文字轻悬停，纤巧克制 */
+.file-trigger {
+  display: inline-flex;
+  height: 26px;
+  max-width: 100%;
+  align-items: center;
+  gap: 5px;
+  border-radius: 7px;
+  padding: 0 8px;
+  font-size: 12.5px;
+  transition: background-color .15s, color .15s;
+}
+.file-trigger:hover:not(:disabled),
+.file-trigger.is-open {
+  background-color: rgb(11 11 12 / 0.045);
+}
+.file-trigger:disabled {
+  cursor: default;
+}
+
+.file-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  z-index: 40;
+  width: 296px;
+  max-height: 360px;
+  overflow-y: auto;
+  border-radius: 14px;
+  border: 1px solid var(--color-line);
+  background: #fff;
+  padding: 6px;
+  box-shadow: 0 10px 28px rgb(0 0 0 / 0.08), 0 1px 3px rgb(0 0 0 / 0.04);
+}
+.file-menu-item {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  border-radius: 9px;
+  padding: 7px 10px;
+  text-align: left;
+  font-size: 12.5px;
+  color: var(--color-ink);
+  transition: background-color .12s;
+}
+.file-menu-item:hover:not(:disabled) {
+  background: var(--color-paper);
+}
+.file-menu-item.is-selected {
+  background: rgb(11 11 12 / 0.05);
+  font-weight: 500;
+}
+.file-menu-item.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 右侧/左侧文件选择卡片行 */
+.picker-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--color-line);
+  background: #fff;
+  padding: 9px 12px;
+  text-align: left;
+  transition: border-color .15s, background-color .15s, box-shadow .15s;
+}
+.picker-row:hover:not(:disabled) {
+  border-color: rgb(11 11 12 / 0.24);
+  background: #fafaf9;
+}
+.picker-row:hover:not(:disabled) .picker-arrow {
+  color: var(--color-ink);
+  transform: translateX(2px);
+}
+.picker-arrow {
+  transition: transform .15s, color .15s;
+}
+.picker-row.is-disabled {
+  opacity: 0.48;
+  background: #fafaf9;
+  cursor: not-allowed;
+}
+
+/* 底部现代轻卡片式工作表标签 */
+.sheet-strip {
+  scrollbar-width: none;
+}
+.sheet-strip::-webkit-scrollbar {
+  display: none;
+}
 .sheet-tab {
   display: inline-flex;
+  height: 28px;
   max-width: 16rem;
   flex: none;
   align-items: center;
-  gap: 5px;
-  border-radius: 0 0 8px 8px;
-  padding: 7px 12px;
-  color: #6b6b7a;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 0 11px;
+  color: #6b6863;
   font-size: 12px;
   white-space: nowrap;
-  transition: background-color .15s, color .15s;
+  transition: background-color .15s, color .15s, box-shadow .15s;
 }
-.sheet-tab:hover { color: #14141c; }
-.sheet-tab.is-on { background: #fff; color: #14141c; font-weight: 600; box-shadow: inset 0 -2px 0 #14141c; }
+.sheet-tab:hover {
+  background: rgb(11 11 12 / 0.045);
+  color: #14141c;
+}
+.sheet-tab.is-on {
+  background: #fff;
+  color: #111111;
+  font-weight: 500;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.06), 0 0 0 1px rgb(11 11 12 / 0.08);
+}
 </style>
