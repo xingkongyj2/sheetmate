@@ -30,6 +30,11 @@ def _key(path: Path) -> tuple[str, int, int, int]:
     return (str(Path(path).resolve()), stat.st_mtime_ns, stat.st_size, stat.st_ino)
 
 
+def fingerprint(path: str | Path) -> tuple[str, int, int, int]:
+    """文件的「指纹」：路径 + 修改时间 + 大小 + 文件号。内容被改写后指纹就变，拿它做缓存键。文件不存在时抛 OSError。"""
+    return _key(Path(path))
+
+
 def _copy(sheets: list[SheetData]) -> list[SheetData]:
     return [dataclasses.replace(sheet, df=sheet.df.copy(deep=False), quality=dict(sheet.quality or {})) for sheet in sheets]
 

@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from sqlalchemy import select
 from sheetmate.core.errors import ServiceError
 from sheetmate.db.models import FileRecord, PrivacyFile, User
 from sheetmate.db.session import session_scope
+from sheetmate.engine.workbooks.cache import fingerprint
 from sheetmate.privacy import KIND_LABELS, TOKEN_RE, Scope, bind, privacy
 from sheetmate.services.privacy import choices, masked_copy
 from sheetmate.services.privacy import service as privacy_service
@@ -35,11 +38,7 @@ def _describe(file_id: str) -> dict[str, Any]:
         filename, path = record.filename, record.stored_path
     picks = choices.load(file_id)
     guard = privacy.guard
-    try:
-        frames = {item.name: item.df for item in masked_copy._read(path)}
-    except ServiceError:
-        frames = {}
-    sheets = []
+    plans = []
     for sheet in profile_sheets:
         name = sheet.get("sheet", "")
         candidates = []
@@ -49,18 +48,20 @@ def _describe(file_id: str) -> dict[str, Any]:
             if found is None and guard is not None and privacy.enabled and (named := guard.registry.kind_for(column["name"])):
                 kind, source, reason = named, "rules", "其他文件里同名的列已识别为敏感"       # 按列名也会被处理
             candidates.append((kind, source, reason))
+        plans.append((sheet, name, candidates))
+    # 打开文件逐格数令牌是最慢的一步（配置低的机器上几十秒）：结果按文件指纹缓存，文件没变就不再打开
+    scans = _scan_file(path, [(name, {column["name"]: item[0] for column, item in zip(sheet.get("columns", []), candidates)})
+                              for sheet, name, candidates in plans], guard)
+    sheets = []
+    for sheet, name, candidates in plans:
         # 开关只有开和关：识别成敏感、但没有任何格子真的被换成令牌的列（比如只写了城市的收货地、没有联系方式的备注），显示成没脱敏
-        frame, really = frames.get(name), {}
-        if frame is not None and guard is not None:
-            by_name = {column["name"]: item[0] for column, item in zip(sheet.get("columns", []), candidates)}
-            really = dict(zip((str(column) for column in frame.columns),
-                              masked_copy.really_masked(frame, [by_name.get(str(column)) for column in frame.columns])))
-        # 文件里真的换成了令牌的格子数（原文件已改成脱敏版时才数得出来；格式没法原地改的文件数不出来，是 0）
-        tokens = _token_counts(frame) if frame is not None else {}
+        scan = scans.get(name)
+        readable = scan is not None          # 这张表真的读出来了（读不出来时不能凭「没有令牌」就把列判成没脱敏）
+        really, tokens = scan if scan is not None else ({}, {})
         columns = []
         for column, (kind, source, reason) in zip(sheet.get("columns", []), candidates):
             key, pick = (name, column["name"]), picks.get((name, column["name"]))
-            if kind is not None and frame is not None and not really.get(column["name"], False):
+            if kind is not None and readable and not really.get(column["name"], False):
                 kind, source, reason = None, None, None
             choice, auto_kind = (pick[0] if pick else None), kind
             if choice == "mask":
@@ -78,6 +79,56 @@ def _describe(file_id: str) -> dict[str, Any]:
              {"id": "address", "label": "详细地址", "enabled": guard is not None and not guard._off("address")},
              {"id": "custom", "label": KIND_LABELS["custom"], "enabled": True}]
     return {"enabled": True, "file_id": file_id, "filename": filename, "sheets": sheets, "types": types}
+
+
+_SCAN_CACHE_MAX = 256
+_scan_cache: OrderedDict[tuple[Any, ...], dict[str, tuple[dict[str, bool], dict[str, int]] | None]] = OrderedDict()
+_scan_gate = threading.Lock()
+
+
+def _scan_file(path: str, plan: list[tuple[str, dict[Any, str | None]]], guard: Any) -> dict[str, tuple[dict[str, bool], dict[str, int]] | None]:
+    """打开文件，逐个工作表算两样东西：哪些列真的被脱敏了、每列有多少个格子是令牌。返回 {工作表: (列→是否真脱敏, 列→令牌数)}，读不出这张表时是 None。
+
+    结果只取决于文件内容、各列的类型和打开了哪些规则，所以按这三样做缓存键：文件没动、识别结果没变，翻几次面板都不用再读文件。
+    读不出来（文件丢了、格式坏了）的不缓存，下次再试。"""
+    try:
+        stamp = fingerprint(path)
+    except OSError:
+        stamp = None
+    key = (stamp, None if guard is None else guard.active, tuple((name, tuple(kinds.items())) for name, kinds in plan))
+    if stamp is not None:
+        with _scan_gate:                          # 同时有两个请求要同一个文件时，只算一遍
+            hit = _scan_cache.get(key)
+            if hit is not None:
+                _scan_cache.move_to_end(key)
+                return hit
+            out, readable = _scan_uncached(path, plan, guard)
+            if readable:
+                _scan_cache[key] = out
+                while len(_scan_cache) > _SCAN_CACHE_MAX:
+                    _scan_cache.popitem(last=False)
+            return out
+    return _scan_uncached(path, plan, guard)[0]
+
+
+def _scan_uncached(path: str, plan: list[tuple[str, dict[Any, str | None]]], guard: Any) -> tuple[dict[str, Any], bool]:
+    try:
+        frames = {item.name: item.df for item in masked_copy._read(path)}
+    except ServiceError:
+        return {name: None for name, _ in plan}, False
+    out: dict[str, Any] = {}
+    for name, by_name in plan:
+        frame = frames.get(name)
+        if frame is None:
+            out[name] = None
+            continue
+        really: dict[str, bool] = {}
+        if guard is not None:
+            really = dict(zip((str(column) for column in frame.columns),
+                              masked_copy.really_masked(frame, [by_name.get(str(column)) for column in frame.columns])))
+        # 文件里真的换成了令牌的格子数（原文件已改成脱敏版时才数得出来；格式没法原地改的文件数不出来，是 0）
+        out[name] = (really, _token_counts(frame))
+    return out, True
 
 
 def _token_counts(frame: Any) -> dict[str, int]:

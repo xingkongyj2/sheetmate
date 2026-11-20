@@ -7,6 +7,7 @@ import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { ConversationDetail, PrivacyEventItem, PrivacyOverview } from '@/api/types'
 import type { UiMessage } from '@/composables/chatModel'
+import { cachedOverview, rememberOverview } from '@/composables/privacyOverviewCache'
 import { formatCount } from '@/composables/privacyPresentation'
 
 import PrivacyFiles from './PrivacyFiles.vue'
@@ -14,26 +15,41 @@ import PrivacySendsDialog from './PrivacySendsDialog.vue'
 
 const props = defineProps<{ detail: ConversationDetail | null; message: UiMessage | null }>()
 
-const overview = ref<PrivacyOverview | null>(null)
+const overview = ref<PrivacyOverview | null>(cachedOverview(props.detail?.id))   // 有上次的结果就先显示，后台再刷新
 const loading = ref(false)
 const error = ref('')
-let version = 0
+let inflight = false
+let queued = false
+let gone = false
 let timer = 0
 
-async function load() {
-  const id = props.detail?.id
-  if (!id) return
-  const current = ++version
+/**
+ * 同一时刻只有一个请求在飞：机器慢、一次要十几秒时，定时刷新不能一个接一个地把上一个请求作废（结果永远来不及显示，只剩转圈）。
+ * 定时、切回窗口这类「顺便刷新」遇到上一次还没回来就直接跳过；文件变了、对话换了这类必须反映的变化（force）会在这一次结束后立即补一次。
+ */
+async function load(force = true) {
+  if (inflight) {
+    if (force) queued = true
+    return
+  }
+  inflight = true
   loading.value = true
   try {
-    const data = await conversationApi.privacy(id)
-    if (current !== version) return
-    overview.value = data
-    error.value = ''
-  } catch (err) {
-    if (current === version) error.value = errorText(err)
+    do {
+      queued = false
+      const id = props.detail?.id
+      if (!id) break
+      try {
+        const data = await conversationApi.privacy(id)
+        if (props.detail?.id !== id) queued = true      // 等的时候换了对话：这份结果不是要的，重来
+        else { overview.value = data; error.value = ''; rememberOverview(id, data) }
+      } catch (err) {
+        if (props.detail?.id === id) error.value = errorText(err)
+      }
+    } while (queued && !gone)
   } finally {
-    if (current === version) loading.value = false
+    inflight = false
+    loading.value = false
   }
 }
 
@@ -42,14 +58,14 @@ const streaming = computed(() => props.message?.streaming === true)
 function schedule() {
   clearTimeout(timer)
   if (!streaming.value) return
-  timer = window.setTimeout(async () => { await load(); schedule() }, 2500)
+  timer = window.setTimeout(async () => { await load(false); schedule() }, 2500)   // 等上一次回来再排下一次，不会越积越多
 }
 const fileKey = computed(() => (props.detail?.files ?? []).map((file) => file.file_id).join(','))
-watch(() => props.detail?.id, () => { overview.value = null; void load() })
+watch(() => props.detail?.id, (id) => { overview.value = cachedOverview(id); void load() })
 watch(streaming, () => { void load(); schedule() })
 watch([fileKey, () => props.message?.privacy], () => { void load() })
 // 客户文件页里改了某个文件的列脱敏，这里要同步：回到这个页面时立即刷新，开着的时候也隔几秒刷新一次
-const onVisible = () => { if (document.visibilityState === 'visible') void load() }
+const onVisible = () => { if (document.visibilityState === 'visible') void load(false) }
 let idle = 0
 onMounted(() => {
   void load(); schedule()
@@ -58,7 +74,8 @@ onMounted(() => {
   idle = window.setInterval(onVisible, 8000)
 })
 onBeforeUnmount(() => {
-  clearTimeout(timer); clearInterval(idle); version++
+  gone = true
+  clearTimeout(timer); clearInterval(idle)
   document.removeEventListener('visibilitychange', onVisible)
   window.removeEventListener('focus', onVisible)
 })
@@ -128,7 +145,7 @@ function levelClass(level: PrivacyEventItem['level']): string {
       <section class="grid gap-2.5" aria-label="文件脱敏">
         <div class="flex items-center justify-between gap-2 px-0.5">
           <h4 class="text-[13px] font-medium leading-7 text-ink">文件脱敏</h4>
-          <button type="button" class="icon-btn size-7" :disabled="loading" title="刷新" aria-label="刷新脱敏情况" @click="load">
+          <button type="button" class="icon-btn size-7" :disabled="loading" title="刷新" aria-label="刷新脱敏情况" @click="load()">
             <RefreshCw class="size-3.5" :class="{ 'animate-spin': loading }" />
           </button>
         </div>
