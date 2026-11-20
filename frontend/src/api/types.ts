@@ -94,6 +94,33 @@ export interface RecipeFlowData {
   output_files?: { name: string; ref: string; source: string; sources: string[]; file_id?: string; download_url?: string }[]
 }
 
+/** 流程的一个保存版本（新的在前）；latest 是最新版本，也就是当前使用的版本。 */
+export interface RecipeVersion {
+  version: number
+  created_at: string
+  steps: number
+  note: string
+  created_by?: 'ai' | 'human' | string
+  conversation_id?: string | null
+  runs?: number
+  latest?: boolean
+}
+
+/** 某个版本和上一版相比改了什么；第一版没有上一版，sections 为空。 */
+export interface RecipeVersionChange {
+  kind: 'added' | 'removed' | 'modified'
+  title: string
+  details: string[]
+  before?: string
+  after?: string
+  code?: { language: string; added: number; removed: number; diff: string; truncated: boolean }
+}
+export interface RecipeVersionChanges {
+  version: number
+  base_version: number | null
+  sections: { key: string; title: string; items: RecipeVersionChange[] }[]
+}
+
 export interface RecipeEditRequest {
   recipe_id: string
   version: number

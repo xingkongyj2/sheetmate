@@ -45,7 +45,6 @@ const tab = ref<Tab>(TABS.find((item) => item.key === initialTab)?.key ?? 'logic
 const customer = ref<CustomerDetail | null>(null)
 const loading = ref(true)
 const summarizing = ref(false)
-const settingPrimary = ref(false)
 const editing = ref(false)
 const runDialog = ref<{ recipeId: string | null } | null>(null)
 const runRecipe = computed(() => customer.value?.recipes.find((recipe) => recipe.recipe_id === runDialog.value?.recipeId) ?? null)
@@ -98,26 +97,6 @@ const fileCount = computed(() => workflowFiles(orderedRecipes.value.length
 function setTab(next: Tab) {
   tab.value = next
   void router.replace({ query: { ...route.query, tab: next } })
-}
-
-async function setPrimary(recipeId: string) {
-  if (settingPrimary.value || !customer.value?.recipes.some((recipe) => recipe.recipe_id === recipeId)
-    || customer.value.primary_recipe_id === recipeId) return
-  const customerId = props.id
-  settingPrimary.value = true
-  try {
-    await customerApi.update(customerId, { primary_recipe_id: recipeId })
-    if (active && props.id === customerId && customer.value?.id === customerId) {
-      await load()
-      if (!active || props.id !== customerId) return
-      toast.success('已设为主流程')
-      void store.refreshCustomers()
-    }
-  } catch (err) {
-    if (active && props.id === customerId) toast.error(errorText(err))
-  } finally {
-    settingPrimary.value = false
-  }
 }
 
 async function newChat() {
@@ -260,11 +239,9 @@ async function onEdited() {
           v-for="recipe in orderedRecipes"
           :key="`${customer.id}:${recipe.recipe_id}`"
           :recipe="recipe"
+          :customer-id="customer.id"
           :files="workflowFiles([...recipe.files, ...recipe.output_files])"
           :primary="recipe.recipe_id === primaryRecipe?.recipe_id"
-          :setting-primary="settingPrimary"
-          :refresh="load"
-          @set-primary="setPrimary"
           @run="(id) => (runDialog = { recipeId: id })"
           @changed="load"
         />

@@ -238,12 +238,18 @@ def ensure_profile(db: Session, record: RecipeRecord) -> RecipeProfile:
 
 
 def versions(db: Session, recipe_id: str) -> list[dict[str, Any]]:
-    records = db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id).order_by(RecipeRecord.version.desc()))
+    """版本列表（新的在前）：备注、来源（AI / 人工）、来源会话、这个版本运行过几次。"""
+    records = list(db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id).order_by(RecipeRecord.version.desc())))
+    run_counts = dict(db.execute(select(Run.recipe_version, func.count()).where(Run.recipe_id == recipe_id)
+                                 .group_by(Run.recipe_version)).all())
     return [
         {"version": r.version,
          "created_at": r.created_at.isoformat(), "steps": len((r.body or {}).get("steps", [])),
-         "note": (r.body or {}).get("metadata", {}).get("version_note", "")}
-        for r in records
+         "note": (r.body or {}).get("metadata", {}).get("version_note", ""),
+         "created_by": r.created_by, "conversation_id": r.conversation_id,
+         "runs": run_counts.get(r.version, 0),
+         "latest": index == 0}
+        for index, r in enumerate(records)
     ]
 
 

@@ -1,13 +1,12 @@
 <script setup lang="ts">
 /**
  * 客户页里的一个流程：流程图和说明；头部只有「用新文件执行」和「详情」两个按钮，
- * 运行记录、版本历史、处理详情、设为主流程、删除都收在详情页里。
+ * 「详情」进入流程详情页（运行记录、版本历史、处理详情、设为主流程、删除都在那里）。
  */
-import { Maximize2, Play, SlidersHorizontal, Star } from '@lucide/vue'
-import { computed, ref } from 'vue'
+import { Play, SlidersHorizontal, Star } from '@lucide/vue'
+import { computed } from 'vue'
 
 import type { CustomerDetail, FileInfo } from '@/api/types'
-import RecipeDetailDialog from '@/components/customer/RecipeDetailDialog.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import { inspectorStates } from '@/composables/recipeFlowInspector'
 
@@ -15,15 +14,12 @@ type CustomerRecipe = CustomerDetail['recipes'][number]
 
 const props = defineProps<{
   recipe: CustomerRecipe
+  customerId: string
   files?: FileInfo[]
   primary?: boolean
-  settingPrimary?: boolean
-  refresh?: () => Promise<void>
 }>()
-const emit = defineEmits<{ run: [recipeId: string]; changed: []; setPrimary: [recipeId: string] }>()
+const emit = defineEmits<{ run: [recipeId: string]; changed: [] }>()
 
-const showDetail = ref(false)
-const flowView = ref<InstanceType<typeof RecipeFlow> | null>(null)
 const latestRun = computed(() => props.recipe.runs.find((run) => run.recipe_version === props.recipe.version))
 const states = computed(() => inspectorStates([], latestRun.value?.steps ?? []))
 </script>
@@ -37,14 +33,12 @@ const states = computed(() => inspectorStates([], latestRun.value?.steps ?? []))
       </div>
       <div class="recipe-panel-actions ml-auto flex max-w-full shrink-0 flex-wrap items-center gap-2">
         <button type="button" class="btn-line size-8 justify-center p-0" title="用新文件执行" aria-label="用新文件执行" @click="emit('run', recipe.recipe_id)"><Play class="size-4" /></button>
-        <button type="button" class="btn-line size-8 justify-center p-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="flowView?.openFullscreen()"><Maximize2 class="size-4" /></button>
-        <button type="button" class="btn-line size-8 justify-center p-0" title="流程详情" aria-label="流程详情" aria-haspopup="dialog" @click="showDetail = true"><SlidersHorizontal class="size-4" /></button>
+        <RouterLink :to="{ name: 'recipe', params: { id: customerId, recipeId: recipe.recipe_id } }" class="btn-line size-8 justify-center p-0" title="流程详情" aria-label="流程详情"><SlidersHorizontal class="size-4" /></RouterLink>
       </div>
     </header>
 
     <div class="rounded-[24px] bg-white p-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-5">
       <RecipeFlow
-        ref="flowView"
         toolbar-placement="hidden"
         :flow="recipe.flow"
         :states="states"
@@ -52,12 +46,6 @@ const states = computed(() => inspectorStates([], latestRun.value?.steps ?? []))
         @changed="emit('changed')"
       />
     </div>
-
-    <RecipeDetailDialog
-      v-if="showDetail"
-      :recipe="recipe" :primary="primary" :setting-primary="settingPrimary" :refresh="refresh"
-      @close="showDetail = false" @changed="emit('changed')" @set-primary="(id) => emit('setPrimary', id)"
-    />
   </article>
 </template>
 

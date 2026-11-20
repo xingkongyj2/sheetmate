@@ -1,4 +1,4 @@
-"""Recipe：列表、详情、版本、编辑（存为新版本）、匹配输入、用新文件执行（SSE）、删除；公式目录。"""
+"""Recipe：列表、详情、版本（含和上一版对比）、编辑（存为新版本）、匹配输入、用新文件执行（SSE）、删除；公式目录。"""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from sheetmate.services.workflows import package as package_service
 from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import replay as replay_service
 from sheetmate.services.workflows import runs as run_service
+from sheetmate.services.workflows import version_diff as version_diff_service
 from sheetmate.services.identity.auth import require_customer
 
 router = APIRouter(prefix="/api", tags=["recipes"])
@@ -47,6 +48,14 @@ def get_recipe(recipe_id: str, version: int | None = None, db: Session = Depends
     runs = run_service.list_runs(db, recipe_id=recipe_id, limit=20)
     return {"ok": True, "recipe": recipe.to_dict(), "flow": recipe.flow(), "versions": recipe_service.versions(db, recipe_id),
             "runs": [run_service.run_dict(r, with_steps=False) for r in runs]}
+
+
+@router.get("/recipes/{recipe_id}/versions/{version}/changes")
+def version_changes(recipe_id: str, version: int, db: Session = Depends(get_db),
+                    user: User = Depends(current_user)) -> dict[str, Any]:
+    """这个版本和上一版相比改了什么。"""
+    recipe_service.require_recipe_access(db, user, recipe_service.get_recipe(db, recipe_id, version))
+    return {"ok": True, **version_diff_service.version_changes(db, recipe_id, version)}
 
 
 @router.get("/recipes/{recipe_id}/package")

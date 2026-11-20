@@ -486,3 +486,41 @@ def test_revoked_customer_grant_blocks_existing_conversation_context(client):
 
     with pytest.raises(Forbidden, match="没有权限访问这个客户"):
         build_context(member_id, conversation_id, llm=None)
+
+
+
+def test_version_changes_compare_with_previous_version(client):
+    """版本详情：和上一版相比改了什么——说明、节点（类型、参数、脚本逐行差异）、输出、列名对应。"""
+    from sheetmate.engine.scripts.store import script_params
+
+    cid = _new_customer(client)["id"]
+    first = Recipe(
+        name="对比流程", description="第一版说明", customer_id=cid, created_by="human",
+        inputs=[RecipeInput(alias="明细", source_file="明细.xlsx", required_columns=["金额"])],
+        steps=[RecipeStep(id=1, name="筛选", formula="filter_rows", output="结果", params={"table": "明细", "conditions": []}),
+               RecipeStep(id=2, name="汇总", formula="python_script", kind="python", output="汇总",
+                          params=script_params({"code": "a = 1\nb = 2\n"}, title="汇总"))],
+        output_spec=[OutputSheet(name="结果", source="结果", description="筛出的行")],
+    )
+    with session_scope() as db:
+        recipe_service.save_recipe(db, first)
+        second = Recipe(**{**first.to_dict(), "description": "第二版说明", "field_mapping": {"金额": ["金额小计"]}})
+        second.steps[0].params = {"table": "明细", "conditions": [{"column": "金额", "op": ">", "value": 0}]}
+        second.steps[1].params = script_params({"code": "a = 1\nb = 3\nc = 4\n"}, title="汇总")
+        second.output_spec.append(OutputSheet(name="汇总", source="汇总"))
+        recipe_service.save_recipe(db, second)
+    rid = first.id
+
+    assert client.get(f"/api/recipes/{rid}/versions/1/changes").json()["sections"] == []
+    data = client.get(f"/api/recipes/{rid}/versions/2/changes").json()
+    assert data["base_version"] == 1
+    sections = {s["key"]: s["items"] for s in data["sections"]}
+    assert set(sections) == {"basic", "steps", "outputs", "mapping"}
+    assert sections["basic"] == [{"kind": "modified", "title": "说明", "details": [], "before": "第一版说明", "after": "第二版说明"}]
+    filter_step, script_step = sections["steps"]
+    assert filter_step["details"] == ["参数修改：conditions"] and "code" not in filter_step
+    assert (script_step["code"]["added"], script_step["code"]["removed"]) == (2, 1)
+    assert "-b = 2" in script_step["code"]["diff"] and "+c = 4" in script_step["code"]["diff"]
+    assert [(i["kind"], i["title"]) for i in sections["outputs"]] == [("added", "汇总")]
+    assert sections["mapping"][0]["title"] == "金额"
+    client.delete(f"/api/recipes/{rid}")

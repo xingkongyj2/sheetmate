@@ -29,6 +29,8 @@ import type {
   PrivacyRuleSetting,
   RecipeFlowData,
   RecipeJSON,
+  RecipeVersion,
+  RecipeVersionChanges,
   RunBrief,
   RunDetail,
   ScriptFile,
@@ -244,8 +246,11 @@ export const recipeApi = {
   list: async (params: { customer_id?: string; conversation_id?: string }) =>
     (await http.get<{ recipes: RecipeBrief[] }>('/recipes', { params })).data.recipes,
   get: async (id: string, version?: number) =>
-    (await http.get<{ recipe: RecipeJSON; flow: RecipeFlowData; versions: { version: number; created_at: string; steps: number; note: string }[]; runs: RunBrief[] }>(
+    (await http.get<{ recipe: RecipeJSON; flow: RecipeFlowData; versions: RecipeVersion[]; runs: RunBrief[] }>(
       `/recipes/${id}`, { params: { version } })).data,
+  /** 这个版本和上一版相比改了什么 */
+  changes: async (id: string, version: number) =>
+    (await http.get<RecipeVersionChanges>(`/recipes/${id}/versions/${version}/changes`)).data,
   update: async (id: string, recipe: RecipeJSON) => (await http.put<{ recipe: RecipeBrief }>(`/recipes/${id}`, recipe)).data.recipe,
   remove: async (id: string) => http.delete(`/recipes/${id}`),
   match: async (id: string, fileIds: string[]) =>

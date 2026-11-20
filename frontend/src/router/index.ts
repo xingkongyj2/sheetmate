@@ -19,6 +19,7 @@ const router = createRouter({
         { path: 'c/:id', name: 'chat', component: () => import('@/views/ChatView.vue'), props: true },
         { path: 'customers', name: 'customers', component: () => import('@/views/CustomersView.vue') },
         { path: 'customers/:id', name: 'customer', component: () => import('@/views/CustomerDetailView.vue'), props: true },
+        { path: 'customers/:id/recipes/:recipeId', name: 'recipe', component: () => import('@/views/RecipeDetailView.vue'), props: true },
         { path: 'formulas', name: 'formulas', component: () => import('@/views/FormulaLibraryView.vue') },
         { path: 'settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
         { path: 'stats', name: 'stats', component: () => import('@/views/StatsView.vue') },
