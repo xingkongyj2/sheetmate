@@ -1,10 +1,12 @@
+import type JSZip from 'jszip'
+
 import { buildWorkbookSnapshot } from './snapshot.ts'
 import { PREVIEW_LIMITS, WorkbookPreviewError } from './types.ts'
-import type { ParsedWorkbook } from './types.ts'
+import type { ParsedWorkbook, SheetMeta, WorkbookSession } from './types.ts'
 
 export { buildWorkbookSnapshot } from './snapshot.ts'
 export { PREVIEW_LIMITS, WorkbookPreviewError } from './types.ts'
-export type { ParsedWorkbook } from './types.ts'
+export type { ParsedWorkbook, SheetMeta, WorkbookSession } from './types.ts'
 
 /** Inspect ZIP metadata before ExcelJS expands the workbook in browser memory. */
 function inspectArchive(buffer: ArrayBuffer): string[] {
@@ -77,64 +79,149 @@ function checkWorksheetXml(xml: string, budget: { cells: number; mergedCells: nu
   }
 }
 
-/** Remove objects the viewer cannot render from a temporary ZIP, leaving the original untouched. */
-async function preparePreviewArchive(buffer: ArrayBuffer, warnings: string[]): Promise<ArrayBuffer> {
-  const { default: JSZip } = await import('jszip')
-  const zip = await JSZip.loadAsync(buffer)
-  const budget = { cells: 0, mergedCells: 0, merges: 0 }
-  let changed = false, sheets = 0
-  for (const entry of Object.values(zip.files)) {
-    if (entry.dir) continue
-    const name = entry.name.replace(/^\//, '')
-    // ExcelJS 4.4 tries to reconcile these objects even when their sheet nodes
-    // are ignored. Legal chart/comment/table relationships can then throw.
-    if (/^xl\/(?:drawings|media|charts|tables|pivotTables|pivotCache|comments|threadedComments|persons)\//i.test(name)
-      || /^xl\/(?:comments\d+\.xml|vbaProject\.bin)$/i.test(name)) {
-      zip.remove(entry.name)
-      changed = true
-      continue
-    }
-    if (/^xl\/worksheets\/[^/]+\.xml$/i.test(name)) {
-      if (++sheets > PREVIEW_LIMITS.sheets) throw new WorkbookPreviewError(`工作表超过 ${PREVIEW_LIMITS.sheets} 张的完整样式预览范围，请使用数据预览或下载原文件。`)
-      const original = await entry.async('string')
-      checkWorksheetXml(original, budget)
-      const cleaned = withoutNodes(original, ['drawing', 'legacyDrawing', 'legacyDrawingHF', 'picture', 'tableParts', 'dataValidations', 'conditionalFormatting', 'extLst'])
-      if (/<(?:[\w.-]+:)?conditionalFormatting\b/i.test(original)) warnings.push('条件格式暂未应用，预览显示单元格的基础样式。')
-      if (cleaned !== original) { zip.file(entry.name, cleaned); changed = true }
-    } else if (/^xl\/worksheets\/_rels\/[^/]+\.rels$/i.test(name)) {
-      const original = await entry.async('string')
-      const cleaned = original.replace(/<(?:[\w.-]+:)?Relationship\b[^>]*\/\s*>/gi, (tag) => {
-        const type = attribute(tag, 'Type') ?? ''
-        return /\/(?:drawing|vmlDrawing|comments|threadedComment|table|image|pivotTable|control|ctrlProp|oleObject)$/i.test(type) ? '' : tag
-      })
-      if (cleaned !== original) { zip.file(entry.name, cleaned); changed = true }
-    } else if (/^xl\/workbook\.xml$/i.test(name)) {
-      // Named ranges are not used by this cached-value-only viewer. ExcelJS
-      // otherwise expands every address in a large named range on import.
-      const original = await entry.async('string')
-      const cleaned = withoutNodes(original, ['definedNames'])
-      if (cleaned !== original) { zip.file(entry.name, cleaned); changed = true }
-    }
-  }
-  return changed ? zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE', compressionOptions: { level: 1 } }) : buffer
+type JSZipInstance = JSZip
+
+const STUB_SHEET = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData/></worksheet>'
+// ExcelJS 4.4 tries to reconcile these objects even when their sheet nodes are ignored. Legal chart/comment/table relationships can then throw.
+const UNRENDERABLE_PART = /^xl\/(?:drawings|media|charts|tables|pivotTables|pivotCache|comments|threadedComments|persons)\/|^xl\/(?:comments\d+\.xml|vbaProject\.bin)$/i
+const relsPathOf = (sheetPath: string) => sheetPath.replace(/([^/]+)$/, '_rels/$1.rels')
+
+function decodeXml(text: string): string {
+  return text.replace(/&(?:#(\d+)|#x([0-9a-f]+)|(lt|gt|amp|quot|apos));/gi, (_all, dec, hex, named) => {
+    if (named) return { lt: '<', gt: '>', amp: '&', quot: '"', apos: "'" }[String(named).toLowerCase()]!
+    return String.fromCodePoint(Number(dec ?? Number.parseInt(hex, 16)))
+  })
 }
 
-/** All parsing and conversion happens locally in the browser. */
-export async function parseWorkbook(buffer: ArrayBuffer, filename: string): Promise<ParsedWorkbook> {
+function resolveTarget(target: string): string {
+  if (target.startsWith('/')) return target.slice(1)
+  const out: string[] = []
+  for (const part of `xl/${target}`.split('/')) {
+    if (part === '..') out.pop()
+    else if (part !== '.') out.push(part)
+  }
+  return out.join('/')
+}
+
+interface SheetEntry extends SheetMeta { path: string }
+
+/** 只读 workbook.xml 和它的关系文件，得到工作表目录和各自的文件位置，不碰工作表本身的内容。 */
+async function readDirectory(zip: JSZipInstance): Promise<{ sheets: SheetEntry[]; active: number }> {
+  const text = async (path: string) => zip.file(path)?.async('string')
+  const workbookXml = await text('xl/workbook.xml')
+  const relsXml = await text('xl/_rels/workbook.xml.rels')
+  if (!workbookXml || !relsXml) throw new WorkbookPreviewError('Excel 文件缺少工作表目录，请使用数据预览或下载原文件查看。')
+  const targets = new Map<string, { type: string; target: string }>()
+  for (const tag of relsXml.matchAll(/<(?:[\w.-]+:)?Relationship\b[^>]*>/gi)) {
+    const id = attribute(tag[0], 'Id'), target = attribute(tag[0], 'Target')
+    if (id && target) targets.set(id, { type: attribute(tag[0], 'Type') ?? '', target })
+  }
+  const sheets: SheetEntry[] = []
+  const listed: Array<number | undefined> = []         // workbook.xml 里每一项对应的工作表位置（图表页之类不是工作表，没有）
+  for (const tag of workbookXml.matchAll(/<(?:[\w.-]+:)?sheet\b[^>]*>/gi)) {
+    const id = /\b[\w.-]+:id\s*=\s*(["'])([\s\S]*?)\1/.exec(tag[0])?.[2]
+    const rel = id ? targets.get(id) : undefined
+    if (!rel || !/\/worksheet$/i.test(rel.type)) { listed.push(undefined); continue }
+    const state = attribute(tag[0], 'state')
+    listed.push(sheets.length)
+    sheets.push({ index: sheets.length, name: decodeXml(attribute(tag[0], 'name') ?? `Sheet${sheets.length + 1}`), hidden: state === 'veryHidden' ? 2 : state === 'hidden' ? 1 : 0, path: resolveTarget(rel.target) })
+  }
+  if (!sheets.length) throw new WorkbookPreviewError('这个文件没有可预览的工作表。')
+  if (sheets.length > PREVIEW_LIMITS.sheets) throw new WorkbookPreviewError(`工作表超过 ${PREVIEW_LIMITS.sheets} 张的完整样式预览范围，请使用数据预览或下载原文件。`)
+  const activeTab = Number(attribute(/<(?:[\w.-]+:)?workbookView\b[^>]*>/i.exec(workbookXml)?.[0] ?? '', 'activeTab') ?? 0)
+  const wanted = listed[Number.isFinite(activeTab) ? activeTab : 0]
+  const visible = sheets.find((sheet) => sheet.hidden === 0)
+  const active = wanted !== undefined && sheets[wanted]!.hidden === 0 ? wanted : (visible ?? sheets[0]!).index
+  return { sheets, active }
+}
+
+/** 清掉预览用不到的对象，并检查这张表有没有超出预览范围。 */
+function cleanWorksheetXml(original: string, warnings: Set<string>): string {
+  checkWorksheetXml(original, { cells: 0, mergedCells: 0, merges: 0 })
+  const cleaned = withoutNodes(original, ['drawing', 'legacyDrawing', 'legacyDrawingHF', 'picture', 'tableParts', 'dataValidations', 'conditionalFormatting', 'extLst'])
+  if (/<(?:[\w.-]+:)?conditionalFormatting\b/i.test(original)) warnings.add('条件格式暂未应用，预览显示单元格的基础样式。')
+  return cleaned
+}
+
+function cleanWorksheetRels(original: string): string {
+  return original.replace(/<(?:[\w.-]+:)?Relationship\b[^>]*\/\s*>/gi, (tag) => {
+    const type = attribute(tag, 'Type') ?? ''
+    return /\/(?:drawing|vmlDrawing|comments|threadedComment|table|image|pivotTable|control|ctrlProp|oleObject)$/i.test(type) ? '' : tag
+  })
+}
+
+/**
+ * 打开工作簿：只读工作表目录，立即返回。
+ * 看哪张表才解析哪张：把别的工作表换成空壳再交给 ExcelJS，它就只需要解析这一张表的内容（共享字符串、样式仍会读，但只有一份）。
+ * 整本解析的耗时和内存都随全部工作表的单元格总数增长；按表加载后只和当前这张表有关。
+ */
+export async function openWorkbook(buffer: ArrayBuffer, filename: string): Promise<WorkbookSession> {
   if (!/\.(xlsx|xlsm)$/i.test(filename)) throw new WorkbookPreviewError('原样式预览支持 .xlsx 和 .xlsm 文件，请使用数据预览或下载此文件。')
   if (!buffer.byteLength) throw new WorkbookPreviewError('文件内容为空，无法预览。')
   if (buffer.byteLength > PREVIEW_LIMITS.fileBytes) throw new WorkbookPreviewError(`文件超过 ${PREVIEW_LIMITS.fileBytes / 1024 / 1024} MB，暂不支持浏览器预览，请下载原文件查看。`)
   const archiveWarnings = inspectArchive(buffer)
+  let zip: JSZipInstance, directory: Awaited<ReturnType<typeof readDirectory>>, JSZipCtor: typeof JSZip
   try {
-    const { default: ExcelJS } = await import('exceljs')
-    const source = new ExcelJS.Workbook()
-    const previewBuffer = await preparePreviewArchive(buffer, archiveWarnings)
-    await source.xlsx.load(previewBuffer, { ignoreNodes: ['dataValidations', 'conditionalFormatting', 'extLst'] })
-    const parsed = buildWorkbookSnapshot(source, filename)
-    parsed.warnings = [...new Set([...archiveWarnings, ...parsed.warnings])]
-    return parsed
+    ;({ default: JSZipCtor } = await import('jszip'))
+    zip = await JSZipCtor.loadAsync(buffer)
+    directory = await readDirectory(zip)
   } catch (error) {
     if (error instanceof WorkbookPreviewError) throw error
     throw new WorkbookPreviewError('这个工作簿的完整样式暂时无法解析，请使用数据预览或下载原文件查看。')
+  }
+  void import('exceljs').catch(() => undefined)         // 解析库的代码先加载起来，读第一张表时就不用等
+  const sheetPaths = new Set(directory.sheets.map((sheet) => sheet.path))
+  const relsPaths = new Set(directory.sheets.map((sheet) => relsPathOf(sheet.path)))
+  const shared = new Map<string, string | Uint8Array>()        // 每张表都要带上的公共部分（样式、共享字符串、主题…）：只解压一次
+  async function sharedParts(): Promise<Map<string, string | Uint8Array>> {
+    if (shared.size) return shared
+    for (const entry of Object.values(zip.files)) {
+      if (entry.dir) continue
+      const name = entry.name.replace(/^\//, '')
+      if (UNRENDERABLE_PART.test(name) || sheetPaths.has(name) || relsPaths.has(name)) continue
+      if (/^xl\/workbook\.xml$/i.test(name)) {
+        // Named ranges are not used by this cached-value-only viewer. ExcelJS otherwise expands every address in a large named range on import.
+        shared.set(entry.name, withoutNodes(await entry.async('string'), ['definedNames']))
+      } else shared.set(entry.name, await entry.async('uint8array'))
+    }
+    return shared
+  }
+
+  async function readSheet(index: number): Promise<ParsedWorkbook> {
+    const target = directory.sheets[index]
+    if (!target) throw new WorkbookPreviewError('没有找到这张工作表。')
+    try {
+      const warnings = new Set<string>()
+      const out = new JSZipCtor()
+      for (const [name, content] of await sharedParts()) out.file(name, content)
+      for (const entry of Object.values(zip.files)) {
+        if (entry.dir) continue
+        const name = entry.name.replace(/^\//, '')
+        if (sheetPaths.has(name)) {
+          out.file(entry.name, name === target.path ? cleanWorksheetXml(await entry.async('string'), warnings) : STUB_SHEET)
+        } else if (name === relsPathOf(target.path)) {
+          out.file(entry.name, cleanWorksheetRels(await entry.async('string')))
+        }
+      }
+      const prepared = await out.generateAsync({ type: 'arraybuffer', compression: 'STORE' })
+      const { default: ExcelJS } = await import('exceljs')
+      const source = new ExcelJS.Workbook()
+      await source.xlsx.load(prepared, { ignoreNodes: ['dataValidations', 'conditionalFormatting', 'extLst'] })
+      const worksheet = source.worksheets[index]?.name === target.name ? source.worksheets[index] : source.getWorksheet(target.name)
+      if (!worksheet) throw new WorkbookPreviewError('没有找到这张工作表。')
+      const parsed = buildWorkbookSnapshot(source, filename, { only: worksheet })
+      parsed.warnings = [...new Set([...warnings, ...parsed.warnings])]
+      return parsed
+    } catch (error) {
+      if (error instanceof WorkbookPreviewError) throw error
+      throw new WorkbookPreviewError('这张工作表的完整样式暂时无法解析，请使用数据预览或下载原文件查看。')
+    }
+  }
+
+  return {
+    sheets: directory.sheets.map(({ index, name, hidden }) => ({ index, name, hidden })),
+    active: directory.active,
+    warnings: archiveWarnings,
+    readSheet,
   }
 }

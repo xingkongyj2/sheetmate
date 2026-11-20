@@ -4,7 +4,7 @@ import { computed, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter } 
 import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { TableReference } from '@/composables/tableReferences'
-import { parseInWorker } from '@/features/workbook-preview/worker-client'
+import { openInWorker } from '@/features/workbook-preview/worker-client'
 
 interface LocalReferenceFile {
   key: string
@@ -30,11 +30,13 @@ async function readSheets(file: File, signal: AbortSignal): Promise<string[]> {
   if (/\.xls$/i.test(file.name)) return (await fileApi.previewUpload(file, undefined, 0, 1, signal)).sheets
   const buffer = await file.arrayBuffer()
   if (signal.aborted) throw new DOMException('已取消读取工作表', 'AbortError')
-  const parsed = await parseInWorker(buffer, file.name, signal)
-  return parsed.workbook.sheetOrder.flatMap((id) => {
-    const name = parsed.workbook.sheets[id]?.name
-    return name ? [name] : []
-  })
+  // 只要工作表名：读目录即可，不用把整个工作簿解析一遍
+  const session = await openInWorker(buffer, file.name, signal)
+  try {
+    return session.sheets.map((sheet) => sheet.name)
+  } finally {
+    session.dispose()
+  }
 }
 
 export function useLocalFileReferences(source: MaybeRefOrGetter<LocalReferenceFile[]>) {

@@ -9,7 +9,9 @@ import type { FileInfo } from '@/api/types'
 import DataTable from '@/components/common/DataTable.vue'
 import { isImageFile } from '@/composables/attachmentFiles'
 
-import { parseInWorker } from './worker-client'
+import type { SheetMeta } from './excel'
+import type { WorkbookViewer } from './viewer'
+import { openInWorker, type PreviewSession } from './worker-client'
 
 // page：作为独立页面整页展示（新标签页里的预览页）；否则是盖在当前页面上的弹层
 const props = defineProps<{ file?: FileInfo; localFile?: File; page?: boolean }>()
@@ -17,6 +19,16 @@ const emit = defineEmits<{ close: [] }>()
 const panel = ref<HTMLElement>()
 const host = ref<HTMLElement>()
 const phase = ref<'download' | 'parse' | 'render' | 'ready'>('download')
+// 按表加载：先只拿到工作表目录，看哪张才解析、渲染哪张
+const sheets = ref<SheetMeta[]>([])
+const selectedSheet = ref(-1)
+const sheetBusy = ref(false)
+const sheetError = ref('')
+const tabColors = ref<Record<number, string>>({})
+const tabs = computed(() => {
+  const visible = sheets.value.filter((sheet) => sheet.hidden === 0)
+  return visible.length ? visible : sheets.value
+})
 const error = ref('')
 const warnings = ref<string[]>([])
 const showWarnings = ref(false)
@@ -34,10 +46,14 @@ const legacySheets = ref<string[]>([])
 const legacyPage = ref<{ columns: string[]; rows: unknown[][]; total: number; has_more?: boolean; total_exact?: boolean } | null>(null)
 const legacyOffset = ref(0)
 const legacyBusy = ref(false)
-const busyText = computed(() => dataMode.value ? '正在读取当前页数据…' : ({ download: '正在读取文件…', parse: '正在解析表格和样式…', render: '正在打开表格…', ready: '' })[phase.value])
+const busyText = computed(() => dataMode.value ? '正在读取当前页数据…' : ({ download: '正在读取文件…', parse: '正在读取工作表…', render: '正在打开表格…', ready: '' })[phase.value])
 const hasNextPage = computed(() => legacyPage.value?.has_more ?? (legacyOffset.value + 100 < (legacyPage.value?.total ?? 0)))
 let controller: AbortController | null = null
-let viewer: { dispose(): void } | null = null
+let viewer: WorkbookViewer | null = null
+let session: PreviewSession | null = null
+let sheetRequest = 0
+let baseWarnings: string[] = []
+const sheetWarnings = new Map<number, string[]>()
 let previousFocus: HTMLElement | null = null
 let previousOverflow = ''
 let loadId = 0
@@ -90,6 +106,16 @@ async function load(preferData = false) {
   const signal = controller.signal
   viewer?.dispose()
   viewer = null
+  session?.dispose()
+  session = null
+  sheets.value = []
+  selectedSheet.value = -1
+  sheetBusy.value = false
+  sheetError.value = ''
+  tabColors.value = {}
+  sheetWarnings.clear()
+  baseWarnings = []
+  ++sheetRequest
   if (localImageUrl) URL.revokeObjectURL(localImageUrl)
   localImageUrl = ''
   imageSrc.value = ''
@@ -118,6 +144,9 @@ async function load(preferData = false) {
   let canFallBack = false
   try {
     if (!props.localFile && !props.file) throw new Error('没有可预览的文件。')
+    // 表格查看器的代码包较大：和下载、解析文件同时加载，不用等它们做完才开始
+    const viewerModule = import('./viewer')
+    viewerModule.catch(() => undefined)
     if (!/\.(xlsx|xlsm|csv)$/i.test(filename.value)) throw new Error('此文件暂不支持在线预览，请使用 Excel 查看。')
     const buffer = props.localFile
       ? await props.localFile.arrayBuffer()
@@ -126,19 +155,21 @@ async function load(preferData = false) {
     canFallBack = true
     if (buffer.byteLength > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，请下载后查看。')
     phase.value = 'parse'
-    const parsed = await parseInWorker(buffer, filename.value, signal)
-    if (signal.aborted || id !== loadId) return
-    warnings.value = parsed.warnings
+    const opened = await openInWorker(buffer, filename.value, signal)
+    if (signal.aborted || id !== loadId) { opened.dispose(); return }
+    session = opened
+    sheets.value = opened.sheets
+    baseWarnings = opened.warnings
+    warnings.value = [...baseWarnings]
     phase.value = 'render'
     await nextTick()
-    const { mountWorkbook } = await import('./viewer')
+    const { createViewer } = await viewerModule
     if (signal.aborted || id !== loadId || !host.value) return
-    const mounted = await mountWorkbook(host.value, parsed.workbook)
-    if (signal.aborted || id !== loadId) mounted.dispose()
-    else {
-      viewer = mounted
-      phase.value = 'ready'
-    }
+    viewer = createViewer(host.value)
+    // 第一张表读不出来（比如超出完整样式的范围）就整体退到分页预览；其余表单独提示，不影响别的表
+    await openSheet(opened.active, true)
+    if (signal.aborted || id !== loadId) return
+    phase.value = 'ready'
   } catch (err) {
     if (signal.aborted || id !== loadId) return
     if (canFallBack && supportsDataPreview.value) {
@@ -151,6 +182,46 @@ async function load(preferData = false) {
       if (error.value && id === loadId) error.value = `原样式预览未能打开，分页数据预览也未能完成：${error.value}`
     } else error.value = errorText(err)
   }
+}
+
+/** 显示一张工作表：解析这一张、换掉当前显示的内容。连续点几个标签时只认最后一次。 */
+async function openSheet(index: number, first = false) {
+  const current = session
+  const shown = viewer
+  if (!current || !shown) return
+  const request = ++sheetRequest
+  const id = loadId
+  selectedSheet.value = index
+  sheetBusy.value = true
+  sheetError.value = ''
+  try {
+    const parsed = await current.loadSheet(index)
+    if (request !== sheetRequest || id !== loadId) return
+    await shown.show(parsed.workbook)
+    if (request !== sheetRequest || id !== loadId) return
+    sheetWarnings.set(index, parsed.warnings)
+    warnings.value = [...new Set([...baseWarnings, ...[...sheetWarnings.values()].flat()])]
+    const color = Object.values(parsed.workbook.sheets)[0]?.tabColor
+    if (color) tabColors.value = { ...tabColors.value, [index]: color }
+  } catch (err) {
+    if (request !== sheetRequest || id !== loadId) return
+    if (first) throw err
+    sheetError.value = errorText(err)
+  } finally {
+    if (request === sheetRequest) sheetBusy.value = false
+  }
+}
+
+function onTabKey(event: KeyboardEvent, position: number) {
+  const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0
+  const edge = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.value.length - 1 : null
+  const next = edge ?? (step ? position + step : null)
+  if (next === null || next < 0 || next >= tabs.value.length) return
+  event.preventDefault()
+  event.stopPropagation()
+  const target = tabs.value[next]!
+  void openSheet(target.index)
+  nextTick(() => (event.currentTarget as HTMLElement | null)?.parentElement?.querySelectorAll<HTMLElement>('[role=tab]')[next]?.focus())
 }
 
 function onKey(event: KeyboardEvent) {
@@ -187,6 +258,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   ++loadId
   controller?.abort()
+  session?.dispose()
   viewer?.dispose()
   if (localImageUrl) URL.revokeObjectURL(localImageUrl)
   window.removeEventListener('keydown', onKey, true)
@@ -236,9 +308,22 @@ onBeforeUnmount(() => {
             <div class="flex gap-2"><button type="button" class="btn-line py-1" :disabled="!legacyOffset || legacyBusy" @click="loadLegacy(legacyOffset - 100)"><ChevronLeft class="size-4" />上一页</button><button type="button" class="btn-line py-1" :disabled="!hasNextPage || legacyBusy" @click="loadLegacy(legacyOffset + 100)">下一页<ChevronRight class="size-4" /></button></div>
           </footer>
         </template>
-        <div v-else class="relative min-h-0 flex-1">
-          <div ref="host" class="absolute inset-0" data-testid="workbook-canvas" />
-          <div v-if="phase !== 'ready'" class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white" role="status"><LoaderCircle class="size-7 animate-spin text-mute" /><span class="text-sm text-mute">{{ busyText }}</span></div>
+        <div v-else class="flex min-h-0 flex-1 flex-col">
+          <div class="relative min-h-0 flex-1">
+            <div ref="host" class="absolute inset-0" data-testid="workbook-canvas" />
+            <div v-if="phase !== 'ready'" class="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-white" role="status"><LoaderCircle class="size-7 animate-spin text-mute" /><span class="text-sm text-mute">{{ busyText }}</span></div>
+            <div v-else-if="sheetBusy" class="absolute inset-0 z-10 flex items-center justify-center bg-white/70" role="status" aria-label="正在读取工作表"><LoaderCircle class="size-6 animate-spin text-mute" /></div>
+            <div v-if="sheetError && phase === 'ready'" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-4 bg-white px-6 text-center">
+              <CircleAlert class="size-8 text-mute" /><p role="alert" class="max-w-lg text-sm leading-6 text-mute">{{ sheetError }}</p>
+              <div class="flex gap-2"><button type="button" class="btn-line" @click="openSheet(selectedSheet)"><RotateCw class="size-4" />重试</button><button v-if="supportsDataPreview" type="button" class="btn-line" @click="load(true)">改用分页预览</button></div>
+            </div>
+          </div>
+          <nav v-if="tabs.length" class="sheet-tabs flex shrink-0 items-stretch gap-0.5 overflow-x-auto border-t border-line bg-paper px-2" role="tablist" aria-label="工作表">
+            <button v-for="(sheet, position) in tabs" :key="sheet.index" type="button" role="tab" :aria-selected="selectedSheet === sheet.index" :tabindex="selectedSheet === sheet.index ? 0 : -1" :title="sheet.name"
+              class="sheet-tab" :class="{ 'is-on': selectedSheet === sheet.index }" @click="openSheet(sheet.index)" @keydown="onTabKey($event, position)">
+              <span class="sheet-dot" :style="tabColors[sheet.index] ? { background: tabColors[sheet.index] } : undefined" aria-hidden="true" /><span class="truncate">{{ sheet.name }}</span>
+            </button>
+          </nav>
         </div>
       </section>
     </div>
@@ -247,4 +332,10 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .workbook-preview :deep(.univer-workbench) { height: 100%; }
+.sheet-tab { display: inline-flex; max-width: 14rem; flex: none; align-items: center; gap: 6px; border-radius: 0 0 8px 8px; padding: 7px 14px; color: #6b6b7a; font-size: 12px; white-space: nowrap; transition: background-color .15s, color .15s; }
+.sheet-tab:hover { color: #14141c; }
+.sheet-tab.is-on { background: #fff; color: #14141c; font-weight: 600; box-shadow: inset 0 -2px 0 #14141c; }
+.sheet-tab:focus-visible { outline: 2px solid #14141c; outline-offset: -2px; }
+.sheet-dot { display: none; width: 8px; height: 8px; flex: none; border-radius: 9999px; }
+.sheet-dot[style] { display: inline-block; }
 </style>

@@ -74,9 +74,12 @@ function cellValue(cell: Cell, date1904: boolean, warnings: Set<string>, formula
   return storedValue(value, date1904, warnings)
 }
 
-/** Map a loaded ExcelJS workbook into a sparse, read-only Univer snapshot. */
-export function buildWorkbookSnapshot(source: Workbook, filename: string): ParsedWorkbook {
-  const worksheets = source.worksheets
+/**
+ * Map a loaded ExcelJS workbook into a sparse, read-only Univer snapshot.
+ * only：只转换这一张表（按表加载时，其余工作表是空壳）；快照里只有这一张表，并且一定显示出来。
+ */
+export function buildWorkbookSnapshot(source: Workbook, filename: string, options: { only?: Worksheet } = {}): ParsedWorkbook {
+  const worksheets = options.only ? [options.only] : source.worksheets
   if (!worksheets.length) throw new WorkbookPreviewError('这个文件没有可预览的工作表。')
   if (worksheets.length > PREVIEW_LIMITS.sheets) tooLarge(`工作表超过 ${PREVIEW_LIMITS.sheets} 张的预览范围`)
   const warnings = new Set<string>()
@@ -227,7 +230,7 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string): Parse
   if (formulas.missing) warnings.add(`${formulas.missing} 个公式单元格没有已保存的计算结果（如 ${formulas.examples.join('、')}），预览已作标记。`)
   if (!worksheets.some((sheet) => sheet.state === 'visible')) {
     workbook.sheets[workbook.sheetOrder[0]!]!.hidden = 0
-    warnings.add('所有工作表均为隐藏状态，预览临时显示第一张工作表。')
+    if (!options.only) warnings.add('所有工作表均为隐藏状态，预览临时显示第一张工作表。')
   }
   return { workbook, warnings: [...warnings], stats: { sheetCount: worksheets.length, cellCount, formulaCount: formulas.count } }
 }
