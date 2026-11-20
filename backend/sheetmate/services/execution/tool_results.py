@@ -104,10 +104,11 @@ def read_tool_result(db: Session, *, user_id: int, conversation_id: str, result_
     end = offset + len(page["content"])
     page["complete"] = end >= total
     page["next_offset"] = None if page["complete"] else end
-    if not page["complete"] and total > _LONG_RESULT_CHARS and offset > 0:
+    if not page["complete"] and total > _LONG_RESULT_CHARS:
         # 模型有时会把一份几十万字的结果按页从头读到尾，一页一次调用，白白耗时和上下文。
-        page["note"] = (f"这份内容共 {total} 字符，已读到 {end * 100 // total}%，逐页读完通常没有必要："
-                        "先判断需要的信息大概在哪一段，只读那一段；已经够判断就直接继续任务。")
+        page["note"] = (f"这份内容共 {total} 字符，当前读到 {end * 100 // total}%，不要逐页通读或循环重读同一分段："
+                        "如果原脚本输出过长（例如打印了大量逐格详情），请直接改写更精简的脚本只提取所需摘要；"
+                        "已经够判断就直接继续任务。")
     return page
 
 

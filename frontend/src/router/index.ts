@@ -25,8 +25,9 @@ const router = createRouter({
         { path: 'stats', name: 'stats', component: () => import('@/views/StatsView.vue') },
       ],
     },
-    // 文件预览：新标签页里整页展示，不带侧边栏
+    // 文件预览与表格比对：新标签页里整页展示，不带侧边栏
     { path: '/preview/:fileId', name: 'preview', component: () => import('@/views/FilePreviewView.vue') },
+    { path: '/compare', name: 'compare', component: () => import('@/views/WorkbookCompareView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

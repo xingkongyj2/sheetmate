@@ -18,7 +18,12 @@ _EVIDENCE = re.compile(r"^\[evidence_id=(ev_[a-zA-Z0-9_]+)\]\n")
 _RECEIPT = re.compile(
     r"^\[execution_receipt status=(success|failed) executed=(true|false) reused=(true|false)\]\n"
 )
-_RECENT_TOOL_RESULTS = 4
+_RECENT_TOOL_RESULTS = 8
+_INSPECT_ONLY_TOOLS = frozenset({
+    "read_tool_result",
+    "inspect_execution_evidence",
+    "inspect_conversation_history",
+})
 _PROGRESS_REQUEST_CHARS = 1200
 _PROGRESS_OBSERVATION_CHARS = 2000
 _PROGRESS_SAMPLE_ROWS = 4
@@ -178,7 +183,8 @@ def _request_progress(call: dict[str, Any]) -> dict[str, Any]:
     result = _selected_fields(args, (
         "result_name", "description", "table", "tables", "column", "columns", "input_tables",
         "input_files", "source_table", "lookup_table", "left", "right", "group_by",
-        "expected_revision", "offset", "limit", "text_offset", "file_id", "filename",
+        "expected_revision", "result_id", "evidence_id", "section", "offset", "limit",
+        "text_offset", "file_id", "filename",
     ), budget=_PROGRESS_REQUEST_CHARS - 450)
     sql = args.get("sql")
     if isinstance(sql, str):
@@ -211,6 +217,21 @@ def _observation_progress(content: str) -> dict[str, Any]:
     if not isinstance(observed, dict):
         return {"status": "结果结构未知，不能从片段推断行数或完成情况",
                 "excerpt": _text_excerpt(body, budget=500)}
+    # read_tool_result 分页结果：避免写“精确结构与结果须回查”诱发模型循环重读同一片段。
+    if (isinstance(observed.get("result_id"), str) and "offset" in observed
+            and "total_chars" in observed and "content" in observed):
+        paged = _selected_fields(observed, (
+            "result_id", "section", "encoding", "offset", "next_offset",
+            "total_chars", "complete", "sanitized_fields",
+        ), budget=800)
+        paged["status"] = (
+            "此前已读取过该工具结果的此分段，请勿重复读取同一分段；"
+            "若原输出过长导致信息分散，请改写精简脚本提取所需摘要。"
+        )
+        content_text = observed.get("content")
+        if isinstance(content_text, str) and content_text:
+            paged["excerpt"] = _text_excerpt(content_text, budget=320)
+        return paged
     result = _selected_fields(observed, (
         "table", "revision", "total_rows", "total_rows_known", "complete", "completeness_scope",
         "encoding", "offset", "returned_rows", "observed_rows", "page_complete", "full_data",
@@ -270,11 +291,17 @@ def _progress_message(assistant: dict[str, Any], exchange: _Exchange) -> dict[st
         if output_id:
             record["tool_result_id"] = output_id
         lines.append(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
-    lines.append(
-        "以上为实际参数与结果的有界索引。complete 描述原观察；sample_only=true 的 rows_sample 仅是样本。"
-        "完整参数/结果/源版本与读取质量按 evidence_id 调用 inspect_execution_evidence，"
-        "分别用 section='args'、section='text'、section='facts'，按 offset/limit 分页；不能从省略内容推断任务完成。"
-    )
+    if all(call["function"]["name"] in _INSPECT_ONLY_TOOLS for call in exchange.calls):
+        lines.append(
+            "以上为此前分段回查记录；不要反复重读相同分段。若原始结果过长导致信息分散，"
+            "请改写精简的 Python 脚本或 SQL 一次提取所需摘要，再继续完成任务。"
+        )
+    else:
+        lines.append(
+            "以上为实际参数与结果的有界索引。complete 描述原观察；sample_only=true 的 rows_sample 仅是样本。"
+            "完整参数/结果/源版本与读取质量按 evidence_id 调用 inspect_execution_evidence，"
+            "分别用 section='args'、section='text'、section='facts'，按 offset/limit 分页；不能从省略内容推断任务完成。"
+        )
     if any(call["function"]["name"] in {"run_python_script", "inspect_python_script"} for call in exchange.calls):
         lines.append("参数若引用 script_id，先查结果取得 run_id，再用 inspect_python_script(run_id) 回查代码。")
     message = {"role": "assistant", "content": "\n".join(lines)}

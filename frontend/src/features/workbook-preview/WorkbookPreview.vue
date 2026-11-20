@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /** Unified original-file preview. Images bypass the workbook parser. */
-import { ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, Sheet, Image, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from '@lucide/vue'
+import { ChevronDown, ChevronLeft, ChevronRight, CircleAlert, Download, GitCompareArrows, Sheet, Image, LoaderCircle, Maximize2, Minimize2, RotateCw, X } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
@@ -14,8 +15,9 @@ import type { WorkbookViewer } from './viewer'
 import { openInWorker, type PreviewSession } from './worker-client'
 
 // page：作为独立页面整页展示（新标签页里的预览页）；否则是盖在当前页面上的弹层
-const props = defineProps<{ file?: FileInfo; localFile?: File; page?: boolean }>()
+const props = defineProps<{ file?: FileInfo; localFile?: File; conversationId?: string; page?: boolean }>()
 const emit = defineEmits<{ close: [] }>()
+const router = useRouter()
 const panel = ref<HTMLElement>()
 const host = ref<HTMLElement>()
 const phase = ref<'download' | 'parse' | 'render' | 'ready'>('download')
@@ -39,6 +41,20 @@ const legacy = computed(() => /\.xls$/i.test(filename.value))
 const image = computed(() => isImageFile(filename.value, props.localFile?.type ?? props.file?.media_type))
 const dataMode = ref(false)
 const supportsDataPreview = computed(() => !image.value && /\.(xlsx|xlsm|xls|csv)$/i.test(filename.value))
+const activeConversationId = computed(() => props.conversationId || props.file?.conversation_id || '')
+const supportsCompare = computed(() => !image.value && Boolean(props.file && activeConversationId.value) && /\.(xlsx|xlsm|csv)$/i.test(filename.value))
+
+function openCompare() {
+  if (!supportsCompare.value || !props.file) return
+  const target = router.resolve({
+    name: 'compare',
+    query: {
+      left: props.file.file_id,
+      conversation: activeConversationId.value,
+    },
+  })
+  window.open(target.href, '_blank')
+}
 const imageSrc = ref('')
 let localImageUrl = ''
 const legacySheet = ref('')
@@ -277,6 +293,7 @@ onBeforeUnmount(() => {
             <h2 id="workbook-preview-title" class="truncate text-sm font-semibold" :title="filename">{{ filename }}</h2>
           </div>
           <a v-if="file && !localFile" :href="file.download_url || fileApi.downloadUrl(file.file_id)" class="btn-line shrink-0 !h-8 py-0 text-xs" :class="{ 'order-last': page }" title="下载原始文件"><Download class="size-4" /><span class="hidden sm:inline">下载</span></a>
+          <button v-if="supportsCompare" type="button" class="btn-line shrink-0 !h-8 py-0 text-xs" title="与另一个表格比对差异" @click="openCompare"><GitCompareArrows class="size-4" /><span class="hidden sm:inline">比对</span></button>
           <button v-if="supportsDataPreview && !legacy && (!dataMode || size <= 25 * 1024 * 1024)" type="button" class="btn-line shrink-0 !h-8 py-0 text-xs" @click="load(!dataMode)">{{ dataMode ? '原样式预览' : '分页预览' }}</button>
           <button v-if="!page" type="button" class="icon-btn" :aria-label="expanded ? '还原窗口' : '放大窗口'" :title="expanded ? '还原窗口' : '放大窗口'" @click="expanded = !expanded"><Minimize2 v-if="expanded" class="size-4" /><Maximize2 v-else class="size-4" /></button>
           <button v-if="!page" type="button" class="icon-btn" aria-label="关闭文件预览" :title="page ? '关闭此页（Esc）' : '关闭（Esc）'" @click="emit('close')"><X class="size-4" /></button>

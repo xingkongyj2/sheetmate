@@ -89,7 +89,19 @@ _TOOL_MARKER = "<｜tool▁call▁begin｜>"
 _TOOL_RE = re.compile(r"<｜tool[\s\S]*?(?:<｜tool▁calls?▁end｜>|$)")
 _EXPLORE_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql", "list_files", "get_recipe"}
 _READ_OBSERVATION_TOOLS = {"table_info", "value_counts", "column_stats", "preview_table", "run_sql"}
+_INSPECT_OBSERVATION_TOOLS = {
+    "read_tool_result",
+    "inspect_execution_evidence",
+    "inspect_conversation_history",
+    "inspect_python_script",
+    "inspect_task_context",
+    "inspect_saved_memories",
+    "inspect_workbook_creation",
+    "inspect_recipe_nodes",
+}
 _MAX_IDENTICAL_OBSERVATIONS = 4
+_MAX_TOOL_RESULT_READS_PER_ID = 10
+_MAX_SAME_TOOL_RESULT_PAGE_READS = 2
 NO_PROGRESS_STOP_MESSAGE = (f"对相同版本输入已连续{_MAX_IDENTICAL_OBSERVATIONS}次重复读取或重复执行相同操作，本轮停止重复操作。"
                             "0 行是有效查询结果，不需要反复重查；相同代码重复执行不会有新结果。"
                             "请依据真实结果如实说明已完成与仍未完成的目标，不把重复读取当作计算或交付完成。")
@@ -169,6 +181,11 @@ class _ReadProgress:
             self.recent = self.recent[-_OBSERVATION_HISTORY_LIMIT:]
         self.key = key
         return self.repetitions >= _MAX_IDENTICAL_OBSERVATIONS
+
+    def reset_streak(self) -> None:
+        """Reset consecutive repetition count while keeping recent keys so alternating loops stop fast."""
+        self.repetitions = 0
+        self.key = None
 
 
 @dataclass
@@ -719,9 +736,9 @@ class AgentExecutor:
                 return
             if no_progress and not progress_warned and pending_response is None and not parallel_batch:
                 # 第一次发现重复：先不收尾，核对还差哪些目标并提醒模型停止重复、去做剩下的事（工具照常可用）。
-                # 提醒之后还在重复，才进入只能回答的最后一步。
+                # 保留 recent 历史只重置连击计数：提醒之后若还继续重复交替循环，很快进入收尾。
                 progress_warned, no_progress = True, False
-                read_progress.observe(None)
+                read_progress.reset_streak()
                 progress_pending = True
                 msgs.append({"role": "user", "content": NO_PROGRESS_WARNING_MESSAGE})
             if progress_pending and pending_response is None and not parallel_batch:
@@ -1244,6 +1261,9 @@ class AgentExecutor:
                 repeated_script = False
                 repeated_read = False
                 method_blocked = False
+                read_blocked = False
+                read_blocked_key: str | None = None
+                read_ref = _tool_result_read_ref(args) if name == "read_tool_result" else None
                 if prefetched is not None:
                     result = ToolResult(**prefetched["result"])
                     executed = True
@@ -1270,6 +1290,17 @@ class AgentExecutor:
                     result = ToolResult(
                         _approach_switch_message(recovery), ok=False, summary="当前方法已达到失败阈值，须先调整方法",
                         public_summary="正在调整处理方法", public_text="当前方法多次未通过，将重新选择处理方法。",
+                    )
+                elif name == "read_tool_result" and read_ref is not None and (
+                    guard := _tool_result_read_guard(budget.results, ctx.branch_id, original_scope, read_ref)
+                ) is not None:
+                    read_blocked = True
+                    guard_message, read_blocked_key = guard
+                    result = ToolResult(
+                        guard_message, ok=False,
+                        summary="已停止重复翻读同一工具结果，请改用精简脚本或直接推进任务",
+                        public_summary="已跳过重复读取工具结果片段",
+                        public_text="该工具结果已读取多次，正在调整获取方式继续处理。",
                     )
                 else:
                     if name == _SCRIPT_TOOL:
@@ -1315,7 +1346,7 @@ class AgentExecutor:
                     tool_map.update({item.name: item for item in self.registry.for_context(ctx)})
                 if not executed:
                     _record_unexecuted_tool(
-                        call, result, status="reused" if repeated_script or repeated_read else "blocked" if method_blocked else "rejected",
+                        call, result, status="reused" if repeated_script or repeated_read else "blocked" if method_blocked or read_blocked else "rejected",
                         arguments=args, duration_ms=int((time.perf_counter() - started) * 1000),
                     )
                 if script_key and not repeated_script:
@@ -1372,13 +1403,14 @@ class AgentExecutor:
                                               "read_key": query_key if executed and result.ok and (
                                                   not (args or {}).get("result_name") or evidence["artifacts"]
                                               ) else None,
+                                              **({"read_ref": read_ref} if executed and result.ok and read_ref is not None else {}),
                                               "result": externalize_script_text(result.text, python=name == _SCRIPT_TOOL)}
                 for invalid_id in recovery.invalid_results:
                     for evidence_id, item in budget.results.items():
                         if item.get("branch_id") == ctx.branch_id and invalid_id in {evidence_id, item.get("call_id")}:
                             item["invalid"] = True
                 end_turn = end_turn or result.end_turn
-                if name != RECONSIDER_TOOL and not method_blocked:
+                if name != RECONSIDER_TOOL and not method_blocked and not read_blocked:
                     recovery.observe(name, result, call_id=call["id"], diagnostic=name in _DIAGNOSTIC_TOOLS,
                                      reused=repeated_script or repeated_read, evidence_id=evidence["id"], result_events=original_events)
                 if executed:
@@ -1389,6 +1421,8 @@ class AgentExecutor:
                     no_progress = read_progress.observe(observation)
                 elif repeated_read:
                     no_progress = read_progress.observe(previous_read[1].get("observation_key"))
+                elif read_blocked and read_blocked_key:
+                    no_progress = read_progress.observe(read_blocked_key)
                 elif repeated_script and script_key:
                     # 原样重发同一段脚本：结果直接复用，没有任何新信息，连续几次就该收尾。
                     no_progress = read_progress.observe("script:" + script_key)
@@ -1401,7 +1435,7 @@ class AgentExecutor:
                     # 脚本中间表或打印完成不算修改交付，实际文件可替代 Recipe 完成交付。
                     built = built or (result.ok and any(event.get("type") == "file" and event.get("file_id")
                                                        for event in result.events))
-                if not result.ok and name != RECONSIDER_TOOL and not method_blocked:
+                if not result.ok and name != RECONSIDER_TOOL and not method_blocked and not read_blocked:
                     failure_text = re.sub(r"\brun_id=[A-Za-z0-9_]+", "run_id=<本次运行>", result.summary or result.text)
                     key = (name, failure_text[:1000])
                     failures[key] = failures.get(key, 0) + 1
@@ -1509,10 +1543,92 @@ def _unique_call_ids(calls: list[dict[str, Any]], messages: list[dict[str, Any]]
     return errors
 
 
+def _tool_result_read_ref(args: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(args, dict):
+        return None
+    result_id = args.get("result_id")
+    if not isinstance(result_id, str) or not result_id.strip():
+        return None
+    section = args.get("section")
+    section_name = section if isinstance(section, str) and section else "text"
+    offset = args.get("offset", 0)
+    if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+        return None
+    return {"result_id": result_id.strip(), "section": section_name, "offset": offset}
+
+
+def _tool_result_read_guard(results: dict[str, dict[str, Any]], branch_id: str | None, scope: str,
+                            read_ref: dict[str, Any]) -> tuple[str, str] | None:
+    """拦截对同一工具结果的循环重读或过度逐页翻读，引导模型改用精简脚本提取摘要。"""
+    target_id = read_ref["result_id"]
+    target_section = read_ref["section"]
+    target_offset = read_ref["offset"]
+    total_reads = 0
+    same_page_reads = 0
+    for item in results.values():
+        if (item.get("tool") != "read_tool_result" or item.get("ok") is not True
+                or item.get("branch_id") != branch_id or item.get("scope") != scope):
+            continue
+        prev = item.get("read_ref")
+        if not isinstance(prev, dict) or prev.get("result_id") != target_id:
+            continue
+        total_reads += 1
+        if prev.get("section") == target_section and prev.get("offset") == target_offset:
+            same_page_reads += 1
+
+    if same_page_reads >= _MAX_SAME_TOOL_RESULT_PAGE_READS:
+        key = f"read_tool_result_repeat:{target_id}:{target_section}:{target_offset}"
+        msg = (
+            f"已拦截重复读取：你已经多次读取过 `{target_id}`（section={target_section}, offset={target_offset}），"
+            "继续重复翻读同一分段不会带来新信息，且会把早期上下文挤出窗口。\n"
+            "请立即停止调用 `read_tool_result` 翻读这份超长文本："
+            "如果原 Python 脚本输出过于冗长（例如逐格打印了几百个单元格样式），"
+            "请改写一段更精简的 `run_python_script`（只汇总去重后的样式/结构摘要或直接写入目标表），"
+            "或依据已经掌握的信息直接完成下一步。"
+        )
+        return msg, key
+    if total_reads >= _MAX_TOOL_RESULT_READS_PER_ID:
+        key = f"read_tool_result_limit:{target_id}"
+        msg = (
+            f"已达到单个工具结果的分页读取上限：你已经对 `{target_id}` 累计读取了 {total_reads} 次片段，"
+            "逐页通读超长结果效率极低且容易导致前页被上下文折叠。\n"
+            "请立即停止继续翻读该结果：请直接改写更精简的 `run_python_script` / SQL 只输出所需的关键摘要，"
+            "或直接基于已有信息完成目标表格处理。"
+        )
+        return msg, key
+    return None
+
+
 def _read_observation_key(name: str, args: dict[str, Any] | None, sources: list[dict[str, Any]],
                           result: ToolResult) -> str | None:
-    """Recognize repeated observations even when SELECT creates a named snapshot."""
-    if name not in _READ_OBSERVATION_TOOLS or not result.ok or not sources:
+    """Recognize repeated observations for both table reads and pagination/inspection tools."""
+    if not result.ok:
+        return None
+    if name in _INSPECT_OBSERVATION_TOOLS:
+        if name == "read_tool_result":
+            ref = _tool_result_read_ref(args)
+            if ref is None:
+                return None
+            # 忽略 limit 变化：同一 result_id + section + offset 反复读取即视为重复观察。
+            try:
+                parsed = json.loads(result.text)
+                digest = parsed.get("sha256") if isinstance(parsed, dict) and isinstance(parsed.get("sha256"), str) else None
+            except (ValueError, TypeError):
+                digest = None
+            payload = {
+                "tool": name,
+                "args": ref,
+                "digest": digest or hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
+            }
+            return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+        payload = {
+            "tool": name,
+            "args": args or {},
+            "digest": hashlib.sha256(result.text.encode("utf-8")).hexdigest(),
+        }
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()).hexdigest()
+
+    if name not in _READ_OBSERVATION_TOOLS or not sources:
         return None
     observation: Any = result.text
     if name == "run_sql":
