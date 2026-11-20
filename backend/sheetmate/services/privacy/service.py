@@ -31,7 +31,7 @@ from sheetmate.engine.tables.sql import quote_ident
 from sheetmate.privacy import (
     ACTION_LABELS, KIND_LABELS, RULES_VERSION, Finding, PrivacyBlocked, Scope, bind, classify_column, merge, privacy,
 )
-from sheetmate.privacy.rules import ALL_KINDS, cell_text
+from sheetmate.privacy.rules import ALL_KINDS, cell_text, monthly_account_column
 from sheetmate.services.files import service as file_service
 from sheetmate.services.privacy import adaptive, choices
 
@@ -236,7 +236,8 @@ def _model_prompt(sheet_name: str, batch: dict[str, list[Any]], hints: dict[str,
         "- address：详细地址（包括只写了街道门牌、没有省市的）\n"
         "- mixed：整体是普通文字（比如备注），但部分单元格里夹着手机号、邮箱或详细地址\n"
         "- none：都不是。人名、公司或店铺名称、网点名称、只有省/市/区的行政区、"
-        "各类编号（运单号、订单号、月结号、账号）、金额、日期、重量，一律选 none\n"
+        "各类编号（运单号、订单号、月结号、账号）、金额、日期、重量，一律选 none；"
+        "列名含「月结卡号」「月结账号」且样例是 10 位纯数字的是客户的月结账号，不是电话，也选 none\n"
         "以样例内容为准：列名像电话但样例里没有号码、列名像地址但样例只有省市，都选 none；"
         "列名看不出来但样例里确实是号码或详细地址，按实际内容选。每个判断都要在 reason 里写出依据的样例值。\n"
         "每一列都必须有一项，name 必须和下面的列名完全一致。输出格式：\n"
@@ -333,6 +334,8 @@ async def _classify_file(profile: dict[str, Any], llm: Any | None) -> tuple[list
         found = []
         for name, column in columns.items():
             texts = [text for text in (cell_text(v) for v in values.get(name, [])[:200]) if text]
+            if monthly_account_column(name, texts):
+                continue                  # 月结卡号/月结账号：不管规则还是脱敏模型怎么判，都不处理
             finding = merge(rules.get(name), model.get(name), reviewed=llm is not None, texts=texts)
             if finding is not None and finding.kind in active:
                 found.append(_column_report(name, finding, int(sheet.get("rows") or 0), column.get("null_rate", 0)))

@@ -8,7 +8,7 @@ from typing import Iterable
 from sheetmate.privacy.address import looks_like_address, split_address
 from sheetmate.privacy.rules import (
     EMAIL_RE, KIND_LABELS, LANDLINE_RE, MOBILE_RE, cell_text, header_kind, is_email, is_id_like_header, is_landline,
-    is_mobile,
+    is_mobile, monthly_account_column,
 )
 
 ACTIONS = {"phone": "tokenize", "landline": "tokenize", "email": "tokenize", "im": "tokenize",
@@ -66,6 +66,9 @@ def region_only_column(name: object, values: Iterable[object]) -> bool:
 def classify_column(name: object, values: Iterable[object]) -> Finding | None:
     """只用内置规则判断一列；没有发现联系方式或地址时返回 None。"""
     texts = [text for text in (cell_text(value) for value in list(values)[:MAX_VALUES]) if text]
+    # 月结卡号/月结账号列（内容是 10 位纯数字）：是客户账号，不是电话，不处理
+    if monthly_account_column(name, texts):
+        return None
     rates, embedded = _rates(texts)
     best_kind, best_rate = max(rates.items(), key=lambda item: item[1])
     header = header_kind(name)

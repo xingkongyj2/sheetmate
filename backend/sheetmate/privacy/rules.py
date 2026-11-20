@@ -11,7 +11,7 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Iterable
 
-RULES_VERSION = "5"   # 规则变了就加一：已缓存的识别结果会按新规则重新识别
+RULES_VERSION = "6"   # 规则变了就加一：已缓存的识别结果会按新规则重新识别
 
 KIND_LABELS = {
     "phone": "手机号", "landline": "座机", "email": "邮箱", "im": "微信/QQ",
@@ -123,6 +123,32 @@ def is_id_like_header(name: object) -> bool:
     return any(word in text for word in _ID_LIKE_HEADER) or (text.endswith("号") and header_kind(name) is None)
 
 
+# 月结账号：列名含「月结」+ 卡号/账号/账户/编号等字样，内容是 10 位纯数字。它是客户账号，不是电话，不需要脱敏
+_MONTHLY_ACCOUNT_PARTS = ("卡", "账", "帐", "号", "户", "码")
+MONTHLY_ACCOUNT_RATE = 0.8      # 列里至少这么多（非空）单元格是 10 位纯数字，才认定是月结账号列
+
+
+def is_monthly_account_header(name: object) -> bool:
+    text = normalize_header(name)
+    if "月结" in text:
+        return any(part in text for part in _MONTHLY_ACCOUNT_PARTS)
+    return "monthly" in text and any(word in text for word in ("account", "acct", "card", "no", "number", "id"))
+
+
+def monthly_account_column(name: object, texts: Iterable[str]) -> bool:
+    """这一列是月结账号列：列名像月结卡号/月结账号，并且内容基本都是 10 位纯数字。
+    其余单元格里要是有手机号、座机、邮箱，这一列就不能整列放过（宁可多遮）。"""
+    if not is_monthly_account_header(name):
+        return False
+    values = [text for text in texts if text]
+    if not values:
+        return False
+    others = [text for text in values if not is_pure_10_digits(text)]
+    if (len(values) - len(others)) / len(values) < MONTHLY_ACCOUNT_RATE:
+        return False
+    return not any(is_mobile(text) or is_landline(text) or is_email(text) for text in others)
+
+
 # ---------------------------------------------------------------------------
 # 内容：整格匹配（用来判断一列）
 # ---------------------------------------------------------------------------
@@ -156,8 +182,18 @@ def is_mobile(text: str) -> bool:
     return bool(_MOBILE_FULL.fullmatch(compact) or _MOBILE_MASKED_FULL.fullmatch(compact))
 
 
+_PURE_10_DIGITS = re.compile(r"[0-9]{10}")
+
+
+def is_pure_10_digits(text: object) -> bool:
+    """恰好 10 位、没有任何分隔符的纯数字（全角数字也算）。月结账号就是这种，座机不会这样写。"""
+    return bool(_PURE_10_DIGITS.fullmatch(unicodedata.normalize("NFKC", str(text)).strip()))
+
+
 def is_landline(text: str) -> bool:
-    # 400/800 是企业热线，不是个人号码
+    # 400/800 是企业热线，不是个人号码；没有分隔符的纯 10 位数字多半是月结账号，不当作座机
+    if is_pure_10_digits(text):
+        return False
     compact = _compact(text)
     return bool(_LANDLINE_FULL.fullmatch(compact) or _LANDLINE_MASKED_FULL.fullmatch(compact))
 
