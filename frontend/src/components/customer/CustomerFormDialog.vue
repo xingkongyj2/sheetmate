@@ -40,7 +40,7 @@ async function save() {
 <template>
   <BaseModal :title="customer ? '编辑客户' : '新建客户'" width="max-w-lg" @close="emit('close')">
     <div class="space-y-4">
-      <div class="flex justify-center"><Mascot :variant="mascot" :size="96" mood="happy" /></div>
+      <div class="flex justify-center"><Mascot :variant="mascot" :size="96" /></div>
       <div class="space-y-1.5">
         <div v-for="(group, i) in MASCOT_GROUPS" :key="i" class="flex flex-wrap justify-center gap-1.5">
           <button

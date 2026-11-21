@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
- * 墨墨家族 IP 形象（原创）：圆团子身体 + 会眨眼、会跟着鼠标转的大眼睛 + 小配饰。
- * mood: idle 发呆 / thinking 思考（眼睛往上看 + 冒泡）/ happy 开心（眯眼笑）/ working 干活（上下晃）/ sleep 闭眼（弯弯的睡眼）
+ * 墨墨家族 IP 形象（原创）：圆团子身体 + 会眨眼/跟鼠标转的丰富搞怪表情 + 标志绿豆芽 / 蓝波点尖帽配饰。
+ * mood: idle 默认（展示头像自带的搞怪表情）/ thinking 思考 / happy 开心 / working 干活（上下晃）/ sleep 闭眼打盹
  */
 import { computed, onMounted, ref, useId } from 'vue'
 
@@ -26,6 +26,7 @@ const root = ref<SVGSVGElement | null>(null)
 const pointer = usePointer()
 const style = computed(() => mascotStyle(props.variant))
 const acc = computed(() => style.value.accessory)
+const face = computed(() => style.value.face ?? 'normal')
 const uid = useId()
 const clipId = `mascot-body-${uid}`
 const shadeId = `mascot-shade-${uid}`
@@ -48,7 +49,14 @@ const look = computed(() => {
 })
 
 /** 深色身体上用白色线条，彩色身体用同色相的深色 */
-const lineColor = computed(() => (style.value.dark ? 'rgba(255,255,255,.8)' : style.value.line))
+const lineColor = computed(() => (style.value.dark ? 'rgba(255,255,255,.86)' : style.value.line))
+
+/** 仅当外部显式切换为 happy / sleep 状态，且头像本身是标准大眼款时覆盖表情；专属搞怪表情在 idle/working/thinking 下保持原汁原味 */
+const moodFaceOverride = computed<'happy' | 'sleep' | null>(() => {
+  if (props.mood === 'sleep') return 'sleep'
+  if (props.mood === 'happy' && face.value === 'normal') return 'happy'
+  return null
+})
 </script>
 
 <template>
@@ -70,7 +78,7 @@ const lineColor = computed(() => (style.value.dark ? 'rgba(255,255,255,.8)' : st
     </defs>
     <ellipse v-if="shadow" cx="60" cy="113" rx="30" ry="4" fill="#000" opacity="0.08" />
 
-    <!-- 身体后面的配饰 -->
+    <!-- 身体后面的配饰（历史猫耳兼容） -->
     <g v-if="acc === 'cat'" stroke-linejoin="round">
       <path d="M32 38 L25 14 L52 25 Z" :fill="style.body" :stroke="style.body" stroke-width="7" />
       <path d="M88 38 L95 14 L68 25 Z" :fill="style.body" :stroke="style.body" stroke-width="7" />
@@ -86,12 +94,50 @@ const lineColor = computed(() => (style.value.dark ? 'rgba(255,255,255,.8)' : st
     <path :d="BODY" :fill="style.body" />
     <path :d="BODY" :fill="`url(#${shadeId})`" />
 
-    <!-- 配饰 -->
+    <!-- ==================== 配饰 ==================== -->
     <g v-if="acc === 'sprout'">
       <path d="M60 23 C60 17 60.5 12 62 7" stroke="#159a5d" stroke-width="2.6" fill="none" stroke-linecap="round" />
       <path d="M62 9 C66 1 77 2 77 8 C72 13 65 13 62 9 Z" :fill="style.accent" />
       <path d="M61 12 C57 6 49 7 49 11 C53 15 58 15 61 12 Z" fill="#5fd39a" />
     </g>
+    <g v-else-if="acc === 'sprout-tilt'" transform="rotate(14 60 23)">
+      <path d="M60 23 C60 17 60.5 12 62 7" stroke="#159a5d" stroke-width="2.6" fill="none" stroke-linecap="round" />
+      <path d="M62 9 C66 1 77 2 77 8 C72 13 65 13 62 9 Z" :fill="style.accent" />
+      <path d="M61 12 C57 6 49 7 49 11 C53 15 58 15 61 12 Z" fill="#5fd39a" />
+    </g>
+    <g v-else-if="acc === 'sprout-droop'">
+      <path d="M60 23 C61 16 66 13 71 15" stroke="#159a5d" stroke-width="2.6" fill="none" stroke-linecap="round" />
+      <path d="M70 14.5 C75 11 81 15 79 20 C74 21 70 18 70 14.5 Z" :fill="style.accent" />
+      <path d="M63 15 C59 10 52 12 53 16 C56 18.5 61 18 63 15 Z" fill="#5fd39a" />
+    </g>
+    <g v-else-if="acc === 'sprout-bandaid'">
+      <g transform="rotate(14 60 23)">
+        <path d="M60 23 C60 17 60.5 12 62 7" stroke="#159a5d" stroke-width="2.6" fill="none" stroke-linecap="round" />
+        <path d="M62 9 C66 1 77 2 77 8 C72 13 65 13 62 9 Z" :fill="style.accent" />
+        <path d="M61 12 C57 6 49 7 49 11 C53 15 58 15 61 12 Z" fill="#5fd39a" />
+      </g>
+      <g transform="rotate(-18 42 40)">
+        <rect x="32" y="34" width="22" height="10" rx="4.5" fill="#f3c691" />
+        <rect x="39" y="34" width="8" height="10" fill="#fbe0bd" />
+        <circle cx="35.5" cy="39" r="1" fill="#c99357" />
+        <circle cx="50.5" cy="39" r="1" fill="#c99357" />
+      </g>
+    </g>
+    <g v-else-if="acc === 'party'" transform="rotate(11 60 26)">
+      <path d="M45 27 L60 4 L75 27 Q60 31 45 27 Z" :fill="style.accent" :stroke="style.accent" stroke-width="2" stroke-linejoin="round" />
+      <circle cx="55.5" cy="21" r="2" fill="#ffffff" opacity="0.92" />
+      <circle cx="64.5" cy="23" r="2" fill="#ffffff" opacity="0.92" />
+      <circle cx="60.5" cy="13.5" r="2" fill="#ffffff" opacity="0.92" />
+      <circle cx="60" cy="3.8" r="4.1" fill="#ffc94a" />
+    </g>
+    <g v-else-if="acc === 'party-tilt'" transform="rotate(-14 60 26)">
+      <path d="M45 27 L60 4 L75 27 Q60 31 45 27 Z" :fill="style.accent" :stroke="style.accent" stroke-width="2" stroke-linejoin="round" />
+      <circle cx="55.5" cy="21" r="2" fill="#ffffff" opacity="0.92" />
+      <circle cx="64.5" cy="23" r="2" fill="#ffffff" opacity="0.92" />
+      <circle cx="60.5" cy="13.5" r="2" fill="#ffffff" opacity="0.92" />
+      <circle cx="60" cy="3.8" r="4.1" fill="#ffc94a" />
+    </g>
+    <!-- 历史配饰兼容 -->
     <g v-else-if="acc === 'glasses'" fill="none" :stroke="style.accent" stroke-width="2.6" stroke-linecap="round">
       <ellipse cx="47" cy="62" rx="13.4" ry="15.4" />
       <ellipse cx="73" cy="62" rx="13.4" ry="15.4" />
@@ -111,13 +157,6 @@ const lineColor = computed(() => (style.value.dark ? 'rgba(255,255,255,.8)' : st
       <path :clip-path="`url(#${clipId})`" d="M10 29 Q60 40 110 29 L110 40 Q60 51 10 40 Z" :fill="style.accent" />
       <circle cx="93" cy="38" r="4.4" :fill="style.accent" />
       <circle cx="93" cy="38" r="4.4" fill="#000" opacity="0.18" />
-    </g>
-    <g v-else-if="acc === 'party'" transform="rotate(12 60 26)">
-      <path d="M46 27 L60 5 L74 27 Q60 30.5 46 27 Z" :fill="style.accent" :stroke="style.accent" stroke-width="2" stroke-linejoin="round" />
-      <circle cx="55.5" cy="21" r="1.8" fill="#ffffff" opacity="0.9" />
-      <circle cx="64.5" cy="23" r="1.8" fill="#ffffff" opacity="0.9" />
-      <circle cx="60.5" cy="14" r="1.8" fill="#ffffff" opacity="0.9" />
-      <circle cx="60" cy="4.2" r="3.8" fill="#ffc94a" />
     </g>
     <g v-else-if="acc === 'halo'">
       <ellipse cx="60" cy="11" rx="17" ry="4.6" fill="none" :stroke="style.accent" stroke-width="3.2">
@@ -183,31 +222,206 @@ const lineColor = computed(() => (style.value.dark ? 'rgba(255,255,255,.8)' : st
       <ellipse cx="86" cy="79" rx="6" ry="3.5" />
     </g>
 
-    <!-- 眼睛 -->
-    <g v-if="mood === 'happy'" fill="none" :stroke="style.dark ? '#ffffff' : style.line" stroke-width="4.5" stroke-linecap="round">
-      <path d="M38 64 Q47 54 56 64" />
-      <path d="M64 64 Q73 54 82 64" />
+    <!-- ==================== 表情（眼睛与嘴） ==================== -->
+    <!-- 外部 mood 覆盖：happy / sleep -->
+    <template v-if="moodFaceOverride === 'happy'">
+      <g fill="none" :stroke="style.dark ? '#ffffff' : style.line" stroke-width="4.5" stroke-linecap="round">
+        <path d="M38 64 Q47 54 56 64" />
+        <path d="M64 64 Q73 54 82 64" />
+      </g>
+      <path d="M54 81 Q60 87 66 81" :stroke="lineColor" stroke-width="3" fill="none" stroke-linecap="round" />
+    </template>
+    <template v-else-if="moodFaceOverride === 'sleep'">
+      <g fill="none" :stroke="style.dark ? '#ffffff' : style.line" stroke-width="5" stroke-linecap="round">
+        <path d="M38 62 Q47 71 56 62" />
+        <path d="M64 62 Q73 71 82 62" />
+      </g>
+    </template>
+
+    <!-- 1. 眯眼大笑 -->
+    <g v-else-if="face === 'laugh'">
+      <path d="M36 64 Q46 52 56 64" fill="none" stroke="#ffffff" stroke-width="5.2" stroke-linecap="round" />
+      <path d="M64 64 Q74 52 84 64" fill="none" stroke="#ffffff" stroke-width="5.2" stroke-linecap="round" />
+      <path d="M51 78 Q60 88 69 78" fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" opacity="0.9" />
     </g>
-    <!-- 闭眼：两道向下弯的弧线（和开心的向上弯相反） -->
-    <g v-else-if="mood === 'sleep'" fill="none" :stroke="style.dark ? '#ffffff' : style.line" stroke-width="5" stroke-linecap="round">
-      <path d="M38 62 Q47 71 56 62" />
-      <path d="M64 62 Q73 71 82 62" />
+
+    <!-- 2. 拽酷墨镜 -->
+    <g v-else-if="face === 'cool'">
+      <rect x="27" y="51" width="30" height="19" rx="5.5" fill="#27272e" stroke="#ffffff" stroke-width="2.4" />
+      <rect x="63" y="51" width="30" height="19" rx="5.5" fill="#27272e" stroke="#ffffff" stroke-width="2.4" />
+      <path d="M57 58 H63" stroke="#ffffff" stroke-width="2.8" stroke-linecap="round" />
+      <path d="M33 56 L39 65 M40 55 L44 61" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" opacity="0.65" />
+      <path d="M69 56 L75 65 M76 55 L80 61" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" opacity="0.65" />
+      <path d="M54 81 Q63 85 70 78" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.9" />
     </g>
-    <g v-else class="animate-blink" :style="{ transformOrigin: '60px 62px', transformBox: 'view-box', animationDelay: blinkDelay }">
-      <ellipse v-if="!style.dark" cx="47" cy="63.4" rx="10.5" ry="13" :fill="style.shade" />
-      <ellipse v-if="!style.dark" cx="73" cy="63.4" rx="10.5" ry="13" :fill="style.shade" />
-      <ellipse cx="47" cy="62" rx="10.5" ry="13" fill="#ffffff" />
-      <ellipse cx="73" cy="62" rx="10.5" ry="13" fill="#ffffff" />
-      <g :style="{ transform: `translate(${look.x}px, ${look.y}px)`, transition: 'transform .18s ease-out' }">
-        <circle cx="48" cy="63" r="5" fill="#111113" />
-        <circle cx="74" cy="63" r="5" fill="#111113" />
-        <circle cx="46.4" cy="61.2" r="1.5" fill="#ffffff" />
-        <circle cx="72.4" cy="61.2" r="1.5" fill="#ffffff" />
+
+    <!-- 3. 两眼放光（金色星星眼） -->
+    <g v-else-if="face === 'star'">
+      <path d="M46 49 L49 58 L58 61 L49 64 L46 73 L43 64 L34 61 L43 58 Z" fill="#ffc94a" />
+      <path d="M74 49 L77 58 L86 61 L77 64 L74 73 L71 64 L62 61 L71 58 Z" fill="#ffc94a" />
+      <circle cx="46" cy="61" r="2.2" fill="#ffffff" />
+      <circle cx="74" cy="61" r="2.2" fill="#ffffff" />
+      <ellipse cx="60" cy="82" rx="5.2" ry="6.2" fill="#ffffff" opacity="0.9" />
+      <ellipse cx="60" cy="84" rx="3.2" ry="2.8" fill="#ff7d95" />
+    </g>
+
+    <!-- 4. 眨眼吐舌 -->
+    <g v-else-if="face === 'tongue'">
+      <ellipse cx="46" cy="62" rx="10" ry="12.2" fill="#ffffff" />
+      <g :style="{ transform: `translate(${look.x * 0.7}px, ${look.y * 0.7}px)`, transition: 'transform .18s ease-out' }">
+        <circle cx="48" cy="62.5" r="4.8" fill="#111113" />
+        <circle cx="46.5" cy="60.5" r="1.5" fill="#ffffff" />
+      </g>
+      <path d="M65 62 Q74 54 83 62" fill="none" stroke="#ffffff" stroke-width="4.8" stroke-linecap="round" />
+      <path d="M51 77 Q60 83 69 77" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" />
+      <path d="M56 79.5 Q60 92 65.5 79.5 Z" fill="#ff7d95" />
+      <path d="M60.5 80.5 V86" stroke="#e05671" stroke-width="1.4" stroke-linecap="round" />
+    </g>
+
+    <!-- 5. 对账晕晕（蚊香眼） -->
+    <g v-else-if="face === 'dizzy'" fill="none" stroke="#ffffff" stroke-width="3" stroke-linecap="round">
+      <path d="M46 62 m0 -1 a2 2 0 1 1 2 2 a5 5 0 1 1 -5 -5 a8.5 8.5 0 1 1 9 8.5" />
+      <path d="M74 62 m0 -1 a2 2 0 1 1 2 2 a5 5 0 1 1 -5 -5 a8.5 8.5 0 1 1 9 8.5" />
+      <path d="M50 82 Q55 77 60 82 T70 82" stroke-width="3.2" />
+    </g>
+
+    <!-- 6. 无语盯人（半眯死鱼眼） -->
+    <g v-else-if="face === 'deadpan'">
+      <ellipse cx="47" cy="63" rx="10" ry="11.5" fill="#ffffff" />
+      <ellipse cx="73" cy="63" rx="10" ry="11.5" fill="#ffffff" />
+      <g :style="{ transform: `translate(${look.x * 0.6}px, ${Math.max(0, look.y * 0.4)}px)`, transition: 'transform .18s ease-out' }">
+        <circle cx="51" cy="65" r="4.5" fill="#111113" />
+        <circle cx="77" cy="65" r="4.5" fill="#111113" />
+      </g>
+      <rect x="35" y="49" width="24" height="12" fill="#111113" />
+      <rect x="61" y="49" width="24" height="12" fill="#111113" />
+      <path d="M36 61 H58 M62 61 H84" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" />
+      <path d="M52 82 H68" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.88" />
+    </g>
+
+    <!-- 7. 摸鱼打盹（鼻涕泡） -->
+    <g v-else-if="face === 'sleepy'">
+      <path d="M37 62 Q46 71 55 62" fill="none" stroke="#ffffff" stroke-width="4.6" stroke-linecap="round" />
+      <path d="M65 62 Q74 71 83 62" fill="none" stroke="#ffffff" stroke-width="4.6" stroke-linecap="round" />
+      <circle cx="60" cy="79" r="3" fill="#ffffff" opacity="0.8" />
+      <g class="mascot-bubble">
+        <circle cx="71" cy="79" r="9.5" fill="#a8d8ff" fill-opacity="0.45" stroke="#ffffff" stroke-width="2" />
+        <path d="M67 74.5 Q69.5 72.5 72.5 74" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" />
       </g>
     </g>
 
-    <!-- 嘴巴 -->
-    <path v-if="mood === 'happy' || mood === 'working'" d="M54 81 Q60 87 66 81" :stroke="lineColor" stroke-width="3" fill="none" stroke-linecap="round" />
+    <!-- 8. 大小眼憨憨 O_o -->
+    <g v-else-if="face === 'goofy'">
+      <ellipse cx="46" cy="64" rx="12" ry="14" fill="#ffffff" />
+      <circle cx="75" cy="64" r="6.8" fill="#ffffff" />
+      <g :style="{ transform: `translate(${look.x * 0.7}px, ${look.y * 0.7}px)`, transition: 'transform .18s ease-out' }">
+        <circle cx="47" cy="64" r="5" fill="#111113" />
+        <circle cx="45.4" cy="62.2" r="1.7" fill="#ffffff" />
+        <circle cx="74.5" cy="64" r="3.1" fill="#111113" />
+        <circle cx="73.5" cy="62.8" r="1.1" fill="#ffffff" />
+      </g>
+      <path d="M56 83 Q61 80 66 83" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.86" />
+    </g>
+
+    <!-- 9. 蓝帽嘻嘻 -->
+    <g v-else-if="face === 'party-happy'">
+      <path d="M37 64 Q47 53 56 64" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" />
+      <path d="M64 64 Q73 53 83 64" fill="none" stroke="#ffffff" stroke-width="5" stroke-linecap="round" />
+      <path d="M53 79 Q60 86 67 79" fill="none" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" opacity="0.86" />
+    </g>
+
+    <!-- 10. 蓝帽小机灵（单眨眼 + 小虎牙） -->
+    <g v-else-if="face === 'wink-fang'">
+      <ellipse cx="47" cy="62" rx="10" ry="12.5" fill="#ffffff" />
+      <g :style="{ transform: `translate(${look.x * 0.7}px, ${look.y * 0.7}px)`, transition: 'transform .18s ease-out' }">
+        <circle cx="49" cy="61.5" r="4.8" fill="#111113" />
+        <circle cx="47.4" cy="59.6" r="1.5" fill="#ffffff" />
+      </g>
+      <path d="M65 61 Q74 52 83 61" fill="none" stroke="#ffffff" stroke-width="4.8" stroke-linecap="round" />
+      <path d="M52 79 Q61 86 71 77" fill="none" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" opacity="0.9" />
+      <polygon points="65,80.5 68.5,78.5 68,84" fill="#ffffff" />
+    </g>
+
+    <!-- 11. 蓝帽惊呆（豆豆眼 + O 嘴） -->
+    <g v-else-if="face === 'shock'">
+      <ellipse cx="46" cy="62" rx="11" ry="13.5" fill="#ffffff" />
+      <ellipse cx="74" cy="62" rx="11" ry="13.5" fill="#ffffff" />
+      <g :style="{ transform: `translate(${look.x * 0.8}px, ${look.y * 0.8}px)`, transition: 'transform .18s ease-out' }">
+        <circle cx="46" cy="62" r="3" fill="#111113" />
+        <circle cx="74" cy="62" r="3" fill="#111113" />
+      </g>
+      <ellipse cx="60" cy="83" rx="5.5" ry="7.2" fill="none" stroke="#ffffff" stroke-width="3.4" />
+    </g>
+
+    <!-- 12. 蓝帽吹口哨（斜眼装无辜 + 音符 ♪） -->
+    <g v-else-if="face === 'whistle'">
+      <ellipse cx="46" cy="61" rx="9.8" ry="12" fill="#ffffff" />
+      <ellipse cx="74" cy="61" rx="9.8" ry="12" fill="#ffffff" />
+      <circle cx="49.5" cy="57.5" r="4.4" fill="#111113" />
+      <circle cx="77.5" cy="57.5" r="4.4" fill="#111113" />
+      <circle cx="48.2" cy="56" r="1.4" fill="#ffffff" />
+      <circle cx="76.2" cy="56" r="1.4" fill="#ffffff" />
+      <circle cx="65" cy="81" r="4" fill="none" stroke="#ffffff" stroke-width="3.2" />
+      <!-- 漂浮的蓝色小音符 -->
+      <g class="mascot-note" fill="#6ea0ff" stroke="#6ea0ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M90 72 V57 L101 54 V67" fill="none" />
+        <ellipse cx="87.5" cy="72.5" rx="3.4" ry="2.5" stroke="none" />
+        <ellipse cx="98.5" cy="68" rx="3.4" ry="2.5" stroke="none" />
+      </g>
+    </g>
+
+    <!-- 13. 蓝帽发财眼（金色 ¥ 财迷眼） -->
+    <g v-else-if="face === 'money'">
+      <g fill="none" stroke="#ffc94a" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M38 51 L46 61 L54 51 M46 61 V73 M40 63.5 H52 M40 68.5 H52" />
+        <path d="M66 51 L74 61 L82 51 M74 61 V73 M68 63.5 H80 M68 68.5 H80" />
+      </g>
+      <path d="M49 80 Q60 91 71 80" fill="none" stroke="#ffffff" stroke-width="3.6" stroke-linecap="round" opacity="0.92" />
+    </g>
+
+    <!-- 14. 蓝帽派对拽哥（斜切霓虹蓝边墨镜） -->
+    <g v-else-if="face === 'party-cool'">
+      <path d="M24 53 L57 50 L55 68 Q40 73 27 67 Z" fill="#1e2230" stroke="#7ea8ff" stroke-width="2.5" stroke-linejoin="round" />
+      <path d="M96 53 L63 50 L65 68 Q80 73 93 67 Z" fill="#1e2230" stroke="#7ea8ff" stroke-width="2.5" stroke-linejoin="round" />
+      <path d="M56 54 H64" stroke="#7ea8ff" stroke-width="3" stroke-linecap="round" />
+      <path d="M32 56 L38 65 M70 56 L76 65" stroke="#ffffff" stroke-width="2.4" stroke-linecap="round" opacity="0.72" />
+      <path d="M53 81 Q61 86 70 78" fill="none" stroke="#ffffff" stroke-width="3.4" stroke-linecap="round" opacity="0.92" />
+    </g>
+
+    <!-- 15. 蓝帽委屈巴巴（水汪汪星星泪眼 + 委屈小嘴） -->
+    <g v-else-if="face === 'teary'">
+      <ellipse cx="46" cy="64" rx="11" ry="12.5" fill="#ffffff" />
+      <ellipse cx="74" cy="64" rx="11" ry="12.5" fill="#ffffff" />
+      <circle cx="46.5" cy="64.5" r="6.8" fill="#1d2538" />
+      <circle cx="73.5" cy="64.5" r="6.8" fill="#1d2538" />
+      <circle cx="44" cy="61.5" r="2.8" fill="#ffffff" />
+      <circle cx="71" cy="61.5" r="2.8" fill="#ffffff" />
+      <circle cx="49" cy="68" r="1.7" fill="#9bd5ff" />
+      <circle cx="76" cy="68" r="1.7" fill="#9bd5ff" />
+      <!-- 眼角小泪滴 -->
+      <path d="M35 72 Q32 78 36 80 Q39 78 35 72 Z" fill="#7ec8ff" />
+      <path d="M85 72 Q88 78 84 80 Q81 78 85 72 Z" fill="#7ec8ff" />
+      <!-- 八字委屈眉与波浪小嘴 -->
+      <path d="M36 49 L49 45 M84 49 L71 45" stroke="#ffffff" stroke-width="2.6" stroke-linecap="round" opacity="0.82" />
+      <path d="M53 84 Q60 78 67 84" fill="none" stroke="#ffffff" stroke-width="3.2" stroke-linecap="round" opacity="0.9" />
+    </g>
+
+    <!-- 默认：经典大眼（可眨眼、可跟鼠标转） -->
+    <template v-else>
+      <g class="animate-blink" :style="{ transformOrigin: '60px 62px', transformBox: 'view-box', animationDelay: blinkDelay }">
+        <ellipse v-if="!style.dark" cx="47" cy="63.4" rx="10.5" ry="13" :fill="style.shade" />
+        <ellipse v-if="!style.dark" cx="73" cy="63.4" rx="10.5" ry="13" :fill="style.shade" />
+        <ellipse cx="47" cy="62" rx="10.5" ry="13" fill="#ffffff" />
+        <ellipse cx="73" cy="62" rx="10.5" ry="13" fill="#ffffff" />
+        <g :style="{ transform: `translate(${look.x}px, ${look.y}px)`, transition: 'transform .18s ease-out' }">
+          <circle cx="48" cy="63" r="5" fill="#111113" />
+          <circle cx="74" cy="63" r="5" fill="#111113" />
+          <circle cx="46.4" cy="61.2" r="1.5" fill="#ffffff" />
+          <circle cx="72.4" cy="61.2" r="1.5" fill="#ffffff" />
+        </g>
+      </g>
+      <path v-if="mood === 'working'" d="M54 81 Q60 87 66 81" :stroke="lineColor" stroke-width="3" fill="none" stroke-linecap="round" />
+    </template>
 
     <!-- 思考气泡 -->
     <g v-if="mood === 'thinking'">
@@ -217,3 +431,30 @@ const lineColor = computed(() => (style.value.dark ? 'rgba(255,255,255,.8)' : st
     </g>
   </svg>
 </template>
+
+<style scoped>
+.mascot-bubble {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: mascot-bubble 2.4s ease-in-out infinite;
+}
+.mascot-note {
+  animation: mascot-note 2.6s ease-in-out infinite;
+}
+
+@keyframes mascot-bubble {
+  0%, 100% { transform: scale(0.92); opacity: 0.85; }
+  50% { transform: scale(1.1); opacity: 1; }
+}
+@keyframes mascot-note {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mascot-bubble,
+  .mascot-note {
+    animation: none;
+  }
+}
+</style>

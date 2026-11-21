@@ -12,7 +12,7 @@ import { conversationApi, runApi } from '@/api'
 import { ApiError, errorText } from '@/api/http'
 import type { StreamHandle } from '@/api/sse'
 import type { AgentEvent, ConversationDetail, FileInfo, RecipeEditRequest, RunSteer, TableBrief } from '@/api/types'
-import FunObject from '@/components/brand/FunObject.vue'
+import ChatWelcomeCharms from '@/components/brand/ChatWelcomeCharms.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
 import ChatComposer, { type Attachment } from '@/components/chat/ChatComposer.vue'
@@ -779,11 +779,7 @@ function answer(option: string) {
             <p class="mt-2 max-w-md text-sm leading-relaxed text-mute">
               {{ customer ? '我会按这个客户的处理逻辑、流程和业务规则来处理。' : '直接说你的需求，我会自动判断处理方式。' }}
             </p>
-            <div class="mt-6 flex gap-6">
-              <FunObject kind="sheet" face="smile" :size="40" class="animate-float" />
-              <FunObject kind="magnet" face="wink" :size="40" class="animate-float [animation-delay:.6s]" />
-              <FunObject kind="cheese" face="happy" :size="40" class="animate-float [animation-delay:1.2s]" />
-            </div>
+            <ChatWelcomeCharms />
           </div>
 
           <div v-else class="space-y-8">
