@@ -139,7 +139,7 @@ async function saveMapping() {
 </script>
 
 <template>
-  <section class="card-soft p-5 sm:p-6">
+  <section class="rounded-[24px] bg-white p-5 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-6">
     <!-- 记忆 -->
     <h3 class="mb-3 text-[15px] font-semibold">记忆</h3>
     <article v-for="memory in humanMemories" :key="memory.id" class="-mx-2 rounded-xl px-2 py-2 transition hover:bg-paper">

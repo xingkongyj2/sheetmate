@@ -128,7 +128,7 @@ async function remove(file: FileInfo) {
 </script>
 
 <template>
-  <div class="card-soft p-5">
+  <div class="rounded-[24px] bg-white p-5 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:p-6">
     <div>
       <div class="mb-3 flex items-center gap-3">
         <h3 class="text-[15px] font-semibold">输入文件</h3>

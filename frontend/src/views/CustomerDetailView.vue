@@ -246,7 +246,7 @@ async function onEdited() {
           @run="(id) => (runDialog = { recipeId: id })"
           @changed="load"
         />
-        <div v-if="!customer.recipes.length" class="card-soft py-14 text-center text-sm text-faint">还没有流程</div>
+        <div v-if="!customer.recipes.length" class="rounded-[24px] bg-white py-14 text-center text-sm text-faint shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)]">还没有流程</div>
       </section>
 
       <!-- 文件 -->
