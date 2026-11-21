@@ -488,6 +488,81 @@ def test_revoked_customer_grant_blocks_existing_conversation_context(client):
         build_context(member_id, conversation_id, llm=None)
 
 
+def test_conversations_are_isolated_across_users_sharing_a_customer(client):
+    """共享同一客户的不同用户只能看到和访问自己的对话、对话中间表与来源会话链接。"""
+    import pandas as pd
+
+    from sheetmate.db.models import Message, Run
+    from sheetmate.services.conversations import service as conv_service
+    from sheetmate.services.workflows import runs as run_service
+
+    member, member_id = _register_member()
+    customer_id = _new_customer(client, name=f"共享客户_{_suffix()}")["id"]
+    with session_scope() as db:
+        db.add(UserCustomer(user_id=member_id, customer_id=customer_id))
+
+    # 管理员在共享客户下建对话、写中间表、留临时查询快照、对话级 Run 与来源流程
+    admin_conv = client.post("/api/conversations", json={"customer_id": customer_id, "title": "管理员私有对话"}).json()["conversation"]["id"]
+    conv_service.workspace(admin_conv).put_dataframe("admin_secret_table", pd.DataFrame({"秘密列": ["绝密值"]}))
+    recipe = Recipe(
+        name="共享客户流程", customer_id=customer_id, created_by="ai",
+        inputs=[RecipeInput(alias="明细")],
+        steps=[RecipeStep(id=1, name="筛查", formula="filter_rows", output="结果", params={"table": "明细", "conditions": []})],
+        output_spec=[OutputSheet(name="结果", source="结果")],
+    )
+    with session_scope() as db:
+        db.add(Message(
+            conversation_id=admin_conv, role="assistant", content="完成",
+            events=[{"type": "table", "table": {"name": "", "label": "管理员临时快照", "ephemeral": True,
+                                                "columns": ["秘密列"], "preview": [["绝密值"]], "rows": 1, "cols": 1}}],
+        ))
+        admin_run = Run(kind="analysis", user_id=1, customer_id=customer_id, conversation_id=admin_conv,
+                        request_text="管理员对话里的提问", status="success")
+        db.add(admin_run)
+        db.flush()
+        admin_run_id = admin_run.id
+        recipe_service.save_recipe(db, recipe, conversation_id=admin_conv)
+    run_service.run_workspaces.get(admin_run_id).put_dataframe("admin_run_table", pd.DataFrame({"列": [1]}), source="computed")
+
+    # 新成员可以看到客户和共享流程，但看不到管理员的对话及计数
+    member_card = next(c for c in member.get("/api/customers").json()["customers"] if c["id"] == customer_id)
+    assert member_card["conversation_count"] == 0
+    member_customer = member.get(f"/api/customers/{customer_id}").json()["customer"]
+    assert member_customer["conversation_count"] == 0
+    assert member_customer["conversations"] == []
+    assert member.get("/api/conversations").json()["conversations"] == []
+    assert member.get(f"/api/conversations/{admin_conv}").status_code == 403
+    assert member.delete(f"/api/conversations/{admin_conv}").status_code == 403
+    assert member.get("/api/recipes", params={"conversation_id": admin_conv}).status_code == 403
+
+    # 流程版本详情中不向他人暴露来源对话 ID，仅创建该对话的本人可见
+    member_versions = member.get(f"/api/recipes/{recipe.id}").json()["versions"]
+    admin_versions = client.get(f"/api/recipes/{recipe.id}").json()["versions"]
+    assert member_versions[0]["conversation_id"] is None
+    assert admin_versions[0]["conversation_id"] == admin_conv
+
+    # 新成员在该客户下新建自己的对话：彼此对话列表与工作区中间表严格隔离
+    member_conv = member.post("/api/conversations", json={"customer_id": customer_id, "title": "成员私有对话"}).json()["conversation"]["id"]
+    member_detail = member.get(f"/api/conversations/{member_conv}").json()["conversation"]
+    table_names = {t["name"] for t in member_detail["tables"]}
+    assert "admin_secret_table" not in table_names
+    assert "管理员临时快照" not in table_names
+    assert "admin_run_table" not in table_names
+    assert all(t.get("conversation_id") != admin_conv for t in member_detail["tables"])
+    assert member.get(f"/api/conversations/{member_conv}/tables/admin_secret_table",
+                      params={"source_conversation_id": admin_conv}).status_code == 403
+    assert member.delete(f"/api/conversations/{member_conv}/tables/admin_secret_table",
+                         params={"source_conversation_id": admin_conv}).status_code == 403
+
+    # 双向隔离：管理员也只看到自己的对话，不能打开成员的对话
+    admin_customer = client.get(f"/api/customers/{customer_id}").json()["customer"]
+    assert admin_customer["conversation_count"] == 1
+    assert [c["id"] for c in admin_customer["conversations"]] == [admin_conv]
+    member_customer_after = member.get(f"/api/customers/{customer_id}").json()["customer"]
+    assert member_customer_after["conversation_count"] == 1
+    assert [c["id"] for c in member_customer_after["conversations"]] == [member_conv]
+    assert client.get(f"/api/conversations/{member_conv}").status_code == 403
+
 
 def test_version_changes_compare_with_previous_version(client):
     """版本详情：和上一版相比改了什么——说明、节点（类型、参数、脚本逐行差异）、输出、列名对应。"""

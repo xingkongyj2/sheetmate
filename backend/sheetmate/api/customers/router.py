@@ -39,26 +39,26 @@ memories_router = APIRouter(prefix="/api/memories", tags=["memories"])
 
 @router.get("")
 def list_customers(db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
-    return {"ok": True, "customers": [customer_service.card(db, c) for c in customer_service.accessible_customers(db, user)]}
+    return {"ok": True, "customers": [customer_service.card(db, c, user=user) for c in customer_service.accessible_customers(db, user)]}
 
 
 @router.post("")
 def create_customer(body: CustomerBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     customer = customer_service.create_customer(db, user, body.name or "", body.code or "", body.description or "")
-    return {"ok": True, "customer": customer_service.card(db, customer)}
+    return {"ok": True, "customer": customer_service.card(db, customer, user=user)}
 
 
 @router.get("/{customer_id}")
 def get_customer(customer_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     customer = require_customer(db, user, customer_id)
-    return {"ok": True, "customer": customer_service.detail(db, customer)}
+    return {"ok": True, "customer": customer_service.detail(db, customer, user=user)}
 
 
 @router.put("/{customer_id}")
 def update_customer(customer_id: str, body: CustomerBody, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     customer = require_customer(db, user, customer_id)
     customer_service.update_customer(customer, body.model_dump(exclude_none=True), db=db)
-    return {"ok": True, "customer": customer_service.card(db, customer)}
+    return {"ok": True, "customer": customer_service.card(db, customer, user=user)}
 
 
 @router.delete("/{customer_id}")
@@ -211,7 +211,7 @@ def _require_memory_access(db: Session, user: User, memory_id: int):
         require_customer(db, user, item.customer_id)
     elif item.conversation_id:
         conv = db.get(Conversation, item.conversation_id)
-        if conv is None or (conv.user_id != user.id and user.role != "admin"):
+        if conv is None or conv.user_id != user.id:
             raise Forbidden("你没有权限维护这条记忆")
     elif item.user_id != user.id and user.role != "admin":
         raise Forbidden("你没有权限维护这条记忆")

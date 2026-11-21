@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import and_, delete, or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.core.config.settings import settings
@@ -50,7 +50,7 @@ def get_conversation(db: Session, user: User, conversation_id: str) -> Conversat
     conv = db.get(Conversation, conversation_id)
     if conv is None:
         raise NotFound("对话不存在")
-    if conv.user_id != user.id and user.role != "admin":
+    if conv.user_id != user.id:
         raise Forbidden("你没有权限访问这个对话")
     if conv.customer_id:
         # A conversation's owner check alone is insufficient after customer
@@ -164,8 +164,10 @@ def detail(db: Session, conv: Conversation) -> dict[str, Any]:
     files = file_service.list_files(db, customer_id=conv.customer_id, conversation_id=conv.id)
     available_files = {record.id for record in files}
     recipes = recipe_service.latest_records(db, **scope)
-    sources = list(db.scalars(select(Conversation).where(Conversation.customer_id == conv.customer_id)
-                             .order_by(Conversation.created_at, Conversation.id))) if conv.customer_id else [conv]
+    sources = list(db.scalars(select(Conversation).where(
+        Conversation.customer_id == conv.customer_id,
+        Conversation.user_id == conv.user_id,
+    ).order_by(Conversation.created_at, Conversation.id))) if conv.customer_id else [conv]
     tables = []
     for source in sources:
         tables.extend(_table_brief(t, conversation=source) for t in conversation_workspaces.existing_tables(source.id)
@@ -196,7 +198,14 @@ def detail(db: Session, conv: Conversation) -> dict[str, Any]:
                            "snapshot_id": f"{message_id}:{event_index}",
                            "conversation_id": source.id, "conversation_title": source.title,
                            "created_at": created_at.isoformat()})
-    run_condition = Run.customer_id == conv.customer_id if conv.customer_id else Run.conversation_id == conv.id
+    run_condition = (
+        and_(
+            Run.customer_id == conv.customer_id,
+            or_(Run.conversation_id.is_(None), Run.conversation_id.in_(source_by_id)),
+        )
+        if conv.customer_id
+        else Run.conversation_id == conv.id
+    )
     resource_runs = list(db.scalars(select(Run).where(run_condition).order_by(Run.created_at, Run.id)))
     for run in resource_runs:
         for table in run_service.run_workspaces.existing_tables(run.id):
@@ -242,7 +251,7 @@ def table_source(db: Session, user: User, conversation_id: str,
     if not source_conversation_id or source_conversation_id == conv.id:
         return conv
     source = db.get(Conversation, source_conversation_id)
-    if source is None or not conv.customer_id or source.customer_id != conv.customer_id:
+    if source is None or not conv.customer_id or source.customer_id != conv.customer_id or source.user_id != conv.user_id:
         raise Forbidden("只能查看或清理本会话或当前客户的中间数据")
     return source
 

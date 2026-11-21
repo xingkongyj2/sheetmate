@@ -35,11 +35,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     conversations.value = conversations.value.filter((c) => c.id !== id)
   }
 
+  function clear() {
+    conversations.value = []
+    customers.value = []
+    loaded.value = false
+  }
+
   const recent = computed(() => sortByRecent(conversations.value))
   const customerGroups = computed(() => groupByCustomer(customers.value, conversations.value))
 
   return {
     conversations, customers, loaded, recent, customerGroups,
-    refreshConversations, refreshCustomers, upsertConversation, patchConversation, removeConversation,
+    refreshConversations, refreshCustomers, upsertConversation, patchConversation, removeConversation, clear,
   }
 })

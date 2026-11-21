@@ -237,16 +237,24 @@ def ensure_profile(db: Session, record: RecipeRecord) -> RecipeProfile:
     return profile
 
 
-def versions(db: Session, recipe_id: str) -> list[dict[str, Any]]:
+def versions(db: Session, recipe_id: str, *, user: User | None = None) -> list[dict[str, Any]]:
     """版本列表（新的在前）：备注、来源（AI / 人工）、来源会话、这个版本运行过几次。"""
     records = list(db.scalars(select(RecipeRecord).where(RecipeRecord.recipe_id == recipe_id).order_by(RecipeRecord.version.desc())))
     run_counts = dict(db.execute(select(Run.recipe_version, func.count()).where(Run.recipe_id == recipe_id)
                                  .group_by(Run.recipe_version)).all())
+    owned_conv_ids: set[str] | None = None
+    if user is not None:
+        conv_ids = {r.conversation_id for r in records if r.conversation_id}
+        owned_conv_ids = (
+            set(db.scalars(select(Conversation.id).where(Conversation.id.in_(conv_ids), Conversation.user_id == user.id)))
+            if conv_ids else set()
+        )
     return [
         {"version": r.version,
          "created_at": r.created_at.isoformat(), "steps": len((r.body or {}).get("steps", [])),
          "note": (r.body or {}).get("metadata", {}).get("version_note", ""),
-         "created_by": r.created_by, "conversation_id": r.conversation_id,
+         "created_by": r.created_by,
+         "conversation_id": r.conversation_id if (owned_conv_ids is None or r.conversation_id in owned_conv_ids) else None,
          "runs": run_counts.get(r.version, 0),
          "latest": index == 0}
         for index, r in enumerate(records)

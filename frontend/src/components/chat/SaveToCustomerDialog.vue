@@ -42,7 +42,6 @@ async function save() {
 
 <template>
   <BaseModal title="保存到客户" width="max-w-lg" @close="emit('close')">
-    <p class="mb-4 text-sm text-mute">保存后，这次对话上传的文件、已保存的流程、记下的规则都会归到客户名下，以后这个客户的对话都能用上。</p>
     <div class="mb-4 flex rounded-full bg-paper p-1 text-sm">
       <button class="flex-1 rounded-full py-1.5" :class="tab === 'existing' ? 'bg-white font-medium shadow-sm' : 'text-mute'" @click="tab = 'existing'">已有客户</button>
       <button class="flex-1 rounded-full py-1.5" :class="tab === 'new' ? 'bg-white font-medium shadow-sm' : 'text-mute'" @click="tab = 'new'">新建客户</button>

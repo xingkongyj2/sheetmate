@@ -679,7 +679,7 @@ def release_customer_reference(db: Session, record: FileRecord, customer_id: str
 
 def remove_from_conversation(db: Session, record: FileRecord, user: User, conversation_id: str) -> bool:
     conv = db.get(Conversation, conversation_id)
-    if conv is None or (conv.user_id != user.id and user.role != "admin"):
+    if conv is None or conv.user_id != user.id:
         raise Forbidden("你没有权限修改这个会话的文件")
     if record.conversation_id != conversation_id and db.get(FileConversation, (record.id, conversation_id)) is None:
         raise ServiceError("这个文件不属于指定会话")
@@ -698,7 +698,7 @@ def remove_from_workspace(db: Session, record: FileRecord, user: User, conversat
     会话绑了客户、文件也在客户的文件里时，同时从客户文件里移除（和客户页的删除一样）；
     客户的其他会话各自保留自己的引用，不受影响。"""
     conv = db.get(Conversation, conversation_id)
-    if conv is None or (conv.user_id != user.id and user.role != "admin"):
+    if conv is None or conv.user_id != user.id:
         raise Forbidden("你没有权限修改这个会话的文件")
     if conv.customer_id and can_access_in_customer(db, record, conv.customer_id):
         remove_from_customer(db, record, user, conv.customer_id)  # 里面会先给客户的每个会话（含这个）留好引用

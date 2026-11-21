@@ -121,14 +121,17 @@ def delete_customer(db: Session, customer: Customer) -> None:
     conversation_service._defer_owner_storage_cleanup(db, roots)
 
 
-def card(db: Session, customer: Customer) -> dict[str, Any]:
+def card(db: Session, customer: Customer, *, user: User | None = None) -> dict[str, Any]:
     """客户卡片：名称、IP 形象、文件数、流程数、最近活动、处理逻辑摘要。"""
     file_count = db.scalar(select(func.count()).select_from(FileRecord).where(
         file_service.customer_file_condition(customer.id), file_service.current_file_condition(),
         FileRecord.kind != "output")) or 0
     recipes = recipe_service.latest_records(db, customer_id=customer.id)
     primary_id = recipe_service.ensure_primary_recipe(db, customer)
-    conv_count = db.scalar(select(func.count()).select_from(Conversation).where(Conversation.customer_id == customer.id)) or 0
+    conv_stmt = select(func.count()).select_from(Conversation).where(Conversation.customer_id == customer.id)
+    if user is not None:
+        conv_stmt = conv_stmt.where(Conversation.user_id == user.id)
+    conv_count = db.scalar(conv_stmt) or 0
     last_run = db.scalars(select(Run).where(Run.customer_id == customer.id).order_by(Run.created_at.desc()).limit(1)).first()
     primary = next((record for record in recipes if record.recipe_id == primary_id), None)
     target = _summary_for_display(db, customer, primary)
@@ -168,7 +171,7 @@ def _first_paragraph(markdown: str) -> str:
     return ""
 
 
-def detail(db: Session, customer: Customer) -> dict[str, Any]:
+def detail(db: Session, customer: Customer, *, user: User | None = None) -> dict[str, Any]:
     primary_id = recipe_service.ensure_primary_recipe(db, customer)
     files = file_service.exclude_run_scoped(db, file_service.list_files(db, customer_id=customer.id))
     scoped_runs = select(Run.id).where(Run.customer_id == customer.id, file_service.run_scoped_condition())
@@ -197,13 +200,15 @@ def detail(db: Session, customer: Customer) -> dict[str, Any]:
                         "field_mapping_entries": memory_service.field_mapping_entries(db, customer.id, recipe_id=record.recipe_id),
                         "runs": [run_service.run_dict(run) for run in db.scalars(select(Run).where(
                             Run.customer_id == customer.id, Run.recipe_id == record.recipe_id).order_by(Run.created_at.desc()))]})
-    conversations = db.scalars(select(Conversation).where(Conversation.customer_id == customer.id)
-                               .order_by(Conversation.updated_at.desc()))
+    conv_stmt = select(Conversation).where(Conversation.customer_id == customer.id)
+    if user is not None:
+        conv_stmt = conv_stmt.where(Conversation.user_id == user.id)
+    conversations = db.scalars(conv_stmt.order_by(Conversation.updated_at.desc()))
     primary = next((item for item in recipes if item["recipe_id"] == primary_id), None)
     if primary is None:
         _summary_for_display(db, customer)
     return {
-        **card(db, customer),
+        **card(db, customer, user=user),
         "summary": primary["summary"] if primary else customer.summary,
         "summary_by": primary["summary_by"] if primary else customer.summary_by,
         "summary_updated_at": primary["summary_updated_at"] if primary else customer.summary_updated_at.isoformat() if customer.summary_updated_at else None,

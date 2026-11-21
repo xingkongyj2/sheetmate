@@ -4,6 +4,7 @@ import { ref } from 'vue'
 
 import { authApi } from '@/api'
 import type { User } from '@/api/types'
+import { useWorkspaceStore } from '@/stores/conversations'
 import { useHomeDraftStore } from '@/stores/homeDraft'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -23,17 +24,20 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   async function login(account: string, password: string) {
+    useWorkspaceStore().clear()
     user.value = await authApi.login(account, password)
     checked.value = true
   }
 
   async function register(account: string, password: string, displayName: string) {
+    useWorkspaceStore().clear()
     user.value = await authApi.register(account, password, displayName)
     checked.value = true
   }
 
   async function logout() {
     await authApi.logout().catch(() => undefined)
+    useWorkspaceStore().clear()
     useHomeDraftStore().clear()
     user.value = null
   }
@@ -43,6 +47,7 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   function clear() {
+    useWorkspaceStore().clear()
     useHomeDraftStore().clear()
     user.value = null
     checked.value = true

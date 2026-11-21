@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from sheetmate.api.deps import admin_user, current_user, sse_response
 from sheetmate.db.session import get_db
 from sheetmate.db.models import User
+from sheetmate.services.conversations import service as conv_service
 from sheetmate.services.customers import service as customer_service
 from sheetmate.services.privacy import service as privacy_service
 from sheetmate.services.formulas import service as formula_service
@@ -37,7 +38,18 @@ def list_recipes(customer_id: str | None = None, conversation_id: str | None = N
                  db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     if customer_id:
         require_customer(db, user, customer_id)
+    if conversation_id:
+        conv_service.get_conversation(db, user, conversation_id)
     records = recipe_service.latest_records(db, customer_id=customer_id, conversation_id=conversation_id)
+    if not customer_id and not conversation_id:
+        accessible_customer_ids = {c.id for c in customer_service.accessible_customers(db, user)}
+        owned_conv_ids = {c.id for c in conv_service.list_conversations(db, user, limit=10_000)}
+        records = [
+            r for r in records
+            if (r.customer_id and r.customer_id in accessible_customer_ids)
+            or (r.conversation_id and r.conversation_id in owned_conv_ids)
+            or (not r.customer_id and not r.conversation_id and r.scope == "global")
+        ]
     return {"ok": True, "recipes": [recipe_service.recipe_brief(r) for r in records]}
 
 
@@ -46,7 +58,7 @@ def get_recipe(recipe_id: str, version: int | None = None, db: Session = Depends
     recipe = recipe_service.get_recipe(db, recipe_id, version)
     recipe_service.require_recipe_access(db, user, recipe)
     runs = run_service.list_runs(db, recipe_id=recipe_id, limit=20)
-    return {"ok": True, "recipe": recipe.to_dict(), "flow": recipe.flow(), "versions": recipe_service.versions(db, recipe_id),
+    return {"ok": True, "recipe": recipe.to_dict(), "flow": recipe.flow(), "versions": recipe_service.versions(db, recipe_id, user=user),
             "runs": [run_service.run_dict(r, with_steps=False) for r in runs]}
 
 
