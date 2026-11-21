@@ -44,6 +44,12 @@ async function submit() {
 
 <template>
   <AuthStage :mood="hidingEyes ? 'happy' : 'idle'" full-screen>
+    <RouterLink
+      :to="{ name: 'showcase' }"
+      class="absolute right-6 top-6 inline-flex items-center gap-1 rounded-full border border-line bg-white/90 px-3 py-1.5 text-xs font-medium text-mute transition hover:border-ink/30 hover:text-ink"
+    >
+      产品展示
+    </RouterLink>
     <div class="flex items-center justify-center gap-2.5 pt-7 select-none">
       <LogoMark :size="44" />
       <span class="text-[38px] font-semibold tracking-tight">SheetMate</span>

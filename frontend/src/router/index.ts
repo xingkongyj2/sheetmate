@@ -13,6 +13,7 @@ import { useAuthStore } from '@/stores/auth'
 const router = createRouter({
   history: createWebHistory(),
   routes: [
+    { path: '/showcase', alias: ['/landing', '/intro'], name: 'showcase', component: () => import('@/views/ShowcaseView.vue'), meta: { open: true } },
     { path: '/login', name: 'login', component: () => import('@/views/LoginView.vue'), meta: { public: true } },
     {
       path: '/',
@@ -50,9 +51,14 @@ const router = createRouter({
   ],
 })
 
+let navigatingToOpen = false
+
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
+  navigatingToOpen = Boolean(to.meta.open)
   const user = await auth.ensure()
+  navigatingToOpen = false
+  if (to.meta.open) return true
   if (to.meta.public) return user ? { name: 'home' } : true
   if (!user) return { name: 'login', query: to.fullPath !== '/' ? { next: to.fullPath } : undefined }
   if (to.matched.some((record) => record.meta.requiresAdmin) && user.role !== 'admin') {
@@ -64,7 +70,8 @@ router.beforeEach(async (to) => {
 setUnauthorizedHandler(() => {
   const auth = useAuthStore()
   auth.clear()
-  if (router.currentRoute.value.name !== 'login') router.push({ name: 'login' })
+  const current = router.currentRoute.value
+  if (!navigatingToOpen && !current.meta.open && current.name !== 'login') router.push({ name: 'login' })
 })
 
 export default router

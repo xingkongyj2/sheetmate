@@ -3,7 +3,7 @@
  * 侧边栏：搜索、新对话、客户库（统一的线条图标），下面是「客户」和「对话」两块列表，
  * 底部是头像和名字（点开是管理中心[仅管理员] / 退出登录）。
  */
-import { CircleUserRound, LogOut, PanelLeft, Search, SquarePen } from '@lucide/vue'
+import { CircleUserRound, LogOut, PanelLeft, Search, Sparkles, SquarePen } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -150,6 +150,9 @@ async function logout() {
       >
         <RouterLink v-if="isAdmin" :to="{ name: 'admin-overview' }" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
           <AdminCenterIcon class="size-4" />管理中心
+        </RouterLink>
+        <RouterLink :to="{ name: 'showcase' }" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
+          <Sparkles class="size-4 text-mute" />产品展示
         </RouterLink>
         <button role="menuitem" class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
           <LogOut class="size-4" />退出登录
