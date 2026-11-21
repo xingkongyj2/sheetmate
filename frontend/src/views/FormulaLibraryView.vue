@@ -236,9 +236,9 @@ async function remove(f: LibraryFormula) {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-6 sm:px-8 sm:py-7">
+    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-5 py-6 sm:px-8 sm:py-8">
       <header class="flex shrink-0 flex-wrap items-center gap-3 sm:gap-4">
-        <h1 class="mr-auto text-xl font-semibold tracking-tight">公式库</h1>
+        <h1 class="mr-auto text-2xl font-semibold tracking-tight text-ink">公式库</h1>
         <label class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-full bg-paper px-3 sm:max-w-48">
           <Search class="size-3.5 shrink-0 text-faint" />
           <input v-model="query" aria-label="搜索公式" placeholder="搜索公式" class="w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-faint" />

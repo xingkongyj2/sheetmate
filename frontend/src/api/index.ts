@@ -39,6 +39,16 @@ import type {
   User,
 } from './types'
 
+export { adminApi } from './admin'
+export type {
+  AdminCustomerRow,
+  AdminExecutionMetrics,
+  AdminOverview,
+  AdminStatsCustomerRow,
+  AdminStatsUserRow,
+  AdminUserRow,
+} from './admin'
+
 export const scriptApi = {
   get: async (id: string) =>
     (await http.get<{ script: ScriptFile }>(`/scripts/${encodeURIComponent(id)}`)).data.script,

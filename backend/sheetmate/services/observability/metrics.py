@@ -14,12 +14,14 @@ from sqlalchemy import and_, case, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from sheetmate.services.observability.tool_catalog import tool_catalog
+from sheetmate.services.identity.auth import user_dict
 from sheetmate.db.models import (
     AgentExecution,
     AgentToolReceipt,
     Conversation,
     Customer,
     Message,
+    RecipeRecord,
     User,
     UserCustomer,
 )
@@ -116,24 +118,16 @@ def _settle_abandoned_usage(usage: dict[str, Any], status: str, *, pending: bool
     return result
 
 
-def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime | None = None) -> dict[str, Any]:
-    """Only the caller's tasks in currently accessible conversations are visible.
-
-    Administrators also get their own tasks here. No account-wide scope or raw
-    prompts/errors/arguments are exposed through the statistics endpoint.
-    """
-    if type(days) is not int or not 1 <= days <= 90:
-        raise ValueError("统计范围需为 1–90 天")
-    end = at or datetime.now()
-    start = end.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
-    filters = [AgentExecution.user_id == user.id, Conversation.user_id == user.id,
-               AgentExecution.created_at >= start, AgentExecution.created_at <= end]
-    if user.role != "admin":
-        grant = exists(select(UserCustomer.user_id).where(
-            UserCustomer.user_id == user.id, UserCustomer.customer_id == Conversation.customer_id))
-        owner = exists(select(Customer.id).where(Customer.id == Conversation.customer_id, Customer.created_by == user.id))
-        filters.append(or_(Conversation.customer_id.is_(None), grant, owner))
-
+def _compute_metrics(
+    db: Session,
+    filters: list[Any],
+    *,
+    days: int,
+    start: datetime,
+    end: datetime,
+    scope: str,
+    include_breakdowns: bool = False,
+) -> dict[str, Any]:
     # Project only counters. Loading checkpoints, event histories or message
     # bodies here would turn a small dashboard into a full transcript scan.
     selected = (select(AgentExecution.id).join(Conversation, Conversation.id == AgentExecution.conversation_id)
@@ -144,7 +138,8 @@ def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime |
         .order_by(Message.id.desc()).limit(1).correlate(AgentExecution).scalar_subquery())
     meta = Message.meta["execution"]
     rows = db.execute(select(
-        AgentExecution.id, AgentExecution.created_at, AgentExecution.status, AgentExecution.recovery_attempts,
+        AgentExecution.id, AgentExecution.user_id, Conversation.customer_id,
+        AgentExecution.created_at, AgentExecution.status, AgentExecution.recovery_attempts,
         AgentExecution.checkpoint["request_budget"].label("saved_budget"),
         AgentExecution.checkpoint["llm_usage"]["usage"].label("saved_usage"),
         AgentExecution.checkpoint["llm_usage"]["stages"].label("saved_stages"),
@@ -167,6 +162,9 @@ def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime |
     stages: dict[str, dict[str, int]] = {}
     durations: list[float] = []
     recovered_tasks = 0
+    user_buckets: dict[int, dict[str, int]] = {}
+    customer_buckets: dict[str, dict[str, int]] = {}
+
     for row in rows:
         durable_status, outcome = row["status"], row["outcome"]
         # A paused task can be waiting for input or stopped as incomplete.
@@ -181,9 +179,11 @@ def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime |
         recovered_tasks += int(row["recovery_attempts"] > 0)
         day = daily[row["created_at"].date().isoformat()]
         day["tasks"] += 1
-        day["completed"] += int(status == "completed")
-        day["failed"] += int(status in {"failed", "incomplete"})
-        if status in {"failed", "incomplete"}:
+        is_completed = int(status == "completed")
+        is_failed = int(status in {"failed", "incomplete"})
+        day["completed"] += is_completed
+        day["failed"] += is_failed
+        if is_failed:
             code = row["code"]
             failures[code if code in _CODES else "other"] += 1
         usage = _settle_abandoned_usage(_dict(row["usage"]), durable_status, pending=bool(row["usage_pending"]))
@@ -198,8 +198,34 @@ def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime |
         calls = _count(usage.get("model_calls"), _count(_dict(usage.get("budget")).get("model_calls")))
         usage_total["pending_tasks"] += int(bool(row["usage_pending"]))
         _add_usage(usage_total, usage, calls)
-        for key in ("prompt_tokens", "completion_tokens"):
-            day[key] += _count(usage.get(key))
+        prompt_tok = _count(usage.get("prompt_tokens"))
+        completion_tok = _count(usage.get("completion_tokens"))
+        day["prompt_tokens"] += prompt_tok
+        day["completion_tokens"] += completion_tok
+
+        if include_breakdowns:
+            uid = row["user_id"]
+            ub = user_buckets.setdefault(uid, {
+                "tasks": 0, "completed": 0, "failed": 0,
+                "prompt_tokens": 0, "completion_tokens": 0, "model_calls": 0,
+            })
+            ub["tasks"] += 1
+            ub["completed"] += is_completed
+            ub["failed"] += is_failed
+            ub["prompt_tokens"] += prompt_tok
+            ub["completion_tokens"] += completion_tok
+            ub["model_calls"] += calls
+
+            cid = row["customer_id"]
+            if cid:
+                cb = customer_buckets.setdefault(cid, {
+                    "tasks": 0, "completed": 0, "failed": 0, "total_tokens": 0,
+                })
+                cb["tasks"] += 1
+                cb["completed"] += is_completed
+                cb["failed"] += is_failed
+                cb["total_tokens"] += prompt_tok + completion_tok
+
         for name, value in _dict(usage.get("stages")).items():
             stage = name if name in _STAGES else "other"
             aggregate = stages.setdefault(stage, _empty_usage())
@@ -248,8 +274,8 @@ def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime |
     denominator = statuses["completed"] + statuses["failed"] + statuses["incomplete"]
     cache_known = not usage_total["cached_tokens_missing_calls"] and not usage_total["cache_miss_tokens_missing_calls"]
     cache_input = usage_total["cached_tokens"] + usage_total["cache_miss_tokens"]
-    return {
-        "scope": "own", "days": days, "from": start.isoformat(), "to": end.isoformat(),
+    result: dict[str, Any] = {
+        "scope": scope, "days": days, "from": start.isoformat(), "to": end.isoformat(),
         "coverage": {"source": "durable_executions", "limit": MAX_EXECUTIONS, "truncated": truncated},
         "tasks": len(rows), "statuses": dict(statuses), "recovered_tasks": recovered_tasks,
         "success_rate": round(statuses["completed"] / denominator, 4) if denominator else None,
@@ -265,3 +291,119 @@ def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime |
         # 工具目录：包含这段时间没用过的工具，附中文名、分类和一句话作用。
         "catalog": tool_catalog(),
     }
+
+    if include_breakdowns:
+        all_users = list(db.scalars(select(User).order_by(User.id)))
+        conv_by_user = dict(db.execute(
+            select(Conversation.user_id, func.count()).group_by(Conversation.user_id)
+        ).all())
+        by_user = []
+        for u in all_users:
+            info = user_dict(u)
+            b = user_buckets.get(u.id, {
+                "tasks": 0, "completed": 0, "failed": 0,
+                "prompt_tokens": 0, "completion_tokens": 0, "model_calls": 0,
+            })
+            denom = b["completed"] + b["failed"]
+            total_tok = b["prompt_tokens"] + b["completion_tokens"]
+            if b["tasks"] > 0 or conv_by_user.get(u.id, 0) > 0:
+                by_user.append({
+                    "user_id": u.id,
+                    "account": info["account"],
+                    "display_name": info["display_name"],
+                    "avatar": info["avatar"],
+                    "role": u.role,
+                    "role_label": info["role_label"],
+                    "tasks": b["tasks"],
+                    "completed": b["completed"],
+                    "failed": b["failed"],
+                    "success_rate": round(b["completed"] / denom, 4) if denom else None,
+                    "prompt_tokens": b["prompt_tokens"],
+                    "completion_tokens": b["completion_tokens"],
+                    "total_tokens": total_tok,
+                    "model_calls": b["model_calls"],
+                    "conversations": int(conv_by_user.get(u.id, 0)),
+                })
+        by_user.sort(key=lambda item: (-item["total_tokens"], -item["tasks"], -item["conversations"], item["user_id"]))
+
+        all_customers = list(db.scalars(select(Customer).order_by(Customer.updated_at.desc())))
+        conv_by_customer = dict(db.execute(
+            select(Conversation.customer_id, func.count())
+            .where(Conversation.customer_id.is_not(None))
+            .group_by(Conversation.customer_id)
+        ).all())
+        recipe_by_customer = dict(db.execute(
+            select(RecipeRecord.customer_id, func.count(func.distinct(RecipeRecord.recipe_id)))
+            .where(RecipeRecord.customer_id.is_not(None))
+            .group_by(RecipeRecord.customer_id)
+        ).all())
+        by_customer = []
+        for c in all_customers:
+            b = customer_buckets.get(c.id, {"tasks": 0, "completed": 0, "failed": 0, "total_tokens": 0})
+            convs = int(conv_by_customer.get(c.id, 0))
+            recs = int(recipe_by_customer.get(c.id, 0))
+            if b["tasks"] > 0 or convs > 0 or recs > 0:
+                by_customer.append({
+                    "customer_id": c.id,
+                    "name": c.name,
+                    "mascot": c.mascot,
+                    "tasks": b["tasks"],
+                    "completed": b["completed"],
+                    "failed": b["failed"],
+                    "total_tokens": b["total_tokens"],
+                    "conversations": convs,
+                    "recipes": recs,
+                })
+        by_customer.sort(key=lambda item: (-item["tasks"], -item["total_tokens"], -item["conversations"]))
+
+        result["by_user"] = by_user
+        result["by_customer"] = by_customer
+        result["users"] = [
+            {"id": u.id, "account": u.account, "display_name": user_dict(u)["display_name"], "role": u.role}
+            for u in all_users
+        ]
+    return result
+
+
+def execution_metrics(db: Session, user: User, *, days: int = 30, at: datetime | None = None) -> dict[str, Any]:
+    """Only the caller's tasks in currently accessible conversations are visible.
+
+    Administrators also get their own tasks here. No account-wide scope or raw
+    prompts/errors/arguments are exposed through the statistics endpoint.
+    """
+    if type(days) is not int or not 1 <= days <= 90:
+        raise ValueError("统计范围需为 1–90 天")
+    end = at or datetime.now()
+    start = end.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+    filters = [AgentExecution.user_id == user.id, Conversation.user_id == user.id,
+               AgentExecution.created_at >= start, AgentExecution.created_at <= end]
+    if user.role != "admin":
+        grant = exists(select(UserCustomer.user_id).where(
+            UserCustomer.user_id == user.id, UserCustomer.customer_id == Conversation.customer_id))
+        owner = exists(select(Customer.id).where(Customer.id == Conversation.customer_id, Customer.created_by == user.id))
+        filters.append(or_(Conversation.customer_id.is_(None), grant, owner))
+    return _compute_metrics(db, filters, days=days, start=start, end=end, scope="own")
+
+
+def admin_execution_metrics(
+    db: Session,
+    *,
+    days: int = 30,
+    user_id: int | None = None,
+    at: datetime | None = None,
+) -> dict[str, Any]:
+    """管理后台全局统计：汇总全平台（或按指定成员筛选）的执行、Token、成员与客户维度指标。"""
+    if type(days) is not int or not 1 <= days <= 90:
+        raise ValueError("统计范围需为 1–90 天")
+    end = at or datetime.now()
+    start = end.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
+    filters: list[Any] = [AgentExecution.created_at >= start, AgentExecution.created_at <= end]
+    if user_id is not None:
+        filters.append(AgentExecution.user_id == user_id)
+    result = _compute_metrics(
+        db, filters, days=days, start=start, end=end,
+        scope="user" if user_id is not None else "all",
+        include_breakdowns=True,
+    )
+    result["user_id"] = user_id
+    return result

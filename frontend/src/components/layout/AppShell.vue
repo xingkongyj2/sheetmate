@@ -10,10 +10,9 @@ import BackgroundPage from './BackgroundPage.vue'
 
 const store = useWorkspaceStore()
 const router = useRouter()
-// 「设置」「统计」是同级的覆盖层：盖在当前页面上，各自保持实例，关闭只是隐藏。
+// 「个人设置」作为工作台覆盖层：盖在当前页面上，关闭只是隐藏。
 const OVERLAYS = [
-  { name: 'settings', label: '设置' },
-  { name: 'stats', label: '统计' },
+  { name: 'settings', label: '个人设置' },
 ] as const
 const isOverlay = (name: unknown) => OVERLAYS.some((overlay) => overlay.name === name)
 const overlayOpen = computed(() => isOverlay(router.currentRoute.value.name))

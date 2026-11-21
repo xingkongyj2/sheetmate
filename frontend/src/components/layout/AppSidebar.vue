@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
- * 侧边栏：搜索、新对话、客户库、公式库（统一的线条图标），下面是「客户」和「对话」两块列表，
- * 底部是头像和名字（点开是统计 / 设置 / 退出登录）。
+ * 侧边栏：搜索、新对话、客户库（统一的线条图标），下面是「客户」和「对话」两块列表，
+ * 底部是头像和名字（点开是管理后台[仅管理员] / 个人设置 / 退出登录）。
  */
-import { ChartColumn, CircleUserRound, Component as FormulaIcon, LogOut, PanelLeft, Search, Settings, SquarePen } from '@lucide/vue'
+import { CircleUserRound, LayoutDashboard, LogOut, PanelLeft, Search, Settings, ShieldCheck, SquarePen } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -32,11 +32,11 @@ function onShortcut(event: KeyboardEvent) {
     searchOpen.value = !searchOpen.value
   }
 }
-// 「设置」和「统计」是同级的覆盖层：再点一次同一个图标回到打开前的页面，点另一个图标直接切换。
+// 「个人设置」作为工作台覆盖层：再点一次回到打开前的页面。
 const overlayReturnPath = ref('/')
-const isOverlay = (name: unknown) => name === 'settings' || name === 'stats'
+const isOverlay = (name: unknown) => name === 'settings'
 const settingsDestination = computed(() => route.name === 'settings' ? overlayReturnPath.value : { name: 'settings' })
-const statsDestination = computed(() => route.name === 'stats' ? overlayReturnPath.value : { name: 'stats' })
+const isAdmin = computed(() => auth.user?.role === 'admin')
 
 const stopTrackingSettings = router.afterEach((to, from, failure) => {
   if (!failure && isOverlay(to.name) && !isOverlay(from.name) && from.matched[0]?.path === '/') {
@@ -130,14 +130,6 @@ async function logout() {
         <span class="nav-icon"><CircleUserRound aria-hidden="true" /></span><span v-if="!collapsed">客户库</span>
         <span v-if="!collapsed && store.customers.length" class="ml-auto text-xs text-faint">{{ store.customers.length }}</span>
       </RouterLink>
-      <RouterLink
-        :to="{ name: 'formulas' }"
-        class="nav-row text-ink/80"
-        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'formulas' ? 'bg-black/[0.06] text-ink' : '']"
-        title="公式库"
-      >
-        <span class="nav-icon"><FormulaIcon aria-hidden="true" /></span><span v-if="!collapsed">公式库</span>
-      </RouterLink>
     </nav>
 
     <SidebarConversationList v-if="!collapsed" />
@@ -159,17 +151,26 @@ async function logout() {
           <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
           <span v-if="!collapsed" class="min-w-0 flex-1 truncate text-sm text-ink">{{ username }}</span>
         </button>
+        <RouterLink
+          v-if="!collapsed && isAdmin"
+          :to="{ name: 'admin-overview' }"
+          class="icon-btn size-8 shrink-0 text-mute hover:bg-black/[0.05] hover:text-ink"
+          title="进入管理后台"
+          aria-label="进入管理后台"
+        >
+          <ShieldCheck class="size-[17px]" aria-hidden="true" />
+        </RouterLink>
       </div>
       <div
         v-if="menuOpen"
         class="absolute bottom-12 left-3 z-30 w-52 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl"
         role="menu"
       >
-        <RouterLink :to="statsDestination" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
-          <ChartColumn class="size-4" />统计
+        <RouterLink v-if="isAdmin" :to="{ name: 'admin-overview' }" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
+          <LayoutDashboard class="size-4" />管理后台
         </RouterLink>
         <RouterLink :to="settingsDestination" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
-          <Settings class="size-4" />设置
+          <Settings class="size-4" />个人设置
         </RouterLink>
         <button role="menuitem" class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
           <LogOut class="size-4" />退出登录

@@ -27,12 +27,18 @@ const props = withDefaults(defineProps<{
   showProtocol?: boolean
   /** 嵌在别的设置分组里：不再单独一个大标题，用卡片内的小标题 */
   embedded?: boolean
+  /** 隐藏标题（父页面已有独立页头时使用） */
+  hideTitle?: boolean
+  /** 宽屏双栏布局：左侧服务商表单，右侧结构协议 */
+  split?: boolean
   api: {
     load: () => Promise<LLMConfig>
     save: (payload: LLMConfigUpdate) => Promise<LLMConfig>
     test: (payload: LLMConfigUpdate) => Promise<LLMTestResult>
   }
-}>(), { description: '', idPrefix: '', defaultProvider: 'deepseek', providers: () => ['deepseek', 'qwen', 'custom'], showProtocol: true })
+}>(), { description: '', idPrefix: '', defaultProvider: 'deepseek', providers: () => ['deepseek', 'qwen', 'custom'], showProtocol: true, hideTitle: false, split: false })
+
+const emit = defineEmits<{ change: [config: LLMConfig] }>()
 
 const toast = useToast()
 
@@ -108,6 +114,7 @@ function draftFrom(provider: LLMProviderConfig): ProviderDraft {
 function applyConfig(next: LLMConfig, refreshedProvider?: LLMProviderId) {
   if (!config.value && next.active_provider_id) selectedProviderId.value = next.active_provider_id
   config.value = next
+  emit('change', next)
   for (const provider of next.providers) {
     if (!drafts[provider.id] || !refreshedProvider || provider.id === refreshedProvider) {
       drafts[provider.id] = draftFrom(provider)
@@ -220,7 +227,10 @@ async function save(provider: LLMProviderConfig) {
     failedAt.delete(provider.id)
     // 保存期间又改了的话，保留正在改的内容，只更新已保存的状态
     if (snapshot(provider.id) === sent) applyConfig(next, provider.id)
-    else config.value = next
+    else {
+      config.value = next
+      emit('change', next)
+    }
     resetTestResult(provider.id)
   } catch (err) {
     failedAt.set(provider.id, sent)
@@ -259,181 +269,193 @@ async function test(provider: LLMProviderConfig) {
 </script>
 
 <template>
-  <section :class="embedded ? '' : 'mt-8'" :aria-labelledby="embedded ? undefined : `${ns}providers-heading`" :aria-label="embedded ? title : undefined">
-    <h2 v-if="!embedded" :id="`${ns}providers-heading`" class="mb-3 text-lg font-semibold tracking-tight">{{ title }}</h2>
-    <p v-if="description" class="-mt-1.5 mb-3 text-[13px] leading-5 text-mute">{{ description }}</p>
-    <div :class="embedded ? '' : 'card-soft overflow-hidden'">
-      <div v-if="tabIds.length > 1" class="px-5 pt-5 sm:px-6 sm:pt-6">
-        <div class="flex gap-1 rounded-xl bg-paper p-1" role="tablist" :aria-label="title" @keydown="onTabKeydown">
-          <button
-            v-for="id in tabIds"
-            :id="`${ns}provider-tab-${id}`"
-            :key="id"
-            type="button"
-            role="tab"
-            :aria-selected="selectedProviderId === id"
-            :aria-controls="`${ns}provider-panel-${id}`"
-            :tabindex="selectedProviderId === id ? 0 : -1"
-            class="min-w-0 flex-1 rounded-lg px-2 py-2 text-sm transition"
-            :class="selectedProviderId === id ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute hover:text-ink'"
-            @click="selectedProviderId = id"
-          >{{ PROVIDER_LABELS[id] }}</button>
-        </div>
-      </div>
-
-      <div v-if="loading" class="flex justify-center p-6" role="status" aria-label="加载中">
-        <LoaderCircle class="size-5 animate-spin text-mute" />
-      </div>
-      <div v-else-if="loadError" class="flex flex-wrap items-center gap-2 p-5 text-sm text-error sm:p-6" role="alert">
-        <span>{{ loadError }}</span>
-        <button type="button" class="font-medium underline" @click="loadConfig">重试</button>
-      </div>
-      <div v-else>
-        <article
-          v-for="provider in orderedProviders"
-          :id="`${ns}provider-panel-${provider.id}`"
-          :key="provider.id"
-          v-show="selectedProviderId === provider.id"
-          role="tabpanel"
-          :aria-labelledby="`${ns}provider-tab-${provider.id}`"
-          tabindex="0"
-          class="p-5 sm:p-6"
-        >
-          <div v-if="drafts[provider.id]" class="space-y-4">
-            <div>
-              <div class="mb-1.5 flex items-center justify-between gap-3 text-xs">
-                <label :for="`${ns}${provider.id}-api-key`" class="font-medium text-mute">API Key</label>
-                <a
-                  v-if="PROVIDER_KEY_URLS[provider.id]"
-                  :href="PROVIDER_KEY_URLS[provider.id]"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  :aria-label="`${PROVIDER_LABELS[provider.id]} 获取 API Key`"
-                  class="inline-flex shrink-0 items-center gap-0.5 text-mute transition hover:text-ink"
-                >获取 API Key<ArrowUpRight class="size-3.5" /></a>
-              </div>
-              <div class="relative">
-                <input
-                  :id="`${ns}${provider.id}-api-key`"
-                  v-model="drafts[provider.id]!.api_key"
-                  :type="keyVisible[provider.id] ? 'text' : 'password'"
-                  class="field pr-11 font-mono"
-                  autocomplete="off"
-                  :disabled="testingProvider === provider.id"
-                  @input="resetTestResult(provider.id)"
-                  @blur="flush(provider.id)"
+  <div :class="split ? 'grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_320px]' : ''">
+    <section :class="embedded || hideTitle ? '' : 'mt-8'" :aria-labelledby="embedded || hideTitle ? undefined : `${ns}providers-heading`" :aria-label="embedded || hideTitle ? title : undefined">
+      <h2 v-if="!embedded && !hideTitle" :id="`${ns}providers-heading`" class="mb-3 text-lg font-semibold tracking-tight">{{ title }}</h2>
+      <p v-if="description" class="-mt-1.5 mb-3 text-[13px] leading-5 text-mute">{{ description }}</p>
+      <div :class="embedded ? '' : 'card-soft overflow-hidden'">
+        <div v-if="tabIds.length > 1" class="px-5 pt-5 sm:px-6 sm:pt-6">
+          <div class="flex gap-1 rounded-xl bg-paper p-1" role="tablist" :aria-label="title" @keydown="onTabKeydown">
+            <button
+              v-for="id in tabIds"
+              :id="`${ns}provider-tab-${id}`"
+              :key="id"
+              type="button"
+              role="tab"
+              :aria-selected="selectedProviderId === id"
+              :aria-controls="`${ns}provider-panel-${id}`"
+              :tabindex="selectedProviderId === id ? 0 : -1"
+              class="min-w-0 flex-1 rounded-lg px-2 py-2 text-sm transition"
+              :class="selectedProviderId === id ? 'bg-white font-medium text-ink shadow-sm' : 'text-mute hover:text-ink'"
+              @click="selectedProviderId = id"
+            >
+              <span class="inline-flex items-center justify-center gap-1.5">
+                <span
+                  v-if="config?.active_provider_id === id"
+                  class="size-1.5 rounded-full bg-success"
+                  aria-hidden="true"
                 />
-                <button
-                  type="button"
-                  class="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-xl text-mute transition hover:text-ink disabled:opacity-50"
-                  :title="keyVisible[provider.id] ? '隐藏 API Key' : '显示 API Key'"
-                  :aria-label="keyVisible[provider.id] ? '隐藏 API Key' : '显示 API Key'"
-                  :aria-pressed="keyVisible[provider.id]"
-                  :disabled="testingProvider === provider.id"
-                  @click="keyVisible[provider.id] = !keyVisible[provider.id]"
-                >
-                  <EyeOff v-if="keyVisible[provider.id]" class="size-4" />
-                  <Eye v-else class="size-4" />
+                {{ PROVIDER_LABELS[id] }}
+              </span>
+            </button>
+          </div>
+        </div>
+
+        <div v-if="loading" class="flex justify-center p-6" role="status" aria-label="加载中">
+          <LoaderCircle class="size-5 animate-spin text-mute" />
+        </div>
+        <div v-else-if="loadError" class="flex flex-wrap items-center gap-2 p-5 text-sm text-error sm:p-6" role="alert">
+          <span>{{ loadError }}</span>
+          <button type="button" class="font-medium underline" @click="loadConfig">重试</button>
+        </div>
+        <div v-else>
+          <article
+            v-for="provider in orderedProviders"
+            :id="`${ns}provider-panel-${provider.id}`"
+            :key="provider.id"
+            v-show="selectedProviderId === provider.id"
+            role="tabpanel"
+            :aria-labelledby="`${ns}provider-tab-${provider.id}`"
+            tabindex="0"
+            class="p-5 sm:p-6"
+          >
+            <div v-if="drafts[provider.id]" class="space-y-4">
+              <div>
+                <div class="mb-1.5 flex items-center justify-between gap-3 text-xs">
+                  <label :for="`${ns}${provider.id}-api-key`" class="font-medium text-mute">API Key</label>
+                  <a
+                    v-if="PROVIDER_KEY_URLS[provider.id]"
+                    :href="PROVIDER_KEY_URLS[provider.id]"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    :aria-label="`${PROVIDER_LABELS[provider.id]} 获取 API Key`"
+                    class="inline-flex shrink-0 items-center gap-0.5 text-mute transition hover:text-ink"
+                  >获取 API Key<ArrowUpRight class="size-3.5" /></a>
+                </div>
+                <div class="relative">
+                  <input
+                    :id="`${ns}${provider.id}-api-key`"
+                    v-model="drafts[provider.id]!.api_key"
+                    :type="keyVisible[provider.id] ? 'text' : 'password'"
+                    class="field pr-11 font-mono"
+                    autocomplete="off"
+                    :disabled="testingProvider === provider.id"
+                    @input="resetTestResult(provider.id)"
+                    @blur="flush(provider.id)"
+                  />
+                  <button
+                    type="button"
+                    class="absolute inset-y-0 right-0 flex w-11 items-center justify-center rounded-r-xl text-mute transition hover:text-ink disabled:opacity-50"
+                    :title="keyVisible[provider.id] ? '隐藏 API Key' : '显示 API Key'"
+                    :aria-label="keyVisible[provider.id] ? '隐藏 API Key' : '显示 API Key'"
+                    :aria-pressed="keyVisible[provider.id]"
+                    :disabled="testingProvider === provider.id"
+                    @click="keyVisible[provider.id] = !keyVisible[provider.id]"
+                  >
+                    <EyeOff v-if="keyVisible[provider.id]" class="size-4" />
+                    <Eye v-else class="size-4" />
+                  </button>
+                </div>
+              </div>
+
+              <div class="grid gap-4 sm:grid-cols-2">
+                <label class="block">
+                  <span class="mb-1.5 block text-xs font-medium text-mute">API Base URL</span>
+                  <input
+                    v-model="drafts[provider.id]!.base_url"
+                    class="field font-mono text-[13px]"
+                    :disabled="testingProvider === provider.id"
+                    @input="resetTestResult(provider.id)"
+                    @blur="flush(provider.id)"
+                  />
+                </label>
+                <label class="block">
+                  <span class="mb-1.5 block text-xs font-medium text-mute">模型</span>
+                  <input
+                    v-model="drafts[provider.id]!.model"
+                    class="field font-mono text-[13px]"
+                    autocomplete="off"
+                    :disabled="testingProvider === provider.id"
+                    @input="onModelChanged(provider)"
+                    @blur="flush(provider.id)"
+                  />
+                </label>
+              </div>
+
+              <div class="flex items-center gap-2 border-t border-line pt-4 sm:gap-6">
+                <label class="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap text-xs font-medium sm:gap-2.5 sm:text-sm">
+                  <span>启用</span>
+                  <input
+                    v-model="drafts[provider.id]!.enabled"
+                    type="checkbox"
+                    role="switch"
+                    class="toggle toggle-xs shrink-0 sm:toggle-sm"
+                    :disabled="testingProvider === provider.id"
+                  />
+                </label>
+                <label v-if="isThinkingSupported(provider)" class="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap text-xs font-medium sm:gap-2.5 sm:text-sm">
+                  <span>思考</span>
+                  <input
+                    v-model="drafts[provider.id]!.thinking_enabled"
+                    type="checkbox"
+                    role="switch"
+                    class="toggle toggle-xs shrink-0 sm:toggle-sm"
+                    :disabled="testingProvider === provider.id"
+                    @change="resetTestResult(provider.id)"
+                  />
+                </label>
+                <button type="button" class="btn-line ml-auto shrink-0 px-2 sm:px-4" :disabled="anyBusy || !isComplete(provider)" @click="test(provider)">
+                  <LoaderCircle v-if="testingProvider === provider.id" class="size-4 animate-spin max-[360px]:hidden" /><Zap v-else class="size-4 max-[360px]:hidden" />测试
                 </button>
               </div>
-            </div>
 
-            <div class="grid gap-4 sm:grid-cols-2">
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-mute">API Base URL</span>
-                <input
-                  v-model="drafts[provider.id]!.base_url"
-                  class="field font-mono text-[13px]"
-                  :disabled="testingProvider === provider.id"
-                  @input="resetTestResult(provider.id)"
-                  @blur="flush(provider.id)"
-                />
-              </label>
-              <label class="block">
-                <span class="mb-1.5 block text-xs font-medium text-mute">模型</span>
-                <input
-                  v-model="drafts[provider.id]!.model"
-                  class="field font-mono text-[13px]"
-                  autocomplete="off"
-                  :disabled="testingProvider === provider.id"
-                  @input="onModelChanged(provider)"
-                  @blur="flush(provider.id)"
-                />
-              </label>
+              <div
+                v-if="testResults[provider.id]"
+                class="rounded-xl px-3 py-2 text-sm"
+                :class="testResults[provider.id]!.ok ? 'bg-success/10 text-success' : 'bg-error/5 text-error'"
+                role="status"
+              >{{ testResults[provider.id]!.text }}</div>
             </div>
+          </article>
+        </div>
+      </div>
+    </section>
 
-            <div class="flex items-center gap-2 border-t border-line pt-4 sm:gap-6">
-              <label class="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap text-xs font-medium sm:gap-2.5 sm:text-sm">
-                <span>启用</span>
-                <input
-                  v-model="drafts[provider.id]!.enabled"
-                  type="checkbox"
-                  role="switch"
-                  class="toggle toggle-xs shrink-0 sm:toggle-sm"
-                  :disabled="testingProvider === provider.id"
-                />
-              </label>
-              <label v-if="isThinkingSupported(provider)" class="flex shrink-0 cursor-pointer items-center gap-1.5 whitespace-nowrap text-xs font-medium sm:gap-2.5 sm:text-sm">
-                <span>思考</span>
-                <input
-                  v-model="drafts[provider.id]!.thinking_enabled"
-                  type="checkbox"
-                  role="switch"
-                  class="toggle toggle-xs shrink-0 sm:toggle-sm"
-                  :disabled="testingProvider === provider.id"
+    <slot />
+
+    <template v-if="!loading && !loadError && showProtocol">
+      <template v-for="provider in orderedProviders" :key="provider.id">
+        <div v-if="drafts[provider.id]" v-show="selectedProviderId === provider.id">
+          <section :class="split ? '' : 'mt-7'" :aria-labelledby="`${ns}${provider.id}-protocol-heading`">
+            <h2 v-if="!split" :id="`${ns}${provider.id}-protocol-heading`" class="mb-3 text-lg font-semibold tracking-tight">结构协议</h2>
+            <div class="card-soft space-y-4 p-5 sm:p-6">
+              <h2 v-if="split" :id="`${ns}${provider.id}-protocol-heading`" class="text-[15px] font-semibold tracking-tight">结构协议</h2>
+              <div>
+                <span class="mb-1.5 block text-xs font-medium text-mute">结构输出协议</span>
+                <BaseSelect
+                  v-model="drafts[provider.id]!.capabilities.structured_output"
+                  :options="[...STRUCTURED_OPTIONS]"
+                  :disabled="!!testingProvider"
+                  aria-label="结构输出协议"
                   @change="resetTestResult(provider.id)"
                 />
-              </label>
-              <button type="button" class="btn-line ml-auto shrink-0 px-2 sm:px-4" :disabled="anyBusy || !isComplete(provider)" @click="test(provider)">
-                <LoaderCircle v-if="testingProvider === provider.id" class="size-4 animate-spin max-[360px]:hidden" /><Zap v-else class="size-4 max-[360px]:hidden" />测试
-              </button>
+              </div>
+              <div>
+                <span class="mb-1.5 block text-xs font-medium text-mute">思考参数协议</span>
+                <BaseSelect
+                  v-model="drafts[provider.id]!.capabilities.thinking_protocol"
+                  :options="[...THINKING_OPTIONS]"
+                  :disabled="!!testingProvider"
+                  aria-label="思考参数协议"
+                  @change="resetTestResult(provider.id)"
+                />
+              </div>
             </div>
-
-            <div
-              v-if="testResults[provider.id]"
-              class="rounded-xl px-3 py-2 text-sm"
-              :class="testResults[provider.id]!.ok ? 'bg-success/10 text-success' : 'bg-error/5 text-error'"
-              role="status"
-            >{{ testResults[provider.id]!.text }}</div>
-          </div>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <slot />
-
-  <template v-if="!loading && !loadError && showProtocol">
-    <template v-for="provider in orderedProviders" :key="provider.id">
-      <div v-if="drafts[provider.id]" v-show="selectedProviderId === provider.id">
-        <section class="mt-7" :aria-labelledby="`${ns}${provider.id}-protocol-heading`">
-          <h2 :id="`${ns}${provider.id}-protocol-heading`" class="mb-3 text-lg font-semibold tracking-tight">结构协议</h2>
-          <div class="card-soft space-y-4 p-5 sm:p-6">
-            <div>
-              <span class="mb-1.5 block text-xs font-medium text-mute">结构输出协议</span>
-              <BaseSelect
-                v-model="drafts[provider.id]!.capabilities.structured_output"
-                :options="[...STRUCTURED_OPTIONS]"
-                :disabled="!!testingProvider"
-                aria-label="结构输出协议"
-                @change="resetTestResult(provider.id)"
-              />
-            </div>
-            <div>
-              <span class="mb-1.5 block text-xs font-medium text-mute">思考参数协议</span>
-              <BaseSelect
-                v-model="drafts[provider.id]!.capabilities.thinking_protocol"
-                :options="[...THINKING_OPTIONS]"
-                :disabled="!!testingProvider"
-                aria-label="思考参数协议"
-                @change="resetTestResult(provider.id)"
-              />
-            </div>
-          </div>
-        </section>
-      </div>
+          </section>
+        </div>
+      </template>
     </template>
-  </template>
+  </div>
 </template>
 
 <style scoped>

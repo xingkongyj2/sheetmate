@@ -26,6 +26,7 @@ import { showsPrivacyReport } from '@/composables/privacyPresentation'
 import { auditLine } from '@/composables/thinkingPresentation'
 import { userFacingSummary, userFacingText } from '@/composables/timelinePresentation'
 import { useToast } from '@/composables/useToast'
+import { useAuthStore } from '@/stores/auth'
 import { useProgressiveReply } from '@/composables/useProgressiveReply'
 import { replyClockTime, useReplyTimer } from '@/composables/useReplyTimer'
 
@@ -38,6 +39,7 @@ import ExecutionStatusNotice from './ExecutionStatusNotice.vue'
 const props = defineProps<{ message: UiMessage; files?: FileInfo[]; tables?: TableBrief[]; customerId?: string | null; conversationId?: string | null; mascot?: string | null; answersDisabled?: boolean; answersClosed?: boolean }>()
 const emit = defineEmits<{ answer: [text: string]; previewFile: [file: FileInfo]; refresh: [] }>()
 const toast = useToast()
+const auth = useAuthStore()
 const { label: replyTime } = useReplyTimer(() => props.message)
 const finishedTime = computed(() => replyClockTime(props.message))
 const openingFile = ref<string | null>(null)
@@ -305,7 +307,7 @@ onBeforeUnmount(() => {
         <CircleAlert class="mt-0.5 size-4 shrink-0" />
         <span>
           {{ errorMessage }}
-          <RouterLink v-if="missingKeyError || message.error?.includes('API Key') || message.error?.includes('设置')" :to="{ name: 'settings' }" class="ml-1 font-medium underline">去设置</RouterLink>
+          <RouterLink v-if="(missingKeyError || message.error?.includes('API Key') || message.error?.includes('设置')) && auth.user?.role === 'admin'" :to="{ name: 'admin-models' }" class="ml-1 font-medium underline">去配置模型</RouterLink>
         </span>
       </div>
 

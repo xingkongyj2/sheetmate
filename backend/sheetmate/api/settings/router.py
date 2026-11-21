@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Response
 
-from sheetmate.api.deps import current_user
+from sheetmate.api.deps import admin_user, current_user
 from sheetmate.api.settings.schemas import LLMBody, PrivacyBody
 from sheetmate.db.models import User
 from sheetmate.services.settings import service as settings_service
@@ -15,26 +15,26 @@ router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
 @router.get("/llm")
-def get_llm_config(response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+def get_llm_config(response: Response, _: User = Depends(admin_user)) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     return {"ok": True, **settings_service.get_llm_config()}
 
 
 @router.put("/llm")
-def put_llm_config(body: LLMBody, response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+def put_llm_config(body: LLMBody, response: Response, _: User = Depends(admin_user)) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     update = settings_service.ModelSettingsUpdate(**dict(body))
     return {"ok": True, **settings_service.put_llm_config(update)}
 
 
 @router.post("/llm/test")
-async def test_llm(body: LLMBody, response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+async def test_llm(body: LLMBody, response: Response, _: User = Depends(admin_user)) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     update = settings_service.ModelSettingsUpdate(**dict(body))
     return await settings_service.test_llm_config(update)
 
 
-# 脱敏设置：总开关和每条规则的开关
+# 脱敏设置：总开关和每条规则的开关（所有登录用户可读开关状态，仅管理员可修改）
 @router.get("/privacy")
 def get_privacy_config(response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
@@ -42,7 +42,7 @@ def get_privacy_config(response: Response, _: User = Depends(current_user)) -> d
 
 
 @router.put("/privacy")
-def put_privacy_config(body: PrivacyBody, response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+def put_privacy_config(body: PrivacyBody, response: Response, _: User = Depends(admin_user)) -> dict[str, Any]:
     """总开关和规则开关只管处理文件时要不要自动识别、脱敏；已经脱敏的文件和手动的选择都不受影响。"""
     response.headers["Cache-Control"] = "no-store"
     return {"ok": True, **settings_service.put_privacy_config(body.enabled, body.rules)}
@@ -50,20 +50,20 @@ def put_privacy_config(body: PrivacyBody, response: Response, _: User = Depends(
 
 # 脱敏模型：专门给脱敏模块识别联系方式和地址用，和对话模型分开保存，接口、字段完全一样。
 @router.get("/privacy-llm")
-def get_privacy_llm_config(response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+def get_privacy_llm_config(response: Response, _: User = Depends(admin_user)) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     return {"ok": True, **settings_service.get_llm_config(settings_service.PRIVACY_LLM_ROOT)}
 
 
 @router.put("/privacy-llm")
-def put_privacy_llm_config(body: LLMBody, response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+def put_privacy_llm_config(body: LLMBody, response: Response, _: User = Depends(admin_user)) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     update = settings_service.ModelSettingsUpdate(**dict(body))
     return {"ok": True, **settings_service.put_llm_config(update, settings_service.PRIVACY_LLM_ROOT)}
 
 
 @router.post("/privacy-llm/test")
-async def test_privacy_llm(body: LLMBody, response: Response, _: User = Depends(current_user)) -> dict[str, Any]:
+async def test_privacy_llm(body: LLMBody, response: Response, _: User = Depends(admin_user)) -> dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     update = settings_service.ModelSettingsUpdate(**dict(body))
     return await settings_service.test_llm_config(update, settings_service.PRIVACY_LLM_ROOT)

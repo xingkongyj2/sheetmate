@@ -460,10 +460,10 @@ def test_customer_access_rules(client):
     with session_scope() as db:
         db.add(UserCustomer(user_id=member_id, customer_id=admins))
     assert m.get(f"/api/customers/{admins}").status_code == 200 and admins in _customer_ids(m)
-    # 成员管理 / 客户管理的后台接口已经撤掉：不会再返回接口数据（有前端构建产物时落到单页应用的兜底页面，是 HTML）
-    for url in ("/api/admin/users", "/api/admin/customers"):
-        r = client.get(url)
-        assert r.status_code in {404, 405} or "application/json" not in r.headers.get("content-type", ""), url
+    # 管理后台接口仅管理员可访问，普通成员一律拒绝（403）
+    for url in ("/api/admin/users", "/api/admin/customers", "/api/admin/overview", "/api/admin/stats"):
+        assert client.get(url).status_code == 200, url
+        assert m.get(url).status_code == 403, url
 
 
 def test_revoked_customer_grant_blocks_existing_conversation_context(client):
