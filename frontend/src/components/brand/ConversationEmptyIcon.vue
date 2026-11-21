@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { MessageSquare } from '@lucide/vue'
+import ConversationIcon from './ConversationIcon.vue'
 </script>
 
 <template>
-  <MessageSquare aria-hidden="true" focusable="false" />
+  <ConversationIcon />
 </template>

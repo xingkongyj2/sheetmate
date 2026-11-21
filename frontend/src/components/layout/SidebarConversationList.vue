@@ -94,10 +94,10 @@ async function remove(id: string, title: string) {
 <template>
   <div
     class="mt-4 min-h-0 flex-1 overflow-y-auto px-3 pb-3"
-    :class="{ 'flex items-center justify-center': store.loaded && !store.conversations.length && !store.customers.length }"
+    :class="{ 'flex items-center justify-center': store.loaded && !store.conversations.length && !store.customerGroups.length }"
   >
-    <!-- 客户 -->
-    <section v-if="store.customers.length" class="mb-3" aria-label="客户">
+    <!-- 客户（仅展示有对话的客户） -->
+    <section v-if="store.customerGroups.length" class="mb-3" aria-label="客户">
       <div class="flex items-center justify-between pr-1">
         <button
           type="button"
@@ -156,7 +156,6 @@ async function remove(id: string, title: string) {
             >
               还有 {{ group.items.length - PREVIEW }} 条
             </button>
-            <p v-if="!group.items.length" class="py-1.5 pl-[50px] text-xs text-faint">暂无对话</p>
           </div>
         </div>
       </div>
@@ -184,7 +183,7 @@ async function remove(id: string, title: string) {
       </div>
     </section>
 
-    <div v-if="store.loaded && !store.conversations.length && !store.customers.length" class="flex flex-col items-center gap-2 px-3 py-6 text-xs leading-relaxed text-faint">
+    <div v-if="store.loaded && !store.conversations.length && !store.customerGroups.length" class="flex flex-col items-center gap-2 px-3 py-6 text-xs leading-relaxed text-faint">
       <ConversationEmptyIcon class="size-8 shrink-0" />
       <span>暂无对话</span>
     </div>

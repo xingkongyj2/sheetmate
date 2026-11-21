@@ -7,7 +7,7 @@ export function sortByRecent(conversations: ConversationBrief[]) {
   return [...conversations].sort((a, b) => time(b.updated_at) - time(a.updated_at))
 }
 
-/** 侧边栏「客户」：每个客户带上自己的对话（最近的在前），有最近对话的客户排在前面。 */
+/** 侧边栏「客户」：只展示有对话的客户并带上自己的对话（最近的在前），有最近对话的客户排在前面。 */
 export function groupByCustomer(customers: CustomerCard[], conversations: ConversationBrief[]) {
   const byCustomer = new Map<string, ConversationBrief[]>()
   for (const conversation of sortByRecent(conversations)) {
@@ -21,6 +21,7 @@ export function groupByCustomer(customers: CustomerCard[], conversations: Conver
       const items = byCustomer.get(customer.id) ?? []
       return { customer, items, activeAt: Math.max(time(items[0]?.updated_at), time(customer.last_activity)) }
     })
+    .filter((group) => group.items.length > 0)
     .sort((a, b) => b.activeAt - a.activeAt)
 }
 

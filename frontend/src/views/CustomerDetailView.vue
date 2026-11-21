@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  ArrowLeft, ArrowRight, LoaderCircle, MessageSquare, MessageSquarePlus, Pencil, Sparkles, Star, Trash2,
+  ArrowLeft, ArrowRight, LoaderCircle, MessageSquarePlus, Pencil, Sparkles, Star, Trash2,
 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { conversationApi, customerApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerDetail } from '@/api/types'
+import ConversationIcon from '@/components/brand/ConversationIcon.vue'
 import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
@@ -284,7 +285,7 @@ async function onEdited() {
           class="group flex items-center gap-3 rounded-xl px-3 py-3 text-sm transition hover:bg-paper focus-visible:outline-2 focus-visible:outline-ink"
           @click="conversationsOpen = false"
         >
-          <MessageSquare class="size-4 shrink-0 text-mute" />
+          <ConversationIcon class="size-4 shrink-0 text-mute/80 transition-colors group-hover:text-ink" />
           <span class="min-w-0 flex-1 truncate">{{ c.title || '新对话' }}</span>
           <span class="shrink-0 text-xs text-faint">{{ timeAgo(c.updated_at) }}</span>
           <ArrowRight class="size-4 shrink-0 text-faint transition group-hover:text-ink" />

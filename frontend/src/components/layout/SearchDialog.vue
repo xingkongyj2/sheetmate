@@ -3,10 +3,11 @@
  * 搜索：按标题、客户名搜对话，按名称、编号搜客户。
  * 数据来自侧边栏已加载的列表，不另外请求；↑↓ 选择，回车打开，Esc 关闭。
  */
-import { MessageSquare, Search } from '@lucide/vue'
+import { Search } from '@lucide/vue'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter, type RouteLocationRaw } from 'vue-router'
 
+import ConversationIcon from '@/components/brand/ConversationIcon.vue'
 import { mascotStyle } from '@/components/brand/mascots'
 import { useWorkspaceStore } from '@/stores/conversations'
 
@@ -126,7 +127,7 @@ onBeforeUnmount(() => previousFocus?.focus?.())
               @mousemove="active = hits.indexOf(hit)"
               @click="open(hit)"
             >
-              <MessageSquare v-if="hit.kind === 'conversation'" class="size-4 shrink-0 text-faint" aria-hidden="true" />
+              <ConversationIcon v-if="hit.kind === 'conversation'" :active="hits[active]?.key === hit.key" class="size-4 shrink-0 text-mute/80" />
               <span v-else class="mx-1 size-2 shrink-0 rounded-full" :style="{ background: hit.color }" aria-hidden="true" />
               <span class="min-w-0 flex-1 truncate text-sm text-ink">{{ hit.title }}</span>
               <span v-if="hit.sub" class="flex max-w-[40%] shrink-0 items-center gap-1.5 truncate text-xs text-faint">
