@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /** 后台客户与流程管理：查看全部客户资产、分配成员权限、跳转工作台或清理客户。 */
-import { ArrowUpRight, Building2, Check, LoaderCircle, Plus, Search, Trash2, UserPlus } from '@lucide/vue'
+import { ArrowUpRight, Building2, Check, LoaderCircle, Plus, Search, Trash2, UserPlus, X } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { adminApi, customerApi, type AdminCustomerRow, type AdminUserRow } from '@/api'
 import { errorText } from '@/api/http'
 import Mascot from '@/components/brand/Mascot.vue'
+import UserAvatar from '@/components/brand/UserAvatar.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import { shortTime } from '@/composables/conversationGroups'
@@ -26,6 +27,8 @@ const creating = ref(false)
 // 分配成员弹窗状态
 const assigningCustomer = ref<AdminCustomerRow | null>(null)
 const selectedMemberIds = ref<Set<number>>(new Set())
+const memberQuery = ref('')
+const memberScope = ref<'all' | 'selected'>('all')
 const savingMembers = ref(false)
 
 async function load() {
@@ -46,6 +49,17 @@ onMounted(load)
 
 const assignableUsers = computed(() => users.value.filter((u) => u.role !== 'admin'))
 
+const filteredAssignableUsers = computed(() => {
+  const q = memberQuery.value.trim().toLowerCase()
+  return assignableUsers.value.filter((u) => {
+    if (memberScope.value === 'selected' && !selectedMemberIds.value.has(u.id)) return false
+    if (!q) return true
+    return `${u.display_name} ${u.account}`.toLowerCase().includes(q)
+  })
+})
+
+const nonAdminMembers = (c: AdminCustomerRow) => c.members.filter((m) => m.role !== 'admin')
+
 const filtered = computed(() => {
   const q = query.value.trim().toLowerCase()
   if (!q) return customers.value
@@ -54,7 +68,14 @@ const filtered = computed(() => {
 
 function openAssign(customer: AdminCustomerRow) {
   assigningCustomer.value = customer
-  selectedMemberIds.value = new Set(customer.member_ids)
+  selectedMemberIds.value = new Set(nonAdminMembers(customer).map((m) => m.id))
+  memberQuery.value = ''
+  memberScope.value = 'all'
+}
+
+function clearSelectedMembers() {
+  selectedMemberIds.value = new Set()
+  if (memberScope.value === 'selected') memberScope.value = 'all'
 }
 
 function toggleMember(id: number) {
@@ -101,20 +122,18 @@ async function removeCustomer(c: AdminCustomerRow) {
   customers.value = customers.value.filter((item) => item.id !== c.id)
   toast.success('已删除')
 }
-
-const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
 </script>
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[1200px] px-5 py-6 sm:px-8 sm:py-8">
+    <div class="mx-auto max-w-[1200px] px-4 py-6 sm:px-8 sm:py-7">
       <header class="flex flex-wrap items-center gap-3">
         <div class="mr-auto flex items-baseline gap-2.5">
-          <h1 class="text-2xl font-semibold tracking-tight text-ink">客户与流程</h1>
+          <h1 class="text-xl font-semibold tracking-tight">客户管理</h1>
           <span class="text-xs tabular-nums text-faint">{{ customers.length }} 个</span>
         </div>
 
-        <label class="flex h-9 w-full items-center gap-2 rounded-xl border border-line bg-white px-3 sm:w-56">
+        <label class="flex h-8 w-full items-center gap-2 rounded-full bg-paper px-3 sm:w-52">
           <Search class="size-3.5 shrink-0 text-faint" />
           <input
             v-model="query"
@@ -124,7 +143,7 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
           />
         </label>
 
-        <button type="button" class="btn-ink h-9 gap-1.5 px-3.5 text-[13px]" @click="creating = true">
+        <button type="button" class="btn-ink h-8 gap-1.5 rounded-full px-3.5 text-[13px]" @click="creating = true">
           <Plus class="size-4" />新建客户
         </button>
       </header>
@@ -181,15 +200,15 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
                     class="inline-flex flex-wrap items-center gap-1.5 rounded-lg text-left transition hover:opacity-80"
                     @click="openAssign(c)"
                   >
-                    <template v-if="c.members.length">
+                    <template v-if="nonAdminMembers(c).length">
                       <span
-                        v-for="m in c.members.slice(0, 2)"
+                        v-for="m in nonAdminMembers(c).slice(0, 2)"
                         :key="m.id"
                         class="inline-flex items-center gap-1 rounded-full bg-paper px-2 py-0.5 text-xs text-ink"
                       >
                         {{ m.display_name }}
                       </span>
-                      <span v-if="c.members.length > 2" class="text-xs tabular-nums text-faint">+{{ c.members.length - 2 }}</span>
+                      <span v-if="nonAdminMembers(c).length > 2" class="text-xs tabular-nums text-faint">+{{ nonAdminMembers(c).length - 2 }}</span>
                     </template>
                     <span v-else class="text-xs text-faint">仅管理员与创建人</span>
                   </button>
@@ -249,39 +268,84 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
     <BaseModal
       v-if="assigningCustomer"
       :title="`成员权限 · ${assigningCustomer.name}`"
-      width="max-w-sm"
+      width="max-w-md"
       @close="!savingMembers && (assigningCustomer = null)"
     >
-      <div class="space-y-4">
+      <div class="space-y-3.5">
         <div v-if="!assignableUsers.length" class="rounded-xl bg-paper py-8 text-center text-xs text-mute">
           暂无普通成员（管理员默认拥有全部权限）
         </div>
-        <div v-else class="max-h-64 divide-y divide-line/60 overflow-y-auto rounded-xl border border-line bg-white">
-          <button
-            v-for="u in assignableUsers"
-            :key="u.id"
-            type="button"
-            class="flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition hover:bg-paper/70"
-            @click="toggleMember(u.id)"
-          >
-            <span
-              class="flex size-4 shrink-0 items-center justify-center rounded border transition"
-              :class="selectedMemberIds.has(u.id) ? 'border-ink bg-ink text-white' : 'border-line bg-white'"
-            >
-              <Check v-if="selectedMemberIds.has(u.id)" class="size-3" />
-            </span>
-            <span class="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white">
-              <img v-if="u.avatar" :src="u.avatar" alt="" class="size-full object-cover" />
-              <template v-else>{{ initialOf(u.display_name) }}</template>
-            </span>
-            <div class="min-w-0 flex-1">
-              <p class="truncate text-sm font-medium text-ink">{{ u.display_name }}</p>
-              <p class="truncate font-mono text-[11px] text-faint">@{{ u.account }}</p>
+        <template v-else>
+          <div class="flex items-center justify-between gap-2 text-[11px]">
+            <div class="flex rounded-full bg-paper p-0.5">
+              <button
+                type="button"
+                class="rounded-full px-2.5 py-0.5 transition"
+                :class="memberScope === 'all' ? 'bg-white font-medium text-ink shadow-xs' : 'text-mute hover:text-ink'"
+                @click="memberScope = 'all'"
+              >全部 {{ assignableUsers.length }}</button>
+              <button
+                type="button"
+                class="rounded-full px-2.5 py-0.5 tabular-nums transition"
+                :class="memberScope === 'selected' ? 'bg-white font-medium text-ink shadow-xs' : 'text-mute hover:text-ink'"
+                @click="memberScope = 'selected'"
+              >已选 {{ selectedMemberIds.size }}</button>
             </div>
-          </button>
-        </div>
+            <button
+              v-if="selectedMemberIds.size"
+              type="button"
+              class="text-faint transition hover:text-ink"
+              @click="clearSelectedMembers"
+            >清空</button>
+          </div>
 
-        <div class="flex justify-end gap-2">
+          <div class="overflow-hidden rounded-xl border border-line bg-white">
+            <div class="flex items-center gap-2 border-b border-line px-3 py-2">
+              <Search class="size-3.5 shrink-0 text-faint" />
+              <input
+                v-model="memberQuery"
+                placeholder="搜索姓名或账号"
+                aria-label="搜索成员"
+                class="w-full min-w-0 bg-transparent text-xs outline-none placeholder:text-faint"
+              />
+              <button
+                v-if="memberQuery"
+                type="button"
+                class="rounded p-0.5 text-faint transition hover:text-ink"
+                aria-label="清空搜索"
+                @click="memberQuery = ''"
+              >
+                <X class="size-3" />
+              </button>
+            </div>
+            <div v-if="!filteredAssignableUsers.length" class="py-8 text-center text-xs text-faint">
+              {{ memberScope === 'selected' && !selectedMemberIds.size ? '暂未选择成员' : '没有匹配的成员' }}
+            </div>
+            <div v-else class="max-h-72 divide-y divide-line/60 overflow-y-auto">
+              <button
+                v-for="u in filteredAssignableUsers"
+                :key="u.id"
+                type="button"
+                class="flex w-full items-center gap-3 px-3.5 py-2.5 text-left transition hover:bg-paper/70"
+                @click="toggleMember(u.id)"
+              >
+                <span
+                  class="flex size-4 shrink-0 items-center justify-center rounded border transition"
+                  :class="selectedMemberIds.has(u.id) ? 'border-ink bg-ink text-white' : 'border-line bg-white'"
+                >
+                  <Check v-if="selectedMemberIds.has(u.id)" class="size-3" />
+                </span>
+                <UserAvatar :seed="u.account || u.display_name" :src="u.avatar" class="size-7" />
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-sm font-medium text-ink">{{ u.display_name }}</p>
+                  <p class="truncate font-mono text-[11px] text-faint">@{{ u.account }}</p>
+                </div>
+              </button>
+            </div>
+          </div>
+        </template>
+
+        <div class="flex justify-end gap-2 pt-1">
           <button type="button" class="btn-line h-9 text-sm" :disabled="savingMembers" @click="assigningCustomer = null">取消</button>
           <button type="button" class="btn-ink h-9 text-sm" :disabled="savingMembers" @click="saveMembers">
             <LoaderCircle v-if="savingMembers" class="size-4 animate-spin" />保存

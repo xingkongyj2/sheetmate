@@ -687,8 +687,8 @@ function answer(option: string) {
 </script>
 
 <template>
-  <div class="chat-page flex h-full min-h-0">
-    <div class="chat-workspace flex min-w-0 flex-1 flex-col">
+  <div class="chat-page flex h-full min-h-0 gap-2">
+    <div class="chat-workspace app-panel flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] bg-panel">
       <!-- 顶部 -->
       <header class="flex h-[52px] shrink-0 items-center gap-2 px-5">
         <div class="flex min-w-0 flex-1 items-center gap-2">

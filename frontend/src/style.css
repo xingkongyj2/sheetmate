@@ -175,6 +175,16 @@ body {
     border: 1px solid #e4e3e1;
     box-shadow: 0 0 6px rgba(60, 50, 40, 0.05);
   }
+  /* 侧边栏菜单选中态：与右侧悬浮卡片同一套描边微阴影质感，柔和暖白底，用内描边避免切换时 1px 抖动 */
+  .sidebar-active {
+    background-color: #fdfcfa;
+    color: var(--color-ink);
+    font-weight: 500;
+    box-shadow:
+      inset 0 0 0 1px #e5e3de,
+      0 1px 2px rgba(68, 54, 38, 0.045),
+      0 2px 6px rgba(68, 54, 38, 0.04);
+  }
   .card-soft {
     @apply rounded-2xl border border-line bg-white;
   }

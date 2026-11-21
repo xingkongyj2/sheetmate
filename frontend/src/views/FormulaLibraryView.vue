@@ -48,7 +48,13 @@ watch(tab, (value) => {
   void router.replace({ query: { ...route.query, tab: value } })
 }, { immediate: true })
 const choosing = ref(false)
+const choosingQuery = ref('')
 const opening = ref(false)
+const filteredCustomersForChoice = computed(() => {
+  const q = choosingQuery.value.trim().toLowerCase()
+  if (!q) return customers.value
+  return customers.value.filter((c) => `${c.name} ${c.code ?? ''}`.toLowerCase().includes(q))
+})
 const editor = ref<EditorState | null>(null)
 const ai = ref<AIState | null>(null)
 const reservedIds = ref<string[]>([])
@@ -118,6 +124,7 @@ async function start() {
     ai.value = { customer: null, formula: null, scope: 'global' }
     return
   }
+  choosingQuery.value = ''
   choosing.value = true
   if (customers.value.length === 1) await proceed(customers.value[0]!.id)
 }
@@ -236,9 +243,9 @@ async function remove(f: LibraryFormula) {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-5 py-6 sm:px-8 sm:py-8">
+    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-6 sm:px-8 sm:py-7">
       <header class="flex shrink-0 flex-wrap items-center gap-3 sm:gap-4">
-        <h1 class="mr-auto text-2xl font-semibold tracking-tight text-ink">公式库</h1>
+        <h1 class="mr-auto text-xl font-semibold tracking-tight">公式库</h1>
         <label class="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-full bg-paper px-3 sm:max-w-48">
           <Search class="size-3.5 shrink-0 text-faint" />
           <input v-model="query" aria-label="搜索公式" placeholder="搜索公式" class="w-full min-w-0 bg-transparent text-[13px] outline-none placeholder:text-faint" />
@@ -325,14 +332,36 @@ async function remove(f: LibraryFormula) {
     </div>
 
     <BaseModal v-if="choosing" :title="customers.length ? '选择客户' : '还没有客户'" width="max-w-sm" @close="!opening && (choosing = false)">
-      <ul v-if="customers.length" class="-mx-2 space-y-0.5" aria-label="客户">
-        <li v-for="c in customers" :key="c.id">
-          <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-left transition hover:bg-paper focus-visible:bg-paper focus-visible:outline-none disabled:opacity-50" :disabled="opening" @click="proceed(c.id)">
-            <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ c.name }}</span>
-            <LoaderCircle v-if="opening" class="size-4 shrink-0 animate-spin text-faint" /><ChevronRight v-else class="size-4 shrink-0 text-faint" />
+      <div v-if="customers.length" class="space-y-2.5">
+        <div class="flex items-center gap-2 rounded-xl border border-line bg-white px-3 py-2">
+          <Search class="size-3.5 shrink-0 text-faint" />
+          <input
+            v-model="choosingQuery"
+            placeholder="搜索客户名称或编号"
+            aria-label="搜索客户"
+            class="w-full min-w-0 bg-transparent text-xs outline-none placeholder:text-faint"
+          />
+          <button
+            v-if="choosingQuery"
+            type="button"
+            class="rounded p-0.5 text-faint transition hover:text-ink"
+            aria-label="清空搜索"
+            @click="choosingQuery = ''"
+          >
+            <X class="size-3" />
           </button>
-        </li>
-      </ul>
+        </div>
+        <div v-if="!filteredCustomersForChoice.length" class="py-6 text-center text-xs text-faint">没有匹配的客户</div>
+        <ul v-else class="-mx-2 max-h-72 space-y-0.5 overflow-y-auto" aria-label="客户">
+          <li v-for="c in filteredCustomersForChoice" :key="c.id">
+            <button type="button" class="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition hover:bg-paper focus-visible:bg-paper focus-visible:outline-none disabled:opacity-50" :disabled="opening" @click="proceed(c.id)">
+              <span class="min-w-0 flex-1 truncate text-sm font-medium">{{ c.name }}</span>
+              <span v-if="c.code" class="shrink-0 font-mono text-[11px] text-faint">{{ c.code }}</span>
+              <LoaderCircle v-if="opening" class="size-4 shrink-0 animate-spin text-faint" /><ChevronRight v-else class="size-4 shrink-0 text-faint" />
+            </button>
+          </li>
+        </ul>
+      </div>
       <button v-else class="btn-ink w-full" @click="router.push({ name: 'customers' })">前往客户库</button>
     </BaseModal>
 

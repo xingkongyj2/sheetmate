@@ -1,13 +1,15 @@
 <script setup lang="ts">
 /**
  * 侧边栏：搜索、新对话、客户库（统一的线条图标），下面是「客户」和「对话」两块列表，
- * 底部是头像和名字（点开是管理后台[仅管理员] / 个人设置 / 退出登录）。
+ * 底部是头像和名字（点开是管理中心[仅管理员] / 退出登录）。
  */
-import { CircleUserRound, LayoutDashboard, LogOut, PanelLeft, Search, Settings, ShieldCheck, SquarePen } from '@lucide/vue'
+import { CircleUserRound, LogOut, PanelLeft, Search, SquarePen } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import AdminCenterIcon from '@/components/brand/AdminCenterIcon.vue'
 import LogoMark from '@/components/brand/LogoMark.vue'
+import UserAvatar from '@/components/brand/UserAvatar.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
 
@@ -32,21 +34,11 @@ function onShortcut(event: KeyboardEvent) {
     searchOpen.value = !searchOpen.value
   }
 }
-// 「个人设置」作为工作台覆盖层：再点一次回到打开前的页面。
-const overlayReturnPath = ref('/')
-const isOverlay = (name: unknown) => name === 'settings'
-const settingsDestination = computed(() => route.name === 'settings' ? overlayReturnPath.value : { name: 'settings' })
 const isAdmin = computed(() => auth.user?.role === 'admin')
 
-const stopTrackingSettings = router.afterEach((to, from, failure) => {
-  if (!failure && isOverlay(to.name) && !isOverlay(from.name) && from.matched[0]?.path === '/') {
-    overlayReturnPath.value = from.fullPath
-  }
-})
-
 const username = computed(() => auth.user?.display_name || auth.user?.account || '')
+const avatarKey = computed(() => auth.user?.account || auth.user?.display_name || '')
 const avatar = computed(() => auth.user?.avatar || '')
-const initial = computed(() => (username.value || '?').slice(0, 1).toUpperCase())
 
 function collapseOnNarrowScreen(event: MediaQueryListEvent) {
   if (event.matches) collapsed.value = true
@@ -68,7 +60,6 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onShortcut)
   window.removeEventListener('pointerdown', closeMenu)
   window.removeEventListener('keydown', closeMenu)
-  stopTrackingSettings()
 })
 
 async function logout() {
@@ -100,8 +91,8 @@ async function logout() {
     <nav class="mt-1 space-y-0.5 px-3" aria-label="主导航">
       <button
         type="button"
-        class="nav-row text-ink/80"
-        :class="[collapsed ? 'justify-center px-0' : 'px-3', searchOpen ? 'bg-black/[0.06] text-ink' : '']"
+        class="nav-row"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', searchOpen ? 'sidebar-active' : 'text-ink/80']"
         :title="`搜索（${shortcutLabel}）`"
         aria-label="搜索"
         aria-haspopup="dialog"
@@ -115,16 +106,16 @@ async function logout() {
       </button>
       <RouterLink
         :to="{ name: 'home' }"
-        class="nav-row text-ink/80"
-        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'home' ? 'bg-black/[0.06] text-ink' : '']"
+        class="nav-row"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'home' ? 'sidebar-active' : 'text-ink/80']"
         title="新对话"
       >
         <span class="nav-icon"><SquarePen aria-hidden="true" /></span><span v-if="!collapsed">新对话</span>
       </RouterLink>
       <RouterLink
         :to="{ name: 'customers' }"
-        class="nav-row text-ink/80"
-        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'customers' ? 'bg-black/[0.06] text-ink' : '']"
+        class="nav-row"
+        :class="[collapsed ? 'justify-center px-0' : 'px-3', route.name === 'customers' ? 'sidebar-active' : 'text-ink/80']"
         title="客户库"
       >
         <span class="nav-icon"><CircleUserRound aria-hidden="true" /></span><span v-if="!collapsed">客户库</span>
@@ -148,18 +139,9 @@ async function logout() {
           :aria-expanded="menuOpen"
           @click="menuOpen = !menuOpen"
         >
-          <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white"><img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" /><template v-else>{{ initial }}</template></span>
+          <UserAvatar :seed="avatarKey" :src="avatar" class="size-6" />
           <span v-if="!collapsed" class="min-w-0 flex-1 truncate text-sm text-ink">{{ username }}</span>
         </button>
-        <RouterLink
-          v-if="!collapsed && isAdmin"
-          :to="{ name: 'admin-overview' }"
-          class="icon-btn size-8 shrink-0 text-mute hover:bg-black/[0.05] hover:text-ink"
-          title="进入管理后台"
-          aria-label="进入管理后台"
-        >
-          <ShieldCheck class="size-[17px]" aria-hidden="true" />
-        </RouterLink>
       </div>
       <div
         v-if="menuOpen"
@@ -167,10 +149,7 @@ async function logout() {
         role="menu"
       >
         <RouterLink v-if="isAdmin" :to="{ name: 'admin-overview' }" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
-          <LayoutDashboard class="size-4" />管理后台
-        </RouterLink>
-        <RouterLink :to="settingsDestination" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
-          <Settings class="size-4" />个人设置
+          <AdminCenterIcon class="size-4" />管理中心
         </RouterLink>
         <button role="menuitem" class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
           <LogOut class="size-4" />退出登录
@@ -183,8 +162,8 @@ async function logout() {
 
 <style scoped>
 /* 侧栏导航行：线条图标 + 文字，图标统一 18px */
-.nav-row { display: flex; width: 100%; align-items: center; gap: 0.625rem; border-radius: 0.75rem; padding-block: 0.5rem; font-size: 0.875rem; transition: background-color .15s; }
-.nav-row:hover { background-color: rgb(0 0 0 / 0.04); }
+.nav-row { display: flex; width: 100%; align-items: center; gap: 0.625rem; border-radius: 0.75rem; padding-block: 0.5rem; font-size: 0.875rem; transition: background-color .15s, box-shadow .15s, color .15s; }
+.nav-row:not(.sidebar-active):hover { background-color: rgb(0 0 0 / 0.04); }
 .nav-icon { display: flex; width: 1.5rem; height: 1.5rem; flex-shrink: 0; align-items: center; justify-content: center; }
 .nav-icon :deep(svg) { width: 18px; height: 18px; stroke-width: 2.25; }
 </style>

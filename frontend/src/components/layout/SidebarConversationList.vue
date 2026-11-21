@@ -2,11 +2,11 @@
 /**
  * 侧边栏列表，分两块：
  * - 客户：头像、名字，点开展开这个客户的对话；
- * - 对话：全部对话，按更新时间排列。
+ * - 对话：未关联客户的对话，按更新时间排列。
  * 两块的收起状态和展开的客户记在本机浏览器里，读写失败就用默认值。
  */
 import { ArrowUpRight, ChevronDown, Plus } from '@lucide/vue'
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
@@ -21,6 +21,7 @@ import { useWorkspaceStore } from '@/stores/conversations'
 import SidebarConversationItem from './SidebarConversationItem.vue'
 
 const store = useWorkspaceStore()
+const standaloneConversations = computed(() => store.recent.filter((c) => !c.customer?.id))
 const route = useRoute()
 const router = useRouter()
 const { confirmDelete } = useConfirm()
@@ -93,7 +94,7 @@ async function remove(id: string, title: string) {
 
 <template>
   <div
-    class="mt-4 min-h-0 flex-1 overflow-y-auto px-3 pb-3"
+    class="mt-3 min-h-0 flex-1 overflow-y-auto px-3 pb-3 pt-1"
     :class="{ 'flex items-center justify-center': store.loaded && !store.conversations.length && !store.customerGroups.length }"
   >
     <!-- 客户（仅展示有对话的客户） -->
@@ -117,8 +118,8 @@ async function remove(id: string, title: string) {
           <div class="group relative">
             <button
               type="button"
-              class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition hover:bg-black/[0.04]"
-              :class="route.name === 'customer' && route.params.id === group.customer.id ? 'bg-black/[0.06]' : ''"
+              class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition"
+              :class="route.name === 'customer' && route.params.id === group.customer.id ? 'sidebar-active' : 'hover:bg-black/[0.04]'"
               :aria-expanded="state.expanded.has(group.customer.id)"
               @click="toggle(group.customer.id)"
             >
@@ -161,8 +162,8 @@ async function remove(id: string, title: string) {
       </div>
     </section>
 
-    <!-- 对话 -->
-    <section v-if="store.conversations.length" aria-label="对话">
+    <!-- 对话（仅展示未关联客户的对话） -->
+    <section v-if="standaloneConversations.length" aria-label="对话">
       <button
         type="button"
         class="group-title"
@@ -174,7 +175,7 @@ async function remove(id: string, title: string) {
       </button>
       <div v-show="!state.conversationsClosed" class="mt-0.5 space-y-0.5">
         <SidebarConversationItem
-          v-for="conv in store.recent"
+          v-for="conv in standaloneConversations"
           :key="conv.id"
           :conversation="conv"
           :active="route.params.id === conv.id"

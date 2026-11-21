@@ -4,6 +4,7 @@ import { computed, ref, watch } from 'vue'
 
 import { authApi } from '@/api'
 import { errorText } from '@/api/http'
+import UserAvatar from '@/components/brand/UserAvatar.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { useToast } from '@/composables/useToast'
 import { useAuthStore } from '@/stores/auth'
@@ -27,7 +28,7 @@ const passwordError = ref('')
 watch(() => auth.user?.display_name, (value) => { if (!editingName.value) name.value = value ?? '' })
 
 const avatar = computed(() => auth.user?.avatar ?? '')
-const initial = computed(() => (auth.user?.display_name || auth.user?.account || '?').slice(0, 1).toUpperCase())
+const avatarKey = computed(() => auth.user?.account || auth.user?.display_name || '')
 const nameChanged = computed(() => !!name.value.trim() && name.value.trim() !== auth.user?.display_name)
 const passwordReady = computed(() => !!current.value && next.value.length >= 6 && next.value === again.value)
 
@@ -134,9 +135,8 @@ async function savePassword() {
   <section class="card-soft p-5 sm:p-6" aria-label="个人资料" data-testid="profile-card">
     <div class="flex items-center gap-4 sm:gap-5">
       <div class="group relative size-16 shrink-0">
-        <label class="block size-16 cursor-pointer overflow-hidden rounded-full bg-ink text-xl font-semibold text-white" title="更换头像">
-          <img v-if="avatar" :src="avatar" alt="头像" class="size-full object-cover" />
-          <span v-else class="flex size-full items-center justify-center">{{ initial }}</span>
+        <label class="block size-16 cursor-pointer overflow-hidden rounded-full" title="更换头像">
+          <UserAvatar :seed="avatarKey" :src="avatar" alt="头像" class="size-full" />
           <span class="absolute inset-0 flex items-center justify-center rounded-full bg-black/40 text-white opacity-0 transition group-hover:opacity-100 group-focus-within:opacity-100">
             <LoaderCircle v-if="savingAvatar" class="size-5 animate-spin" /><Camera v-else class="size-5" />
           </span>

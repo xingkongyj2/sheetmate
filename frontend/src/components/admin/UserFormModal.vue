@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 新增 / 编辑成员弹窗：账号、姓名、角色（成员 / 管理员）、密码重置、客户权限分配。 */
-import { Check, LoaderCircle, Search, ShieldCheck } from '@lucide/vue'
+import { Check, LoaderCircle, Search, ShieldCheck, X } from '@lucide/vue'
 import { computed, ref } from 'vue'
 
 import { adminApi, type AdminCustomerRow, type AdminUserRow } from '@/api'
@@ -29,14 +29,23 @@ const role = ref<'admin' | 'member'>(props.user?.role ?? 'member')
 const password = ref('')
 const selectedCustomers = ref<Set<string>>(new Set(props.user?.customer_ids ?? []))
 const customerQuery = ref('')
+const customerScope = ref<'all' | 'selected'>('all')
 const saving = ref(false)
 const error = ref('')
 
 const filteredCustomers = computed(() => {
   const q = customerQuery.value.trim().toLowerCase()
-  if (!q) return props.customers
-  return props.customers.filter((c) => `${c.name} ${c.code}`.toLowerCase().includes(q))
+  return props.customers.filter((c) => {
+    if (customerScope.value === 'selected' && !selectedCustomers.value.has(c.id)) return false
+    if (!q) return true
+    return `${c.name} ${c.code}`.toLowerCase().includes(q)
+  })
 })
+
+function clearSelectedCustomers() {
+  selectedCustomers.value = new Set()
+  if (customerScope.value === 'selected') customerScope.value = 'all'
+}
 
 const ready = computed(() => {
   if (isEdit.value) {
@@ -148,9 +157,30 @@ async function submit() {
 
       <!-- 客户权限分配 -->
       <div>
-        <div class="mb-1.5 flex items-center justify-between">
+        <div class="mb-1.5 flex items-center justify-between gap-2">
           <span class="text-xs font-medium text-mute">客户权限</span>
-          <span v-if="role === 'member'" class="text-[11px] tabular-nums text-faint">已选 {{ selectedCustomers.size }}</span>
+          <div v-if="role === 'member' && customers.length" class="flex items-center gap-2 text-[11px]">
+            <div class="flex rounded-full bg-paper p-0.5">
+              <button
+                type="button"
+                class="rounded-full px-2 py-0.5 transition"
+                :class="customerScope === 'all' ? 'bg-white font-medium text-ink shadow-xs' : 'text-mute hover:text-ink'"
+                @click="customerScope = 'all'"
+              >全部 {{ customers.length }}</button>
+              <button
+                type="button"
+                class="rounded-full px-2 py-0.5 tabular-nums transition"
+                :class="customerScope === 'selected' ? 'bg-white font-medium text-ink shadow-xs' : 'text-mute hover:text-ink'"
+                @click="customerScope = 'selected'"
+              >已选 {{ selectedCustomers.size }}</button>
+            </div>
+            <button
+              v-if="selectedCustomers.size"
+              type="button"
+              class="text-faint transition hover:text-ink"
+              @click="clearSelectedCustomers"
+            >清空</button>
+          </div>
         </div>
 
         <div
@@ -158,20 +188,34 @@ async function submit() {
           class="flex items-center gap-2 rounded-xl bg-paper px-3.5 py-2.5 text-xs text-mute"
         >
           <ShieldCheck class="size-3.5 shrink-0 text-ink" />
-          <span>管理员默认可访问全部客户与后台</span>
+          <span>管理员默认拥有全部权限</span>
         </div>
 
         <div v-else class="overflow-hidden rounded-xl border border-line bg-white">
-          <label v-if="customers.length > 5" class="flex items-center gap-2 border-b border-line px-3 py-2">
+          <div v-if="customers.length" class="flex items-center gap-2 border-b border-line px-3 py-2">
             <Search class="size-3.5 shrink-0 text-faint" />
             <input
               v-model="customerQuery"
-              placeholder="筛选客户"
-              class="w-full bg-transparent text-xs outline-none placeholder:text-faint"
+              placeholder="搜索客户名称或编号"
+              aria-label="搜索客户"
+              class="w-full min-w-0 bg-transparent text-xs outline-none placeholder:text-faint"
+              @keydown.enter.prevent
             />
-          </label>
+            <button
+              v-if="customerQuery"
+              type="button"
+              class="rounded p-0.5 text-faint transition hover:text-ink"
+              aria-label="清空搜索"
+              @click="customerQuery = ''"
+            >
+              <X class="size-3" />
+            </button>
+          </div>
           <div v-if="!customers.length" class="py-6 text-center text-xs text-faint">暂无客户</div>
-          <div v-else class="max-h-44 divide-y divide-line/60 overflow-y-auto">
+          <div v-else-if="!filteredCustomers.length" class="py-6 text-center text-xs text-faint">
+            {{ customerScope === 'selected' && !selectedCustomers.size ? '暂未选择客户' : '没有匹配的客户' }}
+          </div>
+          <div v-else class="max-h-56 divide-y divide-line/60 overflow-y-auto">
             <button
               v-for="c in filteredCustomers"
               :key="c.id"

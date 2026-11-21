@@ -16,6 +16,7 @@ import { computed, onMounted, ref } from 'vue'
 import { adminApi, type AdminOverview } from '@/api'
 import { errorText } from '@/api/http'
 import Mascot from '@/components/brand/Mascot.vue'
+import UserAvatar from '@/components/brand/UserAvatar.vue'
 import StackedBarChart from '@/components/stats/StackedBarChart.vue'
 import { compact, duration, integer, percent, shortDate } from '@/components/stats/format'
 import { shortTime } from '@/composables/conversationGroups'
@@ -70,18 +71,16 @@ const tokenColumns = computed(() =>
     values: { prompt: d.prompt_tokens, completion: d.completion_tokens },
   })),
 )
-
-const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
 </script>
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[1200px] px-5 py-6 sm:px-8 sm:py-8">
-      <header class="flex items-center justify-between gap-4">
-        <h1 class="text-2xl font-semibold tracking-tight text-ink">总览</h1>
+    <div class="mx-auto flex min-h-full max-w-[1200px] flex-col px-4 py-6 sm:px-8 sm:py-7">
+      <header class="flex shrink-0 items-center justify-between gap-4">
+        <h1 class="text-xl font-semibold tracking-tight">总览</h1>
         <button
           type="button"
-          class="icon-btn !size-9 border border-line"
+          class="icon-btn !size-8 border border-line"
           title="刷新"
           aria-label="刷新总览"
           :disabled="loading"
@@ -100,9 +99,9 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
         <LoaderCircle class="size-6 animate-spin text-mute" />
       </div>
 
-      <div v-else class="mt-6 space-y-5 transition-opacity" :class="loading ? 'opacity-65' : ''">
+      <div v-else class="mt-6 flex min-h-0 flex-1 flex-col gap-5 transition-opacity" :class="loading ? 'opacity-65' : ''">
         <!-- 第一排：4 个核心指标卡 -->
-        <section class="grid grid-cols-2 gap-4 lg:grid-cols-4" aria-label="核心资产">
+        <section class="grid shrink-0 grid-cols-2 gap-4 lg:grid-cols-4" aria-label="核心资产">
           <RouterLink :to="{ name: 'admin-users' }" class="card-soft group p-5 transition hover:border-black/15">
             <div class="flex items-center justify-between text-xs text-mute">
               <span>团队成员</span>
@@ -114,7 +113,7 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
 
           <RouterLink :to="{ name: 'admin-customers' }" class="card-soft group p-5 transition hover:border-black/15">
             <div class="flex items-center justify-between text-xs text-mute">
-              <span>客户与流程</span>
+              <span>客户管理</span>
               <Building2 class="size-4 text-faint transition group-hover:text-ink" />
             </div>
             <p class="mt-3 text-[30px] font-semibold leading-none tracking-tight tabular-nums">{{ integer(data.counts.customers) }}</p>
@@ -142,8 +141,8 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
           </RouterLink>
         </section>
 
-        <!-- 第二排：系统配置状态条 -->
-        <section class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4" aria-label="系统状态">
+        <!-- 第二排：系统配置状态条（两个模型紧邻放置） -->
+        <section class="grid shrink-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4" aria-label="系统状态">
           <RouterLink :to="{ name: 'admin-models' }" class="status-pill group">
             <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-paper text-ink/80">
               <Cpu class="size-4" />
@@ -155,6 +154,22 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
               </div>
               <p class="mt-0.5 truncate text-[13px] font-medium text-ink">
                 {{ data.system.llm.configured ? (data.system.llm.model || data.system.llm.provider_name) : '未配置' }}
+              </p>
+            </div>
+            <ArrowUpRight class="size-3.5 shrink-0 text-faint transition group-hover:text-ink" />
+          </RouterLink>
+
+          <RouterLink :to="{ name: 'admin-privacy' }" class="status-pill group">
+            <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-paper text-ink/80">
+              <Sparkles class="size-4" />
+            </span>
+            <div class="min-w-0 flex-1">
+              <div class="flex items-center gap-1.5 text-xs text-mute">
+                <span class="size-1.5 rounded-full" :class="data.system.privacy.llm_configured ? 'bg-success' : 'bg-faint'" />
+                <span>脱敏模型</span>
+              </div>
+              <p class="mt-0.5 truncate text-[13px] font-medium text-ink">
+                {{ data.system.privacy.llm_configured ? data.system.privacy.llm_model : '未启用' }}
               </p>
             </div>
             <ArrowUpRight class="size-3.5 shrink-0 text-faint transition group-hover:text-ink" />
@@ -176,22 +191,6 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
             <ArrowUpRight class="size-3.5 shrink-0 text-faint transition group-hover:text-ink" />
           </RouterLink>
 
-          <RouterLink :to="{ name: 'admin-privacy' }" class="status-pill group">
-            <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-paper text-ink/80">
-              <Sparkles class="size-4" />
-            </span>
-            <div class="min-w-0 flex-1">
-              <div class="flex items-center gap-1.5 text-xs text-mute">
-                <span class="size-1.5 rounded-full" :class="data.system.privacy.llm_configured ? 'bg-success' : 'bg-faint'" />
-                <span>脱敏模型</span>
-              </div>
-              <p class="mt-0.5 truncate text-[13px] font-medium text-ink">
-                {{ data.system.privacy.llm_configured ? data.system.privacy.llm_model : '仅规则模式' }}
-              </p>
-            </div>
-            <ArrowUpRight class="size-3.5 shrink-0 text-faint transition group-hover:text-ink" />
-          </RouterLink>
-
           <RouterLink :to="{ name: 'admin-customers' }" class="status-pill group">
             <span class="flex size-8 shrink-0 items-center justify-center rounded-xl bg-paper text-ink/80">
               <HardDrive class="size-4" />
@@ -206,10 +205,10 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
           </RouterLink>
         </section>
 
-        <!-- 第三排：左 14 天趋势图 + 右活跃列表 -->
-        <section class="grid gap-5 lg:grid-cols-12">
-          <div class="lg:col-span-7">
-            <div class="mb-2.5 flex items-center justify-between px-0.5">
+        <!-- 第三排：左 14 天趋势图 + 右活跃列表（等高铺满剩余屏幕） -->
+        <section class="grid min-h-[340px] flex-1 gap-5 lg:grid-cols-12">
+          <div class="flex min-h-0 flex-col lg:col-span-7">
+            <div class="mb-2.5 flex h-7 shrink-0 items-center justify-between px-0.5">
               <h2 class="text-sm font-semibold text-ink">近 14 天趋势</h2>
               <div class="flex gap-0.5 rounded-lg bg-paper p-0.5 text-xs">
                 <button
@@ -228,6 +227,8 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
             </div>
             <StackedBarChart
               v-if="chartMode === 'tasks'"
+              class="min-h-0 flex-1"
+              fill-height
               title="每日任务"
               :series="taskSeries"
               :columns="taskColumns"
@@ -236,6 +237,8 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
             />
             <StackedBarChart
               v-else
+              class="min-h-0 flex-1"
+              fill-height
               title="每日 Token"
               :series="tokenSeries"
               :columns="tokenColumns"
@@ -244,8 +247,8 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
             />
           </div>
 
-          <section class="flex flex-col lg:col-span-5">
-            <div class="mb-2.5 flex items-center justify-between px-0.5">
+          <section class="flex min-h-0 flex-col lg:col-span-5">
+            <div class="mb-2.5 flex h-7 shrink-0 items-center justify-between px-0.5">
               <div class="flex gap-0.5 rounded-lg bg-paper p-0.5 text-xs">
                 <button
                   type="button"
@@ -266,17 +269,14 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
               >全部<ArrowUpRight class="size-3.5" /></RouterLink>
             </div>
 
-            <div class="card-soft flex-1 p-5 sm:p-6">
-              <div v-if="activeTab === 'users'" class="divide-y divide-line/60">
+            <div class="card-soft flex min-h-0 flex-1 flex-col p-5 sm:p-6">
+              <div v-if="activeTab === 'users'" class="min-h-0 flex-1 divide-y divide-line/60 overflow-y-auto">
                 <div
                   v-for="u in data.recent_users"
                   :key="u.id"
-                  class="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0"
+                  class="flex items-center gap-3 py-3 first:pt-0 last:pb-0"
                 >
-                  <span class="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-xs font-semibold text-white">
-                    <img v-if="u.avatar" :src="u.avatar" alt="" class="size-full object-cover" />
-                    <template v-else>{{ initialOf(u.display_name) }}</template>
-                  </span>
+                  <UserAvatar :seed="u.account || u.display_name" :src="u.avatar" class="size-8" />
                   <div class="min-w-0 flex-1">
                     <div class="flex items-center gap-1.5">
                       <span class="truncate text-sm font-medium text-ink">{{ u.display_name }}</span>
@@ -292,12 +292,12 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
                 <p v-if="!data.recent_users.length" class="py-10 text-center text-xs text-faint">暂无成员记录</p>
               </div>
 
-              <div v-else class="divide-y divide-line/60">
+              <div v-else class="min-h-0 flex-1 divide-y divide-line/60 overflow-y-auto">
                 <RouterLink
                   v-for="c in data.recent_customers"
                   :key="c.id"
                   :to="{ name: 'customer', params: { id: c.id } }"
-                  class="-mx-2 flex items-center gap-3 rounded-xl px-2 py-2.5 transition hover:bg-paper/80"
+                  class="-mx-2 flex items-center gap-3 rounded-xl px-2 py-3 transition hover:bg-paper/80"
                 >
                   <Mascot :variant="c.mascot" :size="28" :shadow="false" :track="false" mood="idle" />
                   <div class="min-w-0 flex-1">

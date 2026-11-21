@@ -22,6 +22,8 @@ const props = defineProps<{
   /** 纵轴刻度的数值格式（通常是缩写） */
   axisFormat: (value: number) => string
   emptyText?: string
+  /** 撑满父级卡片的剩余高度（用于全屏铺满的看板） */
+  fillHeight?: boolean
 }>()
 
 const PLOT_HEIGHT = 208
@@ -72,7 +74,7 @@ function onKeydown(event: KeyboardEvent) {
 </script>
 
 <template>
-  <section class="card-soft p-5 sm:p-6">
+  <section class="card-soft flex flex-col p-5 sm:p-6">
     <header class="flex flex-wrap items-start justify-between gap-x-4 gap-y-3">
       <div class="min-w-0">
         <h2 class="text-[15px] font-semibold">{{ title }}</h2>
@@ -90,31 +92,37 @@ function onKeydown(event: KeyboardEvent) {
     </header>
 
     <!-- 图表 -->
-    <div class="mt-8">
-      <div v-if="!hasData" class="flex items-center justify-center rounded-xl bg-paper text-sm text-mute" :style="{ height: `${PLOT_HEIGHT}px` }">
+    <div class="mt-8 flex flex-1 flex-col" :class="fillHeight ? 'min-h-0' : 'justify-end'">
+      <div
+        v-if="!hasData"
+        class="flex items-center justify-center rounded-xl bg-paper text-sm text-mute"
+        :class="fillHeight ? 'min-h-[208px] flex-1' : ''"
+        :style="fillHeight ? undefined : { height: `${PLOT_HEIGHT}px` }"
+      >
         {{ emptyText ?? '这段时间没有数据' }}
       </div>
       <div
         v-else
         class="rounded-lg outline-none focus-visible:ring-4 focus-visible:ring-black/5"
+        :class="fillHeight ? 'flex min-h-0 flex-1 flex-col' : ''"
         tabindex="0"
         role="img"
         :aria-label="chartDescription"
         @keydown="onKeydown"
         @blur="active = null"
       >
-        <div class="flex">
+        <div class="flex" :class="fillHeight ? 'min-h-[208px] flex-1' : ''">
           <!-- 纵轴刻度 -->
-          <div class="relative w-11 shrink-0" :style="{ height: `${PLOT_HEIGHT}px` }" aria-hidden="true">
+          <div class="relative w-14 shrink-0" :style="fillHeight ? undefined : { height: `${PLOT_HEIGHT}px` }" aria-hidden="true">
             <span
               v-for="tick in scale.ticks"
               :key="tick"
-              class="absolute right-2 -translate-y-1/2 text-[11px] tabular-nums text-faint"
+              class="absolute right-2 -translate-y-1/2 whitespace-nowrap text-[11px] tabular-nums text-faint"
               :style="{ bottom: `${(tick / scale.max) * 100}%` }"
             >{{ axisFormat(tick) }}</span>
           </div>
           <!-- 绘图区 -->
-          <div class="relative min-w-0 flex-1" :style="{ height: `${PLOT_HEIGHT}px` }" @mouseleave="active = null">
+          <div class="relative min-w-0 flex-1" :style="fillHeight ? undefined : { height: `${PLOT_HEIGHT}px` }" @mouseleave="active = null">
             <div
               v-for="tick in scale.ticks"
               :key="tick"
@@ -162,7 +170,7 @@ function onKeydown(event: KeyboardEvent) {
           </div>
         </div>
         <!-- 横轴日期 -->
-        <div class="ml-11 mt-2 flex gap-[2px]" aria-hidden="true">
+        <div class="ml-14 mt-2 flex gap-[2px]" aria-hidden="true">
           <div v-for="(column, i) in columns" :key="column.key" class="relative h-4 min-w-0 flex-1">
             <span
               v-if="i % labelStep === 0"

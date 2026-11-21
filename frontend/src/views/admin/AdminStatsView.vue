@@ -9,6 +9,7 @@ import { computed, onMounted, ref } from 'vue'
 import { adminApi, type AdminExecutionMetrics } from '@/api'
 import { errorText } from '@/api/http'
 import Mascot from '@/components/brand/Mascot.vue'
+import UserAvatar from '@/components/brand/UserAvatar.vue'
 import BaseSelect from '@/components/common/BaseSelect.vue'
 import RankBars, { type RankRow } from '@/components/stats/RankBars.vue'
 import StackedBarChart from '@/components/stats/StackedBarChart.vue'
@@ -16,7 +17,7 @@ import ToolStats from '@/components/stats/ToolStats.vue'
 import { compact, duration, integer, label, percent, shortDate } from '@/components/stats/format'
 
 const RANGES = [7, 30, 90] as const
-const days = ref<number>(30)
+const days = ref<number>(7)
 const selectedUserId = ref<string>('all')
 const metrics = ref<AdminExecutionMetrics | null>(null)
 const loading = ref(false)
@@ -148,17 +149,15 @@ const cacheKnown = computed(
     metrics.value.usage.cached_tokens_missing_calls === 0 &&
     metrics.value.usage.cache_miss_tokens_missing_calls === 0,
 )
-
-const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
 </script>
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[1200px] px-5 py-6 sm:px-8 sm:py-8">
+    <div class="mx-auto max-w-[1200px] px-4 py-6 sm:px-8 sm:py-7">
       <!-- 顶部栏 -->
       <header class="flex flex-wrap items-center justify-between gap-3">
         <div class="flex items-center gap-2.5">
-          <h1 class="text-2xl font-semibold tracking-tight text-ink">数据统计</h1>
+          <h1 class="text-xl font-semibold tracking-tight">数据统计</h1>
           <button
             v-if="activeUserLabel"
             type="button"
@@ -171,10 +170,12 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
         </div>
 
         <div class="flex flex-wrap items-center gap-2">
-          <div class="w-40">
+          <div class="w-44">
             <BaseSelect
               :model-value="selectedUserId"
               :options="userOptions"
+              searchable
+              search-placeholder="搜索成员"
               aria-label="成员筛选"
               @update:model-value="selectUser(String($event))"
             />
@@ -314,10 +315,7 @@ const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
                   class="flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition hover:bg-paper"
                   @click="selectUser(String(u.user_id))"
                 >
-                  <span class="flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white">
-                    <img v-if="u.avatar" :src="u.avatar" alt="" class="size-full object-cover" />
-                    <template v-else>{{ initialOf(u.display_name) }}</template>
-                  </span>
+                  <UserAvatar :seed="u.account || u.display_name" :src="u.avatar" class="size-7" />
                   <div class="min-w-0 flex-1">
                     <div class="flex items-center justify-between gap-2 text-sm">
                       <span class="truncate font-medium text-ink">{{ u.display_name }}</span>

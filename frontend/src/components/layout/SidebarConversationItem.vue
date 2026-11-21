@@ -14,8 +14,8 @@ const emit = defineEmits<{ remove: [] }>()
   <div class="group relative">
     <RouterLink
       :to="{ name: 'chat', params: { id: conversation.id } }"
-      class="flex items-center rounded-xl py-2 pr-3 text-sm transition hover:bg-black/[0.04]"
-      :class="[nested ? 'gap-4 pl-[17px]' : 'gap-2.5 pl-3', active ? 'bg-black/[0.06] text-ink' : 'text-ink/85']"
+      class="flex items-center rounded-xl py-2 pr-3 text-sm transition"
+      :class="[nested ? 'gap-4 pl-[17px]' : 'gap-2.5 pl-3', active ? 'sidebar-active' : 'text-ink/85 hover:bg-black/[0.04]']"
       :title="conversation.customer ? `${conversation.title} · ${conversation.customer.name}` : conversation.title"
       :aria-current="active ? 'page' : undefined"
     >

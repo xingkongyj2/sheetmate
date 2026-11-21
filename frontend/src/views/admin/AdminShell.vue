@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/** 管理后台主框架：与用户工作台一致的底层画布 + 左侧分组导航 + 右侧悬浮主面板。 */
+/** 管理页面框架：与工作台完全对齐的侧栏宽度（268px / 64px）、Logo、线条图标规格与底部账号栏。 */
 import {
   ArrowLeft,
   Building2,
@@ -16,6 +16,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import LogoMark from '@/components/brand/LogoMark.vue'
+import UserAvatar from '@/components/brand/UserAvatar.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -24,13 +25,29 @@ const router = useRouter()
 
 const narrowScreen = window.matchMedia('(max-width: 767px)')
 const collapsed = ref(narrowScreen.matches)
+const menuOpen = ref(false)
+const accountBox = ref<HTMLElement | null>(null)
 
 function onMediaChange(event: MediaQueryListEvent) {
   if (event.matches) collapsed.value = true
 }
 
-onMounted(() => narrowScreen.addEventListener('change', onMediaChange))
-onBeforeUnmount(() => narrowScreen.removeEventListener('change', onMediaChange))
+function closeMenu(event: Event) {
+  if (event instanceof KeyboardEvent ? event.key === 'Escape' : !accountBox.value?.contains(event.target as Node)) {
+    menuOpen.value = false
+  }
+}
+
+onMounted(() => {
+  narrowScreen.addEventListener('change', onMediaChange)
+  window.addEventListener('pointerdown', closeMenu)
+  window.addEventListener('keydown', closeMenu)
+})
+onBeforeUnmount(() => {
+  narrowScreen.removeEventListener('change', onMediaChange)
+  window.removeEventListener('pointerdown', closeMenu)
+  window.removeEventListener('keydown', closeMenu)
+})
 
 const navGroups = [
   {
@@ -44,7 +61,7 @@ const navGroups = [
     label: '资源',
     items: [
       { name: 'admin-users', label: '人员管理', icon: Users },
-      { name: 'admin-customers', label: '客户与流程', icon: Building2 },
+      { name: 'admin-customers', label: '客户管理', icon: Building2 },
       { name: 'admin-formulas', label: '公式库', icon: FormulaIcon },
     ],
   },
@@ -58,8 +75,8 @@ const navGroups = [
 ] as const
 
 const username = computed(() => auth.user?.display_name || auth.user?.account || '')
+const avatarKey = computed(() => auth.user?.account || auth.user?.display_name || '')
 const avatar = computed(() => auth.user?.avatar || '')
-const initial = computed(() => (username.value || 'A').slice(0, 1).toUpperCase())
 
 async function logout() {
   await auth.logout()
@@ -71,15 +88,11 @@ async function logout() {
   <div class="flex h-full overflow-hidden bg-canvas">
     <aside
       class="flex h-full shrink-0 flex-col transition-[width] duration-200"
-      :class="collapsed ? 'w-[64px]' : 'w-[240px]'"
+      :class="collapsed ? 'w-[64px]' : 'w-[268px]'"
     >
-      <!-- 顶部品牌与折叠 -->
+      <!-- 顶部：与工作台侧边栏完全对齐 -->
       <div class="flex h-14 shrink-0 items-center justify-between px-3.5">
-        <RouterLink v-if="!collapsed" :to="{ name: 'admin-overview' }" class="flex items-center gap-2 pl-1">
-          <LogoMark :size="24" />
-          <span class="text-[17px] font-semibold tracking-tight text-ink">SheetMate</span>
-          <span class="rounded-md bg-black/[0.06] px-1.5 py-0.5 text-[10px] font-medium text-mute">后台</span>
-        </RouterLink>
+        <RouterLink v-if="!collapsed" :to="{ name: 'admin-overview' }" class="pl-1"><LogoMark with-text :size="26" /></RouterLink>
         <button
           type="button"
           class="icon-btn hover:bg-black/[0.05]"
@@ -92,58 +105,55 @@ async function logout() {
         </button>
       </div>
 
-      <!-- 分组导航 -->
-      <nav class="mt-2 min-h-0 flex-1 space-y-5 overflow-y-auto px-3" aria-label="管理后台导航">
+      <!-- 主导航：与工作台统一的 .nav-row 与 18px / 2.25 线条图标 -->
+      <nav class="mt-0.5 min-h-0 flex-1 space-y-4 overflow-y-auto px-3 pb-3 pt-0.5" aria-label="管理导航">
         <div v-for="group in navGroups" :key="group.label" class="space-y-0.5">
-          <p v-if="!collapsed" class="px-3 pb-1 text-[11px] font-medium tracking-wide text-faint">{{ group.label }}</p>
+          <p v-if="!collapsed" class="px-3 py-1.5 text-[13px] text-mute">{{ group.label }}</p>
           <RouterLink
             v-for="item in group.items"
             :key="item.name"
             :to="{ name: item.name }"
-            class="admin-nav-row"
+            class="nav-row"
             :class="[
               collapsed ? 'justify-center px-0' : 'px-3',
-              route.name === item.name ? 'bg-black/[0.065] font-medium text-ink' : 'text-ink/75 hover:bg-black/[0.04] hover:text-ink',
+              route.name === item.name ? 'sidebar-active' : 'text-ink/80',
             ]"
             :title="item.label"
             :aria-current="route.name === item.name ? 'page' : undefined"
           >
-            <span class="admin-nav-icon"><component :is="item.icon" aria-hidden="true" /></span>
+            <span class="nav-icon"><component :is="item.icon" aria-hidden="true" /></span>
             <span v-if="!collapsed" class="truncate">{{ item.label }}</span>
           </RouterLink>
         </div>
       </nav>
 
-      <!-- 底部返回工作台与账号 -->
-      <div class="shrink-0 space-y-1.5 border-t border-black/[0.06] px-3 py-3">
-        <RouterLink
-          :to="{ name: 'home' }"
-          class="admin-nav-row text-mute hover:bg-black/[0.04] hover:text-ink"
-          :class="collapsed ? 'justify-center px-0' : 'px-3'"
-          title="返回工作台"
-        >
-          <span class="admin-nav-icon"><ArrowLeft aria-hidden="true" /></span>
-          <span v-if="!collapsed">返回工作台</span>
-        </RouterLink>
-
-        <div class="flex items-center gap-2 rounded-xl py-1.5" :class="collapsed ? 'justify-center px-0' : 'px-3'">
-          <span
-            aria-hidden="true"
-            class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-[11px] font-semibold text-white"
-          >
-            <img v-if="avatar" :src="avatar" alt="" class="size-full object-cover" />
-            <template v-else>{{ initial }}</template>
-          </span>
-          <span v-if="!collapsed" class="min-w-0 flex-1 truncate text-xs font-medium text-ink">{{ username }}</span>
+      <!-- 底部账号：与工作台侧边栏完全对齐 -->
+      <div ref="accountBox" class="relative px-3 pb-2.5 pt-1">
+        <div class="flex min-w-0 items-center" :class="collapsed ? 'justify-center' : 'gap-1'">
           <button
-            v-if="!collapsed"
             type="button"
-            class="icon-btn size-7 shrink-0 text-faint hover:bg-black/[0.05] hover:text-error"
-            title="退出登录"
-            aria-label="退出登录"
-            @click="logout"
+            class="flex min-w-0 items-center rounded-xl py-1.5 transition hover:bg-black/[0.05]"
+            :class="collapsed ? 'w-full justify-center' : 'flex-1 gap-2.5 pl-3 pr-2 text-left'"
+            :title="username"
+            aria-label="账号菜单"
+            aria-haspopup="menu"
+            :aria-expanded="menuOpen"
+            @click="menuOpen = !menuOpen"
           >
-            <LogOut class="size-3.5" />
+            <UserAvatar :seed="avatarKey" :src="avatar" class="size-6" />
+            <span v-if="!collapsed" class="min-w-0 flex-1 truncate text-sm text-ink">{{ username }}</span>
+          </button>
+        </div>
+        <div
+          v-if="menuOpen"
+          class="absolute bottom-12 left-3 z-30 w-52 animate-pop rounded-2xl border border-line bg-white p-1.5 shadow-xl"
+          role="menu"
+        >
+          <RouterLink :to="{ name: 'home' }" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
+            <ArrowLeft class="size-4" />返回工作台
+          </RouterLink>
+          <button role="menuitem" class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
+            <LogOut class="size-4" />退出登录
           </button>
         </div>
       </div>
@@ -156,27 +166,9 @@ async function logout() {
 </template>
 
 <style scoped>
-.admin-nav-row {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  gap: 0.625rem;
-  border-radius: 0.75rem;
-  padding-block: 0.5rem;
-  font-size: 0.875rem;
-  transition: background-color 0.15s, color 0.15s;
-}
-.admin-nav-icon {
-  display: flex;
-  width: 1.25rem;
-  height: 1.25rem;
-  flex-shrink: 0;
-  align-items: center;
-  justify-content: center;
-}
-.admin-nav-icon :deep(svg) {
-  width: 17px;
-  height: 17px;
-  stroke-width: 1.95;
-}
+/* 与工作台 AppSidebar 完全一致的侧栏导航行与图标规格 */
+.nav-row { display: flex; width: 100%; align-items: center; gap: 0.625rem; border-radius: 0.75rem; padding-block: 0.5rem; font-size: 0.875rem; transition: background-color .15s, box-shadow .15s, color .15s; }
+.nav-row:not(.sidebar-active):hover { background-color: rgb(0 0 0 / 0.04); }
+.nav-icon { display: flex; width: 1.5rem; height: 1.5rem; flex-shrink: 0; align-items: center; justify-content: center; }
+.nav-icon :deep(svg) { width: 18px; height: 18px; stroke-width: 2.25; }
 </style>

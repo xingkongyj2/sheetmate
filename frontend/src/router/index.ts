@@ -19,11 +19,10 @@ const router = createRouter({
       component: () => import('@/components/layout/AppShell.vue'),
       children: [
         { path: '', name: 'home', component: () => import('@/views/HomeView.vue') },
-        { path: 'c/:id', name: 'chat', component: () => import('@/views/ChatView.vue'), props: true },
+        { path: 'c/:id', name: 'chat', component: () => import('@/views/ChatView.vue'), props: true, meta: { splitPanel: true } },
         { path: 'customers', name: 'customers', component: () => import('@/views/CustomersView.vue') },
         { path: 'customers/:id', name: 'customer', component: () => import('@/views/CustomerDetailView.vue'), props: true },
         { path: 'customers/:id/recipes/:recipeId', name: 'recipe', component: () => import('@/views/RecipeDetailView.vue'), props: true },
-        { path: 'settings', name: 'settings', component: () => import('@/views/SettingsView.vue') },
       ],
     },
     {

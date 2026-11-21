@@ -7,6 +7,7 @@ import { adminApi, type AdminCustomerRow, type AdminUserRow } from '@/api'
 import { errorText } from '@/api/http'
 import UserFormModal from '@/components/admin/UserFormModal.vue'
 import Mascot from '@/components/brand/Mascot.vue'
+import UserAvatar from '@/components/brand/UserAvatar.vue'
 import { shortTime } from '@/composables/conversationGroups'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
@@ -105,21 +106,20 @@ async function removeUser(user: AdminUserRow) {
   toast.success('已删除')
 }
 
-const initialOf = (name: string) => (name || '?').slice(0, 1).toUpperCase()
 const shortDate = (iso: string) => (iso ? iso.slice(0, 10) : '—')
 </script>
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div class="mx-auto max-w-[1200px] px-5 py-6 sm:px-8 sm:py-8">
+    <div class="mx-auto max-w-[1200px] px-4 py-6 sm:px-8 sm:py-7">
       <!-- 顶部栏 -->
       <header class="flex flex-wrap items-center gap-3">
         <div class="mr-auto flex items-baseline gap-2.5">
-          <h1 class="text-2xl font-semibold tracking-tight text-ink">人员管理</h1>
+          <h1 class="text-xl font-semibold tracking-tight">人员管理</h1>
           <span class="text-xs tabular-nums text-faint">{{ users.length }} 人</span>
         </div>
 
-        <label class="flex h-9 w-full items-center gap-2 rounded-xl border border-line bg-white px-3 sm:w-52">
+        <label class="flex h-8 w-full items-center gap-2 rounded-full bg-paper px-3 sm:w-48">
           <Search class="size-3.5 shrink-0 text-faint" />
           <input
             v-model="query"
@@ -129,12 +129,12 @@ const shortDate = (iso: string) => (iso ? iso.slice(0, 10) : '—')
           />
         </label>
 
-        <div class="flex gap-0.5 rounded-xl bg-paper p-1 text-xs" role="tablist" aria-label="角色筛选">
+        <div class="flex gap-0.5 rounded-full bg-paper p-0.5 text-xs" role="tablist" aria-label="角色筛选">
           <button
             type="button"
             role="tab"
             :aria-selected="roleFilter === 'all'"
-            class="rounded-lg px-2.5 py-1.5 transition"
+            class="rounded-full px-2.5 py-1 transition"
             :class="roleFilter === 'all' ? 'bg-white font-medium text-ink shadow-xs' : 'text-mute hover:text-ink'"
             @click="roleFilter = 'all'"
           >全部 {{ users.length }}</button>
@@ -142,7 +142,7 @@ const shortDate = (iso: string) => (iso ? iso.slice(0, 10) : '—')
             type="button"
             role="tab"
             :aria-selected="roleFilter === 'admin'"
-            class="rounded-lg px-2.5 py-1.5 transition"
+            class="rounded-full px-2.5 py-1 transition"
             :class="roleFilter === 'admin' ? 'bg-white font-medium text-ink shadow-xs' : 'text-mute hover:text-ink'"
             @click="roleFilter = 'admin'"
           >管理员 {{ adminCount }}</button>
@@ -150,13 +150,13 @@ const shortDate = (iso: string) => (iso ? iso.slice(0, 10) : '—')
             type="button"
             role="tab"
             :aria-selected="roleFilter === 'member'"
-            class="rounded-lg px-2.5 py-1.5 transition"
+            class="rounded-full px-2.5 py-1 transition"
             :class="roleFilter === 'member' ? 'bg-white font-medium text-ink shadow-xs' : 'text-mute hover:text-ink'"
             @click="roleFilter = 'member'"
           >成员 {{ memberCount }}</button>
         </div>
 
-        <button type="button" class="btn-ink h-9 gap-1.5 px-3.5 text-[13px]" @click="openCreate">
+        <button type="button" class="btn-ink h-8 gap-1.5 rounded-full px-3.5 text-[13px]" @click="openCreate">
           <Plus class="size-4" />新增成员
         </button>
       </header>
@@ -200,10 +200,7 @@ const shortDate = (iso: string) => (iso ? iso.slice(0, 10) : '—')
               >
                 <td class="py-3.5 pl-5 pr-3">
                   <div class="flex items-center gap-3">
-                    <span class="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-ink text-xs font-semibold text-white">
-                      <img v-if="u.avatar" :src="u.avatar" alt="" class="size-full object-cover" />
-                      <template v-else>{{ initialOf(u.display_name) }}</template>
-                    </span>
+                    <UserAvatar :seed="u.account || u.display_name" :src="u.avatar" class="size-9" />
                     <div class="min-w-0">
                       <div class="flex items-center gap-1.5">
                         <span class="truncate font-medium text-ink">{{ u.display_name }}</span>

@@ -184,7 +184,7 @@ onBeforeUnmount(() => {
 
 <template>
   <button type="button" class="execution-backdrop" aria-label="收起工作区面板" @click="emit('close')" />
-  <aside id="workspace-panel" class="execution-panel" :class="{ 'is-resizing': resizing }" :style="{ width: `${panelWidth}px` }" aria-label="工作区面板">
+  <aside id="workspace-panel" class="execution-panel app-panel" :class="{ 'is-resizing': resizing }" :style="{ width: `${panelWidth}px` }" aria-label="工作区面板">
     <div
       class="execution-resizer"
       role="separator"
@@ -200,27 +200,30 @@ onBeforeUnmount(() => {
       @pointerdown="startResize"
       @keydown="resizeWithKey"
     />
-    <div class="flex h-11 shrink-0 items-center border-b border-line px-4">
-      <span class="text-sm font-semibold">工作区面板</span>
+    <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[13px]">
+    <div class="flex h-[52px] shrink-0 items-center px-4">
+      <span class="text-[15px] font-semibold tracking-tight text-ink">工作区面板</span>
     </div>
-    <div class="flex shrink-0 gap-1 border-b border-line px-3 py-2 text-[13px]" role="tablist" aria-label="工作区面板分类">
-      <button
-        v-for="item in tabs"
-        :id="`execution-tab-${item.key}`"
-        :key="item.key"
-        type="button"
-        role="tab"
-        :aria-selected="tab === item.key"
-        aria-controls="execution-content"
-        class="shrink-0 rounded-full px-2.5 py-1 transition"
-        :class="tab === item.key ? 'bg-ink text-white' : 'text-mute hover:bg-paper hover:text-ink'"
-        @click="tab = item.key"
-      >
-        {{ item.label }}
-      </button>
+    <div class="shrink-0 px-4 pb-2">
+      <div class="grid grid-cols-5 gap-0.5 rounded-xl bg-paper p-1 text-xs" role="tablist" aria-label="工作区面板分类">
+        <button
+          v-for="item in tabs"
+          :id="`execution-tab-${item.key}`"
+          :key="item.key"
+          type="button"
+          role="tab"
+          :aria-selected="tab === item.key"
+          aria-controls="execution-content"
+          class="rounded-lg py-1.5 text-center transition"
+          :class="tab === item.key ? 'bg-white font-medium text-ink shadow-xs' : 'text-mute hover:text-ink'"
+          @click="tab = item.key"
+        >
+          {{ item.label }}
+        </button>
+      </div>
     </div>
 
-    <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto p-4" :class="{ 'flex flex-col': emptyState }">
+    <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2" :class="{ 'flex flex-col': emptyState }">
       <ExecutionStatusNotice v-if="message && tab !== 'usage'" class="mb-4 shrink-0" :message="message" />
       <div v-if="emptyState" class="flex flex-1 flex-col items-center justify-center gap-3 py-8 text-center text-sm text-faint">
         <span class="text-2xl leading-none" aria-hidden="true">{{ emptyState.emoji }}</span>
@@ -231,9 +234,9 @@ onBeforeUnmount(() => {
       <template v-else-if="tab === 'recipes'">
         <!-- 每个流程只留一行：标题和全屏按钮；版本、状态、流程图、说明都在全屏里看 -->
         <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="mb-2 min-w-0">
-          <div class="flex min-w-0 items-center gap-2 rounded-xl border border-line px-3 py-2.5">
-            <h3 class="min-w-0 flex-1 truncate text-[15px] font-semibold" :title="recipe?.name || progress.saved?.name || progress.recipeName || '处理流程'">{{ recipe?.name || progress.saved?.name || progress.recipeName || '处理流程' }}</h3>
-            <button type="button" class="icon-btn shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" :disabled="!(progress.flow || progress.saved?.flow || progress.steps.length || recipe)" @click="flows.get(progress.key)?.openFullscreen()"><Maximize2 class="size-4" /></button>
+          <div class="flex min-w-0 items-center gap-2 rounded-xl border border-line/80 bg-white px-3.5 py-2.5 transition hover:border-ink/20">
+            <h3 class="min-w-0 flex-1 truncate text-sm font-medium text-ink" :title="recipe?.name || progress.saved?.name || progress.recipeName || '处理流程'">{{ recipe?.name || progress.saved?.name || progress.recipeName || '处理流程' }}</h3>
+            <button type="button" class="icon-btn size-7 shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" :disabled="!(progress.flow || progress.saved?.flow || progress.steps.length || recipe)" @click="flows.get(progress.key)?.openFullscreen()"><Maximize2 class="size-3.5" /></button>
           </div>
           <RecipeFlow
             v-if="progress.flow || progress.saved?.flow || progress.steps.length || recipe"
@@ -253,9 +256,9 @@ onBeforeUnmount(() => {
           />
         </article>
         <article v-for="recipe in recipeSections.saved" :key="recipe.recipe_id" class="mb-2 min-w-0">
-          <div class="flex min-w-0 items-center gap-2 rounded-xl border border-line px-3 py-2.5">
-            <h3 class="min-w-0 flex-1 truncate text-[15px] font-semibold" :title="recipe.name">{{ recipe.name }}</h3>
-            <button type="button" class="icon-btn shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="flows.get(`saved:${recipe.recipe_id}`)?.openFullscreen()"><Maximize2 class="size-4" /></button>
+          <div class="flex min-w-0 items-center gap-2 rounded-xl border border-line/80 bg-white px-3.5 py-2.5 transition hover:border-ink/20">
+            <h3 class="min-w-0 flex-1 truncate text-sm font-medium text-ink" :title="recipe.name">{{ recipe.name }}</h3>
+            <button type="button" class="icon-btn size-7 shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="flows.get(`saved:${recipe.recipe_id}`)?.openFullscreen()"><Maximize2 class="size-3.5" /></button>
           </div>
           <RecipeFlow
             :ref="(el) => setFlow(`saved:${recipe.recipe_id}`, el)" toolbar-placement="hidden" :inline-canvas="false"
@@ -269,7 +272,7 @@ onBeforeUnmount(() => {
       <template v-else-if="tab === 'files'">
         <div v-for="group in fileGroups" :key="group.key" class="mb-5">
           <div class="label-mini mb-2 flex items-center gap-2">{{ group.label }}<span class="font-normal tabular-nums tracking-normal">{{ group.files.length }}</span></div>
-          <div v-for="file in group.files" :key="file.file_id" class="mb-1.5 flex items-center gap-2.5 rounded-xl border border-line px-3 py-2">
+          <div v-for="file in group.files" :key="file.file_id" class="mb-1.5 flex items-center gap-2.5 rounded-xl border border-line/80 bg-white px-3 py-2 transition hover:border-ink/20">
             <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
             <Sheet v-else class="size-4 shrink-0" :class="file.kind === 'output' ? 'text-ink' : 'text-[#4a4743]'" />
             <button type="button" class="min-w-0 flex-1 truncate rounded text-left text-[13px] font-medium underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ink/40" :title="file.filename" :aria-label="`查看 ${file.filename}`" @click="emit('openFile', file)">{{ file.filename }}</button>
@@ -285,7 +288,7 @@ onBeforeUnmount(() => {
       <template v-else-if="tab === 'data'">
         <div>
           <div class="label-mini mb-2 flex items-center gap-2">中间数据<span class="font-normal tabular-nums tracking-normal">{{ tables.length }}</span></div>
-          <div v-for="table in tables" :key="executionTableKey(table)" class="group mb-1.5 rounded-xl border border-line px-3 py-2.5 transition hover:border-ink/20">
+          <div v-for="table in tables" :key="executionTableKey(table)" class="group mb-1.5 rounded-xl border border-line/80 bg-white px-3 py-2.5 transition hover:border-ink/20">
             <div class="flex items-center gap-2">
               <FileCheck2 v-if="table.role === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
               <Sheet v-else class="size-4 shrink-0 text-[#4a4743]" />
@@ -302,19 +305,66 @@ onBeforeUnmount(() => {
       </template>
 
     </div>
+    </div>
   </aside>
 </template>
 
 <style scoped>
-.execution-panel { position: relative; display: flex; height: 100%; flex: none; flex-direction: column; border-left: 1px solid var(--color-line); background: var(--color-panel); }
-.execution-resizer { position: absolute; inset: 0 auto 0 0; z-index: 1; width: 8px; cursor: col-resize; touch-action: none; outline: none; }
-.execution-resizer::after { position: absolute; inset: 0 auto 0 0; width: 2px; background: transparent; content: ''; transition: background-color 150ms; }
+.execution-panel {
+  position: relative;
+  display: flex;
+  height: 100%;
+  flex: none;
+  flex-direction: column;
+  border-radius: 14px;
+  background: var(--color-panel);
+}
+.execution-resizer {
+  position: absolute;
+  inset: 14px auto 14px -10px;
+  z-index: 2;
+  width: 10px;
+  cursor: col-resize;
+  touch-action: none;
+  outline: none;
+}
+.execution-resizer::after {
+  position: absolute;
+  inset: 0 auto 0 4px;
+  width: 2px;
+  border-radius: 9999px;
+  background: transparent;
+  content: '';
+  transition: background-color 150ms;
+}
 .execution-resizer:hover::after,
-.execution-resizer:focus-visible::after,
-.is-resizing .execution-resizer::after { background: #6265dc; }
+.execution-resizer:focus-visible::after {
+  background: rgb(11 11 12 / 0.2);
+}
+.is-resizing .execution-resizer::after {
+  background: rgb(11 11 12 / 0.36);
+}
 .execution-backdrop { display: none; }
 @media (max-width: 1279px) {
-  .execution-panel { position: fixed; top: var(--chat-header-space, 44px); right: 0; z-index: 35; height: calc(100% - var(--chat-header-space, 44px)); box-shadow: -12px 0 50px #00000012; }
-  .execution-backdrop { position: fixed; inset: var(--chat-header-space, 44px) 0 0; z-index: 34; display: block; background: #00000020; }
+  .execution-panel {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    bottom: 8px;
+    z-index: 35;
+    height: auto;
+    max-width: calc(100vw - 16px);
+    box-shadow: -8px 0 36px rgb(0 0 0 / 0.12);
+  }
+  .execution-resizer {
+    inset: 14px auto 14px 0;
+  }
+  .execution-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 34;
+    display: block;
+    background: #00000020;
+  }
 }
 </style>
