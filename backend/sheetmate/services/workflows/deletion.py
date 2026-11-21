@@ -62,6 +62,7 @@ def prepare_confirmation(db: Session, user: User, conversation_id: str, recipe_i
         "recipes": recipes,
         "question": f"确认删除以下 {len(recipes)} 个流程及其全部版本吗？\n" + "\n".join(lines),
         "options": ["确认删除", "取消"],
+        "recommended": None,
         "created_at": datetime.now().isoformat(),
     }
     conversation.pending_recipe_deletion = confirmation

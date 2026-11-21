@@ -243,6 +243,21 @@ def test_ask_user_ends_turn(client, samples, fake_llm):
     events = _chat(client, conv, "统计一下")
     clarify = next(e for e in events if e["type"] == "clarify")
     assert clarify["options"] == ["金额", "重量"]
+    assert clarify["recommended"] == 0
+
+
+def test_ask_user_promotes_recommended_option_first(client, samples, fake_llm):
+    conv = _new_conversation(client)
+    _upload(client, conv, samples["fees_sep"])
+    fake_llm(script=[{"tools": [("ask_user", {
+        "question": "希望如何合并日期列？",
+        "options": ["每天只保留一行", "按天纵向合并（推荐）", "不合并"],
+        "recommended_index": 1,
+    })]}])
+    events = _chat(client, conv, "按天合并")
+    clarify = next(e for e in events if e["type"] == "clarify")
+    assert clarify["options"] == ["按天纵向合并", "每天只保留一行", "不合并"]
+    assert clarify["recommended"] == 0
 
 
 def test_explanation_before_clarification_is_only_shown_once(client, samples, fake_llm):

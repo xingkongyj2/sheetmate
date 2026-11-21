@@ -143,7 +143,7 @@ export type Artifact =
   | { kind: 'file'; key: string; file: FileArtifact }
   | { kind: 'recipe'; key: string; progress: RecipeProgress }
   | { kind: 'recipe_view'; key: string; view: RecipeViewArtifact }
-  | { kind: 'clarify'; key: string; question: string; options: string[] }
+  | { kind: 'clarify'; key: string; question: string; options: string[]; recommended: number | null }
 
 export interface TableArtifact {
   name: string | null
@@ -683,9 +683,27 @@ function mergeEvent(msg: UiMessage, e: AgentEvent, suppressCompletionDraft = fal
       applyDeliveryManifest([msg], e)
       break
     }
-    case 'clarify':
-      msg.artifacts.push({ kind: 'clarify', key: uid('a'), question: e.question, options: e.options ?? [] })
+    case 'clarify': {
+      const rawOptions: string[] = Array.isArray(e.options) ? e.options.map((o: unknown) => String(o ?? '').trim()).filter(Boolean) : []
+      const isExplicitNone = e.recommended === null || e.recommended === -1 || Boolean(e.confirmation_id)
+      const recTagTestRe = /^(?:\s*[[(【（]\s*(?:默认)?(?:推荐|recommended)\s*[\])】）]\s*)+|(?:\s*[[(【（]\s*(?:默认)?(?:推荐|recommended)\s*[\])】）]\s*)+$/i
+      const recTagStripRe = new RegExp(recTagTestRe.source, 'gi')
+      if (!rawOptions.length || isExplicitNone) {
+        msg.artifacts.push({ kind: 'clarify', key: uid('a'), question: e.question, options: rawOptions, recommended: null })
+        break
+      }
+      let recIdx = typeof e.recommended === 'number' && Number.isInteger(e.recommended) && e.recommended >= 0 && e.recommended < rawOptions.length
+        ? e.recommended
+        : rawOptions.findIndex((text) => recTagTestRe.test(text))
+      if (recIdx < 0) recIdx = 0
+      const cleaned = rawOptions.map((text) => text.replace(recTagStripRe, '').trim() || text)
+      if (recIdx > 0) {
+        const [picked] = cleaned.splice(recIdx, 1)
+        cleaned.unshift(picked!)
+      }
+      msg.artifacts.push({ kind: 'clarify', key: uid('a'), question: e.question, options: cleaned, recommended: 0 })
       break
+    }
     case 'memory_saved':
       msg.timeline.push({ kind: 'info', key: uid('t'), tone: 'memory', text: `记住了：${(e.items ?? []).map((i: { key: string; value: string }) => `${i.key}（${i.value}）`).join('；')}`, step: activePlan(msg)?.num })
       break

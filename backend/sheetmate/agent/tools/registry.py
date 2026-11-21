@@ -235,8 +235,12 @@ def _static_tools() -> list[Tool]:
         Tool("save_field_mapping", "为当前客户保存字段映射：标准字段名 ← 各种表里出现的别名（以后读入时自动统一）。只把确定是同一个意思的列配成别名。",
              _obj({"standard": _STR, "aliases": _STR_LIST}, ["standard", "aliases"]), both, run=_tool_save_field_mapping,
              label=lambda a: f"字段映射 · {a.get('standard', '')}", needs_customer=True),
-        Tool("ask_user", "需求有歧义、不同理解会得到明显不同的结果时，向用户提一个问题并给 2~4 个选项，然后停止等待回答。",
-             _obj({"question": _STR, "options": _STR_LIST}, ["question", "options"]), both, run=_tool_ask_user,
+        Tool("ask_user", "需求有歧义、不同理解会得到明显不同的结果时，向用户提一个问题并给 2~4 个选项，把最推荐的方案放在第 1 项并标注 recommended_index=0，然后停止等待回答。",
+             _obj({
+                 "question": _STR,
+                 "options": {**_STR_LIST, "description": "2~4 个清晰互斥的选项，将最推荐的选项放在第 1 位（不要在选项文字里写「推荐」，界面会自动标注）。"},
+                 "recommended_index": {"type": "integer", "description": "推荐选项的 0 基下标，默认 0（推荐项应放在第 1 位）。"},
+             }, ["question", "options"]), both, run=_tool_ask_user,
              label=lambda a: "向你提问"),
     ]
 

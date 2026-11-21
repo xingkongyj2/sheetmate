@@ -3,15 +3,45 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from sheetmate.agent.tools.contracts import AgentContext, ToolResult
+
+_RECOMMENDED_TAG_RE = re.compile(
+    r"^(?:\s*[\[(【（]\s*(?:默认)?(?:推荐|recommended)\s*[\])】）]\s*)+"
+    r"|(?:\s*[\[(【（]\s*(?:默认)?(?:推荐|recommended)\s*[\])】）]\s*)+$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_clarify_options(raw_options: Any, recommended_index: Any = None) -> tuple[list[str], int | None]:
+    options = [str(o).strip() for o in (raw_options or []) if str(o).strip()][:4]
+    if not options:
+        return [], None
+    rec_idx: int | None = None
+    if isinstance(recommended_index, int) and not isinstance(recommended_index, bool) and 0 <= recommended_index < len(options):
+        rec_idx = recommended_index
+    else:
+        for idx, text in enumerate(options):
+            if _RECOMMENDED_TAG_RE.search(text):
+                rec_idx = idx
+                break
+    if rec_idx is None:
+        rec_idx = 0
+    cleaned = [(_RECOMMENDED_TAG_RE.sub("", text).strip() or text) for text in options]
+    if rec_idx > 0:
+        cleaned.insert(0, cleaned.pop(rec_idx))
+    return cleaned, 0
 
 
 def _tool_ask_user(args: dict[str, Any], ctx: AgentContext) -> ToolResult:
     question = str(args.get("question") or "").strip()
-    options = [str(o) for o in (args.get("options") or []) if str(o).strip()][:4]
+    options, recommended = _normalize_clarify_options(args.get("options"), args.get("recommended_index"))
+    event: dict[str, Any] = {"type": "clarify", "question": question, "options": options}
+    if recommended is not None:
+        event["recommended"] = recommended
     return ToolResult("已向用户提问，等待用户回答后再继续。", summary=question,
-                      events=[{"type": "clarify", "question": question, "options": options}], end_turn=True)
+                      events=[event], end_turn=True)
 
 
 def _tool_inspect_evidence(args: dict[str, Any], ctx: AgentContext) -> ToolResult:

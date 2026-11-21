@@ -1710,7 +1710,11 @@ def _history_content(message: Message) -> str:
     for event in message.events or []:
         if event.get("type") != "clarify":
             continue
-        options = "\n".join(f"{index}. {option}" for index, option in enumerate(event.get("options") or [], 1))
+        recommended = event.get("recommended")
+        options = "\n".join(
+            f"{index}. {option}" + ("（推荐）" if recommended == index - 1 else "")
+            for index, option in enumerate(event.get("options") or [], 1)
+        )
         content += f"\n助手提问：{event.get('question', '')}" + (f"\n{options}" if options else "")
     return content
 

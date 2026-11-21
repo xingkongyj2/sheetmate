@@ -193,7 +193,9 @@ export function messageMarkdown(message: UiMessage, stages?: { title: string; su
       `- [${inline(file.filename)}](${file.download_url.replace(/[\s()]/g, (char) => encodeURIComponent(char))})`).join('\n'))
   }
   for (const item of message.artifacts) {
-    if (item.kind === 'clarify') blocks.push(`### 待确认\n\n${item.question}\n\n${item.options.map((option) => `- ${inline(option)}`).join('\n')}`)
+    if (item.kind === 'clarify') {
+      blocks.push(`### 待确认\n\n${item.question}\n\n${item.options.map((option, index) => `- ${inline(option)}${item.recommended === index ? '（推荐）' : ''}`).join('\n')}`)
+    }
   }
   if (message.error) blocks.push(`> ${inline(message.error)}`)
   return blocks.join('\n\n')

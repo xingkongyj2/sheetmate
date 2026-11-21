@@ -3,7 +3,7 @@
  * 对话里的处理卡片：实时展示规划、执行（含自动修复）、校验和比对，按请求展示流程保存结果。
  * 执行已有流程（重复执行）也用这张卡片。
  */
-import { ChevronRight, CircleAlert, Download, ExternalLink, Eye, Sheet, LoaderCircle, MessageCircleQuestion, ShieldCheck } from '@lucide/vue'
+import { ChevronRight, CircleAlert, Download, ExternalLink, Eye, Sheet, LoaderCircle, ShieldCheck } from '@lucide/vue'
 import { computed, ref } from 'vue'
 
 import { fileApi } from '@/api'
@@ -108,10 +108,10 @@ const busyText = computed(() => {
       <p v-else-if="progress.runSummary && !failure" class="text-[13px] leading-relaxed text-mute">{{ userFacingText(progress.runSummary, '处理已结束，请查看结果。', 600) }}</p>
 
       <!-- 需要确认的问题 -->
-      <div v-if="progress.questions?.length" class="rounded-xl bg-fun-yellow/15 px-3 py-2.5 text-[13px]">
-        <div class="mb-1 flex items-center gap-1.5 font-medium text-[#8a6400]"><MessageCircleQuestion class="size-4" />需要你确认</div>
-        <ul class="list-disc space-y-0.5 pl-5 text-[#6b5000]">
-          <li v-for="q in progress.questions" :key="q.question">{{ q.question }}<span v-if="q.options?.length" class="text-[#a68a3a]">（{{ q.options.join(' / ') }}）</span></li>
+      <div v-if="progress.questions?.length" class="rounded-xl border border-line/80 bg-paper/55 px-3.5 py-2.5 text-[13px]">
+        <div class="mb-1 text-xs font-medium text-mute">待确认</div>
+        <ul class="list-disc space-y-0.5 pl-4 text-ink/90">
+          <li v-for="q in progress.questions" :key="q.question">{{ q.question }}<span v-if="q.options?.length" class="text-faint">（{{ q.options.join(' / ') }}）</span></li>
         </ul>
       </div>
 

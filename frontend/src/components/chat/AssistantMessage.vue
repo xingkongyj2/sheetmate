@@ -2,7 +2,7 @@
 /**
  * 助手消息：阶段回复与折叠的处理记录按发生顺序穿插，最后展示回答和交付结果。
  */
-import { Check, ChevronRight, CircleAlert, CircleHelp, Code, Copy, Download, Eye, Sheet, LoaderCircle, MessageCircleQuestion, Table2 } from '@lucide/vue'
+import { ArrowRight, ArrowUp, Check, CircleAlert, CircleHelp, Code, Copy, Download, Eye, Sheet, LoaderCircle, Table2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, ref } from 'vue'
 
 import { fileApi } from '@/api'
@@ -258,45 +258,96 @@ onBeforeUnmount(() => {
         </div>
       </template>
       <template v-if="!typing">
-        <section v-for="a in questions" :key="`b${a.key}`" class="overflow-hidden rounded-2xl border border-[#eadfc9] bg-[#fffcf6]">
-          <div class="flex items-start gap-3 px-4 pb-3 pt-4 sm:px-5 sm:pt-5">
-            <span class="flex size-9 shrink-0 items-center justify-center rounded-xl bg-[#fff1d2] text-[#a56d0d]">
-              <MessageCircleQuestion class="size-[18px]" />
-            </span>
-            <div class="min-w-0 flex-1">
-              <div class="text-[11px] font-semibold tracking-wide text-[#9a6b20]">需要你确认</div>
-              <h3 class="mt-1 whitespace-pre-line break-words text-[15px] font-semibold leading-6 [overflow-wrap:anywhere]">{{ a.question }}</h3>
-              <p class="mt-1 text-xs leading-5 text-mute">{{ answersClosed ? '该问题已结束，可在下方继续对话' : typing || answersDisabled ? '请稍等，正在更新回复' : '选择或直接输入回答' }}</p>
-            </div>
+        <section
+          v-for="a in questions"
+          :key="`b${a.key}`"
+          class="overflow-hidden rounded-2xl border transition"
+          :class="answersClosed
+            ? 'border-line/80 bg-paper/45'
+            : 'border-line bg-white shadow-[0_2px_12px_-4px_rgba(34,34,66,0.06)]'"
+        >
+          <div class="flex items-start gap-3 px-4 py-3.5 sm:px-5 sm:py-4">
+            <h3
+              class="min-w-0 flex-1 whitespace-pre-line break-words text-[14.5px] font-medium leading-6 [overflow-wrap:anywhere]"
+              :class="answersClosed ? 'text-ink/75' : 'text-ink'"
+            >
+              {{ a.question }}
+            </h3>
+            <span
+              v-if="answersClosed"
+              class="mt-0.5 shrink-0 rounded-full bg-black/[0.05] px-2 py-0.5 text-[11px] text-faint"
+            >已结束</span>
+            <span
+              v-else-if="answersDisabled"
+              class="mt-0.5 shrink-0 text-[11px] text-faint"
+            >处理中</span>
           </div>
-          <ol class="space-y-2 px-3 pb-3 sm:px-4 sm:pb-4" :aria-label="a.question">
+
+          <ol
+            v-if="a.options.length"
+            class="divide-y divide-line/70 border-t border-line/70"
+            :aria-label="a.question"
+          >
             <li v-for="(opt, index) in a.options" :key="opt">
               <button
                 type="button"
-                class="group/option flex min-h-12 w-full items-center gap-3 rounded-xl border border-[#eee9df] bg-white px-3.5 py-3 text-left text-[13px] leading-5 text-ink shadow-[0_1px_2px_rgba(28,25,17,0.03)] transition enabled:hover:border-[#d6bf8d] enabled:hover:bg-[#fffdf8] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#d7a337] disabled:cursor-not-allowed disabled:opacity-50"
+                class="group/option flex w-full items-center gap-3 px-4 text-left transition focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ink/40 sm:px-5"
+                :class="answersClosed
+                  ? 'cursor-default py-2.5 text-[13px] leading-5 text-mute'
+                  : 'py-3 text-[13.5px] leading-5 text-ink/90 enabled:hover:bg-paper/75 enabled:hover:text-ink disabled:cursor-not-allowed disabled:opacity-50'"
                 :disabled="answersLocked"
                 @click="emit('answer', opt)"
               >
-                <span aria-hidden="true" class="flex size-6 shrink-0 items-center justify-center rounded-lg bg-paper text-[11px] font-semibold text-mute transition group-hover/option:bg-[#fff1d2] group-hover/option:text-[#9a6b20]">{{ index + 1 }}</span>
-                <span class="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{{ opt }}</span>
-                <ChevronRight aria-hidden="true" class="size-4 shrink-0 text-faint transition group-hover/option:translate-x-0.5 group-hover/option:text-[#a56d0d]" />
+                <span
+                  aria-hidden="true"
+                  class="w-4 shrink-0 font-mono text-[11px] tabular-nums transition-colors"
+                  :class="answersClosed
+                    ? 'text-faint'
+                    : a.recommended === index
+                      ? 'font-medium text-ink/70 group-hover/option:text-ink'
+                      : 'text-faint group-hover/option:text-ink'"
+                >{{ index + 1 }}</span>
+                <span
+                  class="min-w-0 flex-1 break-words [overflow-wrap:anywhere]"
+                  :class="!answersClosed && a.recommended === index ? 'font-medium text-ink' : ''"
+                >{{ opt }}</span>
+                <span
+                  v-if="a.recommended === index"
+                  class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium leading-none"
+                  :class="answersClosed ? 'bg-black/[0.05] text-faint' : 'bg-[#6265DC]/[0.09] text-[#5658cc]'"
+                >推荐</span>
+                <ArrowRight
+                  v-if="!answersClosed"
+                  aria-hidden="true"
+                  class="size-3.5 shrink-0 -translate-x-0.5 text-faint opacity-0 transition group-hover/option:translate-x-0 group-hover/option:text-ink group-hover/option:opacity-100 group-focus-visible/option:translate-x-0 group-focus-visible/option:opacity-100"
+                />
               </button>
             </li>
           </ol>
-          <form class="border-t border-[#eadfc9] px-3 py-3 sm:px-4 sm:py-4" @submit.prevent="submitAnswer(a.key)">
-            <label class="mb-2 block text-xs font-medium text-mute">
-              自定义回答
-              <textarea
-                v-model="answerDrafts[a.key]"
-                rows="2"
-                class="mt-2 block w-full min-w-0 resize-y rounded-xl border border-[#eee9df] bg-white px-3.5 py-3 text-[13px] leading-5 text-ink outline-none transition focus:border-[#d6bf8d] focus:ring-2 focus:ring-[#d7a337]/15 disabled:cursor-not-allowed disabled:opacity-50"
-                :disabled="answersLocked"
-                @keydown="onAnswerKeydown($event, a.key)"
-              />
-            </label>
-            <div class="flex justify-end">
-              <button type="submit" class="btn-ink h-9 px-4 py-0 text-xs disabled:cursor-not-allowed disabled:opacity-50" :disabled="answersLocked || !answerDrafts[a.key]?.trim()">发送</button>
-            </div>
+
+          <form
+            v-if="!answersClosed"
+            class="flex items-center gap-2.5 border-t border-line/70 bg-paper/35 px-4 py-2.5 sm:px-5"
+            @submit.prevent="submitAnswer(a.key)"
+          >
+            <input
+              v-model="answerDrafts[a.key]"
+              type="text"
+              class="min-w-0 flex-1 bg-transparent py-1 text-[13.5px] text-ink outline-none placeholder:text-faint disabled:cursor-not-allowed disabled:opacity-50"
+              placeholder="或直接输入其他说明…"
+              aria-label="自定义回答"
+              :disabled="answersLocked"
+              @keydown="onAnswerKeydown($event, a.key)"
+            />
+            <button
+              type="submit"
+              class="flex size-7 shrink-0 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/80 disabled:cursor-not-allowed disabled:bg-black/[0.08] disabled:text-faint"
+              title="发送"
+              aria-label="发送回答"
+              :disabled="answersLocked || !answerDrafts[a.key]?.trim()"
+            >
+              <ArrowUp class="size-3.5" />
+            </button>
           </form>
         </section>
       </template>

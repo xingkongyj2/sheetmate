@@ -24,7 +24,9 @@ onMounted(() => {
       class="relative my-2 mr-2 flex min-h-0 min-w-0 flex-1 flex-col"
       :class="splitPanel ? '' : 'app-panel overflow-hidden rounded-[14px] bg-panel'"
     >
-      <RouterView />
+      <RouterView v-slot="{ Component, route: displayedRoute }">
+        <component :is="Component" :key="displayedRoute.path" />
+      </RouterView>
     </main>
   </div>
 </template>
