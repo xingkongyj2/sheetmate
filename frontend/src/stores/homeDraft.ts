@@ -166,7 +166,7 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
     customerId.value = initialCustomerId
   }
 
-  /** 显式选中某个客户（例如从侧栏客户项点击「新增对话」进入首页）。 */
+  /** 显式选中某个客户（例如从侧栏客户项或客户详情页点击新建对话进入首页）。 */
   function selectCustomer(nextCustomerId: string | null) {
     initialized.value = true
     customerId.value = nextCustomerId

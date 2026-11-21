@@ -5,7 +5,7 @@ import {
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { conversationApi, customerApi } from '@/api'
+import { customerApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerDetail } from '@/api/types'
 import ConversationIcon from '@/components/brand/ConversationIcon.vue'
@@ -25,7 +25,9 @@ import { isDeliveredOutput } from '@/composables/deliveryFiles'
 import { useConfirm } from '@/composables/useConfirm'
 import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
+import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
+import { useHomeDraftStore } from '@/stores/homeDraft'
 
 
 const props = defineProps<{ id: string }>()
@@ -33,7 +35,9 @@ const route = useRoute()
 const router = useRouter()
 const toast = useToast()
 const { confirmDelete } = useConfirm()
+const auth = useAuthStore()
 const store = useWorkspaceStore()
+const homeDraft = useHomeDraftStore()
 
 type Tab = 'logic' | 'recipes' | 'files' | 'memory'
 const TABS: { key: Tab; label: string }[] = [
@@ -104,13 +108,12 @@ function setTab(next: Tab) {
 }
 
 async function newChat() {
-  try {
-    const conv = await conversationApi.create({ customer_id: props.id, recipe_id: primaryRecipe.value?.recipe_id })
-    store.upsertConversation(conv)
-    router.push({ name: 'chat', params: { id: conv.id } })
-  } catch (err) {
-    toast.error(errorText(err))
-  }
+  const customerId = props.id
+  if (auth.user) await homeDraft.hydrate(auth.user.id)
+  if (!active || props.id !== customerId) return
+  if (!store.customers.some((c) => c.id === customerId)) void store.refreshCustomers().catch(() => undefined)
+  homeDraft.selectCustomer(customerId)
+  await router.push({ name: 'home', query: { customer: customerId } })
 }
 
 async function regenerate() {
@@ -195,7 +198,7 @@ async function onEdited() {
           </div>
         </div>
         <div class="col-span-2 flex flex-wrap items-center gap-2 sm:col-span-1 sm:col-start-2">
-          <button class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="newChat"><MessageSquarePlus class="size-3.5" />新建对话</button>
+          <button type="button" class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="newChat"><MessageSquarePlus class="size-3.5" />新建对话</button>
         </div>
       </header>
 

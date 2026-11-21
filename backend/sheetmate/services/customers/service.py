@@ -32,12 +32,28 @@ from sheetmate.services.workflows import service as recipe_service
 from sheetmate.services.workflows import runs as run_service
 from sheetmate.core.errors import ServiceError
 
-# 与前端 components/brand/mascots.ts 一致：绿豆芽搞怪系列 + 蓝波点尖帽搞怪系列
+# 与前端 components/brand/mascots.ts 一致：10 套色系 × 9 款独立表情（90 款）
 MASCOTS = [
     "blob", "sprout-laugh", "sprout-cool", "sprout-star", "sprout-tongue",
     "sprout-dizzy", "sprout-deadpan", "sprout-sleepy", "sprout-bandaid",
     "ink-party", "party-wink", "party-shock", "party-whistle", "party-money",
-    "party-cool", "party-teary",
+    "party-cool", "party-teary", "party-love", "party-xd",
+    "cream-shy", "cream-cross", "cream-monocle", "cream-question", "cream-sweat",
+    "cream-pixel", "cream-drool", "cream-kiss", "cream-faint",
+    "indigo-eureka", "indigo-nerd", "indigo-steam", "indigo-lollipop", "indigo-side",
+    "indigo-overload", "indigo-drowsy", "indigo-chill", "indigo-hum",
+    "oat-cozy", "oat-sir", "oat-yawn", "oat-crave", "oat-awkward",
+    "oat-grumpy", "oat-coolpop", "oat-derp", "oat-smooch",
+    "sage-leaf", "sage-huh", "sage-grit", "sage-scholar", "sage-judge",
+    "sage-touched", "sage-blep", "sage-nap", "sage-hype",
+    "mist-shiny", "mist-blank", "mist-confused", "mist-boss", "mist-sob",
+    "mist-tune", "mist-ko", "mist-candy", "mist-focus",
+    "peach-cheer", "peach-blush", "peach-rage", "peach-yummy", "peach-cheeky",
+    "peach-doze", "peach-sassy", "peach-spook", "peach-dapper",
+    "taro-dream", "taro-coolcat", "taro-flirt", "taro-bubblecat", "taro-curious",
+    "taro-sweet", "taro-effort", "taro-dizzyx", "taro-noble",
+    "rose-sweetie", "rose-bashful", "rose-adore", "rose-melody", "rose-feisty",
+    "rose-wail", "rose-geek", "rose-gasp", "rose-silly",
 ]
 SUMMARY_POLICY_VERSION = 1  # 用户可见说明只使用流程资料和用户维护的记忆。
 
