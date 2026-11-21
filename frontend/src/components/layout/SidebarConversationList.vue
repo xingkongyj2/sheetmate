@@ -5,7 +5,7 @@
  * - 对话：未关联客户的对话，按更新时间排列。
  * 两块的收起状态和展开的客户记在本机浏览器里，读写失败就用默认值。
  */
-import { ArrowUpRight, ChevronDown, Plus, SquarePen } from '@lucide/vue'
+import { ChevronDown, Plus, SquareArrowOutUpRight, SquarePen } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -145,7 +145,7 @@ async function remove(id: string, title: string) {
                 title="打开详情"
                 :aria-label="`打开客户详情 ${group.customer.name}`"
               >
-                <ArrowUpRight class="size-3.5" />
+                <SquareArrowOutUpRight class="size-3.5" aria-hidden="true" />
               </RouterLink>
               <button
                 type="button"
