@@ -193,7 +193,7 @@ onBeforeUnmount(() => {
     </div>
     <!-- 用时压在首行文字上方，不占位，首行文字仍和头像中心对齐。 -->
     <p v-if="replyTime" class="pointer-events-none absolute left-0 top-0 text-[11px] leading-3 text-faint tabular-nums" data-testid="reply-timer">{{ replyTime }}</p>
-    <div class="assistant-content w-full min-w-0 space-y-3">
+    <div class="assistant-content w-full min-w-0 space-y-3" :class="{ 'has-reply-timer': !!replyTime }">
       <!-- 每轮对话先脱敏再交给模型：脱敏结果永远是回复的第一块内容。 -->
       <PrivacyReportCard v-if="(message.privacy && showsPrivacyReport(message.privacy)) || (!message.privacy && message.privacyRunning)" class="assistant-privacy" :report="message.privacy" :running="message.privacyRunning" />
       <!-- 按发生顺序只合并相邻同类步骤，正文保持原位。 -->
@@ -352,7 +352,7 @@ onBeforeUnmount(() => {
         </section>
       </template>
 
-      <ExecutionStatusNotice v-if="!typing && !showError" :message="message" compact />
+      <ExecutionStatusNotice v-if="!typing && !showError" class="assistant-status" :message="message" compact />
 
       <div v-if="!typing && showError" class="flex gap-2 rounded-xl bg-error/5 px-3.5 py-2.5 text-[13px] text-error">
         <CircleAlert class="mt-0.5 size-4 shrink-0" />
@@ -383,9 +383,15 @@ onBeforeUnmount(() => {
 /* 首行文字中心与头像中心对齐；多行内容的后续行自然向下排。 */
 .assistant-content > .assistant-activity:first-child,
 .assistant-content > .assistant-privacy:first-child,
+.assistant-content > :deep(.assistant-status:first-child),
 .assistant-stage:first-child > .assistant-process > summary,
 .assistant-content > :deep(.prose-sm:first-child) {
   padding-top: max(0px, calc((var(--assistant-avatar-size) - 1lh) / 2));
+}
+
+/* 报错条、文件卡、提问卡等块级首元素在顶部有耗时标签时避开绝对定位的用时，避免文字重叠 */
+.assistant-content.has-reply-timer > :deep(:first-child:not(.assistant-activity):not(.assistant-privacy):not(.assistant-status):not(.assistant-stage):not(.prose-sm)) {
+  margin-top: 1.125rem;
 }
 
 .assistant-content > :deep(.prose-sm:first-child > :is(ul, ol):first-child > li:first-child),
