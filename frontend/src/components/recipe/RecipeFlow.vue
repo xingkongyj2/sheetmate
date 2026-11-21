@@ -405,21 +405,54 @@ onBeforeUnmount(() => {
       <section ref="dialog" role="dialog" aria-modal="true" :aria-label="fullscreen ? `${context.title || '处理流程'} · 全屏流程图` : '流程节点详情'" tabindex="-1" class="flow-dialog" :class="fullscreen ? 'flow-dialog--full' : 'flow-dialog--detail'">
         <template v-if="fullscreen">
           <div ref="workspaceEl" class="flow-workspace" :class="{ 'is-resizing': resizingSide }">
-            <div class="flow-canvas-area">
+            <div class="flow-canvas-area app-panel" :class="{ 'has-side': !!selection }">
               <header class="flow-header">
                 <div class="flow-header-title">
-                  <h2 class="truncate text-[22px] font-semibold leading-tight" :title="context.title || '处理流程'">{{ context.title || '处理流程' }}</h2>
-                  <span v-if="context.version" class="tag shrink-0 !bg-ink !px-2 !py-1 !text-xs !text-white">v{{ context.version }}</span>
-                  <span v-if="context.batch" class="flow-batch-tag" role="status" :title="`第 ${context.batch.index}/${context.batch.total} 次 · ${context.batch.filename}`">
-                    <LoaderCircle v-if="running" class="size-3.5 shrink-0 animate-spin text-[#6265DC]" />
-                    <span class="shrink-0 tabular-nums">第 {{ context.batch.index }}/{{ context.batch.total }} 次</span>
-                    <span class="truncate text-mute">{{ context.batch.filename }}</span>
-                  </span>
+                  <div class="flow-title-pill">
+                    <h2 class="truncate text-[15px] font-semibold tracking-tight text-ink" :title="context.title || '处理流程'">{{ context.title || '处理流程' }}</h2>
+                    <span v-if="context.version" class="shrink-0 rounded-full border border-line bg-paper px-2 py-0.5 text-[11px] font-medium tabular-nums text-mute">v{{ context.version }}</span>
+                    <span v-if="context.batch" class="flow-batch-tag" role="status" :title="`第 ${context.batch.index}/${context.batch.total} 次 · ${context.batch.filename}`">
+                      <LoaderCircle v-if="running" class="size-3.5 shrink-0 animate-spin text-[#6265DC]" />
+                      <span class="shrink-0 tabular-nums">第 {{ context.batch.index }}/{{ context.batch.total }} 次</span>
+                      <span class="truncate text-mute">{{ context.batch.filename }}</span>
+                    </span>
+                  </div>
                 </div>
                 <div class="flow-header-actions">
-                  <button v-if="canEdit" type="button" class="flow-action" aria-label="对话修改" title="对话修改" :disabled="running || openingEdit" @click="editFlow('modify', { kind: 'workflow' })"><MessageCircleMore class="size-5" /></button>
-                  <button v-if="canReplay" type="button" class="flow-action" :aria-label="running ? '执行中' : '重新执行'" :title="running ? '执行中' : '重新执行'" :disabled="running || preparingRun" @click="prepareRun"><LoaderCircle v-if="running || preparingRun" class="size-5 animate-spin" /><Play v-else class="size-5" /></button>
-                  <button type="button" class="flow-action flow-header-close" aria-label="退出全屏" title="退出全屏 · Esc" @click="closeDialog"><X class="size-5" /></button>
+                  <button
+                    v-if="canEdit"
+                    type="button"
+                    class="flow-action-pill"
+                    aria-label="对话修改"
+                    title="对话修改"
+                    :disabled="running || openingEdit"
+                    @click="editFlow('modify', { kind: 'workflow' })"
+                  >
+                    <MessageCircleMore class="size-4 shrink-0" aria-hidden="true" />
+                    <span class="hidden sm:inline">对话修改</span>
+                  </button>
+                  <button
+                    v-if="canReplay"
+                    type="button"
+                    class="flow-action-pill flow-action-pill--primary"
+                    :aria-label="running ? '执行中' : '重新执行'"
+                    :title="running ? '执行中' : '重新执行'"
+                    :disabled="running || preparingRun"
+                    @click="prepareRun"
+                  >
+                    <LoaderCircle v-if="running || preparingRun" class="size-4 shrink-0 animate-spin" aria-hidden="true" />
+                    <Play v-else class="size-3.5 shrink-0" aria-hidden="true" />
+                    <span class="hidden sm:inline">{{ running ? '执行中' : '重新执行' }}</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="flow-action flow-header-close"
+                    aria-label="退出全屏"
+                    title="退出全屏 · Esc"
+                    @click="closeDialog"
+                  >
+                    <X class="size-4" aria-hidden="true" />
+                  </button>
                 </div>
               </header>
               <div ref="viewport" class="flow-viewport" tabindex="0" aria-label="流程画布，可滚动和拖动" @pointerdown="startPan" @pointermove="pan" @pointerup="endPan" @pointercancel="endPan" @lostpointercapture="endPan" @wheel="wheel">
@@ -449,7 +482,7 @@ onBeforeUnmount(() => {
                 :aria-valuenow="sideWidth" :aria-valuemin="SIDE_MIN" :aria-valuemax="SIDE_MAX" tabindex="0" title="拖动调整宽度，双击恢复默认"
                 @pointerdown="startSideResize" @pointermove="moveSideResize" @pointerup="endSideResize" @pointercancel="endSideResize" @keydown="keySideResize" @dblclick="resetSideWidth"
               />
-              <aside class="flow-side-panel" aria-label="节点详情">
+              <aside class="flow-side-panel app-panel" aria-label="节点详情">
                 <RecipeFlowInspector v-if="selection" :selection="selection" :flow="shownFlow" :states="states" :context="context" :recipe="context.recipe" :files="context.files" :editable="canEdit && !running && !openingEdit" @edit="(operation, options) => editFlow(operation, undefined, options?.focus)" @close="selection = null" @preview="openFilePreview" />
               </aside>
             </div>
@@ -468,43 +501,60 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .recipe-flow-toolbar--card { position: absolute; top: 12px; right: 12px; z-index: 2; }
-.flow-layer { position: fixed; inset: 0; z-index: 4000; background: white; }
+.flow-layer { position: fixed; inset: 0; z-index: 4000; background: var(--color-canvas); }
 .flow-layer--detail { display: flex; align-items: center; justify-content: center; padding: 24px; background: #0b0b0c35; backdrop-filter: blur(3px); }
-.flow-dialog { min-width: 0; background: white; outline: none; }
+.flow-dialog { min-width: 0; background: var(--color-canvas); outline: none; }
 .flow-dialog--full { display: flex; height: 100dvh; flex-direction: column; }
-.flow-dialog--detail { display: flex; flex-direction: column; width: clamp(360px, 42vw, 560px); max-width: 100%; max-height: 88dvh; overflow: hidden; border: 1px solid #ececef; border-radius: 24px; box-shadow: 0 24px 90px #22224225; }
-/* 没有顶栏：标题和按钮直接浮在画布上，点击穿透到画布（拖动不受影响），只有按钮自己接收点击。 */
-.flow-header { position: absolute; inset: 0 0 auto 0; z-index: 3; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 18px 20px; pointer-events: none; }
-.flow-header-title { display: flex; min-width: 0; max-width: min(60vw, 560px); grid-column: 2; align-items: center; justify-content: center; gap: 8px; }
-.flow-batch-tag { display: inline-flex; min-width: 0; max-width: 260px; align-items: center; gap: 6px; border-radius: 9999px; background: #6265DC14; padding: 4px 12px; font-size: 12px; line-height: 1.4; color: #3c3f9e; }
-.flow-header-actions { display: flex; grid-column: 3; align-items: center; justify-content: flex-end; gap: 10px; }
-.flow-action { display: inline-flex; width: 42px; height: 42px; flex: none; align-items: center; justify-content: center; border: 1px solid #ececef; border-radius: 9999px; background: white; color: #0b0b0c; pointer-events: auto; transition: border-color .2s, color .2s; }
-.flow-action:hover { border-color: #0b0b0c4d; }
-.flow-action:focus-visible { outline: 2px solid #0b0b0c; outline-offset: 2px; }
+.flow-dialog--detail { display: flex; flex-direction: column; width: clamp(360px, 42vw, 560px); max-width: 100%; max-height: 88dvh; overflow: hidden; border: 1px solid #e4e3e1; border-radius: 20px; background: var(--color-panel); box-shadow: 0 24px 80px -20px rgba(32, 28, 24, 0.22); }
+/* 浮在画布上的轻量标题与操作区：空白处点击穿透到画布，拖动不受影响 */
+.flow-header { position: absolute; inset: 0 0 auto 0; z-index: 3; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 12px; padding: 16px 20px; pointer-events: none; }
+.flow-header-title { display: flex; min-width: 0; max-width: min(52vw, 540px); grid-column: 2; align-items: center; justify-content: center; }
+.flow-canvas-area.has-side .flow-header { grid-template-columns: minmax(0, 1fr) auto; }
+.flow-canvas-area.has-side .flow-header-title { grid-column: 1; justify-content: flex-start; max-width: 100%; }
+.flow-canvas-area.has-side .flow-header-actions { grid-column: 2; }
+.flow-title-pill { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 8px; border: 1px solid #e4e3e1; border-radius: 9999px; background: rgba(255, 255, 255, 0.92); backdrop-filter: blur(10px); padding: 7px 16px; box-shadow: 0 4px 16px -6px rgba(60, 50, 40, 0.08); pointer-events: auto; }
+.flow-batch-tag { display: inline-flex; min-width: 0; max-width: 220px; align-items: center; gap: 6px; border-radius: 9999px; background: #6265dc14; padding: 3px 10px; font-size: 11px; line-height: 1.4; color: #3c3f9e; }
+.flow-header-actions { display: flex; grid-column: 3; align-items: center; justify-content: flex-end; gap: 8px; }
+.flow-action-pill { display: inline-flex; height: 36px; flex: none; align-items: center; justify-content: center; gap: 6px; border: 1px solid #e4e3e1; border-radius: 9999px; background: rgba(255, 255, 255, 0.94); backdrop-filter: blur(10px); padding: 0 14px; font-size: 12.5px; font-weight: 500; color: var(--color-ink); box-shadow: 0 4px 14px -6px rgba(60, 50, 40, 0.08); pointer-events: auto; transition: background-color .18s, border-color .18s, color .18s, transform .15s; }
+.flow-action-pill:hover { border-color: #d4d1cb; background: var(--color-paper); }
+.flow-action-pill:active { transform: scale(0.98); }
+.flow-action-pill:focus-visible { outline: 2px solid var(--color-ink); outline-offset: 2px; }
+.flow-action-pill:disabled { cursor: default; opacity: .45; }
+.flow-action-pill--primary { border-color: var(--color-ink); background: var(--color-ink); color: #ffffff; box-shadow: 0 6px 16px -8px rgba(11, 11, 12, 0.35); }
+.flow-action-pill--primary:hover { border-color: #26262a; background: #26262a; color: #ffffff; }
+.flow-action { display: inline-flex; width: 36px; height: 36px; flex: none; align-items: center; justify-content: center; border: 1px solid #e4e3e1; border-radius: 9999px; background: rgba(255, 255, 255, 0.94); backdrop-filter: blur(10px); color: var(--color-mute); box-shadow: 0 4px 14px -6px rgba(60, 50, 40, 0.08); pointer-events: auto; transition: background-color .18s, border-color .18s, color .18s; }
+.flow-action:hover { border-color: #d4d1cb; background: var(--color-paper); color: var(--color-ink); }
+.flow-action:focus-visible { outline: 2px solid var(--color-ink); outline-offset: 2px; }
 .flow-action:disabled { cursor: default; opacity: .45; }
-.flow-workspace { display: flex; min-height: 0; flex: 1; }
-.flow-canvas-area { position: relative; min-width: 0; min-height: 0; flex: 1; background-color: #fafafd; background-image: radial-gradient(#0b0b0c59 1.6px, transparent 1.7px); background-size: 24px 24px; }
+/* 与主界面 AppShell / ChatView 完全一致的暖灰底 + 悬浮圆角白面板 */
+.flow-workspace { display: flex; min-height: 0; flex: 1; gap: 8px; padding: 8px; background: var(--color-canvas); }
+.flow-canvas-area { position: relative; min-width: 0; min-height: 0; flex: 1; overflow: hidden; border-radius: 14px; background-color: var(--color-panel); background-image: radial-gradient(rgba(120, 113, 104, 0.16) 1px, transparent 1px); background-size: 24px 24px; }
 .flow-viewport { width: 100%; height: 100%; overflow: auto; scrollbar-gutter: stable both-edges; overscroll-behavior: contain; cursor: grab; touch-action: pan-x pan-y; }
 .flow-viewport:active { cursor: grabbing; }
 .flow-viewport:focus-visible { outline: 2px solid #6265dc; outline-offset: -3px; }
 .flow-stage { position: relative; }
 .flow-canvas { position: absolute; width: max-content; transform-origin: top left; padding: 4px; }
-.flow-tools { position: absolute; left: 20px; bottom: 20px; display: flex; align-items: center; padding: 4px; border: 1px solid #ececef; border-radius: 13px; background: white; box-shadow: 0 3px 18px #22224208; }
-.flow-run-status { position: absolute; right: 20px; bottom: 26px; display: flex; max-width: calc(100% - 280px); align-items: center; gap: 8px; border: 1px solid #ececef; border-radius: 12px; padding: 9px 12px; background: white; font-size: 12px; }
+.flow-canvas :deep(.recipe-flow-input),
+.flow-canvas :deep(.recipe-flow-step) { border-color: #e4e3e1; box-shadow: 0 2px 10px -4px rgba(60, 50, 40, 0.07), 0 1px 2px rgba(60, 50, 40, 0.03); }
+.flow-canvas :deep(.recipe-flow-output) { box-shadow: 0 10px 22px -12px rgba(11, 11, 12, 0.42); }
+.flow-tools { position: absolute; left: 18px; bottom: 18px; display: flex; align-items: center; padding: 4px; border: 1px solid #e4e3e1; border-radius: 12px; background: rgba(255, 255, 255, 0.94); backdrop-filter: blur(10px); box-shadow: 0 4px 16px -6px rgba(60, 50, 40, 0.09); }
+.flow-run-status { position: absolute; right: 18px; bottom: 20px; display: flex; max-width: calc(100% - 280px); align-items: center; gap: 8px; border: 1px solid #e4e3e1; border-radius: 12px; padding: 8px 12px; background: rgba(255, 255, 255, 0.94); backdrop-filter: blur(10px); box-shadow: 0 4px 16px -6px rgba(60, 50, 40, 0.09); font-size: 12px; }
 .flow-workspace.is-resizing { cursor: col-resize; user-select: none; }
 .flow-side { position: relative; width: var(--side-w, 460px); min-width: 360px; max-width: calc(100% - 320px); min-height: 0; flex: none; }
-.flow-side-panel { width: 100%; height: 100%; min-height: 0; overflow-y: auto; border-left: 1px solid #ececef; background: white; }
-/* 拖动条：压在面板左边缘，比看得见的那条线宽，方便抓；悬停和拖动时显示一条细线 */
-.flow-side-resizer { position: absolute; top: 0; bottom: 0; left: -5px; z-index: 3; width: 10px; cursor: col-resize; touch-action: none; }
-.flow-side-resizer::after { content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; background: transparent; transition: background .15s; }
+.flow-side-panel { width: 100%; height: 100%; min-height: 0; overflow-y: auto; border-radius: 14px; background: var(--color-panel); }
+/* 拖动条：落在两块悬浮面板的 8px 缝隙里，悬停和拖动时亮起柔和细线 */
+.flow-side-resizer { position: absolute; top: 12px; bottom: 12px; left: -9px; z-index: 3; width: 10px; cursor: col-resize; touch-action: none; }
+.flow-side-resizer::after { content: ''; position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; border-radius: 9999px; background: transparent; transition: background .15s; }
 .flow-side-resizer:hover::after, .flow-side-resizer.is-active::after, .flow-side-resizer:focus-visible::after { background: #6265dc; }
 .flow-side-resizer:focus-visible { outline: none; }
 @media (max-width: 760px) {
   .recipe-flow-toolbar--card { top: 10px; right: 10px; }
+  .flow-workspace { position: relative; padding: 0; gap: 0; }
+  .flow-canvas-area { border-radius: 0; border: none; box-shadow: none; }
   .flow-header { padding: 12px; }
-  .flow-header h2 { font-size: 17px; }
-  .flow-workspace { position: relative; }
-  .flow-side { position: absolute; inset: 0 0 0 auto; z-index: 2; width: min(390px, 100%); min-width: 0; max-width: 100%; box-shadow: -12px 0 40px #22224210; }
+  .flow-title-pill { padding: 6px 12px; }
+  .flow-side { position: absolute; inset: 0 0 0 auto; z-index: 2; width: min(390px, 100%); min-width: 0; max-width: 100%; box-shadow: -12px 0 40px rgba(32, 28, 24, 0.12); }
+  .flow-side-panel { border-radius: 0; border-right: none; border-top: none; border-bottom: none; }
   .flow-side-resizer { display: none; }
   .flow-tools { left: 12px; bottom: 12px; }
   .flow-run-status { top: 12px; right: 12px; bottom: auto; max-width: calc(100% - 24px); }
@@ -515,5 +565,6 @@ onBeforeUnmount(() => {
   .flow-header { grid-template-columns: 1fr auto; }
   .flow-header-title { grid-column: 1; justify-content: flex-start; max-width: 100%; }
   .flow-header-actions { grid-column: 2; gap: 6px; }
+  .flow-action-pill { width: 36px; padding: 0; }
 }
 </style>

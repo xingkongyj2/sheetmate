@@ -284,7 +284,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
 .recipe-flow-file, .recipe-flow-step { cursor: pointer; transition: border-color .25s ease, background-color .25s ease, box-shadow .25s ease; }
 .recipe-flow-file:focus-visible, .recipe-flow-step:focus-visible, .recipe-flow-canvas:focus-visible { outline: 2px solid #6265dc; outline-offset: 3px; }
 .recipe-flow-file-name { overflow-wrap: anywhere; }
-.recipe-flow-connector { color: #c9c9cf; }
+.recipe-flow-connector { color: #ccc9c2; }
 .recipe-flow-connector svg { overflow: visible; }
 .recipe-flow-connector line, .recipe-flow-connector path { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .recipe-flow-connector.is-pending .flow-line { stroke-dasharray: 3 4; }

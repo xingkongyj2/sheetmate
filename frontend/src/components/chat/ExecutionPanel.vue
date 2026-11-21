@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /** 客户/会话资源与单次回答的处理流程；表名按来源工作区定位。 */
-import { Download, Eye, FileCheck2, Sheet, Maximize2, Trash2 } from '@lucide/vue'
+import { Download, Eye, FileCheck2, Sheet, Maximize2, SquareArrowOutUpRight, Trash2 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { conversationApi, fileApi } from '@/api'
@@ -163,6 +163,15 @@ function stepFlow(recipe: RecipeBrief): RecipeFlowData {
 function progressRecipeFlow(progress: RecipeProgress, recipe?: RecipeBrief): RecipeFlowData {
   return progress.flow || progress.saved?.flow || progress.steps.length || !recipe ? progressFlow(progress) : stepFlow(recipe)
 }
+/** 流程详情页地址：流程已保存且归属某个客户时才有；临时对话里的流程没有详情页，退回全屏流程图。 */
+function recipeDetailRoute(recipeId?: string | null, customerId?: string | null) {
+  const customer = customerId || props.detail?.customer?.id
+  return recipeId && customer ? { name: 'recipe', params: { id: customer, recipeId } } : null
+}
+function progressDetailRoute(progress: RecipeProgress, recipe?: RecipeBrief) {
+  if (!recipe && !progress.saved) return null
+  return recipeDetailRoute(recipe?.recipe_id || progress.saved?.recipe_id || progress.recipeId, recipe?.customer_id)
+}
 function progressStatus(progress: RecipeProgress): string {
   if (progress.status === 'failed' || progress.failed || ['failed', 'escalated'].includes(progress.runStatus ?? '')) return 'failed'
   if (progress.status !== 'done') return 'running'
@@ -231,40 +240,45 @@ onBeforeUnmount(() => {
       <ExecutionUsage v-else-if="tab === 'usage'" :message="message" :messages="messages" :refreshing="refreshingUsage" @refresh="emit('refresh')" />
       <ExecutionPrivacy v-else-if="tab === 'privacy'" :detail="detail" :message="message" />
       <template v-else-if="tab === 'recipes'">
-        <!-- 每个流程只留一行：标题和全屏按钮；版本、状态、流程图、说明都在全屏里看 -->
-        <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="mb-2 min-w-0">
-          <div class="flex min-w-0 items-center gap-2 rounded-xl border border-line/80 bg-white px-3.5 py-2.5 transition hover:border-ink/20">
+        <!-- 每个流程一张卡片：标题 + 打开流程详情页（未保存到客户的流程没有详情页，退回全屏流程图），下面是与对话里一致的流程图 -->
+        <article v-for="{ progress, recipe, version } in recipeSections.progresses" :key="progress.key" class="workspace-recipe-card mb-2 min-w-0 rounded-xl border border-line/80 bg-white transition hover:border-ink/20">
+          <div class="flex min-w-0 items-center gap-2 px-3.5 pb-1 pt-2.5">
             <h3 class="min-w-0 flex-1 truncate text-sm font-medium text-ink" :title="recipe?.name || progress.saved?.name || progress.recipeName || '处理流程'">{{ recipe?.name || progress.saved?.name || progress.recipeName || '处理流程' }}</h3>
-            <button type="button" class="icon-btn size-7 shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" :disabled="!(progress.flow || progress.saved?.flow || progress.steps.length || recipe)" @click="flows.get(progress.key)?.openFullscreen()"><Maximize2 class="size-3.5" /></button>
+            <RouterLink v-if="progressDetailRoute(progress, recipe)" :to="progressDetailRoute(progress, recipe)!" target="_blank" rel="noopener noreferrer" class="icon-btn size-7 shrink-0" title="打开流程详情" aria-label="在新标签页打开流程详情"><SquareArrowOutUpRight class="size-3.5" /></RouterLink>
+            <button v-else type="button" class="icon-btn size-7 shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" :disabled="!(progress.flow || progress.saved?.flow || progress.steps.length || recipe)" @click="flows.get(progress.key)?.openFullscreen()"><Maximize2 class="size-3.5" /></button>
           </div>
-          <RecipeFlow
-            v-if="progress.flow || progress.saved?.flow || progress.steps.length || recipe"
-            :ref="(el) => setFlow(progress.key, el)"
-            toolbar-placement="hidden" :inline-canvas="false"
-            :flow="progressRecipeFlow(progress, recipe)"
-            :states="progress.steps"
-            :context="{
-              title: recipe?.name || progress.saved?.name || progress.recipeName,
-              recipeId: progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id,
-              version, recipe: recipe?.recipe || progress.recipe, runId: progress.runId,
-              customerId: recipe?.customer_id || detail?.customer?.id, conversationId: detail?.id,
-              files: detail?.files, resultFiles: progress.files || (progress.file ? [progress.file] : []),
-              running: !['done', 'failed'].includes(progress.status), failed: progressStatus(progress) === 'failed', deleted: progress.deleted,
-            }"
-            @changed="emit('refresh')"
-          />
+          <div v-if="progress.flow || progress.saved?.flow || progress.steps.length || recipe" class="px-3.5 pb-3 pt-1.5">
+            <RecipeFlow
+              :ref="(el) => setFlow(progress.key, el)"
+              toolbar-placement="hidden"
+              :flow="progressRecipeFlow(progress, recipe)"
+              :states="progress.steps"
+              :context="{
+                title: recipe?.name || progress.saved?.name || progress.recipeName,
+                recipeId: progress.saved?.recipe_id || progress.recipeId || progress.recipe?.id,
+                version, recipe: recipe?.recipe || progress.recipe, runId: progress.runId,
+                customerId: recipe?.customer_id || detail?.customer?.id, conversationId: detail?.id,
+                files: detail?.files, resultFiles: progress.files || (progress.file ? [progress.file] : []),
+                running: !['done', 'failed'].includes(progress.status), failed: progressStatus(progress) === 'failed', deleted: progress.deleted,
+              }"
+              @changed="emit('refresh')"
+            />
+          </div>
         </article>
-        <article v-for="recipe in recipeSections.saved" :key="recipe.recipe_id" class="mb-2 min-w-0">
-          <div class="flex min-w-0 items-center gap-2 rounded-xl border border-line/80 bg-white px-3.5 py-2.5 transition hover:border-ink/20">
+        <article v-for="recipe in recipeSections.saved" :key="recipe.recipe_id" class="workspace-recipe-card mb-2 min-w-0 rounded-xl border border-line/80 bg-white transition hover:border-ink/20">
+          <div class="flex min-w-0 items-center gap-2 px-3.5 pb-1 pt-2.5">
             <h3 class="min-w-0 flex-1 truncate text-sm font-medium text-ink" :title="recipe.name">{{ recipe.name }}</h3>
-            <button type="button" class="icon-btn size-7 shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="flows.get(`saved:${recipe.recipe_id}`)?.openFullscreen()"><Maximize2 class="size-3.5" /></button>
+            <RouterLink v-if="recipeDetailRoute(recipe.recipe_id, recipe.customer_id)" :to="recipeDetailRoute(recipe.recipe_id, recipe.customer_id)!" target="_blank" rel="noopener noreferrer" class="icon-btn size-7 shrink-0" title="打开流程详情" aria-label="在新标签页打开流程详情"><SquareArrowOutUpRight class="size-3.5" /></RouterLink>
+            <button v-else type="button" class="icon-btn size-7 shrink-0" title="全屏" aria-label="全屏查看流程图" aria-haspopup="dialog" @click="flows.get(`saved:${recipe.recipe_id}`)?.openFullscreen()"><Maximize2 class="size-3.5" /></button>
           </div>
-          <RecipeFlow
-            :ref="(el) => setFlow(`saved:${recipe.recipe_id}`, el)" toolbar-placement="hidden" :inline-canvas="false"
-            :flow="stepFlow(recipe)"
-            :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id || detail?.id, recipe: recipe.recipe, files: detail?.files }"
-            @changed="emit('refresh')"
-          />
+          <div class="px-3.5 pb-3 pt-1.5">
+            <RecipeFlow
+              :ref="(el) => setFlow(`saved:${recipe.recipe_id}`, el)" toolbar-placement="hidden"
+              :flow="stepFlow(recipe)"
+              :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id || detail?.id, recipe: recipe.recipe, files: detail?.files }"
+              @changed="emit('refresh')"
+            />
+          </div>
         </article>
       </template>
 
