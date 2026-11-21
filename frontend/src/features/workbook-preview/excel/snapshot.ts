@@ -98,13 +98,7 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
   }
   const styleIds = new Map<string, string>()
   const sourceStyles = new WeakMap<object, string | undefined>()
-  function styleId(sourceStyle: Cell['style']): string | undefined {
-    if (sourceStyles.has(sourceStyle)) return sourceStyles.get(sourceStyle)
-    const style: IStyleData = convertStyle(sourceStyle, theme, warnings)
-    if (!Object.keys(style).length) {
-      sourceStyles.set(sourceStyle, undefined)
-      return undefined
-    }
+  function registerStyle(style: IStyleData): string {
     const key = JSON.stringify(style)
     let id = styleIds.get(key)
     if (!id) {
@@ -112,6 +106,16 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
       styleIds.set(key, id)
       workbook.styles[id] = style
     }
+    return id
+  }
+  function styleId(sourceStyle: Cell['style']): string | undefined {
+    if (sourceStyles.has(sourceStyle)) return sourceStyles.get(sourceStyle)
+    const style: IStyleData = convertStyle(sourceStyle, theme, warnings)
+    if (!Object.keys(style).length) {
+      sourceStyles.set(sourceStyle, undefined)
+      return undefined
+    }
+    const id = registerStyle(style)
     sourceStyles.set(sourceStyle, id)
     return id
   }
@@ -168,13 +172,7 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
         const date = raw instanceof Date || (raw && typeof raw === 'object' && 'result' in raw && raw.result instanceof Date)
         if (date && !cell.numFmt) {
           const defaultDateStyle = { ...(cellStyle ? workbook.styles[cellStyle] : {}), n: { pattern: 'yyyy-mm-dd' } }
-          const key = JSON.stringify(defaultDateStyle)
-          cellStyle = styleIds.get(key)
-          if (!cellStyle) {
-            cellStyle = `s${styleIds.size}`
-            styleIds.set(key, cellStyle)
-            workbook.styles[cellStyle] = defaultDateStyle
-          }
+          cellStyle = registerStyle(defaultDateStyle)
         }
         if (value.v === undefined && !cellStyle) continue
         if (++cellCount > PREVIEW_LIMITS.cells) tooLarge(`工作簿有效单元格超过 ${PREVIEW_LIMITS.cells.toLocaleString()} 个的预览范围`)
@@ -205,6 +203,58 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
     const ySplit = view?.state === 'frozen' ? view.ySplit ?? 0 : 0
     const firstScrollable = view?.state === 'frozen' && view.topLeftCell ? decodeAddress(view.topLeftCell) : undefined
     const defaultColumnWidth = worksheet.properties.defaultColWidth
+    const defaultColPx = defaultColumnWidth ? columnWidthToPixels(defaultColumnWidth) : 64
+
+    // 含显式换行符或被右侧非空单元格截断的长文本，若原表未显式关闭自动换行，则在预览中自动折行以便行高自适应完整展开
+    const mergeEndCol = new Map<string, number>()
+    for (const range of mergeData) {
+      mergeEndCol.set(`${range.startRow}:${range.startColumn}`, range.endColumn)
+    }
+    const resolveStyleObj = (ref: IStyleData | string | null | undefined | void): IStyleData | undefined =>
+      typeof ref === 'string' ? workbook.styles[ref] ?? undefined : ref ?? undefined
+    const estimateWidth = (text: string, fontSize: number): number => {
+      let width = 0
+      for (let i = 0; i < text.length; i++) {
+        width += text.charCodeAt(i) > 0x2e80 ? fontSize * 1.35 : fontSize * 0.72
+      }
+      return width
+    }
+    for (const [rKey, rawRowCells] of Object.entries(cellData)) {
+      if (!rawRowCells) continue
+      const rowCells = rawRowCells as Record<number, ICellData | null | undefined>
+      const r = Number(rKey)
+      const rowStyleObj = resolveStyleObj(rowData[r]?.s)
+      for (const [cKey, cell] of Object.entries(rowCells)) {
+        if (!cell || typeof cell.v !== 'string' || !cell.v) continue
+        const c = Number(cKey)
+        const cellStyleObj = resolveStyleObj(cell.s)
+        const colStyleObj = resolveStyleObj(columnData[c]?.s)
+        const existingWrap = cellStyleObj?.tb ?? rowStyleObj?.tb ?? colStyleObj?.tb
+        if (existingWrap !== undefined) continue
+        if (cellStyleObj?.stf === 1 || cellStyleObj?.tr) continue
+        let needsWrap = cell.v.includes('\n')
+        if (!needsWrap) {
+          const endCol = mergeEndCol.get(`${r}:${c}`) ?? c
+          const rightCell = rowCells[endCol + 1]
+          const rightOccupied = Boolean(rightCell && rightCell.v !== undefined && rightCell.v !== null && rightCell.v !== '')
+          if (rightOccupied) {
+            let colWidth = 0
+            for (let k = c; k <= endCol; k++) colWidth += columnData[k]?.w ?? defaultColPx
+            const fs = cellStyleObj?.fs ?? rowStyleObj?.fs ?? colStyleObj?.fs ?? 11
+            needsWrap = estimateWidth(cell.v, fs) > colWidth - 8
+          }
+        }
+        if (needsWrap) {
+          const base = cellStyleObj ?? {}
+          cell.s = registerStyle({
+            ...base,
+            tb: 3,
+            pd: { l: 2, r: 2, ...base.pd, t: base.pd?.t ?? 3, b: base.pd?.b ?? 3 },
+          })
+        }
+      }
+    }
+
     const sheet: Partial<IWorksheetData> = {
       id, name: worksheet.name,
       tabColor: colorToHex(worksheet.properties.tabColor, theme) ?? '',
@@ -212,7 +262,7 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
       rowCount: Math.max(50, maxRow),
       columnCount: Math.max(20, maxColumn),
       defaultRowHeight: (worksheet.properties.defaultRowHeight ?? 15) * 4 / 3,
-      defaultColumnWidth: defaultColumnWidth ? columnWidthToPixels(defaultColumnWidth) : 64,
+      defaultColumnWidth: defaultColPx,
       zoomRatio: Math.max(0.1, Math.min(4, (view?.zoomScale ?? 100) / 100)),
       scrollTop: 0, scrollLeft: 0,
       freeze: { xSplit, ySplit, startRow: ySplit ? (firstScrollable?.row ?? ySplit + 1) - 1 : -1, startColumn: xSplit ? (firstScrollable?.column ?? xSplit + 1) - 1 : -1 },

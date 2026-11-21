@@ -4,6 +4,8 @@ import { createUniver, LocaleType, type IWorkbookData } from '@univerjs/presets'
 
 import '@univerjs/preset-sheets-core/lib/index.css'
 
+import { autoFitSheetRows, createRenderedGate } from './autoFitRows'
+
 export interface WorkbookViewer {
   /** 显示一张工作表：换掉当前显示的内容，不重新创建整个查看器 */
   show(snapshot: IWorkbookData): Promise<void>
@@ -31,7 +33,9 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
       footer: false,
     })],
   })
+  const renderedGate = createRenderedGate(univerAPI)
   let current: string | undefined
+  let disposed = false
   let unitSeq = 0
   let suppressZoom = false
   let zoomTimer: ReturnType<typeof setTimeout> | undefined
@@ -65,18 +69,19 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
   return {
     async show(snapshot) {
       // 先建新的、再销毁旧的：分配唯一 unit id 防止缓存复用快照与未销毁的旧 unit 冲突
+      const unitId = `${snapshot.id || 'preview'}-${++unitSeq}`
       const workbook = univerAPI.createWorkbook({
         ...snapshot,
-        id: `${snapshot.id || 'preview'}-${++unitSeq}`,
+        id: unitId,
       })
       const previous = current
       current = workbook.getId()
-      try {
-        workbook.setEditable(false)
-        await workbook.getWorkbookPermission().setReadOnly()
-      } finally {
-        if (previous) univerAPI.disposeUnit(previous)
-      }
+      if (previous) univerAPI.disposeUnit(previous)
+      await renderedGate.wait()
+      if (disposed || current !== unitId) return
+      autoFitSheetRows(workbook, snapshot)
+      workbook.setEditable(false)
+      await workbook.getWorkbookPermission().setReadOnly()
     },
     setZoom,
     getZoom,
@@ -85,6 +90,8 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
       return () => zoomListeners.delete(handler)
     },
     dispose() {
+      disposed = true
+      renderedGate.dispose()
       clearTimeout(zoomTimer)
       zoomListeners.clear()
       zoomSub.dispose()

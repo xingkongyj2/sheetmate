@@ -131,6 +131,7 @@ export function convertStyle(source: Partial<Style>, theme: string[], warnings: 
     if (alignment.wrapText !== undefined) style.tb = alignment.wrapText ? 3 : 1
     if (alignment.shrinkToFit) style.stf = 1
     if (alignment.indent) style.pd = { l: alignment.indent * 9 }
+    if (style.tb === 3) style.pd = { l: 2, r: 2, ...style.pd, t: style.pd?.t ?? 3, b: style.pd?.b ?? 3 }
     if (alignment.readingOrder) style.td = alignment.readingOrder === 'rtl' ? 2 : 1
     if (alignment.textRotation === 'vertical') style.tr = { a: 0, v: 1 }
     else if (typeof alignment.textRotation === 'number') style.tr = { a: alignment.textRotation }

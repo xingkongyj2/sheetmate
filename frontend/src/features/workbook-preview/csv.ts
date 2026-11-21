@@ -159,7 +159,7 @@ export function parseCsvWorkbook(buffer: ArrayBuffer, filename: string): ParsedC
     row.forEach((value, columnIndex) => {
       if (value === '') return
       const cells = cellData[rowIndex] ?? (cellData[rowIndex] = {})
-      cells[columnIndex] = { v: value, t: 1 }
+      cells[columnIndex] = { v: value, t: 1, s: 'wrap' }
       cellCount += 1
     })
   })
@@ -170,7 +170,9 @@ export function parseCsvWorkbook(buffer: ArrayBuffer, filename: string): ParsedC
       name: filename,
       appVersion: '1.3.1',
       locale: 'zhCN' as IWorkbookData['locale'],
-      styles: {},
+      styles: {
+        wrap: { tb: 3, vt: 2, pd: { t: 3, b: 3, l: 4, r: 4 } },
+      },
       sheetOrder: [sheetId],
       sheets: {
         [sheetId]: {

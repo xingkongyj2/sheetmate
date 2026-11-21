@@ -166,6 +166,12 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
     customerId.value = initialCustomerId
   }
 
+  /** 显式选中某个客户（例如从侧栏客户项点击「新增对话」进入首页）。 */
+  function selectCustomer(nextCustomerId: string | null) {
+    initialized.value = true
+    customerId.value = nextCustomerId
+  }
+
   function resetInitializationIfEmpty() {
     if (!text.value && !files.value.length && !attachments.value.length && customerId.value === null) initialized.value = false
   }
@@ -196,5 +202,5 @@ export const useHomeDraftStore = defineStore('homeDraft', () => {
   }
 
   return { text, thinking, customerId, files, attachments, busy, generation, ready, savingFiles, cacheError, hasMissingFiles,
-    hydrate, flush, retrySave, initialize, resetInitializationIfEmpty, clear }
+    hydrate, flush, retrySave, initialize, selectCustomer, resetInitializationIfEmpty, clear }
 })

@@ -4,6 +4,8 @@ import { createUniver, LocaleType, type IWorkbookData } from '@univerjs/presets'
 
 import '@univerjs/preset-sheets-core/lib/index.css'
 
+import { autoFitSheetRows, createRenderedGate } from '@/features/workbook-preview/autoFitRows'
+
 export interface ScrollSyncState {
   sheetViewStartRow: number
   sheetViewStartColumn: number
@@ -48,8 +50,10 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
     })],
   })
 
+  const renderedGate = createRenderedGate(univerAPI)
   let currentUnitId: string | undefined
   let currentSheetId: string | undefined
+  let disposed = false
   let unitSeq = 0
   let suppressScroll = false
   let suppressSelection = false
@@ -171,25 +175,31 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
       clearTimeout(selectionReleaseTimer)
 
       // 始终分配新的 unit id：Worker 缓存复用的同一快照或重试加载不会与尚未销毁的旧 unit 冲突
+      const unitId = `${snapshot.id || 'cmp'}-${++unitSeq}`
       const nextSnapshot: IWorkbookData = {
         ...snapshot,
-        id: `${snapshot.id || 'cmp'}-${++unitSeq}`,
+        id: unitId,
       }
       const workbook = univerAPI.createWorkbook(nextSnapshot)
       const previous = currentUnitId
       currentUnitId = workbook.getId()
       currentSheetId = workbook.getActiveSheet()?.getSheetId()
+      if (previous) univerAPI.disposeUnit(previous)
 
       try {
+        await renderedGate.wait()
+        if (disposed || currentUnitId !== unitId) return
+        autoFitSheetRows(workbook, nextSnapshot)
         workbook.setEditable(false)
         await workbook.getWorkbookPermission().setReadOnly()
       } finally {
-        if (previous) univerAPI.disposeUnit(previous)
-        if (savedScroll) {
-          requestAnimationFrame(() => setScrollState(savedScroll))
+        if (!disposed && currentUnitId === unitId) {
+          if (savedScroll) {
+            requestAnimationFrame(() => setScrollState(savedScroll))
+          }
+          scrollReleaseTimer = setTimeout(() => { suppressScroll = false }, 80)
+          selectionReleaseTimer = setTimeout(() => { suppressSelection = false }, 80)
         }
-        scrollReleaseTimer = setTimeout(() => { suppressScroll = false }, 80)
-        selectionReleaseTimer = setTimeout(() => { suppressSelection = false }, 80)
       }
     },
     getScrollState: readScrollState,
@@ -210,6 +220,8 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
       return () => zoomListeners.delete(handler)
     },
     dispose() {
+      disposed = true
+      renderedGate.dispose()
       clearTimeout(scrollReleaseTimer)
       clearTimeout(selectionReleaseTimer)
       clearTimeout(zoomReleaseTimer)

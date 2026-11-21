@@ -5,7 +5,7 @@
  * - 对话：未关联客户的对话，按更新时间排列。
  * 两块的收起状态和展开的客户记在本机浏览器里，读写失败就用默认值。
  */
-import { ArrowUpRight, ChevronDown, Plus } from '@lucide/vue'
+import { ArrowUpRight, ChevronDown, Plus, SquarePen } from '@lucide/vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -14,17 +14,26 @@ import ConversationEmptyIcon from '@/components/brand/ConversationEmptyIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import type { CustomerCard } from '@/api/types'
-import { shortTime } from '@/composables/conversationGroups'
 import { useConfirm } from '@/composables/useConfirm'
+import { useAuthStore } from '@/stores/auth'
 import { useWorkspaceStore } from '@/stores/conversations'
+import { useHomeDraftStore } from '@/stores/homeDraft'
 
 import SidebarConversationItem from './SidebarConversationItem.vue'
 
 const store = useWorkspaceStore()
+const auth = useAuthStore()
+const homeDraft = useHomeDraftStore()
 const standaloneConversations = computed(() => store.recent.filter((c) => !c.customer?.id))
 const route = useRoute()
 const router = useRouter()
 const { confirmDelete } = useConfirm()
+
+async function startCustomerChat(customerId: string) {
+  if (auth.user) await homeDraft.hydrate(auth.user.id)
+  homeDraft.selectCustomer(customerId)
+  await router.push({ name: 'home', query: { customer: customerId } })
+}
 
 const creating = ref(false)
 
@@ -118,7 +127,7 @@ async function remove(id: string, title: string) {
           <div class="group relative">
             <button
               type="button"
-              class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-2 text-left transition"
+              class="flex w-full items-center gap-2.5 rounded-xl py-2 pl-2.5 pr-8 text-left transition-colors group-hover:pr-14 group-focus-within:pr-14"
               :class="route.name === 'customer' && route.params.id === group.customer.id ? 'sidebar-active' : 'hover:bg-black/[0.04]'"
               :aria-expanded="state.expanded.has(group.customer.id)"
               @click="toggle(group.customer.id)"
@@ -126,19 +135,28 @@ async function remove(id: string, title: string) {
               <span class="flex size-[30px] shrink-0 items-center justify-center">
                 <Mascot :variant="group.customer.mascot" :size="30" :shadow="false" :track="false" :mood="state.expanded.has(group.customer.id) ? 'idle' : 'sleep'" />
               </span>
-              <span class="flex min-w-0 flex-1 items-center gap-2">
-                <span class="min-w-0 flex-1 truncate text-sm font-medium text-ink">{{ group.customer.name }}</span>
-                <span class="shrink-0 text-[11px] text-faint transition group-hover:opacity-0">{{ shortTime(group.activeAt) }}</span>
-              </span>
+              <span class="min-w-0 flex-1 truncate text-sm font-medium text-ink">{{ group.customer.name }}</span>
             </button>
-            <RouterLink
-              :to="{ name: 'customer', params: { id: group.customer.id } }"
-              class="absolute right-1.5 top-2 rounded-md p-1 text-faint opacity-0 transition hover:bg-black/[0.05] hover:text-ink focus-visible:opacity-100 group-hover:opacity-100"
-              title="打开客户"
-              :aria-label="`打开客户 ${group.customer.name}`"
-            >
-              <ArrowUpRight class="size-3.5" />
-            </RouterLink>
+            <span class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs tabular-nums text-faint transition-opacity group-hover:opacity-0 group-focus-within:opacity-0">{{ group.items.length }}</span>
+            <div class="pointer-events-none absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-0.5 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100">
+              <RouterLink
+                :to="{ name: 'customer', params: { id: group.customer.id } }"
+                class="rounded-md p-1 text-faint transition hover:bg-black/[0.05] hover:text-ink"
+                title="打开详情"
+                :aria-label="`打开客户详情 ${group.customer.name}`"
+              >
+                <ArrowUpRight class="size-3.5" />
+              </RouterLink>
+              <button
+                type="button"
+                class="rounded-md p-1 text-faint transition hover:bg-black/[0.05] hover:text-ink"
+                title="新增对话"
+                :aria-label="`为 ${group.customer.name} 新增对话`"
+                @click.stop="startCustomerChat(group.customer.id)"
+              >
+                <SquarePen class="size-3.5" />
+              </button>
+            </div>
           </div>
           <div v-if="state.expanded.has(group.customer.id)" class="mt-1 space-y-0.5 pb-1">
             <SidebarConversationItem
