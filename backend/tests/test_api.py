@@ -82,7 +82,7 @@ def test_unauthenticated_request_is_rejected(client):
 def test_demo_customer_detail(client):
     customers = client.get("/api/customers").json()["customers"]
     demo = next(c for c in customers if c["name"].startswith("顺达物流"))
-    assert demo["recipe_count"] == 1 and demo["file_count"] == 4
+    assert demo["recipe_count"] == 1 and demo["file_count"] == 5
     detail = client.get(f"/api/customers/{demo['id']}").json()["customer"]
     recipe = detail["recipes"][0]
     assert "status" not in recipe and "status_label" not in recipe
@@ -622,6 +622,33 @@ def test_revise_rule_change_is_not_reverted(client, samples, fake_llm):
     assert "其他" in owners and "新食研" not in owners
     assert not any(e["type"] == "recipe_saved" for e in events)
     assert client.get(f"/api/conversations/{conv}").json()["conversation"]["recipes"] == []
+
+
+def test_empty_customer_cannot_generate_summary(client, samples, fake_llm):
+    """没有上传文件也没有流程的新客户不允许总结分析，残留的空客户自动总结也会被清理。"""
+    from sheetmate.db.session import session_scope
+    from sheetmate.db.models import Customer
+
+    fake_llm()
+    customer = client.post("/api/customers", json={"name": "空白新客户"}).json()["customer"]
+    rejected = client.post(f"/api/customers/{customer['id']}/summary")
+    assert rejected.status_code == 400
+    assert "没有文件或流程" in rejected.json()["error"]["message"]
+
+    # 历史空客户若残留旧自动总结，展示时自动清空（保留原有更新时间）
+    with session_scope() as db:
+        row = db.get(Customer, customer["id"])
+        row.summary = "空泛自动总结"
+        row.summary_by = "ai"
+    detail = client.get(f"/api/customers/{customer['id']}").json()["customer"]
+    assert detail["summary"] == "" and detail["has_summary"] is False
+
+    # 上传文件后即可正常总结
+    with open(samples["owners"], "rb") as f:
+        up = client.post(f"/api/customers/{customer['id']}/files", files={"file": (samples["owners"].name, f)})
+    assert up.status_code == 200
+    ok = client.post(f"/api/customers/{customer['id']}/summary")
+    assert ok.status_code == 200 and ok.json()["summary"]
 
 
 def test_legacy_human_edited_summary_is_not_overwritten(client, samples, fake_llm):

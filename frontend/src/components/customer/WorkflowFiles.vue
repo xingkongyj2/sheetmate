@@ -5,6 +5,7 @@ import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { customerApi, fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo } from '@/api/types'
+import CustomerEmptyIllustration from '@/components/brand/CustomerEmptyIllustration.vue'
 import { isDeliveredOutput } from '@/composables/deliveryFiles'
 import { useConfirm } from '@/composables/useConfirm'
 import { usePrivacyStatus } from '@/composables/usePrivacyStatus'
@@ -163,7 +164,10 @@ async function remove(file: FileInfo) {
         :badge="file.kind === 'expected' ? file.kind_label : undefined" badge-class="!bg-fun-yellow/20 !text-[#8a6400]" :rename-file="rename"
         @preview="emit('preview', $event)" @remove="remove"
       />
-      <p v-if="!files.length" class="py-6 text-center text-sm text-faint">还没有文件</p>
+      <div v-if="!files.length" class="flex flex-col items-center py-6 text-center">
+        <CustomerEmptyIllustration kind="files" size="sm" />
+        <p class="mt-2 text-sm text-faint">还没有输入文件</p>
+      </div>
 
       <h3 class="mb-3 mt-6 border-t border-line pt-6 text-[15px] font-semibold">输出文件</h3>
       <WorkflowFileRow
@@ -171,7 +175,10 @@ async function remove(file: FileInfo) {
         :badge="file.delivery_status === 'candidate' ? '待核验文件' : undefined" :rename-file="recipeId ? rename : undefined"
         @preview="emit('preview', $event)" @remove="remove"
       />
-      <p v-if="!results.length" class="py-6 text-center text-sm text-faint">还没有输出文件</p>
+      <div v-if="!results.length" class="flex flex-col items-center py-6 text-center">
+        <CustomerEmptyIllustration kind="outputs" size="sm" />
+        <p class="mt-2 text-sm text-faint">还没有输出文件</p>
+      </div>
     </div>
   </div>
 </template>

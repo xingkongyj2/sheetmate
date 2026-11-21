@@ -5,6 +5,7 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { conversationApi, fileApi } from '@/api'
 import type { ConversationDetail, FileInfo, RecipeBrief, RecipeFlowData, TableBrief } from '@/api/types'
+import WorkspaceEmptyIcon from '@/components/brand/WorkspaceEmptyIcon.vue'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
 import type { RecipeProgress, UiMessage } from '@/composables/chatModel'
 import { executionFileGroups, executionRecipeSections, executionTableKey, executionTables } from '@/composables/executionPresentation'
@@ -42,12 +43,12 @@ const tables = computed(() => executionTables(props.detail?.tables ?? []))
 const fileGroups = computed(() => executionFileGroups(props.detail?.files ?? []).filter((group) => group.files.length))
 // 每个表格文件有没有做过脱敏识别：打开「文件」tab 时才取，刚上传的文件会自己更新状态
 const privacy = usePrivacyStatus(() => (tab.value === 'files' ? fileGroups.value.flatMap((group) => group.files.map((file) => file.file_id)) : []))
-const emptyState = computed(() => {
+const emptyState = computed<{ kind: 'recipes' | 'files' | 'data'; text: string } | null>(() => {
   if (tab.value === 'recipes' && !recipeSections.value.saved.length && !recipeSections.value.progresses.length) {
-    return { emoji: '🙃', text: '暂无已保存的流程' }
+    return { kind: 'recipes', text: '暂无已保存的流程' }
   }
-  if (tab.value === 'files' && !fileGroups.value.length) return { emoji: '🫠', text: '还没有文件' }
-  if (tab.value === 'data' && !tables.value.length) return { emoji: '😴', text: '暂无中间数据' }
+  if (tab.value === 'files' && !fileGroups.value.length) return { kind: 'files', text: '还没有文件' }
+  if (tab.value === 'data' && !tables.value.length) return { kind: 'data', text: '暂无中间数据' }
   return null
 })
 const viewportWidth = ref(window.innerWidth)
@@ -226,7 +227,7 @@ onBeforeUnmount(() => {
     <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2" :class="{ 'flex flex-col': emptyState }">
       <ExecutionStatusNotice v-if="message && tab !== 'usage'" class="mb-4 shrink-0" :message="message" />
       <div v-if="emptyState" class="flex flex-1 flex-col items-center justify-center gap-3 py-8 text-center text-sm text-faint">
-        <span class="text-2xl leading-none" aria-hidden="true">{{ emptyState.emoji }}</span>
+        <WorkspaceEmptyIcon :kind="emptyState.kind" />
         <p>{{ emptyState.text }}</p>
       </div>
       <ExecutionUsage v-else-if="tab === 'usage'" :message="message" :messages="messages" :refreshing="refreshingUsage" @refresh="emit('refresh')" />

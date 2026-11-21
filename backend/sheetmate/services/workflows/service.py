@@ -188,8 +188,9 @@ def ensure_primary_recipe(db: Session, customer: Customer) -> str | None:
     ids = list(db.scalars(select(RecipeRecord.recipe_id).where(RecipeRecord.customer_id == customer.id)
                          .group_by(RecipeRecord.recipe_id)
                          .order_by(func.min(RecipeRecord.created_at), func.min(RecipeRecord.id))))
-    if customer.primary_recipe_id not in ids:
-        customer.primary_recipe_id = ids[0] if ids else None
+    target_primary = customer.primary_recipe_id if customer.primary_recipe_id in ids else (ids[0] if ids else None)
+    if customer.primary_recipe_id != target_primary:
+        customer.primary_recipe_id = target_primary
         db.flush()
     if customer.primary_recipe_id:
         from sheetmate.services.memory.field_mappings import migrate_customer_context

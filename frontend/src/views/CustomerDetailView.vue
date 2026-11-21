@@ -10,6 +10,7 @@ import { errorText } from '@/api/http'
 import type { CustomerDetail } from '@/api/types'
 import ConversationIcon from '@/components/brand/ConversationIcon.vue'
 import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
+import CustomerEmptyIllustration from '@/components/brand/CustomerEmptyIllustration.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
@@ -94,6 +95,8 @@ const primaryRecipe = computed(() => orderedRecipes.value[0] ?? null)
 const fileCount = computed(() => workflowFiles(orderedRecipes.value.length
   ? orderedRecipes.value.flatMap((recipe) => [...recipe.files, ...recipe.output_files.filter(isDeliveredOutput)])
   : [...(customer.value?.files ?? []), ...(customer.value?.outputs ?? []).filter(isDeliveredOutput)]).length)
+const hasSummaryMaterial = computed(() => orderedRecipes.value.length > 0 || (customer.value?.files.length ?? 0) > 0)
+const hasDisplaySummary = computed(() => Boolean(customer.value?.summary && (hasSummaryMaterial.value || customer.value.summary_by === 'human')))
 
 function setTab(next: Tab) {
   tab.value = next
@@ -219,17 +222,20 @@ async function onEdited() {
         <div class="mx-auto max-w-3xl">
           <h2 v-if="primaryRecipe" class="mb-3 break-words px-1 text-[16px] font-semibold leading-relaxed [text-wrap:balance]">{{ primaryRecipe.name }}</h2>
           <div class="rounded-[26px] bg-white px-6 py-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:px-9 sm:py-5">
-          <div v-if="customer.summary" class="mb-3 flex items-center gap-3">
-            <span v-if="customer.summary_updated_at" class="text-xs text-faint">{{ customer.summary_by === 'human' ? '更新于' : '自动更新于' }} {{ timeAgo(customer.summary_updated_at) }}</span>
-            <button class="btn-text ml-auto shrink-0" :disabled="summarizing" @click="regenerate">
-              <LoaderCircle v-if="summarizing" class="size-3.5 animate-spin" /><Sparkles v-else class="size-3.5" />重新总结
-            </button>
-          </div>
-          <CustomerLogicSummary v-if="customer.summary" :source="customer.summary" />
-          <div v-else class="py-10 text-center text-sm text-faint">
-            还没有处理逻辑说明<br />
-            <button class="btn-line mt-3" :disabled="summarizing" @click="regenerate"><Sparkles class="size-4" />让 AI 总结</button>
-          </div>
+            <div v-if="hasDisplaySummary" class="mb-3 flex items-center gap-3">
+              <span v-if="customer.summary_updated_at" class="text-xs text-faint">{{ customer.summary_by === 'human' ? '更新于' : '自动更新于' }} {{ timeAgo(customer.summary_updated_at) }}</span>
+              <button v-if="hasSummaryMaterial" class="btn-text ml-auto shrink-0" :disabled="summarizing" @click="regenerate">
+                <LoaderCircle v-if="summarizing" class="size-3.5 animate-spin" /><Sparkles v-else class="size-3.5" />重新总结
+              </button>
+            </div>
+            <CustomerLogicSummary v-if="hasDisplaySummary" :source="customer.summary" />
+            <div v-else class="flex flex-col items-center py-10 text-center">
+              <CustomerEmptyIllustration kind="logic" />
+              <p class="mt-3 text-sm text-faint">还没有处理逻辑说明</p>
+              <button v-if="hasSummaryMaterial" class="btn-line mt-4" :disabled="summarizing" @click="regenerate">
+                <LoaderCircle v-if="summarizing" class="size-4 animate-spin" /><Sparkles v-else class="size-4" />让 AI 总结
+              </button>
+            </div>
           </div>
         </div>
       </section>
@@ -246,7 +252,10 @@ async function onEdited() {
           @run="(id) => (runDialog = { recipeId: id })"
           @changed="load"
         />
-        <div v-if="!customer.recipes.length" class="rounded-[24px] bg-white py-14 text-center text-sm text-faint shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)]">还没有流程</div>
+        <div v-if="!customer.recipes.length" class="flex flex-col items-center rounded-[24px] bg-white px-6 py-12 text-center shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)]">
+          <CustomerEmptyIllustration kind="recipes" />
+          <p class="mt-3 text-sm text-faint">还没有流程</p>
+        </div>
       </section>
 
       <!-- 文件 -->

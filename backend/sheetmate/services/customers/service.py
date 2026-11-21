@@ -121,18 +121,50 @@ def delete_customer(db: Session, customer: Customer) -> None:
     conversation_service._defer_owner_storage_cleanup(db, roots)
 
 
-def card(db: Session, customer: Customer, *, user: User | None = None) -> dict[str, Any]:
+def _is_delivered_output(record: FileRecord) -> bool:
+    """与前端 isDeliveredOutput 一致：排除过程中间文件与已被替换的旧结果。"""
+    profile = record.profile or {}
+    return (
+        not profile.get("intermediate")
+        and profile.get("step_id") is None
+        and profile.get("delivery_status") not in {"intermediate", "superseded"}
+    )
+
+
+def _visible_customer_file_count(db: Session, customer: Customer, recipes: list[RecipeRecord], primary_id: str | None) -> int:
+    """与客户详情页「文件」Tab 数量保持一致：排除单次执行临时输入/过程文件，去重统计输入与正式交付输出。"""
+    if recipes:
+        seen: set[str] = set()
+        for record in recipes:
+            for item in file_service.recipe_files(db, customer.id, record.recipe_id, primary_recipe_id=primary_id):
+                if item.kind != "output" or _is_delivered_output(item):
+                    seen.add(item.id)
+        return len(seen)
+    files = file_service.exclude_run_scoped(db, file_service.list_files(db, customer_id=customer.id))
+    return len({item.id for item in files if item.kind != "output" or _is_delivered_output(item)})
+
+
+def card(db: Session, customer: Customer, *, user: User | None = None, file_count: int | None = None) -> dict[str, Any]:
     """客户卡片：名称、IP 形象、文件数、流程数、最近活动、处理逻辑摘要。"""
-    file_count = db.scalar(select(func.count()).select_from(FileRecord).where(
-        file_service.customer_file_condition(customer.id), file_service.current_file_condition(),
-        FileRecord.kind != "output")) or 0
     recipes = recipe_service.latest_records(db, customer_id=customer.id)
     primary_id = recipe_service.ensure_primary_recipe(db, customer)
+    if file_count is None:
+        file_count = _visible_customer_file_count(db, customer, recipes, primary_id)
     conv_stmt = select(func.count()).select_from(Conversation).where(Conversation.customer_id == customer.id)
     if user is not None:
         conv_stmt = conv_stmt.where(Conversation.user_id == user.id)
     conv_count = db.scalar(conv_stmt) or 0
-    last_run = db.scalars(select(Run).where(Run.customer_id == customer.id).order_by(Run.created_at.desc()).limit(1)).first()
+    run_stmt = select(Run.created_at).where(Run.customer_id == customer.id)
+    if user is not None:
+        run_stmt = run_stmt.where(or_(Run.conversation_id.is_(None), Run.user_id == user.id))
+    last_run_at = db.scalar(run_stmt.order_by(Run.created_at.desc()).limit(1))
+    last_conv_at = (
+        db.scalar(select(func.max(Conversation.updated_at)).where(
+            Conversation.customer_id == customer.id, Conversation.user_id == user.id,
+        ))
+        if user is not None else None
+    )
+    last_activity = max(dt for dt in (customer.updated_at, last_run_at, last_conv_at) if dt is not None)
     primary = next((record for record in recipes if record.recipe_id == primary_id), None)
     target = _summary_for_display(db, customer, primary)
     summary = (target.summary or "").strip()
@@ -150,7 +182,7 @@ def card(db: Session, customer: Customer, *, user: User | None = None) -> dict[s
         "conversation_count": int(conv_count),
         "recipes": [{"recipe_id": r.recipe_id, "name": r.name, "version": r.version,
                      "steps": len((r.body or {}).get("steps", []))} for r in recipes[:3]],
-        "last_activity": (last_run.created_at if last_run else customer.updated_at).isoformat(),
+        "last_activity": last_activity.isoformat(),
         "has_summary": bool(summary),
     }
 
@@ -180,10 +212,14 @@ def detail(db: Session, customer: Customer, *, user: User | None = None) -> dict
         FileRecord.kind == "output", or_(FileRecord.run_id.is_(None), FileRecord.run_id.not_in(scoped_runs)))) or 0
     records = recipe_service.latest_records(db, customer_id=customer.id)
     recipes = []
+    visible_file_ids: set[str] = set()
     for record in records:
         recipe = recipe_service.record_to_recipe(record)
         profile = _summary_for_display(db, customer, record)
         resources = file_service.recipe_files(db, customer.id, record.recipe_id, primary_recipe_id=primary_id)
+        for item in resources:
+            if item.kind != "output" or _is_delivered_output(item):
+                visible_file_ids.add(item.id)
         if not profile.summary:
             inputs = [file_service.file_dict(item) for item in resources if item.kind != "output"]
             _, _, context = _summary_inputs(db, customer, record.recipe_id)
@@ -200,6 +236,8 @@ def detail(db: Session, customer: Customer, *, user: User | None = None) -> dict
                         "field_mapping_entries": memory_service.field_mapping_entries(db, customer.id, recipe_id=record.recipe_id),
                         "runs": [run_service.run_dict(run) for run in db.scalars(select(Run).where(
                             Run.customer_id == customer.id, Run.recipe_id == record.recipe_id).order_by(Run.created_at.desc()))]})
+    if not records:
+        visible_file_ids = {item.id for item in files if item.kind != "output" or _is_delivered_output(item)}
     conv_stmt = select(Conversation).where(Conversation.customer_id == customer.id)
     if user is not None:
         conv_stmt = conv_stmt.where(Conversation.user_id == user.id)
@@ -208,7 +246,7 @@ def detail(db: Session, customer: Customer, *, user: User | None = None) -> dict
     if primary is None:
         _summary_for_display(db, customer)
     return {
-        **card(db, customer, user=user),
+        **card(db, customer, user=user, file_count=len(visible_file_ids)),
         "summary": primary["summary"] if primary else customer.summary,
         "summary_by": primary["summary_by"] if primary else customer.summary_by,
         "summary_updated_at": primary["summary_updated_at"] if primary else customer.summary_updated_at.isoformat() if customer.summary_updated_at else None,
@@ -242,8 +280,16 @@ def _summary_inputs(db: Session, customer: Customer, recipe_id: str | None = Non
 
 
 def _summary_for_display(db: Session, customer: Customer, record: RecipeRecord | None = None) -> Customer | RecipeProfile:
-    """旧自动总结可能混入 AI 习惯；展示前从允许公开的资料重建一次。"""
+    """旧自动总结可能混入 AI 习惯，或空客户残留过早生成的泛泛说明；展示前校验。"""
     target = recipe_service.ensure_profile(db, record) if record else customer
+    if record is None and target.summary and target.summary_by != "human":
+        files, recipes, _ = _summary_inputs(db, customer)
+        if not files and not recipes:
+            prev_updated_at = customer.updated_at
+            target.summary = ""
+            target.summary_updated_at = None
+            customer.updated_at = prev_updated_at
+            return target
     if (target.summary and target.summary_by != "human"
             and (target.summary_policy_version or 0) < SUMMARY_POLICY_VERSION):
         files, recipes, memory_text = _summary_inputs(db, customer, record.recipe_id if record else None)
@@ -266,10 +312,12 @@ async def _compose_summary(name: str, files: list[dict[str, Any]], recipes: list
 
 
 async def refresh_summary(db: Session, customer: Customer, llm: Any | None, recipe_id: str | None = None) -> str:
-    """手动「重新总结」：重新生成并恢复为自动更新。"""
+    """手动「重新总结」：重新生成并恢复为自动更新；无文件且无流程时禁止生成空泛说明。"""
     record = recipe_service.resolve_customer_recipe(db, customer.id, recipe_id)
     target = recipe_service.ensure_profile(db, record) if record else customer
     files, recipes, memory_text = _summary_inputs(db, customer, record.recipe_id if record else None)
+    if not files and not recipes:
+        raise ServiceError("当前客户还没有文件或流程，请先上传数据或生成流程后再总结")
     text = await _compose_summary(record.name if record else customer.name, files, recipes, memory_text, llm)
     target.summary = text
     target.summary_updated_at = now()
@@ -360,6 +408,16 @@ async def _auto_refresh(customer_id: str) -> None:
         except LLMError:
             llm = None
         for recipe_id, version, name, (files, recipes, memory_text) in materials:
+            if not files and not recipes:
+                with session_scope() as db:
+                    target = db.get(RecipeProfile, recipe_id) if recipe_id else db.get(Customer, customer_id)
+                    if target is not None and target.summary_by != "human" and target.summary:
+                        prev_updated_at = getattr(target, "updated_at", None)
+                        target.summary = ""
+                        target.summary_updated_at = None
+                        if prev_updated_at is not None and hasattr(target, "updated_at"):
+                            target.updated_at = prev_updated_at
+                continue
             text = await _compose_summary(name, files, recipes, memory_text, llm)
             with session_scope() as db:
                 target = db.get(RecipeProfile, recipe_id) if recipe_id else db.get(Customer, customer_id)

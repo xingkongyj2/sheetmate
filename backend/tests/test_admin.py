@@ -524,9 +524,10 @@ def test_conversations_are_isolated_across_users_sharing_a_customer(client):
         recipe_service.save_recipe(db, recipe, conversation_id=admin_conv)
     run_service.run_workspaces.get(admin_run_id).put_dataframe("admin_run_table", pd.DataFrame({"列": [1]}), source="computed")
 
-    # 新成员可以看到客户和共享流程，但看不到管理员的对话及计数
+    # 新成员可以看到客户和共享流程，但看不到管理员的对话及计数，也不会被管理员私有会话运行污染最近活动时间
     member_card = next(c for c in member.get("/api/customers").json()["customers"] if c["id"] == customer_id)
     assert member_card["conversation_count"] == 0
+    assert member_card["file_count"] == 0
     member_customer = member.get(f"/api/customers/{customer_id}").json()["customer"]
     assert member_customer["conversation_count"] == 0
     assert member_customer["conversations"] == []
