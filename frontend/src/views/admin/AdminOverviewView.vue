@@ -5,7 +5,6 @@ import {
   Building2,
   Cpu,
   HardDrive,
-  LoaderCircle,
   RefreshCw,
   ShieldCheck,
   Sparkles,
@@ -16,6 +15,7 @@ import { computed, onMounted, ref } from 'vue'
 import { adminApi, type AdminOverview } from '@/api'
 import { errorText } from '@/api/http'
 import Mascot from '@/components/brand/Mascot.vue'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import UserAvatar from '@/components/brand/UserAvatar.vue'
 import StackedBarChart from '@/components/stats/StackedBarChart.vue'
 import { compact, duration, integer, percent, shortDate } from '@/components/stats/format'
@@ -95,9 +95,7 @@ const tokenColumns = computed(() =>
         <button type="button" class="font-medium underline" @click="load">重试</button>
       </div>
 
-      <div v-else-if="!data" class="flex justify-center py-28" role="status">
-        <LoaderCircle class="size-6 animate-spin text-mute" />
-      </div>
+      <MascotLoader v-else-if="!data" size="lg" class="py-24" />
 
       <div v-else class="mt-6 flex min-h-0 flex-1 flex-col gap-5 transition-opacity" :class="loading ? 'opacity-65' : ''">
         <!-- 第一排：4 个核心指标卡 -->

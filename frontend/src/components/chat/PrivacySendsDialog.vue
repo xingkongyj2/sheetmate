@@ -2,12 +2,13 @@
 /** 模型脱敏明细，两页（原文 → 令牌，原文在本机还原，模型只看到令牌）：
  *  脱敏——文件脱敏之后仍以原文出现、发给模型前才换成令牌的值（每个值只在第一次出现的那次发送里列一次）；
  *  拦截——停止发送的原因，以及没能处理掉的值。 */
-import { LoaderCircle, RotateCw } from '@lucide/vue'
+import { RotateCw } from '@lucide/vue'
 import { onMounted, ref, watch } from 'vue'
 
 import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { PrivacyBlock, PrivacySend } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 
 type Tab = 'sends' | 'blocks'
@@ -58,9 +59,7 @@ function clock(iso: string | null): string {
       </div>
     </template>
 
-    <div v-if="loading && !loaded()" class="flex justify-center py-12" role="status" aria-label="加载中">
-      <LoaderCircle class="size-5 animate-spin text-mute motion-reduce:animate-none" />
-    </div>
+    <MascotLoader v-if="loading && !loaded()" size="sm" class="py-12" />
 
     <div v-else-if="error" class="flex flex-col items-center gap-3 py-10 text-center">
       <p class="max-w-md break-words text-sm leading-6 text-error" role="alert">{{ error }}</p>

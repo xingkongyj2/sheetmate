@@ -4,12 +4,13 @@
  * 两个标签——「改动」：和上一版相比改了什么（脚本、SQL 给出逐行差异）；「完整内容」：这个版本的概览。
  * 第一版没有上一版，只显示完整内容。
  */
-import { ChevronRight, LoaderCircle } from '@lucide/vue'
+import { ChevronRight } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { RecipeFlowData, RecipeJSON, RecipeVersion, RecipeVersionChange, RecipeVersionChanges } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import RecipeOverview from '@/components/recipe/RecipeOverview.vue'
 
@@ -95,7 +96,7 @@ onMounted(async () => {
     </div>
 
     <p v-if="loadError" class="py-10 text-center text-sm text-error" role="alert">{{ loadError }}</p>
-    <div v-else-if="!recipe || !flow" class="flex justify-center py-12"><LoaderCircle class="size-5 animate-spin text-mute" /></div>
+    <MascotLoader v-else-if="!recipe || !flow" size="sm" class="py-12" />
 
     <!-- 改动 -->
     <div v-else-if="tab === 'changes'" class="mt-6">

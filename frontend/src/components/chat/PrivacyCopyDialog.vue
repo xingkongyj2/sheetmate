@@ -6,6 +6,7 @@ import { computed, onMounted, ref } from 'vue'
 import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { PrivacyCopyPreview } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { formatCount } from '@/composables/privacyPresentation'
 import { usePrivacyCopy } from '@/composables/usePrivacyCopy'
@@ -78,9 +79,7 @@ function cell(value: string | number | null): string {
       </div>
     </template>
 
-    <div v-if="!preview && loading" class="flex justify-center py-12" role="status" aria-label="加载中">
-      <LoaderCircle class="size-5 animate-spin text-mute motion-reduce:animate-none" />
-    </div>
+    <MascotLoader v-if="!preview && loading" size="sm" class="py-12" />
 
     <div v-else-if="!preview" class="flex flex-col items-center gap-3 py-10 text-center">
       <p class="max-w-md break-words text-sm leading-6 text-error" role="alert">{{ error }}</p>
@@ -144,8 +143,8 @@ function cell(value: string | number | null): string {
             </tbody>
           </table>
         </div>
-        <div v-if="loading" class="pointer-events-none absolute inset-0 flex items-center justify-center" role="status" aria-label="加载中">
-          <LoaderCircle class="size-5 animate-spin text-mute motion-reduce:animate-none" />
+        <div v-if="loading" class="pointer-events-none absolute inset-0 flex items-center justify-center">
+          <MascotLoader size="sm" />
         </div>
       </div>
     </div>

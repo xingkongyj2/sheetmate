@@ -7,6 +7,7 @@ import { ArrowUpRight, Eye, EyeOff, LoaderCircle, Zap } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { errorText } from '@/api/http'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import type { LLMAdvancedConfig, LLMConfig, LLMConfigUpdate, LLMProviderConfig, LLMProviderId } from '@/api/types'
 import BaseSelect from '@/components/common/BaseSelect.vue'
 import { useToast } from '@/composables/useToast'
@@ -301,9 +302,7 @@ async function test(provider: LLMProviderConfig) {
           </div>
         </div>
 
-        <div v-if="loading" class="flex justify-center p-6" role="status" aria-label="加载中">
-          <LoaderCircle class="size-5 animate-spin text-mute" />
-        </div>
+        <MascotLoader v-if="loading" size="sm" class="py-10" />
         <div v-else-if="loadError" class="flex flex-wrap items-center gap-2 p-5 text-sm text-error sm:p-6" role="alert">
           <span>{{ loadError }}</span>
           <button type="button" class="font-medium underline" @click="loadConfig">重试</button>

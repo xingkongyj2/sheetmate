@@ -141,22 +141,13 @@ onBeforeUnmount(() => {
       </nav>
     </header>
 
-    <!-- 第一屏：全屏空间特效 Banner（100svh） -->
-    <ShowcaseHeroBanner
-      :cta-label="ctaLabel"
-      @enter="enterApp"
-      @scroll-down="scrollToSection('workspace')"
-    />
+    <!-- 首屏：3D 丝绸光雕 + 4 张核心功能悬浮卡 + 抬升呈现的宽幅真实工作台 -->
+    <ShowcaseHeroBanner :cta-label="ctaLabel" @enter="enterApp">
+      <ShowcaseHeroStage />
+    </ShowcaseHeroBanner>
 
     <!-- 以下全部为干净纯白背景 -->
     <main class="bg-white">
-      <!-- 宽幅 1:1 真实软件工作台演示 -->
-      <section id="workspace" class="scroll-mt-20 px-4 pb-20 pt-8 sm:px-6 sm:pt-12">
-        <div class="reveal-item mx-auto max-w-[1320px]">
-          <ShowcaseHeroStage />
-        </div>
-      </section>
-
       <!-- 核心功能区（6 张简约白卡） -->
       <section id="features" class="scroll-mt-20 mx-auto max-w-[1200px] px-4 py-16 sm:px-6 sm:py-24">
         <h2 class="reveal-item mb-12 text-center text-[28px] font-semibold tracking-[-0.025em] text-ink sm:text-[36px]">

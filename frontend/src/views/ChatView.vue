@@ -3,7 +3,7 @@
  * 对话页：中间是消息流和输入框，右侧是工作区面板。
  * 顶部：标题（可改）、绑定的客户（或「保存到客户」）、任务目录和工作区面板开关。
  */
-import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Play, Save, ShieldOff, X } from '@lucide/vue'
+import { LayoutDashboard, ListTree, LoaderCircle, Pencil, Play, ShieldOff, UserRoundPlus, X } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -14,6 +14,7 @@ import type { StreamHandle } from '@/api/sse'
 import type { AgentEvent, ConversationDetail, FileInfo, RecipeEditRequest, RunSteer, TableBrief } from '@/api/types'
 import ChatWelcomeCharms from '@/components/brand/ChatWelcomeCharms.vue'
 import Mascot from '@/components/brand/Mascot.vue'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
 import ChatComposer, { type Attachment } from '@/components/chat/ChatComposer.vue'
 import ExecutionPanel from '@/components/chat/ExecutionPanel.vue'
@@ -729,8 +730,16 @@ function answer(option: string) {
           </span>
           <span class="max-w-[128px] truncate font-medium">{{ customer.name }}</span>
         </RouterLink>
-        <button v-else-if="detail" class="btn-text h-8 shrink-0 gap-1.5 whitespace-nowrap px-2.5 text-xs" title="把这次对话的数据、已保存的流程和记忆保存到客户" @click="saveOpen = true">
-          <Save class="size-3.5" />保存到客户
+        <button
+          v-else-if="detail"
+          type="button"
+          class="icon-btn shrink-0"
+          :class="{ '!bg-black/[0.06] !text-ink': saveOpen }"
+          title="保存到客户：把这次对话的数据、已保存的流程和记忆保存到客户"
+          aria-label="保存到客户"
+          @click="saveOpen = true"
+        >
+          <UserRoundPlus class="size-4" aria-hidden="true" />
         </button>
 
         <button
@@ -770,7 +779,7 @@ function answer(option: string) {
       <div ref="scroller" class="chat-scroller min-h-0 flex-1 overflow-y-auto" @scroll.passive="onChatScroll">
       <div ref="content" class="chat-scroll-content">
         <div class="chat-messages pb-6 pt-8">
-          <div v-if="loading" class="flex justify-center py-20 text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
+          <MascotLoader v-if="loading" class="py-24" />
 
           <!-- 空对话 -->
           <div v-else-if="!messages.length" class="flex flex-col items-center py-16 text-center">

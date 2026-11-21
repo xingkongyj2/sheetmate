@@ -7,6 +7,7 @@ import { useRouter } from 'vue-router'
 import type { CustomerCard } from '@/api/types'
 import CustomerLibraryIcon from '@/components/brand/CustomerLibraryIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import { timeAgo } from '@/composables/chatModel'
 import { useWorkspaceStore } from '@/stores/conversations'
@@ -77,7 +78,8 @@ async function onSaved(customer: CustomerCard) {
         </RouterLink>
       </div>
 
-      <div v-else-if="!loading" class="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center text-sm text-faint" role="status">
+      <MascotLoader v-else-if="loading" size="lg" class="py-16" />
+      <div v-else class="flex flex-1 flex-col items-center justify-center gap-3 py-12 text-center text-sm text-faint" role="status">
         <CustomerLibraryIcon class="size-12 opacity-65" />
         <p>{{ store.customers.length ? '没有找到符合条件的客户' : '还没有客户' }}</p>
       </div>

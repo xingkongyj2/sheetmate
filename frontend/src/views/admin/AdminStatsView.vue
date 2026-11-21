@@ -3,12 +3,13 @@
  * 后台数据统计：全平台视角 + 按成员下钻 + 7/30/90 天范围。
  * 宽屏 Bento 排版：4 张 KPI 卡片、双列每日趋势、成员/客户用量排行、任务诊断与模型阶段、工具调用明细。
  */
-import { ChartColumn, LoaderCircle, RefreshCw, X } from '@lucide/vue'
+import { ChartColumn, RefreshCw, X } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { adminApi, type AdminExecutionMetrics } from '@/api'
 import { errorText } from '@/api/http'
 import Mascot from '@/components/brand/Mascot.vue'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import UserAvatar from '@/components/brand/UserAvatar.vue'
 import BaseSelect from '@/components/common/BaseSelect.vue'
 import RankBars, { type RankRow } from '@/components/stats/RankBars.vue'
@@ -209,9 +210,7 @@ const cacheKnown = computed(
         <button type="button" class="font-medium underline" @click="load">重试</button>
       </div>
 
-      <div v-else-if="!metrics" class="flex justify-center py-28" role="status">
-        <LoaderCircle class="size-6 animate-spin text-mute" />
-      </div>
+      <MascotLoader v-else-if="!metrics" size="lg" class="py-24" />
 
       <div v-else-if="metrics.tasks === 0" class="card-soft mt-6 flex flex-col items-center gap-3 px-6 py-20 text-center">
         <span class="flex size-12 items-center justify-center rounded-2xl bg-paper text-mute">

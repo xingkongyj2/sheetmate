@@ -1,9 +1,10 @@
 <script setup lang="ts">
 /** 查看整张表（分页）。loader 由调用方提供：会话工作区的表 / 运行中间表 / 上传文件的 sheet。 */
-import { ChevronLeft, ChevronRight, LoaderCircle } from '@lucide/vue'
+import { ChevronLeft, ChevronRight } from '@lucide/vue'
 import { onMounted, ref } from 'vue'
 
 import { errorText } from '@/api/http'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 
 import BaseModal from './BaseModal.vue'
 import DataTable from './DataTable.vue'
@@ -49,7 +50,7 @@ onMounted(() => load(0))
       <p v-if="subtitle" class="mt-0.5 truncate text-xs text-faint">{{ subtitle }}</p>
     </template>
     <div v-if="error" class="rounded-xl bg-error/5 px-4 py-3 text-sm text-error">{{ error }}</div>
-    <div v-else-if="!page" class="flex h-40 items-center justify-center text-mute"><LoaderCircle class="size-5 animate-spin" /></div>
+    <MascotLoader v-else-if="!page" size="sm" class="h-44" />
     <DataTable v-else :columns="page.columns" :rows="page.rows" :offset="offset" max-height="62vh" />
     <template v-if="page && page.total > PAGE" #footer>
       <div class="flex w-full items-center justify-between text-sm text-mute">

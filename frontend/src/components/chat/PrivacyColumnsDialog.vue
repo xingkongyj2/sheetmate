@@ -7,6 +7,7 @@ import { computed, onMounted, ref } from 'vue'
 import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { PrivacyColumnChange, PrivacyColumns, PrivacyColumnState } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 
 const props = defineProps<{ fileId: string; filename: string; conversationId?: string; elevated?: boolean }>()
@@ -60,7 +61,7 @@ const setKind = (column: PrivacyColumnState, kind: PrivacyColumnChange['kind']) 
       <h3 class="truncate text-base font-semibold" :title="filename">脱敏 · {{ filename }}</h3>
     </template>
     <div class="min-h-24" data-testid="privacy-columns">
-      <p v-if="loading" class="flex items-center justify-center gap-2 py-10 text-sm text-mute"><LoaderCircle class="size-4 animate-spin" />正在分析列头和内容</p>
+      <MascotLoader v-if="loading" size="sm" label="正在分析列头和内容" class="py-10" />
       <p v-else-if="error && !data" class="py-10 text-center text-sm text-error" role="alert">{{ error }}</p>
       <template v-else-if="data && sheet">
         <div class="mb-3 flex flex-wrap gap-1.5" role="tablist">

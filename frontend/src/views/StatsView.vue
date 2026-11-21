@@ -3,10 +3,11 @@
  * 统计：和「设置」同级的页面。先给 4 个关键数字，再用图看趋势（每日任务、每日 Token），
  * 最后按排行看任务状态、失败原因、工具和模型调用阶段。
  */
-import { ChartColumn, LoaderCircle, RefreshCw } from '@lucide/vue'
+import { ChartColumn, RefreshCw } from '@lucide/vue'
 import { computed, onMounted, ref } from 'vue'
 
 import { errorText } from '@/api/http'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import { getExecutionMetrics } from '@/api/observability'
 import type { ExecutionMetrics } from '@/api/observability'
 import RankBars from '@/components/stats/RankBars.vue'
@@ -128,9 +129,7 @@ const usageIncomplete = computed(() => !!metrics.value &&
         <button type="button" class="font-medium underline" @click="load">重试</button>
       </div>
 
-      <div v-else-if="!metrics" class="mt-24 flex justify-center" role="status" aria-label="正在加载统计">
-        <LoaderCircle class="size-6 animate-spin text-mute" />
-      </div>
+      <MascotLoader v-else-if="!metrics" size="lg" class="py-24" />
 
       <div v-else-if="metrics.tasks === 0" class="card-soft mt-8 flex flex-col items-center gap-3 px-6 py-16 text-center">
         <span class="flex size-12 items-center justify-center rounded-2xl bg-paper text-mute"><ChartColumn class="size-6" /></span>

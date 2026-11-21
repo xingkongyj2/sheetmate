@@ -8,6 +8,7 @@ import { errorText } from '@/api/http'
 import UserFormModal from '@/components/admin/UserFormModal.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import UserAvatar from '@/components/brand/UserAvatar.vue'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import { shortTime } from '@/composables/conversationGroups'
 import { useConfirm } from '@/composables/useConfirm'
 import { useToast } from '@/composables/useToast'
@@ -166,9 +167,7 @@ const shortDate = (iso: string) => (iso ? iso.slice(0, 10) : '—')
         <button type="button" class="font-medium underline" @click="load">重试</button>
       </div>
 
-      <div v-else-if="loading" class="flex justify-center py-24">
-        <LoaderCircle class="size-6 animate-spin text-mute" />
-      </div>
+      <MascotLoader v-else-if="loading" size="lg" class="py-24" />
 
       <div v-else-if="!filtered.length" class="card-soft mt-6 flex flex-col items-center gap-2.5 py-16 text-center">
         <span class="flex size-11 items-center justify-center rounded-2xl bg-paper text-mute">

@@ -12,6 +12,7 @@ import ConversationIcon from '@/components/brand/ConversationIcon.vue'
 import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
 import CustomerEmptyIllustration from '@/components/brand/CustomerEmptyIllustration.vue'
 import Mascot from '@/components/brand/Mascot.vue'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import CustomerFormDialog from '@/components/customer/CustomerFormDialog.vue'
 import CustomerLogicSummary from '@/components/customer/CustomerLogicSummary.vue'
@@ -166,7 +167,7 @@ async function onEdited() {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div v-if="loading" class="flex h-full items-center justify-center"><LoaderCircle class="size-6 animate-spin text-mute" /></div>
+    <MascotLoader v-if="loading" size="lg" class="h-full" />
     <div v-else-if="customer" class="sheetmate-content-width mx-auto w-full px-6 pb-16 pt-6">
       <RouterLink :to="{ name: 'customers' }" class="btn-ink size-8 p-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" title="返回全部客户" aria-label="返回全部客户"><ArrowLeft class="size-3.5" aria-hidden="true" /></RouterLink>
 

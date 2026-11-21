@@ -14,6 +14,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerDetail, RecipeVersion } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import RecipeRunsList from '@/components/customer/RecipeRunsList.vue'
 import RecipeVersionDialog from '@/components/customer/RecipeVersionDialog.vue'
@@ -181,7 +182,7 @@ async function removeRecipe() {
 
 <template>
   <div class="h-full overflow-y-auto">
-    <div v-if="loading" class="flex h-full items-center justify-center"><LoaderCircle class="size-6 animate-spin text-mute" /></div>
+    <MascotLoader v-if="loading" size="lg" class="h-full" />
 
     <div v-else-if="recipe && body && customer" class="mx-auto w-full max-w-3xl px-6 pb-20 pt-6">
       <nav class="flex min-w-0 items-center gap-3 text-xs text-mute" aria-label="返回">
@@ -242,7 +243,7 @@ async function removeRecipe() {
       <!-- 版本历史：点开看这个版本的完整信息和改动 -->
       <section v-else class="mt-8">
         <p v-if="versionError" class="ver-card py-5 text-center text-sm text-error" role="alert">{{ versionError }}</p>
-        <p v-else-if="!versions" class="ver-card flex justify-center py-5"><LoaderCircle class="size-5 animate-spin text-mute" /></p>
+        <MascotLoader v-else-if="!versions" size="sm" class="ver-card py-6" />
         <ol v-else class="ver-card">
           <li v-for="v in versions" :key="v.version">
             <button type="button" class="ver-row" :aria-label="`查看 v${v.version} 的版本详情`" @click="openedVersion = v">

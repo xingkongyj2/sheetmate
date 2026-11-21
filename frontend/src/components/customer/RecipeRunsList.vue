@@ -3,12 +3,13 @@
  * 一个流程的运行记录（流程详情页「运行记录」标签）：按天分组——今天、昨天，再往前显示日期；
  * 每组 = 卡片外的大标题 + 一张卡片，卡片里一行一次运行，点开看每一步详情。
  */
-import { ChevronRight, Download, Eye, LoaderCircle } from '@lucide/vue'
+import { ChevronRight, Download, Eye } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { fileApi, runApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { RunBrief } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import { duration, percent } from '@/composables/chatModel'
 import { primaryRunDeliveryId } from '@/composables/deliveryFiles'
@@ -83,7 +84,7 @@ onBeforeUnmount(() => { requestVersion++ })
 
 <template>
   <div>
-    <div v-if="loading" class="flex h-32 items-center justify-center" aria-label="正在加载运行记录"><LoaderCircle class="size-5 animate-spin text-mute" /></div>
+    <MascotLoader v-if="loading" size="sm" class="h-36" />
     <div v-else-if="loadError" class="card-soft py-8 text-center" role="alert">
       <p class="text-sm text-error">{{ loadError }}</p>
       <button type="button" class="btn-line mt-3" @click="load">重新加载</button>

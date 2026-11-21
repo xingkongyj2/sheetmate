@@ -7,6 +7,7 @@ import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerCard, CustomerDetail, CustomerFormula, FormulaInfo, FormulaSuggestion } from '@/api/types'
 import FormulaLibraryIcon from '@/components/brand/FormulaLibraryIcon.vue'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import FormulaAIGeneratorDialog from '@/components/customer/FormulaAIGeneratorDialog.vue'
@@ -261,7 +262,7 @@ async function remove(f: LibraryFormula) {
       </div>
 
       <div v-if="error" class="mt-6 rounded-2xl bg-error/5 p-4 text-sm text-error" role="alert">{{ error }}<button class="btn-text ml-3" @click="load">重试</button></div>
-      <div v-else-if="loading" class="flex justify-center py-20"><LoaderCircle class="size-5 animate-spin text-faint" /></div>
+      <MascotLoader v-else-if="loading" class="py-20" />
       <template v-else-if="tab === 'customer'">
         <div v-if="customerGroups.length" class="mt-7 space-y-9">
           <section v-for="group in customerGroups" :key="group.customerId" :aria-label="group.customerName">

@@ -9,6 +9,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { fileApi, runApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { RunDetail, StepReport } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import ExecutionStatusNotice from '@/components/chat/ExecutionStatusNotice.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
@@ -123,7 +124,7 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
       </div>
     </template>
 
-    <div v-if="!run" class="flex h-40 items-center justify-center"><LoaderCircle class="size-5 animate-spin text-mute" /></div>
+    <MascotLoader v-if="!run" size="sm" class="h-44" />
     <div v-else class="space-y-8">
       <!-- 概况：一行重点 -->
       <div class="space-y-3">

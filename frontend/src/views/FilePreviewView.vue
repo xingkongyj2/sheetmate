@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /** 文件预览页：在新的标签页里整页展示一个文件（表格或图片）。刷新、复制地址都停在这个文件。 */
-import { CircleAlert, LoaderCircle } from '@lucide/vue'
+import { CircleAlert } from '@lucide/vue'
 import { computed, defineAsyncComponent, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 
 const WorkbookPreview = defineAsyncComponent(() => import('@/features/workbook-preview/WorkbookPreview.vue'))
 const route = useRoute()
@@ -55,5 +56,5 @@ onMounted(load)
     <p role="alert" class="max-w-lg text-sm leading-6 text-mute">{{ error }}</p>
     <button type="button" class="btn-line" @click="load">重新加载</button>
   </div>
-  <div v-else class="flex h-dvh items-center justify-center" role="status"><LoaderCircle class="size-7 animate-spin text-mute" /></div>
+  <MascotLoader v-else size="lg" class="h-dvh" />
 </template>

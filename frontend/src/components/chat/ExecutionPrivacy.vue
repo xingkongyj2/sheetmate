@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /** 详情面板「脱敏」：当前会话的脱敏情况（只读）。哪些文件、哪些列、怎么处理、每次发送前检查的结果，都写清楚。 */
-import { ChevronRight, LoaderCircle, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff } from '@lucide/vue'
+import { ChevronRight, RefreshCw, ShieldAlert, ShieldCheck, ShieldOff } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { ConversationDetail, PrivacyEventItem, PrivacyOverview } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import type { UiMessage } from '@/composables/chatModel'
 import { cachedOverview, rememberOverview } from '@/composables/privacyOverviewCache'
 import { formatCount } from '@/composables/privacyPresentation'
@@ -134,12 +135,10 @@ function levelClass(level: PrivacyEventItem['level']): string {
 </script>
 
 <template>
-  <section class="grid gap-5" aria-label="脱敏">
+  <section class="flex flex-1 shrink-0 flex-col gap-5" aria-label="脱敏">
     <p v-if="error" class="break-words rounded-xl bg-error/5 px-3 py-2 text-xs leading-5 text-error" role="alert">{{ error }}</p>
 
-    <div v-if="!overview && loading" class="flex justify-center py-8" role="status" aria-label="加载中">
-      <LoaderCircle class="size-5 animate-spin text-mute" />
-    </div>
+    <MascotLoader v-if="!overview && loading" class="py-6" />
 
     <template v-else-if="overview">
       <section class="grid gap-2.5" aria-label="文件脱敏">

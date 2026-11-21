@@ -224,7 +224,7 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2" :class="{ 'flex flex-col': emptyState }">
+    <div id="execution-content" role="tabpanel" :aria-labelledby="`execution-tab-${tab}`" class="min-h-0 flex-1 overflow-y-auto px-4 pb-4 pt-2" :class="{ 'flex flex-col': emptyState || tab === 'privacy' }">
       <ExecutionStatusNotice v-if="message && tab !== 'usage'" class="mb-4 shrink-0" :message="message" />
       <div v-if="emptyState" class="flex flex-1 flex-col items-center justify-center gap-3 py-8 text-center text-sm text-faint">
         <WorkspaceEmptyIcon :kind="emptyState.kind" />

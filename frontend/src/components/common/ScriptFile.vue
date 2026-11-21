@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { Check, Copy, Download, FileCode2, LoaderCircle } from '@lucide/vue'
+import { Check, Copy, Download, FileCode2 } from '@lucide/vue'
 import { computed, ref, watch } from 'vue'
 
 import { scriptApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { ScriptFile, ScriptReference } from '@/api/types'
+import MascotLoader from '@/components/brand/MascotLoader.vue'
 import { scriptTitle } from '@/composables/scriptPresentation'
 import { useToast } from '@/composables/useToast'
 
@@ -68,7 +69,7 @@ function download() {
         <div class="min-w-0"><h3 class="break-words text-base font-semibold">{{ title }}</h3><p class="mt-1 break-all font-mono text-[11px] text-faint">{{ script.script_id }}.py</p></div>
       </div>
     </template>
-    <p v-if="loading" role="status" class="flex items-center justify-center gap-2 py-10 text-sm text-mute"><LoaderCircle class="size-4 animate-spin" />正在加载脚本…</p>
+    <MascotLoader v-if="loading" size="sm" label="正在加载脚本" class="py-10" />
     <div v-else-if="error" role="alert" class="space-y-3 rounded-xl bg-error/5 p-4 text-sm text-error"><p>{{ error }}</p><button type="button" class="btn-line" @click="load">重新加载</button></div>
     <pre v-else-if="file" class="max-h-[60vh] overflow-auto rounded-xl bg-[#171d28] p-4 font-mono text-xs leading-6 text-[#dde7f5]" tabindex="0"><code>{{ file.code }}</code></pre>
     <template v-if="file" #footer>

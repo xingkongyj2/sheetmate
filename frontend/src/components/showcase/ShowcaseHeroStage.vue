@@ -8,10 +8,10 @@ import {
   ArrowUp,
   Check,
   CheckCircle2,
+  ChevronDown,
   CircleUserRound,
   Download,
   Eye,
-  FileSpreadsheet,
   Maximize2,
   MessageSquarePlus,
   Play,
@@ -21,19 +21,21 @@ import {
   ShieldCheck,
   Sparkles,
   SquarePen,
+  X,
 } from '@lucide/vue'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 
 import CustomerDetailTabIcon from '@/components/brand/CustomerDetailTabIcon.vue'
 import LogoMark from '@/components/brand/LogoMark.vue'
 import Mascot from '@/components/brand/Mascot.vue'
+import UnboundCustomerIcon from '@/components/brand/UnboundCustomerIcon.vue'
 
 type SceneId = 'home' | 'chat' | 'customers' | 'customer' | 'recipe'
 type PanelTab = 'recipes' | 'files' | 'data' | 'usage' | 'privacy'
 type CustomerTab = 'logic' | 'recipes' | 'files' | 'memory'
 
 const SCENES: { id: SceneId; num: string; label: string }[] = [
-  { id: 'home', num: '01', label: '首页开工' },
+  { id: 'home', num: '01', label: '首页' },
   { id: 'chat', num: '02', label: '对话与工作区' },
   { id: 'customers', num: '03', label: '客户库' },
   { id: 'customer', num: '04', label: '客户详情' },
@@ -145,27 +147,35 @@ const CUSTOMERS: DemoCustomer[] = [
 ]
 
 const activeScene = ref<SceneId>('home')
-const selectedCustomerId = ref<string>('shunda')
+/** 首页默认未绑定客户（干净空首页），点开下方抽屉可模拟选择客户 */
+const homeCustomerId = ref<string | null>(null)
+const pickerOpen = ref(false)
+const detailCustomerId = ref<string>('shunda')
 const panelTab = ref<PanelTab>('files')
 const customerTab = ref<CustomerTab>('memory')
 const privacyMasked = ref(true)
 const flowStep = ref(4)
-const paused = ref(false)
 
-let autoTimer: number | null = null
 let flowTimer: number | null = null
 
-const currentCustomer = computed(() => CUSTOMERS.find((c) => c.id === selectedCustomerId.value) ?? CUSTOMERS[0]!)
-const activeIndex = computed(() => SCENES.findIndex((s) => s.id === activeScene.value))
+const homeCustomer = computed(() => CUSTOMERS.find((c) => c.id === homeCustomerId.value) ?? null)
+const currentCustomer = computed(() => CUSTOMERS.find((c) => c.id === detailCustomerId.value) ?? CUSTOMERS[0]!)
 
 function goScene(id: SceneId) {
+  pickerOpen.value = false
   activeScene.value = id
   if (id === 'recipe') runFlowDemo()
 }
 
 function openCustomerDetail(id: string) {
-  selectedCustomerId.value = id
+  pickerOpen.value = false
+  detailCustomerId.value = id
   activeScene.value = 'customer'
+}
+
+function chooseHomeCustomer(id: string | null) {
+  homeCustomerId.value = id
+  pickerOpen.value = false
 }
 
 function runFlowDemo() {
@@ -181,29 +191,16 @@ function runFlowDemo() {
   }, 380)
 }
 
-onMounted(() => {
-  autoTimer = window.setInterval(() => {
-    if (paused.value) return
-    const next = SCENES[(activeIndex.value + 1) % SCENES.length]
-    if (next) goScene(next.id)
-  }, 7500)
-})
-
 onBeforeUnmount(() => {
-  if (autoTimer) window.clearInterval(autoTimer)
   if (flowTimer) window.clearInterval(flowTimer)
 })
 </script>
 
 <template>
-  <div
-    class="mx-auto w-full max-w-[1320px]"
-    @mouseenter="paused = true"
-    @mouseleave="paused = false"
-  >
-    <!-- 实际软件壳层（无多余假浏览器标题栏，直接呈现 SheetMate 真实工作台） -->
+  <div class="mx-auto w-full max-w-[1320px]">
+    <!-- 实际软件壳层（按正常桌面浏览器 16:10 比例展示：1320 × 760） -->
     <div class="relative overflow-hidden rounded-[24px] border border-[#e3e1dc] bg-canvas shadow-[0_30px_90px_-34px_rgba(15,14,12,0.16),0_4px_18px_rgba(15,14,12,0.04)]">
-      <div class="flex min-h-[580px] flex-col lg:flex-row">
+      <div class="flex min-h-[680px] flex-col lg:h-[760px] lg:flex-row">
         <!-- 左侧真实侧边栏（AppSidebar 1:1 复刻） -->
         <aside class="hidden w-[236px] shrink-0 flex-col justify-between p-3 lg:flex">
           <div>
@@ -246,7 +243,7 @@ onBeforeUnmount(() => {
                 :key="cust.id"
                 type="button"
                 class="flex w-full items-center gap-2.5 rounded-xl px-2.5 py-1.5 text-left text-[13px] transition"
-                :class="activeScene === 'customer' && selectedCustomerId === cust.id ? 'sidebar-active' : 'text-ink/80 hover:bg-black/[0.04]'"
+                :class="activeScene === 'customer' && detailCustomerId === cust.id ? 'sidebar-active' : 'text-ink/80 hover:bg-black/[0.04]'"
                 @click="openCustomerDetail(cust.id)"
               >
                 <Mascot :variant="cust.mascot" :size="20" :shadow="false" />
@@ -293,86 +290,102 @@ onBeforeUnmount(() => {
         <div class="flex flex-1 p-2.5 lg:pl-0">
           <div class="app-panel flex flex-1 flex-col overflow-hidden rounded-[18px] bg-panel">
             <Transition name="scene-fade" mode="out-in">
-              <!-- ========== 01 真实首页（HomeView） ========== -->
+              <!-- ========== 01 真实空首页（HomeView 1:1 复刻） ========== -->
               <div
                 v-if="activeScene === 'home'"
                 key="home"
-                class="flex flex-1 flex-col items-center justify-center px-6 py-12 sm:px-12"
+                class="flex flex-1 flex-col justify-between px-6 pb-5 pt-10 sm:px-12"
               >
-                <div class="flex items-center gap-3 text-[24px] font-semibold tracking-tight text-ink sm:text-[28px]">
-                  <LogoMark :size="30" />
-                  <span>你的专属手工账单助手</span>
-                </div>
+                <div class="mx-auto flex w-full max-w-[640px] flex-1 flex-col justify-center pb-8">
+                  <div class="flex items-center justify-center gap-3 text-[24px] font-semibold tracking-tight text-ink sm:text-[28px]">
+                    <LogoMark :size="30" />
+                    <span>你的专属手工账单助手</span>
+                  </div>
 
-                <!-- 首页输入框 + 探头墨墨 + 底部选择客户抽屉 -->
-                <div class="mt-20 w-full max-w-[660px]">
-                  <div class="relative z-10">
-                    <div class="pointer-events-none absolute bottom-full right-6 aspect-[33/20] w-[144px] overflow-hidden">
-                      <Transition name="peek-pop" mode="out-in">
-                        <Mascot :key="currentCustomer.mascot" :variant="currentCustomer.mascot" :size="144" :shadow="false" class="h-auto w-full" />
-                      </Transition>
-                    </div>
-
-                    <div class="chat-card p-4">
-                      <div class="mb-3 flex flex-wrap gap-2">
-                        <span class="inline-flex items-center gap-1.5 rounded-lg border border-line bg-[#faf9f7] px-2.5 py-1 text-xs text-ink/85">
-                          <FileSpreadsheet class="size-3.5 text-[#22b573]" />
-                          华东运单明细.xlsx
-                        </span>
-                        <span class="inline-flex items-center gap-1.5 rounded-lg border border-line bg-[#faf9f7] px-2.5 py-1 text-xs text-ink/85">
-                          <FileSpreadsheet class="size-3.5 text-[#22b573]" />
-                          华南运单明细.xlsx
-                        </span>
-                        <span class="inline-flex items-center gap-1.5 rounded-lg border border-line bg-[#faf9f7] px-2.5 py-1 text-xs text-ink/85">
-                          <FileSpreadsheet class="size-3.5 text-[#22b573]" />
-                          阶梯价目表.xlsx
-                        </span>
+                  <!-- 干净空输入框 + 右上角探头墨墨 + 底部「选择客户」抽屉 -->
+                  <div class="mt-20 w-full">
+                    <div class="relative z-10">
+                      <div class="pointer-events-none absolute bottom-full right-6 aspect-[33/20] w-[144px] overflow-hidden">
+                        <Transition name="peek-pop" mode="out-in">
+                          <Mascot
+                            :key="homeCustomer?.mascot ?? 'blob'"
+                            :variant="homeCustomer?.mascot ?? 'blob'"
+                            :size="144"
+                            :shadow="false"
+                            class="h-auto w-full"
+                          />
+                        </Transition>
                       </div>
 
-                      <p class="min-h-[48px] text-[15px] leading-relaxed text-ink">
-                        {{ currentCustomer.prompt }}<span class="typing-caret" />
-                      </p>
+                      <div class="chat-card p-4">
+                        <p class="min-h-[58px] text-[15px] leading-relaxed text-faint">
+                          账单的一切，交给我
+                        </p>
 
-                      <div class="mt-4 flex items-center justify-between">
-                        <div class="flex items-center gap-2">
-                          <span class="inline-flex size-8 items-center justify-center rounded-full border border-line text-mute">
-                            <Plus class="size-4" />
-                          </span>
-                          <span class="inline-flex items-center gap-1.5 rounded-full border border-[#e3e4fb] bg-[#f4f4fe] px-3 py-1 text-xs font-medium text-[#5255c8]">
-                            <Sparkles class="size-3.5" />
-                            思考模式
+                        <div class="mt-3 flex items-center justify-between">
+                          <div class="flex items-center gap-2">
+                            <span class="inline-flex size-8 items-center justify-center rounded-full text-mute">
+                              <Plus class="size-4" />
+                            </span>
+                            <span class="inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs text-mute">
+                              <Sparkles class="size-3.5" />
+                              思考模式
+                            </span>
+                          </div>
+                          <span class="inline-flex size-8 items-center justify-center rounded-full bg-[#e9e7e2] text-[#a8a49e]">
+                            <ArrowUp class="size-4" />
                           </span>
                         </div>
+                      </div>
+                    </div>
+
+                    <!-- 真实「选择客户」抽屉（默认空状态，点开可切换客户） -->
+                    <div class="relative mx-5 -mt-4 rounded-b-xl border border-t-0 border-[#eeeeed] bg-white pt-4 shadow-[0_1px_2px_rgba(0,0,0,0.04),0_6px_20px_rgba(0,0,0,0.07)]">
+                      <div
+                        class="flex h-10 w-full cursor-pointer items-center gap-1.5 rounded-b-xl px-3.5 text-[13px] text-mute transition hover:bg-black/[0.03] hover:text-ink"
+                        @click="pickerOpen = !pickerOpen"
+                      >
+                        <span class="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-paper">
+                          <UnboundCustomerIcon v-if="!homeCustomer" class="size-5 shrink-0" />
+                          <Mascot v-else :variant="homeCustomer.mascot" :size="26" :shadow="false" />
+                        </span>
+                        <span class="truncate" :class="homeCustomer ? 'font-medium text-ink' : ''">
+                          {{ homeCustomer ? homeCustomer.name : '选择客户' }}
+                        </span>
                         <button
+                          v-if="homeCustomer"
                           type="button"
-                          class="inline-flex size-9 items-center justify-center rounded-full bg-ink text-white transition hover:bg-black/85 active:scale-95"
-                          title="查看执行过程"
-                          @click="goScene('chat')"
+                          class="flex size-5 items-center justify-center rounded-full text-faint hover:bg-black/[0.07] hover:text-ink"
+                          title="取消选择"
+                          @click.stop="chooseHomeCustomer(null)"
                         >
-                          <ArrowUp class="size-4" />
+                          <X class="size-3" />
+                        </button>
+                        <ChevronDown class="ml-auto size-3.5 text-faint transition" :class="{ 'rotate-180': pickerOpen }" />
+                      </div>
+
+                      <!-- 点开后的轻巧客户选择列表 -->
+                      <div
+                        v-if="pickerOpen"
+                        class="absolute inset-x-0 top-full z-20 mt-1.5 rounded-xl border border-line bg-white p-1.5 shadow-lg"
+                      >
+                        <button
+                          v-for="cust in CUSTOMERS"
+                          :key="cust.id"
+                          type="button"
+                          class="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-[13px] transition hover:bg-paper"
+                          @click="chooseHomeCustomer(cust.id)"
+                        >
+                          <Mascot :variant="cust.mascot" :size="22" :shadow="false" />
+                          <span class="flex-1 text-ink">{{ cust.name }}</span>
+                          <Check v-if="homeCustomerId === cust.id" class="size-3.5 text-ink" />
                         </button>
                       </div>
                     </div>
                   </div>
-
-                  <!-- 真实「选择客户」抽屉 -->
-                  <div class="relative mx-5 -mt-4 rounded-b-xl border border-t-0 border-[#eeeeed] bg-white px-4 pb-3.5 pt-6 shadow-[0_6px_20px_rgba(0,0,0,0.06)]">
-                    <div class="flex flex-wrap items-center gap-2">
-                      <span class="text-xs text-faint">客户</span>
-                      <button
-                        v-for="cust in CUSTOMERS"
-                        :key="cust.id"
-                        type="button"
-                        class="inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition"
-                        :class="selectedCustomerId === cust.id ? 'border-ink bg-ink text-white' : 'border-line bg-[#faf9f7] text-mute hover:border-ink/30 hover:text-ink'"
-                        @click="selectedCustomerId = cust.id"
-                      >
-                        <Mascot :variant="cust.mascot" :size="16" :shadow="false" />
-                        <span>{{ cust.name }}</span>
-                      </button>
-                    </div>
-                  </div>
                 </div>
+
+                <div class="text-center text-[11px] tracking-wide text-faint">本产品归属「数智结算工坊」</div>
               </div>
 
               <!-- ========== 02 真实对话 + 右侧工作区面板（ChatView + ExecutionPanel） ========== -->
@@ -382,8 +395,8 @@ onBeforeUnmount(() => {
                 class="grid flex-1 divide-y divide-line/80 lg:grid-cols-[1.25fr_0.85fr] lg:divide-x lg:divide-y-0"
               >
                 <!-- 左：对话主栏 -->
-                <div class="flex flex-col">
-                  <div class="flex h-[52px] items-center justify-between border-b border-line/70 px-5">
+                <div class="flex min-h-0 flex-col">
+                  <div class="flex h-[54px] shrink-0 items-center justify-between border-b border-line/70 px-5">
                     <span class="text-[14px] font-medium text-ink">10月区域运费核算</span>
                     <button
                       type="button"
@@ -395,12 +408,15 @@ onBeforeUnmount(() => {
                     </button>
                   </div>
 
-                  <div class="flex-1 space-y-5 p-6">
+                  <div class="flex-1 space-y-5 overflow-y-auto p-6">
                     <!-- 用户消息 -->
                     <div class="ml-auto max-w-[82%] space-y-1.5">
                       <div class="flex flex-wrap justify-end gap-1.5">
                         <span class="inline-flex items-center gap-1 rounded-lg border border-line bg-white px-2 py-0.5 text-[11px] text-mute">
                           <Sheet class="size-3 text-[#22b573]" /> 华东运单明细.xlsx
+                        </span>
+                        <span class="inline-flex items-center gap-1 rounded-lg border border-line bg-white px-2 py-0.5 text-[11px] text-mute">
+                          <Sheet class="size-3 text-[#22b573]" /> 华南运单明细.xlsx
                         </span>
                         <span class="inline-flex items-center gap-1 rounded-lg border border-line bg-white px-2 py-0.5 text-[11px] text-mute">
                           <Sheet class="size-3 text-[#22b573]" /> 阶梯价目表.xlsx
@@ -414,7 +430,7 @@ onBeforeUnmount(() => {
                     <!-- 助手回复 -->
                     <div class="flex items-start gap-3">
                       <Mascot variant="blob" :size="30" :shadow="false" class="mt-0.5 shrink-0" />
-                      <div class="min-w-0 flex-1 space-y-3">
+                      <div class="min-w-0 flex-1 space-y-3.5">
                         <div class="flex flex-wrap gap-2 text-xs text-mute">
                           <span class="inline-flex items-center gap-1 rounded-full bg-paper px-2.5 py-1">
                             <CheckCircle2 class="size-3.5 text-[#22b573]" /> 读取 1,842 条运单
@@ -427,47 +443,72 @@ onBeforeUnmount(() => {
                           </span>
                         </div>
 
-                        <p class="text-[13.5px] leading-relaxed text-ink">已完成 10 月三区运费对账汇总，各区明细与总账已核平：</p>
+                        <p class="text-[13.5px] leading-relaxed text-ink">已完成 10 月三区运费核算汇总，成品账单与异常清单均已生成：</p>
 
                         <!-- 真实 Markdown 汇总表样式 -->
                         <div class="overflow-hidden rounded-xl border border-[#dfe3e8] bg-white">
                           <table class="w-full text-left text-[12.5px] tabular-nums">
                             <thead class="border-b border-[#dfe3e8] bg-[#f7f8fa] text-xs text-mute">
                               <tr>
-                                <th class="px-3.5 py-2 font-semibold">结算区域</th>
-                                <th class="px-3.5 py-2 font-semibold">有效单量</th>
-                                <th class="px-3.5 py-2 font-semibold text-right">结算金额</th>
-                                <th class="px-3.5 py-2 font-semibold text-right">状态</th>
+                                <th class="px-3.5 py-2.5 font-semibold">结算区域</th>
+                                <th class="px-3.5 py-2.5 font-semibold">有效单量</th>
+                                <th class="px-3.5 py-2.5 font-semibold text-right">结算金额</th>
+                                <th class="px-3.5 py-2.5 font-semibold text-right">状态</th>
                               </tr>
                             </thead>
                             <tbody class="divide-y divide-[#eef0f3]">
                               <tr>
-                                <td class="px-3.5 py-2 font-medium">华东仓</td>
-                                <td class="px-3.5 py-2 text-mute">812</td>
-                                <td class="px-3.5 py-2 text-right font-mono">¥ 48,920.00</td>
-                                <td class="px-3.5 py-2 text-right text-[#1fa463]">一致</td>
+                                <td class="px-3.5 py-2.5 font-medium">华东仓</td>
+                                <td class="px-3.5 py-2.5 text-mute">812</td>
+                                <td class="px-3.5 py-2.5 text-right font-mono">¥ 48,920.00</td>
+                                <td class="px-3.5 py-2.5 text-right text-[#1fa463]">正常</td>
                               </tr>
                               <tr class="bg-[#fafbfc]">
-                                <td class="px-3.5 py-2 font-medium">华南仓</td>
-                                <td class="px-3.5 py-2 text-mute">645</td>
-                                <td class="px-3.5 py-2 text-right font-mono">¥ 36,415.50</td>
-                                <td class="px-3.5 py-2 text-right text-[#1fa463]">一致</td>
+                                <td class="px-3.5 py-2.5 font-medium">华南仓</td>
+                                <td class="px-3.5 py-2.5 text-mute">645</td>
+                                <td class="px-3.5 py-2.5 text-right font-mono">¥ 36,415.50</td>
+                                <td class="px-3.5 py-2.5 text-right text-[#1fa463]">正常</td>
                               </tr>
                               <tr>
-                                <td class="px-3.5 py-2 font-medium">华北仓</td>
-                                <td class="px-3.5 py-2 text-mute">362</td>
-                                <td class="px-3.5 py-2 text-right font-mono">¥ 21,084.50</td>
-                                <td class="px-3.5 py-2 text-right text-[#1fa463]">一致</td>
+                                <td class="px-3.5 py-2.5 font-medium">华北仓</td>
+                                <td class="px-3.5 py-2.5 text-mute">362</td>
+                                <td class="px-3.5 py-2.5 text-right font-mono">¥ 21,084.50</td>
+                                <td class="px-3.5 py-2.5 text-right text-[#1fa463]">正常</td>
                               </tr>
                               <tr class="bg-[#f7f8fa] font-semibold">
-                                <td class="px-3.5 py-2">合计</td>
-                                <td class="px-3.5 py-2">1,819</td>
-                                <td class="px-3.5 py-2 text-right font-mono">¥ 106,420.00</td>
-                                <td class="px-3.5 py-2 text-right text-[#1fa463]">已核平</td>
+                                <td class="px-3.5 py-2.5">合计</td>
+                                <td class="px-3.5 py-2.5">1,819</td>
+                                <td class="px-3.5 py-2.5 text-right font-mono">¥ 106,420.00</td>
+                                <td class="px-3.5 py-2.5 text-right text-[#1fa463]">已生成</td>
                               </tr>
                             </tbody>
                           </table>
                         </div>
+
+                        <!-- 生成的可下载成品卡 -->
+                        <div class="flex items-center justify-between rounded-xl border border-line/80 bg-white px-3.5 py-2.5">
+                          <div class="flex min-w-0 items-center gap-2.5">
+                            <Sheet class="size-4 shrink-0 text-[#1fa463]" />
+                            <span class="truncate text-[13px] font-medium text-ink">顺达_10月结算汇总单.xlsx</span>
+                          </div>
+                          <span class="shrink-0 rounded-full bg-paper px-2.5 py-0.5 text-[11px] text-mute">点击右侧面板查看</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <!-- 真实底部对话输入框 -->
+                  <div class="shrink-0 px-6 pb-5 pt-2">
+                    <div class="chat-card px-4 py-3">
+                      <div class="text-[13.5px] text-faint">继续提问...</div>
+                      <div class="mt-3 flex items-center justify-between">
+                        <div class="flex items-center gap-2 text-xs text-mute">
+                          <Plus class="size-4" />
+                          <span class="inline-flex items-center gap-1"><Sparkles class="size-3.5" /> 思考模式</span>
+                        </div>
+                        <span class="inline-flex size-7 items-center justify-center rounded-full bg-[#e9e7e2] text-[#a8a49e]">
+                          <ArrowUp class="size-3.5" />
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -834,14 +875,14 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- 底部极简 5 场景切换条 -->
+    <!-- 底部极简 5 场景切换条（默认停在 01 首页，点击自由体验其他页面） -->
     <div class="mx-auto mt-5 max-w-[780px]">
-      <div class="grid grid-cols-2 gap-1.5 rounded-2xl border border-[#e6e4df] bg-white/90 p-1.5 shadow-[0_6px_22px_-12px_rgba(15,14,12,0.1)] sm:grid-cols-5">
+      <div class="grid grid-cols-2 gap-1.5 rounded-2xl border border-[#e6e4df] bg-white p-1.5 shadow-[0_6px_22px_-12px_rgba(15,14,12,0.1)] sm:grid-cols-5">
         <button
           v-for="scene in SCENES"
           :key="scene.id"
           type="button"
-          class="relative overflow-hidden rounded-xl px-3 py-2.5 text-left transition"
+          class="relative rounded-xl px-3 py-2.5 text-left transition"
           :class="activeScene === scene.id ? 'bg-[#f4f3ef] text-ink' : 'text-mute hover:bg-[#faf9f7] hover:text-ink'"
           @click="goScene(scene.id)"
         >
@@ -849,12 +890,6 @@ onBeforeUnmount(() => {
             <span class="font-mono text-[10.5px]" :class="activeScene === scene.id ? 'font-semibold text-[#6265dc]' : 'text-faint'">{{ scene.num }}</span>
             <span class="truncate text-[13px] font-medium">{{ scene.label }}</span>
           </div>
-          <span
-            v-if="activeScene === scene.id"
-            :key="`${scene.id}-${paused ? 'p' : 'r'}`"
-            class="story-progress absolute inset-x-2.5 bottom-1 h-[2px] origin-left rounded-full bg-ink/75"
-            :class="{ 'story-progress-paused': paused }"
-          />
         </button>
       </div>
     </div>
@@ -886,23 +921,5 @@ onBeforeUnmount(() => {
 .peek-pop-leave-to {
   opacity: 0;
   transform: translateY(10px) scale(0.94);
-}
-
-.story-progress {
-  animation: story-bar 7.5s linear forwards;
-}
-.story-progress-paused {
-  animation-play-state: paused;
-}
-@keyframes story-bar {
-  from { transform: scaleX(0); }
-  to { transform: scaleX(1); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .story-progress {
-    animation: none;
-    transform: scaleX(1);
-  }
 }
 </style>
