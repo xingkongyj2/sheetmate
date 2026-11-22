@@ -27,7 +27,6 @@ import RecipeFlowInspector from './RecipeFlowInspector.vue'
 
 // 用新文件执行：和客户页里的「执行」是同一个弹窗。全屏模式仅用它选文件，确认后直接在流程图节点上实时执行。
 const RunRecipeDialog = defineAsyncComponent(() => import('@/components/customer/RunRecipeDialog.vue'))
-const RunDetailDialog = defineAsyncComponent(() => import('@/components/customer/RunDetailDialog.vue'))
 const props = withDefaults(defineProps<{
   flow: RecipeFlowData
   states?: StepState[]
@@ -136,7 +135,6 @@ const fsActiveIndex = ref(0)
 const fsViewing = ref<number | null>(null)
 const fsRunning = ref(false)
 const fsStopping = ref(false)
-const fsDetailRunId = ref<string | null>(null)
 const fsBatchOpen = ref(false)
 let fsGeneration = 0
 let fsHandle: StreamHandle | null = null
@@ -247,7 +245,6 @@ function resetFullscreenRun() {
   fsViewing.value = null
   fsRunning.value = false
   fsStopping.value = false
-  fsDetailRunId.value = null
   fsBatchOpen.value = false
   runRecipe.value = null
 }
@@ -538,7 +535,6 @@ function startFullscreenRun(payload: { items: PickedRunItem[]; pool: FileInfo[] 
   fsActiveIndex.value = 0
   fsViewing.value = null
   fsBatchOpen.value = false
-  fsDetailRunId.value = null
   selection.value = null
   runRecipe.value = null
   follow.value = true
@@ -778,11 +774,6 @@ onBeforeUnmount(() => {
                       <Download class="size-3.5" />下载
                     </a>
                   </template>
-
-                  <template v-if="!fsViewRunning && fsViewItem?.progress.runId">
-                    <span class="h-3.5 w-px shrink-0 bg-line" />
-                    <button type="button" class="flow-hud-btn" aria-haspopup="dialog" @click="fsDetailRunId = fsViewItem!.progress.runId!">详情</button>
-                  </template>
                 </div>
               </div>
             </div>
@@ -807,7 +798,6 @@ onBeforeUnmount(() => {
     :customer-id="context.customerId" :conversation-id="context.conversationId" :recipe="runRecipe" :pick-only="fullscreen" elevated
     @close="runRecipe = null" @start="startFullscreenRun" @done="emit('changed')"
   />
-  <RunDetailDialog v-if="fsDetailRunId" :run-id="fsDetailRunId" elevated @close="fsDetailRunId = null" @changed="emit('changed')" />
 </template>
 
 <style scoped>
