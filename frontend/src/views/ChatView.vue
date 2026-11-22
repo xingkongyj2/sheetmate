@@ -1142,8 +1142,8 @@ function answer(option: string) {
 }
 @container chat-workspace (min-width: 560px) {
   .chat-body.has-outline .chat-messages {
-    width: calc(100% - 7.75rem);
-    margin-left: max(6.25rem, calc((100% - var(--chat-message-width)) / 2));
+    width: calc(100% - 8.25rem);
+    margin-left: max(6.75rem, calc((100% - var(--chat-message-width)) / 2));
   }
 }
 @container chat-workspace (min-width: 840px) {

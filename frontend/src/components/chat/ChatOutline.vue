@@ -658,7 +658,7 @@ onBeforeUnmount(() => {
   width: 100%;
   align-items: center;
   gap: 8px;
-  padding: 6px 10px 6px 12px;
+  padding: 6px 10px 6px 13px;
   border: 0;
   border-radius: 10px;
   background: transparent;
@@ -703,9 +703,9 @@ onBeforeUnmount(() => {
 
 .chat-outline-indicator {
   position: absolute;
-  left: 4px;
+  left: 5px;
   top: 50%;
-  width: 2.5px;
+  width: 2px;
   height: 0;
   border-radius: 999px;
   background: var(--color-ink);

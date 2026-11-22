@@ -6,16 +6,16 @@
  * 客户页发起的执行，临时上传的输入和每次的结果都只记在各次执行里，不进文件页。
  * 正常情况下不调用 AI；出错时可选让 AI 自动修复。
  */
-import { Check, ChevronDown, Download, Eye, Files, FileSpreadsheet, Sheet, LoaderCircle, Play, RotateCcw, Square, TriangleAlert, Upload, X } from '@lucide/vue'
+import { Check, ChevronDown, ChevronRight, CircleX, Download, Eye, Files, FileSpreadsheet, Sheet, LoaderCircle, Play, RotateCcw, Square, TriangleAlert, Upload, X } from '@lucide/vue'
 import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 
 import { conversationApi, customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerWorkflow, FileInfo } from '@/api/types'
+import RecipeIcon from '@/components/brand/RecipeIcon.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
-import { addProgressFile, applyRecipeEvent, duration, newProgress, timeAgo, type FileArtifact, type RecipeProgress, type StepState } from '@/composables/chatModel'
-import { recipeToolLabel } from '@/composables/recipeTools'
+import { addProgressFile, applyRecipeEvent, newProgress, timeAgo, type FileArtifact, type RecipeProgress, type StepState } from '@/composables/chatModel'
 import { inputKey, missingColumns, pickSheet, sampleFile, type RunInput } from '@/composables/runInputs'
 import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
@@ -231,32 +231,204 @@ function retryFailed() {
   if (indices.length) void execute(indices)
 }
 
-// 单次执行：流程图 + 进度；批量：流程图跟着正在跑的那一次（可点下面的某一行查看那一次），下面一行一次执行
+// 单次执行：状态卡 → 输出文件 → 处理节点 → 输入文件；批量：状态卡 → 执行列表（含直接下载）→ 当前选中项详情
 const single = computed(() => (items.value.length === 1 ? items.value[0] : null))
 const viewIndex = computed(() => viewing.value ?? activeIndex.value)
 const viewItem = computed<RunItem | null>(() => items.value[viewIndex.value] ?? null)
 const progress = computed(() => viewItem.value?.progress ?? newProgress('replay'))
 const outputFiles = computed(() => viewItem.value?.files ?? [])
-/** 批量执行时告诉流程图：现在展示的是第几次、哪个文件 */
+/** 批量执行时标识当前展开的是第几次、哪个文件 */
 const batchInfo = computed(() => (items.value.length > 1 && viewItem.value
   ? { index: viewIndex.value + 1, total: items.value.length, filename: viewItem.value.title } : undefined))
 const viewRunning = computed(() => (single.value ? running.value : viewItem.value?.state === 'run'))
 const finished = computed(() => items.value.filter((item) => item.state === 'done' || item.state === 'failed').length)
+const succeededCount = computed(() => items.value.filter((item) => item.state === 'done').length)
 const failedCount = computed(() => items.value.filter((item) => item.state === 'failed').length)
 const retryable = computed(() => items.value.filter((item) => item.state === 'failed' || item.state === 'skipped').length)
+const batchPercent = computed(() => (items.value.length ? Math.round((finished.value / items.value.length) * 100) : 0))
 const stepsDone = (item: RunItem) => item.progress.steps.filter((step) => !['pending', 'running', 'repairing'].includes(step.status)).length
-const stepTotal = computed(() => props.recipe.recipe.steps.length)
+const stepTotal = computed(() => props.recipe.recipe.steps.filter((step) => step.enabled !== false).length || props.recipe.recipe.steps.length)
 const stepsFinished = computed(() => progress.value.steps.filter((step) => !['pending', 'running', 'repairing'].includes(step.status)).length)
-const stepMeta = (step: StepState) => {
-  const rows = step.report?.rows_out
-  return [rows !== undefined ? `${rows.toLocaleString()} 行` : '', duration(step.report?.duration_ms)].filter(Boolean).join(' · ')
-}
 const stepFailedChecks = (step: StepState) => (step.report?.checks ?? []).filter((check) => !check.ok)
 const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.runStatus === 'escalated' ? 'escalated' : 'failed') : item.progress.runStatus ?? 'success')
+
+const modalTitle = computed(() => {
+  if (stage.value === 'pick') return '运行流程'
+  if (single.value) return running.value ? '正在执行' : '执行结果'
+  return running.value ? '正在批量执行' : '批量执行结果'
+})
+
+const displaySteps = computed<StepState[]>(() => {
+  if (progress.value.steps.length) return progress.value.steps
+  return props.recipe.recipe.steps
+    .filter((step) => step.enabled !== false)
+    .map((step) => ({
+      step_id: step.id,
+      name: step.name,
+      formula: step.formula,
+      formula_name: step.formula,
+      kind: step.kind,
+      formula_kind: step.formula_kind,
+      description: step.description,
+      output: step.output,
+      status: 'pending' as const,
+      repairs: [],
+    }))
+})
+
+const displayInputs = computed(() => {
+  const mapping = viewItem.value?.mapping ?? {}
+  const fileIdOf = (alias: string) => {
+    const key = mapping[alias]
+    return key ? key.split('::')[0] : ''
+  }
+  if (progress.value.inputs.length) {
+    return progress.value.inputs.map((item) => ({
+      alias: item.alias,
+      filename: item.filename,
+      fileId: fileIdOf(item.alias),
+      warnings: item.warnings ?? [],
+    }))
+  }
+  if (!viewItem.value) return []
+  return inputs.value
+    .map((input) => {
+      const fid = fileIdOf(input.alias)
+      const file = pool.value.find((f) => f.file_id === fid)
+      return {
+        alias: input.alias,
+        filename: file?.filename || expectedName(input),
+        fileId: fid,
+        warnings: [] as string[],
+      }
+    })
+    .filter((item) => item.filename)
+})
+
+/** 仅在存在失败或警告时提取具体异常提示；全部通过时不展示校验明细 */
+const validationIssues = computed(() => {
+  const validation = progress.value.validation
+  if (!validation || validation.status === 'pass') return []
+  return (validation.checks ?? [])
+    .filter((check) => check.status === 'fail' || check.status === 'warn')
+    .map((check) => check.message || check.description)
+    .filter(Boolean)
+})
+
+const bannerError = computed(() => progress.value.escalation || progress.value.failed || '')
+
+type BannerTone = 'running' | 'success' | 'warning' | 'error'
+const singleBanner = computed<{ tone: BannerTone; title: string; desc: string }>(() => {
+  const steps = displaySteps.value
+  const totalSteps = steps.length
+  if (running.value) {
+    const repairing = steps.find((step) => step.status === 'repairing')
+    const active = steps.find((step) => step.status === 'running')
+    return {
+      tone: 'running',
+      title: repairing ? '正在自动修复并重试…' : '正在执行流程…',
+      desc: repairing
+        ? `正在修复「${repairing.name}」`
+        : active
+          ? `正在处理「${active.name}」（已完成 ${stepsFinished.value}/${totalSteps}）`
+          : totalSteps
+            ? `已完成 ${stepsFinished.value}/${totalSteps} 个节点`
+            : '正在准备输入文件…',
+    }
+  }
+  if (failedOf(progress.value)) {
+    const status = progress.value.runStatus
+    const tone: BannerTone = ['cancelled', 'interrupted', 'incomplete'].includes(status ?? '') ? 'warning' : 'error'
+    const title = status === 'escalated'
+      ? '执行失败，需人工处理'
+      : status === 'cancelled'
+        ? '已停止执行'
+        : status === 'interrupted'
+          ? '执行已中断'
+          : status === 'incomplete'
+            ? '执行未完成'
+            : '执行失败'
+    const failedStep = steps.find((step) => step.status === 'failed')
+    const desc = failedStep ? `节点「${failedStep.name}」执行出错` : '请查看下方报错信息后调整重试'
+    return { tone, title, desc }
+  }
+  const summaryParts = [
+    totalSteps ? `${totalSteps} 个节点全部完成` : '',
+    outputFiles.value.length ? `已生成 ${outputFiles.value.length} 个结果文件` : '',
+  ].filter(Boolean)
+  if (progress.value.runStatus === 'warning' || validationIssues.value.length) {
+    return {
+      tone: 'warning',
+      title: '执行完成，存在提示',
+      desc: summaryParts.join(' · ') || '请留意下方提示内容',
+    }
+  }
+  return {
+    tone: 'success',
+    title: progress.value.runStatus === 'repaired' ? '执行成功（已自动修复）' : '执行成功',
+    desc: summaryParts.join(' · ') || '流程已执行完成',
+  }
+})
+
+const batchBanner = computed<{ tone: BannerTone; title: string; desc: string }>(() => {
+  if (running.value) {
+    return {
+      tone: 'running',
+      title: `正在批量执行（${finished.value}/${items.value.length}）`,
+      desc: failedCount.value ? `已完成 ${finished.value} 个，其中 ${failedCount.value} 个失败` : `共 ${items.value.length} 个文件，正在依次处理`,
+    }
+  }
+  if (!failedCount.value && finished.value === items.value.length) {
+    return {
+      tone: 'success',
+      title: '批量执行成功',
+      desc: `全部 ${items.value.length} 个文件均已执行完成`,
+    }
+  }
+  if (failedCount.value === items.value.length) {
+    return {
+      tone: 'error',
+      title: '批量执行失败',
+      desc: `${failedCount.value} 个文件均未执行成功，可点击下方条目查看报错`,
+    }
+  }
+  const parts = [
+    succeededCount.value ? `${succeededCount.value} 个成功` : '',
+    failedCount.value ? `${failedCount.value} 个失败` : '',
+    items.value.length - finished.value > 0 ? `${items.value.length - finished.value} 个未执行` : '',
+  ].filter(Boolean)
+  return {
+    tone: 'warning',
+    title: '批量执行已结束',
+    desc: parts.join(' · '),
+  }
+})
+
+const STEP_STATUS_TEXT: Record<StepState['status'], string> = {
+  pending: '等待中',
+  running: '执行中',
+  repairing: '修复中',
+  success: '已完成',
+  repaired: '已自动修复',
+  warning: '有提示',
+  failed: '失败',
+}
+const stepStatusText = (status: StepState['status']) => STEP_STATUS_TEXT[status] ?? ''
 </script>
 
 <template>
-  <BaseModal :title="`执行「${recipe.name}」`" width="max-w-3xl" :elevated="elevated" @close="emit('close')">
+  <BaseModal width="max-w-3xl" :elevated="elevated" @close="emit('close')">
+    <template #title>
+      <div class="flex min-w-0 items-center gap-2.5">
+        <RecipeIcon kind="workflow" :size="28" />
+        <h3 class="flex min-w-0 items-baseline gap-1.5 text-[15px] font-semibold leading-snug text-ink">
+          <span class="shrink-0">{{ modalTitle }}</span>
+          <span class="shrink-0" aria-hidden="true">·</span>
+          <span class="min-w-0 truncate" :title="recipe.name">{{ recipe.name }}</span>
+        </h3>
+      </div>
+    </template>
+
     <!-- 1. 每个输入选一个文件；放多个文件就是批量 -->
     <div v-if="stage === 'pick'" class="space-y-3">
       <div v-for="input in inputs" :key="input.alias">
@@ -308,48 +480,173 @@ const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.
       <p v-if="total > 1" class="px-1 text-xs leading-relaxed text-mute">共 {{ total }} 个文件，每个文件单独执行一次。</p>
     </div>
 
-    <!-- 2. 执行：概况 → 输入文件 → 处理节点（实时状态）→ 输出文件 → 校验；批量时下面是一行一次 -->
-    <div v-else class="space-y-7">
-      <div class="space-y-2">
-        <div class="flex flex-wrap items-center gap-2.5">
-          <StatusPill v-if="single" :status="running ? 'running' : progress.status === 'failed' ? 'failed' : progress.runStatus ?? 'running'" />
-          <template v-else>
-            <span class="text-sm font-semibold tabular-nums">{{ finished }}/{{ items.length }} 已完成</span>
-            <span v-if="failedCount" class="text-xs font-medium text-error">{{ failedCount }} 个失败</span>
-            <LoaderCircle v-if="running" class="size-3.5 animate-spin text-info" />
-          </template>
-          <span v-if="progress.steps.length" class="text-[13px] tabular-nums text-mute">{{ stepsFinished }}/{{ progress.steps.length }} 个节点</span>
-          <button v-if="single && !elevated && progress.runId && !running" type="button" class="btn-text ml-auto h-7 px-2 py-0 text-xs" aria-haspopup="dialog" @click="detailRunId = progress.runId!">运行详情</button>
+    <!-- 2. 执行结果：顶部结果总览（状态 + 快捷结果文件）→ 输入文件 → 处理节点 → 输出文件 -->
+    <div v-else class="space-y-5">
+      <!-- 2.1 顶部执行结果卡（单次 / 批量） -->
+      <div v-if="single" class="status-banner" :class="`is-${singleBanner.tone}`" role="status">
+        <div class="flex items-center gap-3.5">
+          <span class="status-badge" :class="`is-${singleBanner.tone}`" aria-hidden="true">
+            <LoaderCircle v-if="singleBanner.tone === 'running'" class="size-4.5 animate-spin" />
+            <Check v-else-if="singleBanner.tone === 'success'" class="size-4.5 stroke-[2.4]" />
+            <TriangleAlert v-else-if="singleBanner.tone === 'warning'" class="size-4" />
+            <X v-else class="size-4.5 stroke-[2.4]" />
+          </span>
+          <div class="min-w-0 flex-1">
+            <div class="text-[15px] font-semibold leading-snug text-ink">{{ singleBanner.title }}</div>
+            <p v-if="singleBanner.desc" class="mt-0.5 text-xs leading-5 text-mute">{{ singleBanner.desc }}</p>
+          </div>
+          <button
+            v-if="!elevated && progress.runId && !running"
+            type="button"
+            class="btn-text shrink-0 gap-0.5 px-2.5 py-1.5 text-xs font-medium"
+            aria-haspopup="dialog"
+            @click="detailRunId = progress.runId!"
+          >
+            运行详情<ChevronRight class="size-3.5 text-faint" />
+          </button>
         </div>
-        <p v-if="batchInfo" class="flex items-center gap-1.5 text-xs text-mute" role="status">
-          <LoaderCircle v-if="viewRunning" class="size-3 shrink-0 animate-spin text-info" />
-          <span class="shrink-0 font-medium tabular-nums text-ink">第 {{ batchInfo.index }}/{{ batchInfo.total }} 次</span>
-          <span class="min-w-0 truncate">{{ batchInfo.filename }}</span>
-        </p>
-        <div v-if="progress.escalation || progress.failed" class="whitespace-pre-wrap rounded-xl bg-error/5 px-4 py-3 text-[13px] leading-6 text-error" role="alert">{{ progress.escalation || progress.failed }}</div>
+
+        <!-- 快捷结果文件：置顶直接查看与下载 -->
+        <ul v-if="outputFiles.length" class="quick-results">
+          <li v-for="file in outputFiles" :key="file.file_id" class="flex items-center gap-3">
+            <span class="output-icon is-sm" aria-hidden="true">
+              <FileSpreadsheet class="size-4" />
+            </span>
+            <button type="button" class="file-name" :title="`查看 ${file.filename}`" @click="previewOutput(file)">{{ file.filename }}</button>
+            <div class="flex shrink-0 items-center gap-2">
+              <button type="button" class="btn-line h-8 gap-1.5 px-3 py-0 text-xs" @click="previewOutput(file)">
+                <Eye class="size-3.5" />查看
+              </button>
+              <a :href="file.download_url" class="btn-ink h-8 gap-1.5 px-3.5 py-0 text-xs">
+                <Download class="size-3.5" />下载
+              </a>
+            </div>
+          </li>
+        </ul>
+
+        <div
+          v-if="bannerError"
+          class="mt-3 whitespace-pre-wrap rounded-xl border border-error/15 bg-white/90 px-3.5 py-2.5 text-[13px] leading-6 text-error"
+          role="alert"
+        >{{ bannerError }}</div>
+        <ul
+          v-if="validationIssues.length"
+          class="mt-2.5 space-y-1 rounded-xl border border-[#f2d6a2] bg-white/85 px-3.5 py-2.5 text-xs leading-5 text-[#8a5a00]"
+        >
+          <li v-for="(issue, i) in validationIssues" :key="i" class="flex items-start gap-1.5">
+            <TriangleAlert class="mt-0.5 size-3.5 shrink-0" /><span>{{ issue }}</span>
+          </li>
+        </ul>
       </div>
 
-      <section v-if="progress.inputs.length">
-        <h4 class="sec-title">输入文件<small>{{ progress.inputs.length }}</small></h4>
-        <ul class="card">
-          <li v-for="i in progress.inputs" :key="i.alias">
+      <div v-else class="status-banner" :class="`is-${batchBanner.tone}`" role="status">
+        <div class="flex items-center gap-3.5">
+          <span class="status-badge" :class="`is-${batchBanner.tone}`" aria-hidden="true">
+            <LoaderCircle v-if="batchBanner.tone === 'running'" class="size-4.5 animate-spin" />
+            <Check v-else-if="batchBanner.tone === 'success'" class="size-4.5 stroke-[2.4]" />
+            <TriangleAlert v-else-if="batchBanner.tone === 'warning'" class="size-4" />
+            <X v-else class="size-4.5 stroke-[2.4]" />
+          </span>
+          <div class="min-w-0 flex-1">
+            <div class="text-[15px] font-semibold leading-snug text-ink">{{ batchBanner.title }}</div>
+            <p class="mt-0.5 text-xs leading-5 text-mute">{{ batchBanner.desc }}</p>
+          </div>
+        </div>
+        <div v-if="running" class="mt-3 h-1.5 overflow-hidden rounded-full bg-black/[0.06]">
+          <div class="h-full rounded-full bg-ink transition-all duration-300" :style="{ width: `${batchPercent}%` }" />
+        </div>
+      </div>
+
+      <!-- 2.2 批量模式：执行列表（置顶，直接可查看/下载每次的结果） -->
+      <section v-if="!single">
+        <h4 class="sec-title">执行列表<small>{{ items.length }}</small></h4>
+        <ol class="card is-batch">
+          <li v-for="(item, index) in items" :key="index" class="transition-colors" :class="viewIndex === index ? 'bg-paper/75' : ''">
             <div class="flex items-center gap-3">
-              <FileSpreadsheet class="size-5 shrink-0 text-ink" />
-              <span class="min-w-0 flex-1 truncate text-sm font-semibold" :title="i.filename">{{ i.filename }}</span>
-              <span v-if="i.kind !== 'file' && i.rows" class="shrink-0 text-xs tabular-nums text-faint">{{ i.sheet }} · {{ i.rows.toLocaleString() }} 行</span>
+              <span class="w-5 shrink-0 text-right text-xs tabular-nums text-faint">{{ index + 1 }}</span>
+              <button
+                type="button"
+                class="min-w-0 flex-1 truncate text-left text-sm font-medium"
+                :class="item.state === 'wait' ? 'cursor-default text-mute' : 'text-ink hover:underline underline-offset-4'"
+                :title="item.state === 'wait' ? item.title : `查看第 ${index + 1} 次执行情况：${item.title}`"
+                :aria-current="viewIndex === index ? 'true' : undefined"
+                @click="item.state !== 'wait' && (viewing = index)"
+              >{{ item.title }}</button>
+              <span v-if="item.state === 'wait'" class="shrink-0 text-xs text-faint">等待中</span>
+              <span v-else-if="item.state === 'skipped'" class="shrink-0 text-xs text-faint">已跳过</span>
+              <span v-else-if="item.state === 'run'" class="inline-flex shrink-0 items-center gap-1.5 text-xs text-info">
+                <LoaderCircle class="size-3.5 animate-spin" /><span class="tabular-nums">{{ stepsDone(item) }}/{{ stepTotal }}</span>
+              </span>
+              <StatusPill v-else class="shrink-0" :status="itemStatus(item)" />
+              <template v-for="file in item.files" :key="file.file_id">
+                <button type="button" class="icon-btn size-7 shrink-0" title="查看结果" :aria-label="`查看结果 ${file.filename}`" @click="previewOutput(file)"><Eye class="size-4" /></button>
+                <a :href="file.download_url" class="icon-btn size-7 shrink-0" title="下载结果" :aria-label="`下载结果 ${file.filename}`"><Download class="size-4" /></a>
+              </template>
+              <button v-if="!elevated && item.progress.runId && (item.state === 'done' || item.state === 'failed')" type="button" class="btn-text h-7 shrink-0 px-2 py-0 text-xs" aria-haspopup="dialog" @click="detailRunId = item.progress.runId!">详情</button>
             </div>
-            <ul v-if="Object.keys(i.renames).length || i.warnings.length" class="notes">
-              <li v-for="(std, raw) in i.renames" :key="raw" class="is-info">列名「{{ raw }}」已对应为「{{ std }}」</li>
-              <li v-for="w in i.warnings" :key="w" class="is-warn"><TriangleAlert class="mt-0.5 size-3.5 shrink-0" />{{ w }}</li>
+            <p v-if="item.state === 'failed' && (item.progress.escalation || item.progress.failed)" class="mt-1.5 line-clamp-3 whitespace-pre-wrap pl-8 text-xs leading-relaxed text-error">{{ item.progress.escalation || item.progress.failed }}</p>
+          </li>
+        </ol>
+      </section>
+
+      <!-- 批量模式：当前选中条目的明细分隔条 -->
+      <div v-if="batchInfo && viewItem && viewItem.state !== 'wait'" class="space-y-3 border-t border-line pt-4">
+        <div class="flex items-center gap-2 text-xs text-mute">
+          <LoaderCircle v-if="viewRunning" class="size-3.5 shrink-0 animate-spin text-info" />
+          <span class="rounded-md bg-paper px-2 py-0.5 font-medium tabular-nums text-ink">第 {{ batchInfo.index }}/{{ batchInfo.total }} 次</span>
+          <span class="min-w-0 flex-1 truncate">{{ batchInfo.filename }}</span>
+        </div>
+        <div
+          v-if="bannerError"
+          class="whitespace-pre-wrap rounded-xl border border-error/15 bg-error/5 px-3.5 py-2.5 text-[13px] leading-6 text-error"
+          role="alert"
+        >{{ bannerError }}</div>
+        <ul
+          v-if="validationIssues.length"
+          class="space-y-1 rounded-xl border border-[#f2d6a2] bg-[#fffaf0] px-3.5 py-2.5 text-xs leading-5 text-[#8a5a00]"
+        >
+          <li v-for="(issue, i) in validationIssues" :key="i" class="flex items-start gap-1.5">
+            <TriangleAlert class="mt-0.5 size-3.5 shrink-0" /><span>{{ issue }}</span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- 2.3 输入文件 -->
+      <section v-if="(single || (viewItem && viewItem.state !== 'wait')) && displayInputs.length">
+        <h4 class="sec-title">输入文件<small>{{ displayInputs.length }}</small></h4>
+        <ul class="card is-compact">
+          <li v-for="item in displayInputs" :key="item.alias">
+            <div class="flex items-center gap-2.5">
+              <Sheet class="size-4 shrink-0 text-mute" />
+              <button
+                v-if="item.fileId"
+                type="button"
+                class="input-name"
+                :title="`查看 ${item.filename}`"
+                @click="openFilePreview(item.fileId)"
+              >{{ item.filename }}</button>
+              <span v-else class="min-w-0 flex-1 truncate text-[13.5px] font-medium text-ink" :title="item.filename">{{ item.filename }}</span>
+              <button
+                v-if="item.fileId"
+                type="button"
+                class="icon-btn size-7 shrink-0"
+                title="查看文件"
+                :aria-label="`查看 ${item.filename}`"
+                @click="openFilePreview(item.fileId)"
+              ><Eye class="size-3.5" /></button>
+            </div>
+            <ul v-if="item.warnings.length" class="notes is-input">
+              <li v-for="w in item.warnings" :key="w" class="is-warn"><TriangleAlert class="mt-0.5 size-3.5 shrink-0" /><span>{{ w }}</span></li>
             </ul>
           </li>
         </ul>
       </section>
 
-      <section v-if="progress.steps.length">
-        <h4 class="sec-title">处理节点<small>{{ progress.steps.length }}</small></h4>
+      <!-- 2.4 处理节点（看每步执行情况与报错，隐藏技术标签和细节） -->
+      <section v-if="(single || (viewItem && viewItem.state !== 'wait')) && displaySteps.length">
+        <h4 class="sec-title">处理节点<small>{{ displaySteps.length }}</small></h4>
         <ol class="card">
-          <li v-for="step in progress.steps" :key="step.step_id" class="step">
+          <li v-for="step in displaySteps" :key="step.step_id">
             <div class="flex items-center gap-3">
               <span class="step-no" :class="`is-${step.status}`">
                 <LoaderCircle v-if="step.status === 'running' || step.status === 'repairing'" class="size-3.5 animate-spin" />
@@ -358,64 +655,38 @@ const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.
                 <X v-else-if="step.status === 'failed'" class="size-3.5" />
                 <template v-else>{{ step.step_id }}</template>
               </span>
-              <span class="min-w-0 flex-1">
-                <span class="flex flex-wrap items-center gap-2">
-                  <span class="text-sm font-semibold leading-6" :class="step.status === 'pending' ? 'text-mute' : ''">{{ step.name }}</span>
-                  <span class="kind-tag">{{ recipeToolLabel(step) }}</span>
-                  <span v-if="step.status === 'repairing'" class="text-xs text-info">AI 正在修复</span>
-                  <span v-else-if="step.status === 'repaired'" class="text-xs text-info">已自动修复</span>
-                </span>
-                <span v-if="stepMeta(step)" class="mt-0.5 block text-xs tabular-nums text-faint">{{ stepMeta(step) }}</span>
-              </span>
+              <span class="min-w-0 flex-1 truncate text-sm font-medium" :class="step.status === 'pending' ? 'text-mute' : 'text-ink'" :title="step.name">{{ step.name }}</span>
+              <span class="step-status" :class="`is-${step.status}`">{{ stepStatusText(step.status) }}</span>
             </div>
             <ul v-if="step.error || step.report?.warnings?.length || stepFailedChecks(step).length" class="notes">
-              <li v-if="step.error" class="is-error"><X class="mt-0.5 size-3.5 shrink-0" />{{ step.error }}</li>
-              <li v-for="(check, i) in stepFailedChecks(step)" :key="`c${i}`" class="is-warn"><TriangleAlert class="mt-0.5 size-3.5 shrink-0" />{{ check.message }}</li>
-              <li v-for="(w, i) in step.report?.warnings ?? []" :key="`w${i}`" class="is-warn"><TriangleAlert class="mt-0.5 size-3.5 shrink-0" />{{ w }}</li>
+              <li v-if="step.error" class="is-error"><CircleX class="mt-0.5 size-3.5 shrink-0" /><span>{{ step.error }}</span></li>
+              <li v-for="(check, i) in stepFailedChecks(step)" :key="`c${i}`" class="is-warn"><TriangleAlert class="mt-0.5 size-3.5 shrink-0" /><span>{{ check.message }}</span></li>
+              <li v-for="(w, i) in step.report?.warnings ?? []" :key="`w${i}`" class="is-warn"><TriangleAlert class="mt-0.5 size-3.5 shrink-0" /><span>{{ w }}</span></li>
             </ul>
           </li>
         </ol>
       </section>
 
-      <section v-if="single && (outputFiles.length || !running)">
+      <!-- 2.5 输出文件 -->
+      <section v-if="single || (viewItem && viewItem.state !== 'wait')">
         <h4 class="sec-title">输出文件<small v-if="outputFiles.length">{{ outputFiles.length }}</small></h4>
-        <ul v-if="outputFiles.length" class="card">
-          <li v-for="file in outputFiles" :key="file.file_id" class="flex items-center gap-3">
-            <FileSpreadsheet class="size-5 shrink-0 text-ink" />
-            <button type="button" class="file-name" :title="`查看 ${file.filename}`" @click="previewOutput(file)">{{ file.filename }}</button>
-            <span class="flex shrink-0 items-center">
-              <button type="button" class="icon-btn" title="查看" :aria-label="`查看 ${file.filename}`" @click="previewOutput(file)"><Eye class="size-4" /></button>
-              <a :href="file.download_url" class="icon-btn" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>
+        <ul v-if="outputFiles.length" class="card is-compact">
+          <li v-for="file in outputFiles" :key="file.file_id" class="flex items-center gap-2.5">
+            <span class="output-icon is-xs" aria-hidden="true">
+              <FileSpreadsheet class="size-3.5" />
+            </span>
+            <button type="button" class="input-name font-semibold" :title="`查看 ${file.filename}`" @click="previewOutput(file)">{{ file.filename }}</button>
+            <span class="flex shrink-0 items-center gap-0.5">
+              <button type="button" class="icon-btn size-7" title="查看" :aria-label="`查看 ${file.filename}`" @click="previewOutput(file)"><Eye class="size-3.5" /></button>
+              <a :href="file.download_url" class="icon-btn size-7" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-3.5" /></a>
             </span>
           </li>
         </ul>
-        <p v-else class="empty">这次没有生成结果文件</p>
+        <div v-else-if="viewRunning" class="empty flex items-center justify-center gap-2">
+          <LoaderCircle class="size-3.5 animate-spin text-mute" /><span>正在生成结果文件…</span>
+        </div>
+        <p v-else class="empty">本次执行未生成结果文件</p>
       </section>
-
-      <p v-if="progress.validation" class="flex items-center gap-1.5 text-[13px]" :class="progress.validation.status === 'pass' ? 'text-success' : 'text-[#b7770c]'">
-        <Check v-if="progress.validation.status === 'pass'" class="size-4" /><TriangleAlert v-else class="size-4" />{{ progress.validation.summary }}
-      </p>
-
-      <ol v-if="!single" class="divide-y divide-line rounded-2xl border border-line">
-        <li v-for="(item, index) in items" :key="index" class="px-4 py-2.5 transition-colors" :class="viewIndex === index ? 'bg-paper/70' : ''">
-          <div class="flex items-center gap-3">
-            <span class="w-5 shrink-0 text-right text-xs tabular-nums text-faint">{{ index + 1 }}</span>
-            <button type="button" class="min-w-0 flex-1 truncate text-left text-sm" :class="item.state === 'wait' ? 'cursor-default text-mute' : 'hover:underline underline-offset-4'" :title="item.state === 'wait' ? item.title : `查看第 ${index + 1} 次的流程图：${item.title}`" :aria-current="viewIndex === index ? 'true' : undefined" @click="item.state !== 'wait' && (viewing = index)">{{ item.title }}</button>
-            <span v-if="item.state === 'wait'" class="shrink-0 text-xs text-faint">等待</span>
-            <span v-else-if="item.state === 'skipped'" class="shrink-0 text-xs text-faint">已跳过</span>
-            <span v-else-if="item.state === 'run'" class="inline-flex shrink-0 items-center gap-1.5 text-xs text-info">
-              <LoaderCircle class="size-3.5 animate-spin" /><span class="tabular-nums">{{ stepsDone(item) }}/{{ stepTotal }}</span>
-            </span>
-            <StatusPill v-else class="shrink-0" :status="itemStatus(item)" />
-            <template v-for="file in item.files" :key="file.file_id">
-              <button type="button" class="icon-btn size-7 shrink-0" title="查看结果" :aria-label="`查看结果 ${file.filename}`" @click="previewOutput(file)"><Eye class="size-4" /></button>
-              <a :href="file.download_url" class="icon-btn size-7 shrink-0" title="下载结果" :aria-label="`下载结果 ${file.filename}`"><Download class="size-4" /></a>
-            </template>
-            <button v-if="!elevated && item.progress.runId && (item.state === 'done' || item.state === 'failed')" type="button" class="btn-text h-7 shrink-0 px-2 py-0 text-xs" aria-haspopup="dialog" @click="detailRunId = item.progress.runId!">详情</button>
-          </div>
-          <p v-if="item.state === 'failed' && (item.progress.escalation || item.progress.failed)" class="mt-1.5 line-clamp-3 whitespace-pre-wrap pl-8 text-xs leading-relaxed text-error">{{ item.progress.escalation || item.progress.failed }}</p>
-        </li>
-      </ol>
     </div>
 
     <template v-if="stage === 'pick' && batchable && canUpload" #header-actions>
@@ -458,26 +729,257 @@ const itemStatus = (item: RunItem) => (item.state === 'failed' ? (item.progress.
 </template>
 
 <style scoped>
-/* 与运行详情弹窗一致：标题在卡片外，卡片里一行一项、细线分隔 */
-.sec-title { display: flex; align-items: baseline; gap: 8px; margin: 0 2px 10px; color: #14141c; font-size: 16px; font-weight: 700; line-height: 1.35; }
-.sec-title small { color: #a4a4b2; font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
-.card { margin: 0; border: 1px solid var(--color-line); border-radius: 16px; background: #fff; padding: 4px 18px; list-style: none; }
-.card > li { padding: 12px 0; }
-.card > li + li { border-top: 1px solid #f0f0f4; }
-.file-name { min-width: 0; flex: 1; overflow: hidden; color: #14141c; font-size: 14px; font-weight: 600; text-align: left; text-overflow: ellipsis; white-space: nowrap; text-underline-offset: 4px; }
-.file-name:hover { text-decoration: underline; }
-.empty { margin: 0; border: 1px dashed var(--color-line); border-radius: 16px; padding: 20px; color: #a4a4b2; font-size: 13px; text-align: center; }
+/* 顶部执行状态卡 */
+.status-banner {
+  border: 1px solid var(--color-line);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: var(--color-paper);
+}
+.status-banner.is-success {
+  border-color: #cdecd9;
+  background: #f3fbf6;
+}
+.status-banner.is-warning {
+  border-color: #f3ddb2;
+  background: #fffaf0;
+}
+.status-banner.is-error {
+  border-color: #f7cfcf;
+  background: #fef5f5;
+}
 
-.step-no { display: inline-flex; width: 24px; height: 24px; flex: none; align-items: center; justify-content: center; border-radius: 9999px; background: #f0f0f4; color: #a4a4b2; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.step-no.is-running, .step-no.is-repairing { background: color-mix(in srgb, var(--color-info) 12%, transparent); color: var(--color-info); }
-.step-no.is-success, .step-no.is-repaired { background: color-mix(in srgb, var(--color-success) 12%, transparent); color: var(--color-success); }
-.step-no.is-warning { background: color-mix(in srgb, var(--color-warning) 18%, transparent); color: #8a5a00; }
-.step-no.is-failed { background: color-mix(in srgb, var(--color-error) 10%, transparent); color: var(--color-error); }
-.kind-tag { display: inline-flex; align-items: center; border-radius: 8px; background: #6265dc1a; padding: 1px 8px; color: #6265dc; font-size: 12px; font-weight: 600; line-height: 1.6; }
+.status-badge {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+}
+.status-badge.is-running {
+  border: 1px solid var(--color-line);
+  background: #fff;
+  color: var(--color-ink);
+}
+.status-badge.is-success {
+  background: #22b573;
+  color: #fff;
+}
+.status-badge.is-warning {
+  background: #f2a21b;
+  color: #fff;
+}
+.status-badge.is-error {
+  background: var(--color-error);
+  color: #fff;
+}
 
-.notes { margin: 4px 0 0 36px; padding: 0; list-style: none; }
-.notes li { display: flex; gap: 6px; padding: 2px 0; font-size: 12.5px; line-height: 1.6; overflow-wrap: anywhere; }
-.notes .is-error { color: var(--color-error); }
-.notes .is-warn { color: #8a5a00; }
-.notes .is-info { color: #8a8a98; }
+/* 区块标题与卡片 */
+.sec-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 2px 8px;
+  color: var(--color-ink);
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+.sec-title small {
+  color: var(--color-faint);
+  font-size: 12px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.card {
+  margin: 0;
+  border: 1px solid var(--color-line);
+  border-radius: 16px;
+  background: #fff;
+  padding: 2px 16px;
+  list-style: none;
+}
+.card > li {
+  padding: 11px 0;
+}
+.card > li + li {
+  border-top: 1px solid #f2f1ee;
+}
+.card.is-result > li {
+  padding: 12px 0;
+}
+.card.is-compact {
+  padding: 2px 14px;
+}
+.card.is-compact > li {
+  padding: 8px 0;
+}
+.card.is-batch {
+  overflow: hidden;
+  padding: 0;
+}
+.card.is-batch > li {
+  padding: 10px 16px;
+}
+
+.output-icon {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d2eedf;
+  border-radius: 10px;
+  background: #effaf4;
+  color: #1a9c5b;
+}
+.output-icon.is-sm {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+}
+.output-icon.is-xs {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+}
+
+.quick-results {
+  margin: 12px 0 0;
+  border: 1px solid rgba(20, 20, 23, 0.07);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 2px 12px;
+  list-style: none;
+}
+.quick-results > li {
+  padding: 9px 0;
+}
+.quick-results > li + li {
+  border-top: 1px solid #f2f1ee;
+}
+
+.file-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--color-ink);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-underline-offset: 4px;
+}
+.file-name:hover {
+  text-decoration: underline;
+}
+
+.input-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--color-ink);
+  font-size: 13.5px;
+  font-weight: 500;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-underline-offset: 4px;
+}
+.input-name:hover {
+  text-decoration: underline;
+}
+
+.empty {
+  margin: 0;
+  border: 1px dashed var(--color-line);
+  border-radius: 14px;
+  padding: 16px;
+  color: var(--color-faint);
+  font-size: 13px;
+  text-align: center;
+}
+
+/* 处理节点状态 */
+.step-no {
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: var(--color-paper);
+  color: var(--color-mute);
+  font-size: 11.5px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.step-no.is-running,
+.step-no.is-repairing {
+  background: color-mix(in srgb, var(--color-info) 12%, transparent);
+  color: var(--color-info);
+}
+.step-no.is-success,
+.step-no.is-repaired {
+  background: color-mix(in srgb, var(--color-success) 14%, transparent);
+  color: var(--color-success);
+}
+.step-no.is-warning {
+  background: color-mix(in srgb, var(--color-warning) 18%, transparent);
+  color: #8a5a00;
+}
+.step-no.is-failed {
+  background: color-mix(in srgb, var(--color-error) 12%, transparent);
+  color: var(--color-error);
+}
+
+.step-status {
+  flex: none;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-faint);
+}
+.step-status.is-running,
+.step-status.is-repairing {
+  color: var(--color-info);
+}
+.step-status.is-success,
+.step-status.is-repaired {
+  color: var(--color-success);
+}
+.step-status.is-warning {
+  color: #8a5a00;
+}
+.step-status.is-failed {
+  color: var(--color-error);
+}
+
+.notes {
+  margin: 6px 0 0 34px;
+  padding: 0;
+  list-style: none;
+}
+.notes.is-input {
+  margin-left: 26px;
+}
+.notes li {
+  display: flex;
+  gap: 6px;
+  padding: 2px 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.notes .is-error {
+  color: var(--color-error);
+}
+.notes .is-warn {
+  color: #8a5a00;
+}
 </style>

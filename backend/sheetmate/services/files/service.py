@@ -145,17 +145,37 @@ def _visible_condition(db: Session, *, customer_id: str | None, conversation_id:
     return and_(condition, FileRecord.id != exclude_file_id) if exclude_file_id else condition
 
 
+def _is_run_scoped(db: Session, run_id: str | None) -> bool:
+    """判断该运行是否属于独立空间（重复执行 / scope=run），其输入输出不进客户或聊天文件页。"""
+    if not run_id:
+        return False
+    run = db.get(Run, run_id)
+    if run is None:
+        return False
+    return run.kind == "replay" or (run.validation or {}).get("scope") == RUN_SCOPE
+
+
 def unique_filename(db: Session, filename: str, *, customer_id: str | None = None,
                     conversation_id: str | None = None, user_id: int | None = None,
-                    exclude_file_id: str | None = None, only_kind: str | None = None) -> str:
+                    exclude_file_id: str | None = None, only_kind: str | None = None,
+                    run_id: str | None = None, intermediate: bool = False) -> str:
     """当前可见范围内重名时，在扩展名前依次追加（1）、（2），不覆盖原文件。
 
-    only_kind 给出时只和这一类文件比较：交付文件只看有没有重名的交付文件，和输入文件同名不算重名。"""
+    only_kind 给出时只和这一类文件比较：交付文件只看有没有重名的交付文件，和输入文件同名不算重名。
+    run_id 指向独立空间的单次流程执行时，仅在该次执行内部查重，不与客户/聊天的文件区互相加后缀。"""
     name = safe_filename(filename)
-    condition = _visible_condition(db, customer_id=customer_id, conversation_id=conversation_id, user_id=user_id,
-                                   exclude_file_id=exclude_file_id)
-    # 会话在同一个事务里可登记多个结果，先刷入前面的记录，后面的文件名才能正确顺延。
+    # 会话或单次执行在同一个事务里可登记多个结果，先刷入前面的记录，后面的文件名才能正确顺延。
     db.flush()
+    if run_id and _is_run_scoped(db, run_id):
+        parts = [FileRecord.run_id == run_id, current_file_condition()]
+        if not intermediate:
+            parts.append(func.coalesce(FileRecord.profile["intermediate"].as_boolean(), False).is_(False))
+        if exclude_file_id:
+            parts.append(FileRecord.id != exclude_file_id)
+        condition = and_(*parts)
+    else:
+        condition = _visible_condition(db, customer_id=customer_id, conversation_id=conversation_id, user_id=user_id,
+                                       exclude_file_id=exclude_file_id)
     if only_kind:
         condition = and_(condition, FileRecord.kind == only_kind)
     occupied = {item.casefold() for item in db.scalars(select(FileRecord.filename).where(condition))}
@@ -191,6 +211,7 @@ def save_upload(
     customer_id: str | None = None,
     conversation_id: str | None = None,
     kind: str = "input",
+    for_run: bool = False,
 ) -> FileRecord:
     original_name = safe_filename(filename)
     suffix = Path(original_name).suffix.lower()
@@ -200,7 +221,10 @@ def save_upload(
         raise ServiceError(f"文件超过 {settings.max_upload_mb} MB")
     if not data:
         raise ServiceError("文件是空的")
-    name = unique_filename(db, original_name, customer_id=customer_id, conversation_id=conversation_id, user_id=user.id)
+    # 独立流程执行时临时上传的输入文件不进入客户/聊天文件页，直接保留原文件名，不与工作区文件抢名加后缀。
+    name = original_name if for_run else unique_filename(
+        db, original_name, customer_id=customer_id, conversation_id=conversation_id, user_id=user.id
+    )
     file_id = f"f_{uuid.uuid4().hex[:10]}"
     folder = settings.uploads_dir / owner_dir(customer_id, conversation_id)
     folder.mkdir(parents=True, exist_ok=True)
@@ -212,6 +236,8 @@ def save_upload(
         path.unlink(missing_ok=True)
         raise ServiceError(str(exc)) from exc
     profile["original_filename"] = filename
+    if for_run:
+        profile["run_input"] = True
     record = FileRecord(
         id=file_id, customer_id=customer_id, conversation_id=conversation_id, filename=name, stored_path=str(path),
         size=len(data), kind=kind if kind in KIND_LABELS else "input", profile=profile, created_by=user.id,
@@ -239,9 +265,10 @@ def register_output(db: Session, *, path: Path, filename: str, customer_id: str 
     profile["original_filename"] = filename
     profile["delivery_status"] = delivery_status
     profile["intermediate"] = delivery_status == "intermediate"
-    # 交付文件只在交付文件之间查重：和输入同名（比如在空白模板副本上填好的结果）不加序号，同一个任务再跑一次才加。
+    # 交付文件只在交付文件之间查重：和输入同名（比如在空白模板副本上填好的结果）不加序号；
+    # 独立空间的单次流程执行仅在本次执行内查重，不与客户/聊天的文件区互相加（1）。
     name = unique_filename(db, filename, customer_id=customer_id, conversation_id=conversation_id, user_id=user_id,
-                           only_kind="output")
+                           only_kind="output", run_id=run_id, intermediate=delivery_status == "intermediate")
     record = FileRecord(
         id=f"f_{uuid.uuid4().hex[:10]}", customer_id=customer_id, conversation_id=conversation_id, run_id=run_id,
         filename=name, stored_path=str(path), size=path.stat().st_size, kind="output",

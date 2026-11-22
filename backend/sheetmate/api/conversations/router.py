@@ -153,11 +153,9 @@ async def upload_file(conversation_id: str, background: BackgroundTasks, file: U
     conv = conv_service.get_conversation(db, user, conversation_id)
     data = await file.read()
     record = file_service.save_upload(db, data=data, filename=file.filename or "file", user=user,
-                                      customer_id=conv.customer_id, conversation_id=conv.id, kind=kind)
+                                      customer_id=conv.customer_id, conversation_id=conv.id, kind=kind, for_run=for_run)
     tables = []
-    if for_run:
-        record.profile = {**(record.profile or {}), "run_input": True}
-    else:
+    if not for_run:
         if conv.customer_id and conv.recipe_id:
             file_service.retain_for_recipe(db, record, conv.customer_id, conv.recipe_id)
         tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record, protect=True)
