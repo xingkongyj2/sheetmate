@@ -149,8 +149,8 @@ const subOf = (section: Section) => (section.kind === 'other' ? '' : titles[sect
 
 /* 步骤：强调色序号 + 加粗步骤名 + 说明 */
 .logic-steps { margin: 0; padding: 0; list-style: none; }
-.logic-steps li { display: grid; grid-template-columns: 1.75rem minmax(0, 1fr); gap: 0 10px; }
-.logic-steps li + li { margin-top: 18px; }
+.logic-steps li { display: grid; grid-template-columns: 1.125rem minmax(0, 1fr); gap: 0 4px; }
+.logic-steps li + li { margin-top: 14px; }
 .logic-steps-no { color: #6265dc; font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; line-height: 26px; }
 .logic-steps-title { color: #14141c; font-size: 14.5px; font-weight: 650; line-height: 26px; }
 

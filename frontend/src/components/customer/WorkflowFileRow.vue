@@ -64,31 +64,36 @@ async function save() {
 </script>
 
 <template>
-  <div class="-mx-2 rounded-xl px-2 py-2 text-sm transition hover:bg-paper">
-    <form v-if="editing" class="flex items-center gap-2" @submit.prevent="save">
-      <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
-      <Sheet v-else class="size-4 shrink-0 text-[#4a4743]" />
+  <div class="group -mx-2 rounded-xl px-2.5 py-2.5 text-sm transition hover:bg-paper">
+    <form v-if="editing" class="flex items-center gap-2.5" @submit.prevent="save">
+      <span class="flex size-7 shrink-0 items-center justify-center rounded-lg bg-paper">
+        <FileCheck2 v-if="file.kind === 'expected'" class="size-4 text-[#4a4743]" />
+        <Sheet v-else class="size-4 text-[#4a4743]" />
+      </span>
       <input ref="input" v-model="draft" class="input input-sm min-w-0 flex-1 rounded-xl" aria-label="文件名" :maxlength="MAX_STEM" :disabled="saving" @keydown.esc.stop.prevent="cancel" />
       <span v-if="extension" class="shrink-0 text-faint">{{ extension }}</span>
       <div class="flex shrink-0 items-center gap-0.5">
-        <button type="submit" class="icon-btn !text-[#6265dc]" :disabled="saving" aria-label="保存文件名" title="保存"><LoaderCircle v-if="saving" class="size-4 animate-spin" /><Check v-else class="size-4" /></button>
+        <button type="submit" class="icon-btn !text-ink" :disabled="saving" aria-label="保存文件名" title="保存"><LoaderCircle v-if="saving" class="size-4 animate-spin" /><Check v-else class="size-4" /></button>
         <button type="button" class="icon-btn" :disabled="saving" aria-label="取消" title="取消" @click="cancel"><X class="size-4" /></button>
       </div>
     </form>
     <div v-else class="flex items-center gap-3">
-      <button type="button" class="flex min-w-0 flex-1 items-center gap-2 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :title="file.filename" :aria-label="`预览 ${file.filename}`" @click="emit('preview', file)">
-        <FileCheck2 v-if="file.kind === 'expected'" class="size-4 shrink-0 text-[#4a4743]" />
-        <Sheet v-else class="size-4 shrink-0 text-[#4a4743]" /><span class="truncate">{{ file.filename }}</span>
+      <button type="button" class="flex min-w-0 flex-1 items-center gap-2.5 rounded text-left underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" :title="file.filename" :aria-label="`预览 ${file.filename}`" @click="emit('preview', file)">
+        <span class="flex size-7 shrink-0 items-center justify-center rounded-lg bg-paper transition group-hover:bg-white">
+          <FileCheck2 v-if="file.kind === 'expected'" class="size-4 text-[#4a4743]" />
+          <Sheet v-else class="size-4 text-[#4a4743]" />
+        </span>
+        <span class="truncate text-sm font-semibold text-ink">{{ file.filename }}</span>
       </button>
       <span v-if="badge" class="tag shrink-0 whitespace-nowrap" :class="badgeClass">{{ badge }}</span>
-      <span class="shrink-0 text-xs text-faint">{{ timeAgo(file.created_at) }}</span>
+      <span class="shrink-0 text-xs tabular-nums text-faint">{{ timeAgo(file.created_at) }}</span>
       <div class="flex shrink-0 items-center gap-0.5">
         <PrivacyStatusIcon :status="privacy" :file="file" />
-        <button v-if="renameFile" type="button" class="icon-btn" title="修改文件名" :aria-label="`修改 ${file.filename} 的文件名`" @click="startEdit"><Pencil class="size-4" /></button>
-        <a :href="file.download_url" class="icon-btn" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>
-        <button type="button" class="icon-btn hover:text-error" title="删除" :aria-label="`删除 ${file.filename}`" @click="emit('remove', file)"><Trash2 class="size-4" /></button>
+        <button v-if="renameFile" type="button" class="icon-btn hover:!bg-white" title="修改文件名" :aria-label="`修改 ${file.filename} 的文件名`" @click="startEdit"><Pencil class="size-4" /></button>
+        <a :href="file.download_url" class="icon-btn hover:!bg-white" title="下载" :aria-label="`下载 ${file.filename}`"><Download class="size-4" /></a>
+        <button type="button" class="icon-btn hover:!bg-white hover:text-error" title="删除" :aria-label="`删除 ${file.filename}`" @click="emit('remove', file)"><Trash2 class="size-4" /></button>
       </div>
     </div>
-    <p v-if="error" class="mt-1 pl-6 text-xs text-error" role="alert">{{ error }}</p>
+    <p v-if="error" class="mt-1 pl-9 text-xs text-error" role="alert">{{ error }}</p>
   </div>
 </template>
