@@ -128,8 +128,8 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
         run = run_service.create_run(db, kind="replay", user_id=user.id, customer_id=recipe.customer_id, conversation_id=None,
                                      recipe_id=recipe.id, recipe_version=recipe.version,
                                      request_text=f"用新文件执行「{recipe.name}」", input_file_ids=list(records))
-        if scoped:
-            run.validation = {"scope": file_service.RUN_SCOPE}
+        # 无论从哪里发起重复跑流程，输入输出都留在流程运行记录内，不进客户/聊天的文件 Tab。
+        run.validation = {"scope": file_service.RUN_SCOPE}
         label = Path(file_service.safe_filename(label)).stem[:60] if label and label.strip() else ""
         out_path = run_service.output_path(run, file_service.safe_filename(f"{recipe.name}_结果.xlsx"))
         run_id = run.id
@@ -203,9 +203,7 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
                                          conversation_id=run.conversation_id, recipe_id=run.recipe_id,
                                          recipe_version=run.recipe_version, input_file_ids=list(run.input_file_ids or []),
                                          request_text=f"从第 {step_id} 步重跑「{recipe.name}」")
-        resumed.validation = {"resumed_from": {"run_id": run.id, "step_id": step_id}}
-        if (run.validation or {}).get("scope") == file_service.RUN_SCOPE:
-            resumed.validation["scope"] = file_service.RUN_SCOPE   # 从某一步重跑：结果同样只记在执行里
+        resumed.validation = {"resumed_from": {"run_id": run.id, "step_id": step_id}, "scope": file_service.RUN_SCOPE}
         resumed_run_id = resumed.id
         out_path = run_service.output_path(resumed, file_service.safe_filename(f"{recipe.name}_结果_重跑_{uuid4().hex[:8]}.xlsx"))
     edited = False

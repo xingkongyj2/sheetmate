@@ -292,11 +292,10 @@ def bind_to_customer(db: Session, conv: Conversation, user: User, *, customer_id
     previous_customer = conv.customer_id
     if previous_customer:
         file_service.retain_customer_files(db, previous_customer, conversation_id=conv.id)
-    records = file_service.list_files(db, conversation_id=conv.id)
+    records = file_service.list_files(db, conversation_id=conv.id, include_run_scoped=True)
     conv.customer_id = customer.id
     for record in records:
         file_service.retain_for_customer(db, record, customer.id)
-    file_service.retain_customer_files(db, customer.id, conversation_id=conv.id)
     for run in db.scalars(select(Run).where(Run.conversation_id == conv.id, Run.customer_id.is_(None))):
         run.customer_id = customer.id
     recipe_service.assign_customer(db, conversation_id=conv.id, customer_id=customer.id)
@@ -359,7 +358,7 @@ def delete_conversation(db: Session, conv: Conversation) -> None:
     """Delete a conversation and every resource whose only scope is that conversation."""
     conversation_id = conv.id
     execution_ids = list(db.scalars(select(AgentExecution.id).where(AgentExecution.conversation_id == conversation_id)))
-    records = file_service.list_files(db, conversation_id=conversation_id, available_only=False)
+    records = file_service.list_files(db, conversation_id=conversation_id, available_only=False, include_run_scoped=True)
     run_rows = list(db.scalars(select(Run).where(Run.conversation_id == conversation_id)))
     run_ids = [run.id for run in run_rows]
     run_file_ids = {file_id for run in run_rows for file_id in _run_file_ids(run)}

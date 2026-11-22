@@ -150,15 +150,8 @@ def _is_delivered_output(record: FileRecord) -> bool:
 
 
 def _visible_customer_file_count(db: Session, customer: Customer, recipes: list[RecipeRecord], primary_id: str | None) -> int:
-    """与客户详情页「文件」Tab 数量保持一致：排除单次执行临时输入/过程文件，去重统计输入与正式交付输出。"""
-    if recipes:
-        seen: set[str] = set()
-        for record in recipes:
-            for item in file_service.recipe_files(db, customer.id, record.recipe_id, primary_recipe_id=primary_id):
-                if item.kind != "output" or _is_delivered_output(item):
-                    seen.add(item.id)
-        return len(seen)
-    files = file_service.exclude_run_scoped(db, file_service.list_files(db, customer_id=customer.id))
+    """与客户详情页及绑定聊天的「文件」Tab 保持完全一致：排除重跑临时输入/过程文件，统计输入与正式交付输出。"""
+    files = file_service.list_files(db, customer_id=customer.id)
     return len({item.id for item in files if item.kind != "output" or _is_delivered_output(item)})
 
 
@@ -223,21 +216,16 @@ def _first_paragraph(markdown: str) -> str:
 
 def detail(db: Session, customer: Customer, *, user: User | None = None) -> dict[str, Any]:
     primary_id = recipe_service.ensure_primary_recipe(db, customer)
-    files = file_service.exclude_run_scoped(db, file_service.list_files(db, customer_id=customer.id))
-    scoped_runs = select(Run.id).where(Run.customer_id == customer.id, file_service.run_scoped_condition())
-    output_count = db.scalar(select(func.count()).select_from(FileRecord).where(
-        file_service.customer_file_condition(customer.id), file_service.current_file_condition(),
-        FileRecord.kind == "output", or_(FileRecord.run_id.is_(None), FileRecord.run_id.not_in(scoped_runs)))) or 0
+    files = file_service.list_files(db, customer_id=customer.id)
+    delivered_outputs = [item for item in files if item.kind == "output" and _is_delivered_output(item)]
+    output_count = len(delivered_outputs)
+    visible_file_ids = {item.id for item in files if item.kind != "output" or _is_delivered_output(item)}
     records = recipe_service.latest_records(db, customer_id=customer.id)
     recipes = []
-    visible_file_ids: set[str] = set()
     for record in records:
         recipe = recipe_service.record_to_recipe(record)
         profile = _summary_for_display(db, customer, record)
         resources = file_service.recipe_files(db, customer.id, record.recipe_id, primary_recipe_id=primary_id)
-        for item in resources:
-            if item.kind != "output" or _is_delivered_output(item):
-                visible_file_ids.add(item.id)
         if not profile.summary:
             inputs = [file_service.file_dict(item) for item in resources if item.kind != "output"]
             _, _, context = _summary_inputs(db, customer, record.recipe_id)
@@ -254,8 +242,6 @@ def detail(db: Session, customer: Customer, *, user: User | None = None) -> dict
                         "field_mapping_entries": memory_service.field_mapping_entries(db, customer.id, recipe_id=record.recipe_id),
                         "runs": [run_service.run_dict(run) for run in db.scalars(select(Run).where(
                             Run.customer_id == customer.id, Run.recipe_id == record.recipe_id).order_by(Run.created_at.desc()))]})
-    if not records:
-        visible_file_ids = {item.id for item in files if item.kind != "output" or _is_delivered_output(item)}
     conv_stmt = select(Conversation).where(Conversation.customer_id == customer.id)
     if user is not None:
         conv_stmt = conv_stmt.where(Conversation.user_id == user.id)
@@ -270,7 +256,7 @@ def detail(db: Session, customer: Customer, *, user: User | None = None) -> dict
         "summary_updated_at": primary["summary_updated_at"] if primary else customer.summary_updated_at.isoformat() if customer.summary_updated_at else None,
         "output_count": int(output_count),
         "files": [file_service.file_dict(f) for f in files if f.kind != "output"],
-        "outputs": [file_service.file_dict(f) for f in files if f.kind == "output"][:20],
+        "outputs": [file_service.file_dict(f) for f in files if f.kind == "output"],
         "recipes": recipes,
         "memories": memory_service.customer_visible_memories(db, customer.id, recipe_id=primary_id),
         "field_mapping": memory_service.field_mapping_for(db, customer.id, recipe_id=primary_id),

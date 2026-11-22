@@ -732,6 +732,9 @@ class ConversationHost:
             run = run_service.create_run(db, kind=kind, user_id=self.user_id, customer_id=self.customer_id,
                                          conversation_id=self.conversation_id, recipe_id=recipe.id, recipe_version=recipe.version,
                                          request_text=request_text, input_file_ids=list(dict.fromkeys(input_files)))
+            if kind == "replay":
+                # 聊天里发起的重复执行同样只把输入/输出留在流程内部，不进客户与聊天的文件 Tab。
+                run.validation = {**(run.validation or {}), "scope": file_service.RUN_SCOPE}
             filename = file_service.safe_filename(f"{recipe.name}_结果.xlsx")
             path = run_service.output_path(run, filename)
         return RunHandle(run_id=run.id, ws=run_service.run_workspaces.get(run.id), output_path=path)
@@ -782,9 +785,31 @@ class ConversationHost:
             assert run is not None
             actual_inputs = [i.get("file_id") or (i.get("source") or {}).get("file_id") for i in report.get("inputs", [])]
             run.input_file_ids = list(dict.fromkeys(fid for fid in actual_inputs if fid))
+            if run.kind == "replay" and self.conversation_id and run.input_file_ids:
+                # 聊天里当轮专为重跑流程上传的新输入文件，标记为 run_input 留在流程运行记录内，不污染客户/聊天的文件 Tab。
+                baseline_bindings = (recipe.learned_from or {}).get("input_bindings", {})
+                baseline_ids = {
+                    str(v if isinstance(v, str) else v.get("file_id"))
+                    for v in (baseline_bindings.values() if isinstance(baseline_bindings, dict) else [])
+                    if (isinstance(v, str) and v) or (isinstance(v, dict) and v.get("file_id"))
+                }
+                latest_user = db.scalars(
+                    select(Message).where(Message.conversation_id == self.conversation_id, Message.role == "user")
+                    .order_by(Message.id.desc()).limit(1)
+                ).first()
+                turn_attachments = set((latest_user.meta or {}).get("attachments", []) if latest_user else [])
+                for fid in set(run.input_file_ids) & turn_attachments - baseline_ids:
+                    input_rec = db.get(FileRecord, fid)
+                    if input_rec is not None:
+                        input_rec.profile = {**(input_rec.profile or {}), "run_input": True}
+                        if recipe.id:
+                            link = db.get(FileRecipe, (fid, recipe.id))
+                            if link is not None:
+                                db.delete(link)
             run.validation = {**(run.validation or {}), "recipe_snapshot": snapshot.to_dict(), "files": delivered}
             if register_output:
-                recipe.learned_from["input_bindings"] = dict(snapshot.learned_from["input_bindings"])
+                if run.kind != "replay":
+                    recipe.learned_from["input_bindings"] = dict(snapshot.learned_from["input_bindings"])
                 if not run.validation.get("recipe_deleted") and report.get("status") in {"success", "warning"}:
                     self._last_recipe = snapshot
                 elif self._last_recipe is not None and self._last_recipe.id == recipe.id:

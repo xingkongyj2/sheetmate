@@ -147,16 +147,20 @@ def bind_customer(conversation_id: str, body: BindBody, background: BackgroundTa
 
 @router.post("/{conversation_id}/files")
 async def upload_file(conversation_id: str, background: BackgroundTasks, file: UploadFile = File(...),
-                      kind: str = Form("input"), db: Session = Depends(get_db),
+                      kind: str = Form("input"), for_run: bool = False, db: Session = Depends(get_db),
                       user: User = Depends(current_user)) -> dict[str, Any]:
-    """上传到会话并立即加载到工作区。绑定了客户的会话，文件同时进入客户资料库。"""
+    """上传到会话并立即加载到工作区。绑定了客户的会话，文件同时进入客户资料库；for_run=True 时仅用于本次重跑，不进文件页。"""
     conv = conv_service.get_conversation(db, user, conversation_id)
     data = await file.read()
     record = file_service.save_upload(db, data=data, filename=file.filename or "file", user=user,
                                       customer_id=conv.customer_id, conversation_id=conv.id, kind=kind)
-    if conv.customer_id and conv.recipe_id:
-        file_service.retain_for_recipe(db, record, conv.customer_id, conv.recipe_id)
-    tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record, protect=True)
+    tables = []
+    if for_run:
+        record.profile = {**(record.profile or {}), "run_input": True}
+    else:
+        if conv.customer_id and conv.recipe_id:
+            file_service.retain_for_recipe(db, record, conv.customer_id, conv.recipe_id)
+        tables = file_service.load_into_workspace(conv_service.workspace(conv.id), record, protect=True)
     db.commit()   # 后台识别要读到刚保存的文件
     background.add_task(privacy_service.identify_uploaded, record.id)   # 上传后自动识别敏感列，发第一条消息时直接用结果
     return {"ok": True, "file": file_service.file_dict(record),

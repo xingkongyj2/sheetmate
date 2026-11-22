@@ -159,11 +159,13 @@ export const conversationApi = {
   remove: async (id: string) => http.delete(`/conversations/${id}`),
   bind: async (id: string, payload: { customer_id?: string; new_customer?: { name: string; code?: string; description?: string } }) =>
     (await http.post<{ conversation: ConversationBrief; customer_id: string }>(`/conversations/${id}/bind`, payload)).data,
-  upload: async (id: string, file: File, kind: 'input' | 'expected' = 'input') => {
+  upload: async (id: string, file: File, kind: 'input' | 'expected' = 'input', forRun = false) => {
     const form = new FormData()
     form.append('file', file)
     form.append('kind', kind)
-    return (await http.post<{ file: FileInfo; tables: TableBrief[] }>(`/conversations/${id}/files`, form)).data
+    return (await http.post<{ file: FileInfo; tables: TableBrief[] }>(`/conversations/${id}/files`, form, {
+      params: { for_run: forRun || undefined },
+    })).data
   },
   loadFile: async (id: string, fileId: string) =>
     (await http.post<{ tables: TableBrief[] }>(`/conversations/${id}/load-file`, { file_id: fileId })).data.tables,

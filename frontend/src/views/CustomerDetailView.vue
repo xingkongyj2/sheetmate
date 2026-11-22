@@ -54,7 +54,11 @@ const loading = ref(true)
 const summarizing = ref(false)
 const editing = ref(false)
 const runDialog = ref<{ recipeId: string | null } | null>(null)
-const runRecipe = computed(() => customer.value?.recipes.find((recipe) => recipe.recipe_id === runDialog.value?.recipeId) ?? null)
+const runRecipe = computed(() => {
+  const recipe = customer.value?.recipes.find((item) => item.recipe_id === runDialog.value?.recipeId) ?? null
+  if (!recipe || !customer.value) return recipe
+  return { ...recipe, files: workflowFiles([...recipe.files, ...customer.value.files]) }
+})
 const openFilePreview = useFilePreview()
 const conversationsOpen = ref(false)
 let loadVersion = 0
@@ -75,11 +79,21 @@ async function load() {
     if (active && version === loadVersion) loading.value = false
   }
 }
+const syncOnReturn = () => {
+  if (document.visibilityState === 'visible' && !loading.value && !editing.value && !runDialog.value) void load()
+}
 onMounted(() => {
   if (route.query.tab === 'runs') void router.replace({ query: { ...route.query, tab: 'recipes' } })
   void load()
+  window.addEventListener('focus', syncOnReturn)
+  document.addEventListener('visibilitychange', syncOnReturn)
 })
-onBeforeUnmount(() => { active = false; loadVersion++ })
+onBeforeUnmount(() => {
+  active = false
+  loadVersion++
+  window.removeEventListener('focus', syncOnReturn)
+  document.removeEventListener('visibilitychange', syncOnReturn)
+})
 watch(() => props.id, () => {
   customer.value = null
   const nextTab = route.query.tab === 'runs' ? 'recipes' : route.query.tab
@@ -97,9 +111,10 @@ watch(() => route.query.tab, (next) => {
 
 const orderedRecipes = computed(() => primaryFirst(customer.value?.recipes ?? [], customer.value?.primary_recipe_id))
 const primaryRecipe = computed(() => orderedRecipes.value[0] ?? null)
-const fileCount = computed(() => workflowFiles(orderedRecipes.value.length
-  ? orderedRecipes.value.flatMap((recipe) => [...recipe.files, ...recipe.output_files.filter(isDeliveredOutput)])
-  : [...(customer.value?.files ?? []), ...(customer.value?.outputs ?? []).filter(isDeliveredOutput)]).length)
+const fileCount = computed(() => workflowFiles([
+  ...(customer.value?.files ?? []),
+  ...(customer.value?.outputs ?? []).filter(isDeliveredOutput),
+]).length)
 const hasSummaryMaterial = computed(() => orderedRecipes.value.length > 0 || (customer.value?.files.length ?? 0) > 0)
 const hasDisplaySummary = computed(() => Boolean(customer.value?.summary && (hasSummaryMaterial.value || customer.value.summary_by === 'human')))
 
@@ -262,16 +277,9 @@ async function onEdited() {
         </div>
       </section>
 
-      <!-- 文件 -->
-      <section v-else-if="tab === 'files'" class="mt-6 space-y-8">
-        <section v-for="recipe in orderedRecipes" :key="`${customer.id}:${recipe.recipe_id}`" class="space-y-3">
-          <header class="flex items-center gap-2 px-1">
-            <h2 class="min-w-0 break-words text-[16px] font-semibold leading-relaxed">{{ recipe.name }}</h2>
-            <span v-if="recipe.recipe_id === primaryRecipe?.recipe_id" class="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full bg-[#6265DC]/8 px-2 py-1 text-[10px] text-[#6265DC]"><Star class="size-3 fill-current" />主流程</span>
-          </header>
-          <WorkflowFiles :customer-id="customer.id" :recipe-id="recipe.recipe_id" :files="recipe.files" :outputs="recipe.output_files" :refresh="load" @preview="openFilePreview" />
-        </section>
-        <WorkflowFiles v-if="!orderedRecipes.length" :key="customer.id" :customer-id="customer.id" :files="customer.files" :outputs="customer.outputs" :refresh="load" @preview="openFilePreview" />
+      <!-- 文件：与绑定该客户的聊天工作区「文件」Tab 保持完全一致 -->
+      <section v-else-if="tab === 'files'" class="mt-6">
+        <WorkflowFiles :key="customer.id" :customer-id="customer.id" :files="customer.files" :outputs="customer.outputs" :refresh="load" @preview="openFilePreview" />
       </section>
 
       <!-- 记忆 -->

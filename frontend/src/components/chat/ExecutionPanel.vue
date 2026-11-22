@@ -139,9 +139,12 @@ async function drop(table: TableBrief) {
 async function removeFile(file: FileInfo) {
   if (!props.detail) return
   const conversationId = props.detail.id
+  const boundCustomer = props.detail.customer
   if (!await confirmDelete({
     title: '删除这个文件？', target: file.filename,
-    description: '删除后，这个文件不再出现在工作区里。',
+    description: boundCustomer
+      ? `删除后，这个文件会从当前对话和客户「${boundCustomer.name}」的文件列表中同步移除。`
+      : '删除后，这个文件不再出现在工作区里。',
     confirmText: '删除文件',
     action: () => fileApi.remove(file.file_id, undefined, undefined, conversationId),
   })) return

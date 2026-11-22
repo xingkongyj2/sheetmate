@@ -136,7 +136,7 @@ async function upload(input: RunInput, files: File[], batch = false) {
     for (const file of files) {
       const info = props.customerId
         ? await customerApi.uploadFile(props.customerId, file, 'input', props.recipe.recipe_id, true)
-        : (await conversationApi.upload(props.conversationId!, file, 'input')).file
+        : (await conversationApi.upload(props.conversationId!, file, 'input', true)).file
       pool.value.unshift(info)
       added.push(info)
       uploading.value.done++
@@ -192,7 +192,7 @@ async function execute(indices: number[]) {
       const fileIds = [...new Set(Object.values(item.mapping).map((key) => key.split('::')[0]))]
       const handle = recipeApi.run(props.recipe.recipe_id, {
         file_ids: fileIds, inputs: item.mapping, allow_repair: allowRepair,
-        scoped: !!props.customerId, label: items.value.length > 1 ? item.label || undefined : undefined,
+        scoped: true, label: items.value.length > 1 ? item.label || undefined : undefined,
       }, (e) => {
         if (e.type.startsWith('recipe_')) applyRecipeEvent(item.progress, e)
         else if (e.type === 'file') {

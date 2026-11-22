@@ -136,7 +136,12 @@ def _visible_condition(db: Session, *, customer_id: str | None, conversation_id:
         conditions.extend([FileRecord.conversation_id.in_(conversation_ids), FileRecord.id.in_(linked)])
     if not conditions:
         conditions.append(FileRecord.created_by == user_id)
-    condition = and_(or_(*conditions), current_file_condition())
+    scoped_runs = select(Run.id).where(run_scoped_condition())
+    not_run_scoped = and_(
+        or_(FileRecord.run_id.is_(None), FileRecord.run_id.not_in(scoped_runs)),
+        func.coalesce(FileRecord.profile["run_input"].as_boolean(), False).is_(False),
+    )
+    condition = and_(or_(*conditions), current_file_condition(), not_run_scoped)
     return and_(condition, FileRecord.id != exclude_file_id) if exclude_file_id else condition
 
 
@@ -458,17 +463,21 @@ def retain_for_recipe(db: Session, record: FileRecord, customer_id: str, recipe_
     db.flush()
 
 
-RUN_SCOPE = "run"   # Run.validation["scope"]：用户在客户页「执行」发起的运行，输入输出只记在这次执行里，不进文件页
+RUN_SCOPE = "run"   # Run.validation["scope"]：重复跑流程（无论从客户页、流程详情、全屏还是聊天发起）的输入输出只留在流程运行记录里，不进客户/聊天文件页
 
 
 def run_scoped_condition():
-    return Run.validation["scope"].as_string() == RUN_SCOPE
+    return or_(Run.kind == "replay", func.coalesce(Run.validation["scope"].as_string(), "") == RUN_SCOPE)
+
+
+def not_run_scoped_condition():
+    return and_(Run.kind != "replay", func.coalesce(Run.validation["scope"].as_string(), "") != RUN_SCOPE)
 
 
 def exclude_run_scoped(db: Session, records: list[FileRecord]) -> list[FileRecord]:
-    """去掉只属于某次执行的文件：执行时新上传的输入，以及这次执行产生的全部输出（含中间文件）。
+    """去掉只属于某次流程重跑的文件：重跑时上传的输入，以及重跑产生的全部输出（含中间文件）。
 
-    执行很多次、每次换一批输入时，文件页不会被撑满；这些文件在对应的执行记录里查看。"""
+    重复跑流程不管在哪里跑，输入和输出都留在流程运行记录里查看，不展示到客户和聊天的文件 Tab。"""
     run_ids = {record.run_id for record in records if record.run_id}
     scoped = set(db.scalars(select(Run.id).where(Run.id.in_(run_ids), run_scoped_condition()))) if run_ids else set()
     return [record for record in records
@@ -490,7 +499,7 @@ def _recipe_file_ids(db: Session, customer_id: str, recipe_id: str) -> set[str]:
                 exact_inputs.add(str(file_id))
                 resolved_aliases.add(alias)
     runs = list(db.scalars(select(Run).where(Run.recipe_id == recipe_id, Run.customer_id == customer_id,
-                                             func.coalesce(Run.validation["scope"].as_string(), "") != RUN_SCOPE)))
+                                             not_run_scoped_condition())))
     for run in runs:
         exact_inputs.update(run.input_file_ids or [])
         for item in (run.validation or {}).get("inputs", []):
@@ -600,12 +609,13 @@ def can_access_file(db: Session, user: User, record: FileRecord) -> bool:
 
 
 def retain_customer_files(db: Session, customer_id: str, *, conversation_id: str | None = None) -> None:
-    """在解绑/删除前保留各现存会话能使用的客户资料，兼容升级前的单归属记录。"""
+    """在解绑/删除客户前，把客户当前可见文件快照保留给对应会话，解绑后两边各自独立管理。"""
     conversation_ids = ([conversation_id] if conversation_id else list(db.scalars(
         select(Conversation.id).where(Conversation.customer_id == customer_id))))
     if not conversation_ids:
         return
-    file_ids = list(db.scalars(select(FileRecord.id).where(customer_file_condition(customer_id))))
+    records = exclude_run_scoped(db, list(db.scalars(select(FileRecord).where(customer_file_condition(customer_id)))))
+    file_ids = [record.id for record in records]
     if not file_ids:
         return
     existing = set(db.execute(select(FileConversation.file_id, FileConversation.conversation_id).where(
@@ -654,12 +664,17 @@ def delete_if_unowned(db: Session, record: FileRecord) -> bool:
 
 
 def remove_from_customer(db: Session, record: FileRecord, user: User, customer_id: str) -> bool:
+    """从客户文件移除，并同步解除当前绑定在该客户下的所有会话引用，保证客户与绑定会话两边一致。"""
     require_customer(db, user, customer_id)
     if not can_access_in_customer(db, record, customer_id):
         raise ServiceError("这个文件不属于指定客户")
-    # 兼容已有会话尚未显式加载的客户文件：客户删除不能破坏它们原有的输入范围。
-    for conv_id in db.scalars(select(Conversation.id).where(Conversation.customer_id == customer_id)):
-        retain_for_conversation(db, record, conv_id)
+    bound_conv_ids = set(db.scalars(select(Conversation.id).where(Conversation.customer_id == customer_id)))
+    for conv_id in bound_conv_ids:
+        link = db.get(FileConversation, (record.id, conv_id))
+        if link is not None:
+            db.delete(link)
+    if record.conversation_id in bound_conv_ids:
+        record.conversation_id = None
     release_customer_reference(db, record, customer_id)
     db.flush()
     return delete_if_unowned(db, record)
@@ -693,15 +708,14 @@ def remove_from_conversation(db: Session, record: FileRecord, user: User, conver
 
 
 def remove_from_workspace(db: Session, record: FileRecord, user: User, conversation_id: str) -> bool:
-    """聊天工作区里删除一个文件：这个会话不再有它。
-
-    会话绑了客户、文件也在客户的文件里时，同时从客户文件里移除（和客户页的删除一样）；
-    客户的其他会话各自保留自己的引用，不受影响。"""
+    """聊天工作区里删除一个文件：
+    - 已绑定客户时：直接从客户移除并同步解除该客户所有绑定会话的引用，保证客户与聊天文件完全一致；
+    - 未绑定客户时：仅从当前独立会话移除。"""
     conv = db.get(Conversation, conversation_id)
     if conv is None or conv.user_id != user.id:
         raise Forbidden("你没有权限修改这个会话的文件")
     if conv.customer_id and can_access_in_customer(db, record, conv.customer_id):
-        remove_from_customer(db, record, user, conv.customer_id)  # 里面会先给客户的每个会话（含这个）留好引用
+        return remove_from_customer(db, record, user, conv.customer_id)
     return remove_from_conversation(db, record, user, conversation_id)
 
 
@@ -721,24 +735,26 @@ def preview(record: FileRecord, sheet: str | None = None, offset: int = 0, limit
 
 def list_files(db: Session, *, customer_id: str | None = None, conversation_id: str | None = None,
                kinds: tuple[str, ...] | None = None, available_only: bool = True,
-               include_superseded: bool = False) -> list[FileRecord]:
-    conds = []
+               include_superseded: bool = False, include_run_scoped: bool = False) -> list[FileRecord]:
+    """统一的文件查询口径：
+    - 传了 customer_id（客户页或已绑定客户的聊天）：以客户文件为唯一真相源，两边展示完全一致；
+    - 仅传 conversation_id（未绑定客户的独立聊天）：仅查询该会话自己的文件；
+    - 默认排除重复跑流程产生的临时输入（run_input）和重跑输出（replay / scope=run）。"""
     if customer_id:
-        conds.append(customer_file_condition(customer_id))
-    if conversation_id:
+        scope = customer_file_condition(customer_id)
+    elif conversation_id:
         linked = select(FileConversation.file_id).where(FileConversation.conversation_id == conversation_id)
-        conds.extend([FileRecord.conversation_id == conversation_id, FileRecord.id.in_(linked)])
-    if not conds:
+        scope = or_(FileRecord.conversation_id == conversation_id, FileRecord.id.in_(linked))
+    else:
         return []
-    stmt = select(FileRecord).where(or_(*conds)).order_by(FileRecord.created_at.desc())
+    stmt = select(FileRecord).where(scope).order_by(FileRecord.created_at.desc())
     if not include_superseded:
         stmt = stmt.where(current_file_condition())
     if kinds:
         stmt = stmt.where(FileRecord.kind.in_(kinds))
     records = [record for record in db.scalars(stmt) if not available_only or Path(record.stored_path).is_file()]
-    if conversation_id:
-        for record in records:
-            retain_for_conversation(db, record, conversation_id)
+    if not include_run_scoped:
+        records = exclude_run_scoped(db, records)
     return records
 
 

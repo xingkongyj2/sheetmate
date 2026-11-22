@@ -302,7 +302,7 @@ async function prepareRun() {
     let files: FileInfo[] = []
     if (props.context.customerId) {
       const customer = await customerApi.get(props.context.customerId)
-      files = customer.recipes.find((item) => item.recipe_id === recipeId)?.files ?? customer.files
+      files = [...(customer.recipes.find((item) => item.recipe_id === recipeId)?.files ?? []), ...customer.files]
     } else if (props.context.conversationId) {
       files = (await conversationApi.get(props.context.conversationId)).files
     }

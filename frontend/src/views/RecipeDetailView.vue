@@ -283,7 +283,7 @@ async function removeRecipe() {
       @changed="load"
     />
     <RecipeVersionDialog v-if="openedVersion" :key="openedVersion.version" :recipe-id="recipeId" :item="openedVersion" @close="openedVersion = null" />
-    <RunRecipeDialog v-if="running && recipe" :customer-id="customer?.id" :recipe="recipe" @close="running = false" @done="load" />
+    <RunRecipeDialog v-if="running && recipe" :customer-id="customer?.id" :recipe="customer ? { ...recipe, files: workflowFiles([...recipe.files, ...customer.files]) } : recipe" @close="running = false" @done="load" />
     <BaseModal v-if="showJson && recipe" :title="`${recipe.name} · 流程数据`" width="max-w-4xl" @close="showJson = false">
       <pre class="max-h-[65vh] overflow-auto rounded-xl bg-paper p-4 font-mono text-xs leading-relaxed">{{ JSON.stringify(recipe.recipe, null, 2) }}</pre>
     </BaseModal>

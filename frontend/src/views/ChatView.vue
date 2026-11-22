@@ -17,6 +17,7 @@ import Mascot from '@/components/brand/Mascot.vue'
 import MascotLoader from '@/components/brand/MascotLoader.vue'
 import AssistantMessage from '@/components/chat/AssistantMessage.vue'
 import ChatComposer, { type Attachment } from '@/components/chat/ChatComposer.vue'
+import ChatOutline from '@/components/chat/ChatOutline.vue'
 import ExecutionPanel from '@/components/chat/ExecutionPanel.vue'
 import SaveToCustomerDialog from '@/components/chat/SaveToCustomerDialog.vue'
 import RunSteeringQueue from '@/components/chat/RunSteeringQueue.vue'
@@ -27,6 +28,7 @@ import DataTable from '@/components/common/DataTable.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { attachmentMessage } from '@/composables/attachmentFiles'
 import { applyDeliveryManifest, applyEvent, finishMessage, restoreConversationMessages, markRecipeDeleted, newAssistant, newUser, uid, type UiMessage } from '@/composables/chatModel'
+import { buildChatOutline, resolveActiveOutlineKey } from '@/composables/chatOutline'
 import { useFilePreview } from '@/composables/useFilePreview'
 import { usePrivacySwitch } from '@/composables/usePrivacySwitch'
 import { useToast } from '@/composables/useToast'
@@ -142,6 +144,24 @@ const messageFiles = computed(() => {
   for (const file of recentlyUploaded.value) files.set(file.file_id, file)
   return [...files.values()]
 })
+const outlineItems = computed(() => buildChatOutline(messages.value, messageFiles.value))
+const showOutline = computed(() => !loading.value && outlineItems.value.length > 0)
+const outlineLastActivity = computed(() => {
+  let latest = 0
+  for (const message of messages.value) {
+    const ts = message.replyFinishedAt ?? Date.parse(message.createdAt ?? '')
+    if (Number.isFinite(ts) && ts > latest) latest = ts
+  }
+  return latest ? new Date(latest).toISOString() : detail.value?.updated_at ?? null
+})
+const activeOutlineKey = ref<string | null>(null)
+const highlightedKey = ref<string | null>(null)
+const messageEls = new Map<string, HTMLElement>()
+let outlineFrame = 0
+let jumpLockKey: string | null = null
+let jumpTargetTop: number | null = null
+let jumpLockTimer = 0
+let highlightTimer = 0
 const referenceFiles = computed(() => messageFiles.value.map((file, index) => ({ file, index })).sort((left, right) => {
   const first = Date.parse(left.file.created_at ?? '')
   const second = Date.parse(right.file.created_at ?? '')
@@ -313,25 +333,36 @@ async function refreshMetadata() {
 watch([panelOpen, panelTab], ([open, tab]) => {
   clearTimeout(usageRefreshTimer)
   usagePendingSince = 0
-  if (open && tab === 'usage') void refreshSide()
+  if (open && (tab === 'usage' || tab === 'files' || tab === 'recipes')) void refreshSide()
   else scheduleUsageRefresh()
 })
 
 let resizeObserver: ResizeObserver | null = null
 
 const privacySwitch = usePrivacySwitch()
-const refreshPrivacySwitch = () => { void privacySwitch.refresh() }
+const syncOnFocus = () => {
+  void privacySwitch.refresh()
+  if (document.visibilityState === 'visible' && detail.value?.customer && !streaming.value && !loading.value) {
+    void refreshSide()
+  }
+}
 
 onMounted(async () => {
   void privacySwitch.refresh()
-  window.addEventListener('focus', refreshPrivacySwitch)   // 在设置页改完回来，提示立刻更新
+  window.addEventListener('focus', syncOnFocus)   // 从设置页或客户详情页回来时，状态与绑定文件立刻同步
+  document.addEventListener('visibilitychange', syncOnFocus)
   // 内容高度变化（逐字显示、表格渲染、图片加载）时，如果用户本来就在底部附近，就跟着滚到底
-  if (typeof ResizeObserver !== 'undefined' && content.value) {
-    resizeObserver = new ResizeObserver(() => scrollToBottom())
-    resizeObserver.observe(content.value)
+  if (typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => {
+      scrollToBottom()
+      scheduleActiveOutlineSync()
+    })
+    if (content.value) resizeObserver.observe(content.value)
+    if (scroller.value) resizeObserver.observe(scroller.value)
   }
   await load()
   if (disposed) return
+  scheduleActiveOutlineSync()
   const pending = pendingStarts.get(props.id)
   if (pending) {
     pendingStarts.delete(props.id)
@@ -340,15 +371,123 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('focus', refreshPrivacySwitch)
+  window.removeEventListener('focus', syncOnFocus)
+  document.removeEventListener('visibilitychange', syncOnFocus)
   disposed = true
   resizeObserver?.disconnect()
   clearTimeout(pollTimer)
   clearInterval(watchdogTimer)
   clearTimeout(usageRefreshTimer)
+  clearTimeout(jumpLockTimer)
+  clearTimeout(highlightTimer)
   cancelAnimationFrame(scrollFrame)
+  cancelAnimationFrame(outlineFrame)
   handle?.abort() // 只是断开连接，后台任务会继续执行并保存结果
 })
+
+// ------------------------------------------------------------------ 左侧对话目录联动
+
+function setMessageEl(key: string, el: unknown) {
+  const element = el && typeof el === 'object' && (typeof HTMLElement === 'undefined' || el instanceof HTMLElement)
+    ? (el as HTMLElement)
+    : null
+  if (element) messageEls.set(key, element)
+  else messageEls.delete(key)
+}
+
+function clearJumpLock() {
+  jumpLockKey = null
+  jumpTargetTop = null
+  window.clearTimeout(jumpLockTimer)
+  jumpLockTimer = 0
+}
+
+function updateActiveOutlineNow() {
+  const items = outlineItems.value
+  if (!items.length) {
+    activeOutlineKey.value = null
+    return
+  }
+  const el = scroller.value
+  if (!el) {
+    activeOutlineKey.value = items[items.length - 1]!.key
+    return
+  }
+  if (jumpLockKey) {
+    if (jumpTargetTop !== null && Math.abs(el.scrollTop - jumpTargetTop) <= 4) {
+      clearJumpLock()
+    } else {
+      activeOutlineKey.value = jumpLockKey
+      return
+    }
+  }
+  const scrollerRect = el.getBoundingClientRect()
+  const metrics: { key: string; top: number }[] = []
+  for (const item of items) {
+    const node = messageEls.get(item.key)
+    if (!node) continue
+    metrics.push({
+      key: item.key,
+      top: node.getBoundingClientRect().top - scrollerRect.top + el.scrollTop,
+    })
+  }
+  const composerEl = el.querySelector('.chat-composer-lane') as HTMLElement | null
+  const visibleHeight = Math.max(120, el.clientHeight - (composerEl?.offsetHeight ?? 0))
+  activeOutlineKey.value = resolveActiveOutlineKey(metrics, el.scrollTop, el.clientHeight, el.scrollHeight, {
+    anchorRatio: Math.min(0.32, (visibleHeight * 0.28) / Math.max(1, el.clientHeight)),
+  }) ?? items[items.length - 1]!.key
+}
+
+function scheduleActiveOutlineSync() {
+  if (outlineFrame || disposed) return
+  outlineFrame = requestAnimationFrame(() => {
+    outlineFrame = 0
+    if (!disposed) updateActiveOutlineNow()
+  })
+}
+
+function jumpToTurn(key: string) {
+  const el = scroller.value
+  const target = messageEls.get(key)
+  if (!el || !target) return
+  cancelAnimationFrame(scrollFrame)
+  scrollFrame = 0
+  forceScroll = false
+  followOutput = false
+  const scrollerRect = el.getBoundingClientRect()
+  const targetTop = target.getBoundingClientRect().top - scrollerRect.top + el.scrollTop
+  const maxScroll = Math.max(0, el.scrollHeight - el.clientHeight)
+  const destination = Math.max(0, Math.min(maxScroll, Math.round(targetTop - 28)))
+  activeOutlineKey.value = key
+  jumpLockKey = key
+  jumpTargetTop = destination
+  window.clearTimeout(jumpLockTimer)
+  jumpLockTimer = window.setTimeout(() => {
+    clearJumpLock()
+    scheduleActiveOutlineSync()
+  }, 750)
+  const reduced = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  el.scrollTo({ top: destination, behavior: reduced ? 'auto' : 'smooth' })
+  if (reduced || Math.abs(el.scrollTop - destination) <= 2) {
+    clearJumpLock()
+  }
+  window.clearTimeout(highlightTimer)
+  highlightedKey.value = null
+  void nextTick(() => {
+    if (disposed) return
+    highlightedKey.value = key
+    highlightTimer = window.setTimeout(() => {
+      if (highlightedKey.value === key) highlightedKey.value = null
+    }, 980)
+  })
+}
+
+watch(
+  () => outlineItems.value.map((item) => item.key).join(','),
+  () => {
+    void nextTick(() => scheduleActiveOutlineSync())
+  },
+)
 
 // ------------------------------------------------------------------ 发送
 
@@ -364,6 +503,7 @@ function scrollToBottom(force = false) {
         el.scrollTop = el.scrollHeight
         previousScrollTop = el.scrollTop
         followOutput = true
+        scheduleActiveOutlineSync()
       }
       forceScroll = false
     })
@@ -373,9 +513,18 @@ function scrollToBottom(force = false) {
 function onChatScroll() {
   const el = scroller.value
   if (!el) return
-  if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) followOutput = true
-  else if (el.scrollTop < previousScrollTop - 1) followOutput = false
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  if (jumpLockKey) {
+    if (nearBottom && jumpTargetTop !== null && el.scrollHeight - jumpTargetTop - el.clientHeight < 80) {
+      followOutput = true
+    }
+  } else if (nearBottom) {
+    followOutput = true
+  } else if (el.scrollTop < previousScrollTop - 1) {
+    followOutput = false
+  }
   previousScrollTop = el.scrollTop
+  scheduleActiveOutlineSync()
 }
 
 watch(
@@ -769,14 +918,33 @@ function answer(option: string) {
         </button>
       </header>
 
-      <div class="chat-body min-h-0 flex-1" :class="{ 'has-directory': checklist && checklistOpen }">
+      <div class="chat-body min-h-0 flex-1" :class="{ 'has-directory': checklist && checklistOpen, 'has-outline': showOutline }">
+      <Transition name="chat-outline-fade">
+        <ChatOutline
+          v-if="showOutline"
+          class="chat-outline-dock"
+          :title="detail?.title ?? ''"
+          :items="outlineItems"
+          :active-key="activeOutlineKey"
+          :fallback-start="detail?.created_at"
+          :fallback-end="outlineLastActivity"
+          @select="jumpToTurn"
+        />
+      </Transition>
       <aside v-if="checklist" v-show="checklistOpen" id="task-directory" class="chat-progress" aria-label="本轮任务进度">
         <TaskChecklist :key="checklist.key" :items="checklist.items" :running="checklist.running" />
       </aside>
 
       <div class="chat-conversation">
       <!-- 消息 -->
-      <div ref="scroller" class="chat-scroller min-h-0 flex-1 overflow-y-auto" @scroll.passive="onChatScroll">
+      <div
+        ref="scroller"
+        class="chat-scroller min-h-0 flex-1 overflow-y-auto"
+        @scroll.passive="onChatScroll"
+        @wheel.passive="clearJumpLock"
+        @touchstart.passive="clearJumpLock"
+        @pointerdown.passive="clearJumpLock"
+      >
       <div ref="content" class="chat-scroll-content">
         <div class="chat-messages pb-6 pt-8">
           <MascotLoader v-if="loading" class="py-24" />
@@ -792,7 +960,14 @@ function answer(option: string) {
           </div>
 
           <div v-else class="space-y-8">
-            <template v-for="m in messages" :key="m.key">
+            <div
+              v-for="m in messages"
+              :key="m.key"
+              :ref="(el) => m.role === 'user' && setMessageEl(m.key, el)"
+              :data-message-key="m.key"
+              class="chat-message-item"
+              :class="{ 'is-jump-highlighted': highlightedKey === m.key }"
+            >
               <UserMessage v-if="m.role === 'user'" :message="m" :files="messageFiles" @preview="openFilePreview" />
               <AssistantMessage
                 v-else
@@ -808,7 +983,7 @@ function answer(option: string) {
                 @preview-file="openFilePreview"
                 @refresh="refreshSide"
               />
-            </template>
+            </div>
           </div>
 
           <div v-if="reconnecting" class="mt-6 flex items-center gap-2 rounded-xl bg-info/5 px-4 py-3 text-sm text-info">
@@ -935,6 +1110,42 @@ function answer(option: string) {
   margin-left: max(4rem, calc((100% - var(--chat-message-width)) / 2));
   margin-right: 1.5rem;
 }
+.chat-message-item.is-jump-highlighted :deep(.user-bubble) {
+  animation: chat-turn-jump-pulse 0.95s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes chat-turn-jump-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(11, 11, 12, 0.26);
+  }
+  35% {
+    box-shadow: 0 0 0 6px rgba(11, 11, 12, 0.14);
+  }
+  100% {
+    box-shadow: 0 0 0 11px rgba(11, 11, 12, 0);
+  }
+}
+.chat-outline-fade-enter-active {
+  transition: opacity 260ms cubic-bezier(0.22, 1, 0.36, 1), transform 300ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.chat-outline-fade-leave-active {
+  transition: opacity 160ms ease, transform 180ms ease;
+}
+.chat-outline-fade-enter-from,
+.chat-outline-fade-leave-to {
+  opacity: 0;
+  transform: translate3d(-8px, 0, 0);
+}
+@container chat-workspace (max-width: 559px) {
+  .chat-outline-dock {
+    display: none;
+  }
+}
+@container chat-workspace (min-width: 560px) {
+  .chat-body.has-outline .chat-messages {
+    width: calc(100% - 7.75rem);
+    margin-left: max(6.25rem, calc((100% - var(--chat-message-width)) / 2));
+  }
+}
 @container chat-workspace (min-width: 840px) {
   .chat-body.has-directory {
     --chat-directory-space: 324px;
@@ -946,6 +1157,15 @@ function answer(option: string) {
     z-index: 1;
     width: 304px;
     margin: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-message-item.is-jump-highlighted :deep(.user-bubble) {
+    animation: none;
+  }
+  .chat-outline-fade-enter-active,
+  .chat-outline-fade-leave-active {
+    transition: none;
   }
 }
 </style>
