@@ -65,7 +65,7 @@ export function privacyStatusShort(status: PrivacyFileStatus): string {
   if (status.state === 'running') return '识别中…'
   if (status.state === 'failed') return '识别未完成'
   if (status.state === 'none') return '未识别'
-  return status.columns > 0 ? `已脱敏 ${status.columns} 列` : '无需替换'
+  return status.columns > 0 ? `已脱敏 ${status.columns} 列` : '无需脱敏'
 }
 
 /** privacy_report 事件 → 卡片数据；事件不合法返回 null */

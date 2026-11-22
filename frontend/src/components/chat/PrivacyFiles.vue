@@ -38,7 +38,7 @@ function canCopy(file: PrivacyFile | PrivacyFileState) {
           <LoaderCircle v-if="status(file) === 'pending'" class="size-3.5 shrink-0 animate-spin text-mute" aria-label="识别中" />
           <span v-else-if="status(file) === 'failed'" class="tag shrink-0 !bg-error/10 !text-error">识别失败</span>
           <!-- 很窄时（比如面板拖到最窄）这行小字让位给文件名，展开后的明细里本来就有 -->
-          <span v-else class="hidden shrink-0 text-[11px] tabular-nums text-faint @[300px]/file:inline" :class="{ '!inline': !canCopy(file) }">{{ protectedColumnCount(file) ? `${protectedColumnCount(file)} 列已保护` : unfinished ? '未完成识别' : '无需替换' }}</span>
+          <span v-else class="hidden shrink-0 text-[11px] tabular-nums text-faint @[300px]/file:inline" :class="{ '!inline': !canCopy(file) }">{{ protectedColumnCount(file) ? `${protectedColumnCount(file)} 列已保护` : unfinished ? '未完成识别' : '无需脱敏' }}</span>
           <!-- 按钮在 summary 里：点击不能触发展开/收起 -->
           <template v-if="canCopy(file)">
             <button type="button" class="icon-btn size-7 shrink-0" title="查看 AI 看到的样子" :aria-label="`查看 ${file.filename} 脱敏后的样子`" @click.stop.prevent="viewing = { fileId: file.file_id, filename: file.filename }">

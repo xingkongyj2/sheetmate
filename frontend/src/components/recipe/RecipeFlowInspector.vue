@@ -286,7 +286,7 @@ function privacySummary(id: string): string {
   if (!status) return ''
   if (status.state !== 'ready' || !privacyColumns[id]) return privacyStatusShort(status)
   const columns = maskedGroups(id).flatMap((group) => group.columns)
-  return columns.length ? `已脱敏 ${columns.length} 列 · ${formatCount(columns.reduce((total, column) => total + column.values, 0))} 个值` : '无需替换'
+  return columns.length ? `已脱敏 ${columns.length} 列 · ${formatCount(columns.reduce((total, column) => total + column.values, 0))} 个值` : '无需脱敏'
 }
 function privacyTone(id: string): string {
   const status = privacy[id]

@@ -242,34 +242,55 @@ async function removeRecipe() {
 
       <!-- 版本历史：点开看这个版本的完整信息和改动 -->
       <section v-else class="mt-8">
-        <p v-if="versionError" class="ver-card py-5 text-center text-sm text-error" role="alert">{{ versionError }}</p>
-        <MascotLoader v-else-if="!versions" size="sm" class="ver-card py-6" />
+        <div v-if="versions?.length" class="ver-head">
+          <h2>版本记录<small>{{ versions.length }}</small></h2>
+        </div>
+        <p v-if="versionError" class="ver-card py-6 text-center text-sm text-error" role="alert">{{ versionError }}</p>
+        <MascotLoader v-else-if="!versions" size="sm" class="ver-card py-8" />
         <ol v-else class="ver-card">
-          <li v-for="v in versions" :key="v.version">
-            <button type="button" class="ver-row" :aria-label="`查看 v${v.version} 的版本详情`" @click="openedVersion = v">
-              <span class="tag shrink-0" :class="v.latest ? '!bg-ink !text-white' : ''">v{{ v.version }}</span>
+          <li v-for="v in versions" :key="v.version" class="ver-item">
+            <button type="button" class="ver-row group" :aria-label="`查看 v${v.version} 的版本详情`" @click="openedVersion = v">
+              <span class="ver-badge" :class="v.latest ? 'is-current' : ''">
+                <span>v{{ v.version }}</span>
+              </span>
               <span class="min-w-0 flex-1">
-                <span class="block truncate text-sm" :class="v.note ? 'text-ink' : 'text-faint'">{{ v.note || '—' }}</span>
-                <span class="mt-0.5 block text-xs text-faint">
-                  {{ [versionSource(v) === v.note ? '' : versionSource(v), v.runs !== undefined ? `运行 ${v.runs} 次` : ''].filter(Boolean).join(' · ') }}
+                <span class="flex min-w-0 items-center gap-2">
+                  <span class="truncate text-[14.5px] font-semibold leading-snug" :class="v.note ? 'text-ink' : 'text-faint'">{{ v.note || '未填写版本说明' }}</span>
+                  <span v-if="v.latest" class="ver-current-pill">
+                    <span class="size-1.5 rounded-full bg-success" aria-hidden="true" />当前版本
+                  </span>
+                </span>
+                <span class="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-mute">
+                  <span v-if="versionSource(v) !== v.note">{{ versionSource(v) }}</span>
+                  <span v-if="versionSource(v) !== v.note && v.runs !== undefined" class="text-faint" aria-hidden="true">·</span>
+                  <span v-if="v.runs !== undefined" class="tabular-nums">已运行 {{ v.runs }} 次</span>
+                  <span class="text-faint sm:hidden" aria-hidden="true">·</span>
+                  <span class="tabular-nums text-faint sm:hidden">{{ v.created_at.slice(0, 16).replace('T', ' ') }}</span>
                 </span>
               </span>
-              <span v-if="v.latest" class="shrink-0 text-xs font-medium text-[#6265dc]">当前</span>
               <span class="hidden shrink-0 text-xs tabular-nums text-faint sm:inline">{{ v.created_at.slice(0, 16).replace('T', ' ') }}</span>
-              <ChevronRight class="size-4 shrink-0 text-faint" />
+              <ChevronRight class="size-4 shrink-0 text-faint transition-transform duration-150 group-hover:translate-x-0.5 group-hover:text-ink" />
             </button>
           </li>
         </ol>
       </section>
 
-      <!-- 低频操作 -->
-      <footer class="mt-14 flex flex-wrap items-center gap-x-1 gap-y-2 border-t border-line pt-5">
-        <button type="button" class="btn-text text-xs" @click="showJson = true"><Braces class="size-3.5" />流程数据</button>
-        <a :href="`/api/recipes/${recipe.recipe_id}/package`" class="btn-text text-xs" download><FolderDown class="size-3.5" />流程导出</a>
-        <span class="ml-auto flex items-center gap-2">
-          <button v-if="!primary" type="button" class="btn-line" :disabled="settingPrimary" @click="setPrimary"><Star class="size-4" />设为主流程</button>
-          <button type="button" class="btn-line border-error/20 text-error hover:border-error/40 hover:bg-error/5" @click="removeRecipe"><Trash2 class="size-4" />删除流程</button>
-        </span>
+      <!-- 底部操作区：统一的暖灰托盘 + 等高胶囊按钮 -->
+      <footer class="recipe-footer mt-10">
+        <div class="flex flex-wrap items-center gap-2">
+          <button type="button" class="footer-pill" @click="showJson = true">
+            <Braces class="size-3.5 text-mute" />流程数据
+          </button>
+          <a :href="`/api/recipes/${recipe.recipe_id}/package`" class="footer-pill" download>
+            <FolderDown class="size-3.5 text-mute" />流程导出
+          </a>
+          <button v-if="!primary" type="button" class="footer-pill" :disabled="settingPrimary" @click="setPrimary">
+            <Star class="size-3.5 text-mute" />设为主流程
+          </button>
+        </div>
+        <button type="button" class="footer-pill is-danger" @click="removeRecipe">
+          <Trash2 class="size-3.5" />删除流程
+        </button>
       </footer>
     </div>
 
@@ -291,10 +312,99 @@ async function removeRecipe() {
 </template>
 
 <style scoped>
-/* 版本列表：一张卡片，一行一个版本，整行可点 */
-.ver-card { margin: 0; border: 1px solid var(--color-line); border-radius: 16px; background: #fff; padding: 8px; list-style: none; }
-.ver-card > li + li { border-top: 1px solid #f0f0f4; }
-.ver-row { display: flex; width: 100%; align-items: center; gap: 12px; border-radius: 12px; padding: 12px; text-align: left; transition: background-color .15s; }
+/* 版本列表：与运行记录保持同一套卡片语言与 36px 左侧徽章节奏 */
+.ver-head h2 { display: flex; align-items: baseline; gap: 8px; margin: 0 2px 10px; color: var(--color-ink); font-size: 16px; font-weight: 700; line-height: 1.35; }
+.ver-head small { color: var(--color-faint); font-size: 12.5px; font-weight: 500; font-variant-numeric: tabular-nums; }
+
+.ver-card { margin: 0; border: 1px solid var(--color-line); border-radius: 16px; background: #fff; padding: 6px; list-style: none; }
+.ver-item { position: relative; }
+.ver-item + .ver-item::before { content: ''; position: absolute; top: 0; left: 12px; right: 12px; border-top: 1px solid #f2f1ee; transition: border-color .15s; }
+.ver-item:hover::before, .ver-item:hover + .ver-item::before { border-color: transparent; }
+
+.ver-row { display: flex; width: 100%; align-items: center; gap: 12px; border-radius: 12px; padding: 11px 12px; text-align: left; transition: background-color .15s; }
 .ver-row:hover { background: var(--color-paper); }
 .ver-row:focus-visible { outline: 2px solid var(--color-ink); outline-offset: 2px; }
+
+.ver-badge {
+  position: relative;
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-line);
+  border-radius: 11px;
+  background: var(--color-paper);
+  color: var(--color-mute);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.ver-badge.is-current {
+  border-color: var(--color-ink);
+  background: var(--color-ink);
+  color: #fff;
+  box-shadow: 0 4px 10px -6px rgba(11, 11, 12, 0.45);
+}
+
+.ver-current-pill {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #cdecd9;
+  border-radius: 9999px;
+  background: #f0faf4;
+  padding: 1px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: #169458;
+}
+
+/* 底部操作托盘 */
+.recipe-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border: 1px solid var(--color-line);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--color-paper) 60%, #fff);
+  padding: 10px 12px;
+}
+
+.footer-pill {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-line);
+  border-radius: 9999px;
+  background: #fff;
+  padding: 0 12px;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--color-ink);
+  box-shadow: 0 1px 2px rgba(60, 50, 40, 0.03);
+  transition: background-color .15s, border-color .15s, color .15s, transform .12s;
+}
+.footer-pill:hover {
+  border-color: #d4d1cb;
+  background: var(--color-panel);
+}
+.footer-pill:active { transform: scale(0.98); }
+.footer-pill:focus-visible { outline: 2px solid var(--color-ink); outline-offset: 2px; }
+.footer-pill:disabled { cursor: not-allowed; opacity: .45; }
+
+.footer-pill.is-danger {
+  border-color: color-mix(in srgb, var(--color-error) 22%, transparent);
+  color: var(--color-error);
+}
+.footer-pill.is-danger:hover {
+  border-color: color-mix(in srgb, var(--color-error) 40%, transparent);
+  background: color-mix(in srgb, var(--color-error) 6%, #fff);
+}
 </style>
