@@ -9,7 +9,7 @@ import type { ConversationDetail, PrivacyEventItem, PrivacyOverview } from '@/ap
 import MascotLoader from '@/components/brand/MascotLoader.vue'
 import type { UiMessage } from '@/composables/chatModel'
 import { cachedOverview, rememberOverview } from '@/composables/privacyOverviewCache'
-import { formatCount } from '@/composables/privacyPresentation'
+import { formatCount, protectedColumnCount } from '@/composables/privacyPresentation'
 
 import PrivacyFiles from './PrivacyFiles.vue'
 import PrivacySendsDialog from './PrivacySendsDialog.vue'
@@ -116,9 +116,11 @@ function detailTab(event: PrivacyEventItem): DetailTab | null {
   return event.kind === '发送检查' ? 'sends' : event.kind === '拦截' ? 'blocks' : null
 }
 
-// 输入（含期望结果）和输出分开列；没有脱敏的文件后端已经去掉
+// 输入（含期望结果）和输出分开列；仅展示真正有脱敏列（或识别失败）的文件，无需替换的不展示
 const fileGroups = computed(() => {
-  const files = overview.value?.files ?? []
+  const files = (overview.value?.files ?? [])
+    .filter((file) => protectedColumnCount(file) > 0 || file.status === 'failed')
+    .map((file) => (file.status === 'ready' ? { ...file, sheets: file.sheets.filter((sheet) => sheet.columns.length > 0) } : file))
   return [
     { key: 'input', label: '输入文件', files: files.filter((file) => file.kind !== 'output') },
     { key: 'output', label: '输出文件', files: files.filter((file) => file.kind === 'output') },

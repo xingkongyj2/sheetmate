@@ -4,7 +4,7 @@ import { onMounted, ref } from 'vue'
 
 import { recipeApi } from '@/api'
 import type { FormulaInfo } from '@/api/types'
-import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
+import RecipeIcon, { type RecipeIconKind } from '@/components/brand/RecipeIcon.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import { formulaArt } from '@/composables/chatModel'
 
@@ -43,7 +43,7 @@ function groups(list: FormulaInfo[]) {
       <div class="grid gap-2 sm:grid-cols-2">
         <button v-for="f in list" :key="f.id" class="rounded-xl border border-line p-3 text-left transition hover:bg-paper" @click="open = open === f.id ? null : f.id">
           <div class="flex items-center gap-2">
-            <FunObject :kind="formulaArt(f.id) as FunKind" :size="24" />
+            <RecipeIcon :kind="formulaArt(f.id) as RecipeIconKind" :size="26" />
             <span class="text-sm font-medium">{{ f.name }}</span>
             <span class="ml-auto font-mono text-[10px] text-faint">{{ f.id }}</span>
           </div>

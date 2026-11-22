@@ -9,7 +9,7 @@ import { computed, ref } from 'vue'
 import { fileApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { FileInfo } from '@/api/types'
-import FunObject from '@/components/brand/FunObject.vue'
+import RecipeIcon from '@/components/brand/RecipeIcon.vue'
 import Mascot from '@/components/brand/Mascot.vue'
 import StatusPill from '@/components/common/StatusPill.vue'
 import type { RecipeProgress } from '@/composables/chatModel'
@@ -83,7 +83,7 @@ const busyText = computed(() => {
   <div class="card-soft relative min-w-0 animate-rise overflow-hidden">
     <!-- 标题 -->
     <div class="flex items-center gap-3 border-b border-line bg-paper/60 py-3 pl-4" :class="flow ? 'pr-[238px] max-sm:pr-4 max-sm:pb-12' : 'pr-4'">
-      <FunObject kind="blocks" :size="30" class="shrink-0" />
+      <RecipeIcon kind="workflow" :size="30" class="shrink-0" />
       <div class="flex min-w-0 flex-1 items-center gap-2">
         <span class="truncate text-[14px] font-semibold leading-6">{{ progress.saved?.name || progress.recipeName || MODE_LABEL[progress.mode] }}</span>
         <span v-if="progress.deleted" class="tag shrink-0 whitespace-nowrap">流程已删除</span>

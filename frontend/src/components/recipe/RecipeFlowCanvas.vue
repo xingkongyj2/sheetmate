@@ -4,7 +4,7 @@ import { Check, CircleAlert, Sheet, LoaderCircle, TriangleAlert, Wrench } from '
 import { computed } from 'vue'
 
 import type { FlowStep, RecipeFlowData } from '@/api/types'
-import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
+import RecipeIcon, { type RecipeIconKind } from '@/components/brand/RecipeIcon.vue'
 import { formulaArt, percent, type StepState } from '@/composables/chatModel'
 import { flowInputFiles, flowOutputFiles } from '@/composables/recipeFlow'
 import type { FlowFileNode } from '@/composables/recipeFlowInteraction'
@@ -58,8 +58,11 @@ function stateIcon(id: number) {
     default: return null
   }
 }
-function art(step: FlowStep): FunKind {
-  return recipeToolKind(step) === 'formula' ? formulaArt(step.formula, step.formula_kind) as FunKind : 'code'
+function art(step: FlowStep): RecipeIconKind {
+  const kind = recipeToolKind(step)
+  if (kind === 'sql') return 'sql'
+  if (kind === 'python') return 'code'
+  return formulaArt(step.formula, step.formula_kind) as RecipeIconKind
 }
 function stepLabel(step: FlowStep) {
   return `查看第 ${step.id} 步：${step.name}${stateLabel(step.id) ? `，${stateLabel(step.id)}` : ''}`
@@ -163,8 +166,8 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
           </span>
           <span class="recipe-flow-step-art flex w-full items-center gap-2">
             <span v-if="!compact" class="flex size-5 shrink-0 items-center justify-center rounded-full bg-ink text-[11px] font-semibold text-white">{{ step.id }}</span>
-            <FunObject :kind="art(step)" :size="compact ? 34 : 22" />
-            <span v-if="!compact" class="tag ml-auto" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">{{ recipeToolLabel(step) }}</span>
+            <RecipeIcon :kind="art(step)" :size="compact ? 32 : 24" />
+            <span v-if="!compact" class="tag ml-auto">{{ recipeToolLabel(step) }}</span>
           </span>
           <span class="recipe-flow-step-name mt-2 block text-[13.5px] font-semibold leading-snug" :title="step.name">{{ recipeStepTitle(step) }}</span>
           <span v-if="!compact" class="mt-1 line-clamp-2 text-xs leading-relaxed text-mute">{{ step.description }}</span>
@@ -194,7 +197,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
           :aria-pressed="selectedFileKey === file.key"
           @click="emit('selectFile', file)"
         >
-          <span class="flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-white/15"><FunObject kind="plane" :size="18" /></span>
+          <span class="flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-white/14"><RecipeIcon kind="output" :size="16" bare /></span>
           <span class="min-w-0 leading-tight">
             <span class="recipe-flow-file-name block text-[13px] font-medium">{{ file.name }}</span>
           </span>
@@ -246,7 +249,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
         >
           <span class="flex w-full min-w-0 items-center gap-1.5">
             <span class="min-w-0 break-words text-[13px] font-medium" :title="step.name">{{ recipeStepTitle(step) }}</span>
-            <span class="tag ml-auto shrink-0" :class="recipeToolKind(step) !== 'formula' || step.formula_kind === 'customer' ? '!bg-fun-purple/10 !text-fun-purple' : ''">{{ recipeToolLabel(step) }}</span>
+            <span class="tag ml-auto shrink-0">{{ recipeToolLabel(step) }}</span>
           </span>
           <span class="mt-1 line-clamp-2 text-xs text-mute">{{ step.description }}</span>
           <span v-if="state(step.id)" class="recipe-flow-status mt-1 flex flex-wrap items-center gap-x-2 text-[11px]" :class="`is-${stepTone(step.id)}`">
@@ -270,7 +273,7 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
         :aria-pressed="selectedFileKey === file.key"
         @click="emit('selectFile', file)"
       >
-        <span class="flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-white/15"><FunObject kind="plane" :size="18" /></span>
+        <span class="flex size-[26px] shrink-0 items-center justify-center rounded-lg bg-white/14"><RecipeIcon kind="output" :size="16" bare /></span>
         <span class="min-w-0 leading-tight">
           <span class="recipe-flow-file-name block text-[13px] font-medium">{{ file.name }}</span>
         </span>

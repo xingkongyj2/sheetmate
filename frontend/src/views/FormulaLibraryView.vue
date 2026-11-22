@@ -8,7 +8,7 @@ import { errorText } from '@/api/http'
 import type { CustomerCard, CustomerDetail, CustomerFormula, FormulaInfo, FormulaSuggestion } from '@/api/types'
 import FormulaLibraryIcon from '@/components/brand/FormulaLibraryIcon.vue'
 import MascotLoader from '@/components/brand/MascotLoader.vue'
-import FunObject, { type FunKind } from '@/components/brand/FunObject.vue'
+import RecipeIcon, { type RecipeIconKind } from '@/components/brand/RecipeIcon.vue'
 import BaseModal from '@/components/common/BaseModal.vue'
 import FormulaAIGeneratorDialog from '@/components/customer/FormulaAIGeneratorDialog.vue'
 import FormulaEditorDialog from '@/components/customer/FormulaEditorDialog.vue'
@@ -315,7 +315,7 @@ async function remove(f: LibraryFormula) {
             <div class="mt-4 grid gap-4 md:grid-cols-2 lg:grid-cols-3">
               <article v-for="f in group.formulas" :key="f.id" class="formula-card group relative flex min-w-0 flex-col rounded-[22px] bg-white p-5">
                 <div class="flex w-full items-center gap-2.5">
-                  <FunObject :kind="formulaArt(f.id) as FunKind" :size="28" />
+                  <RecipeIcon :kind="formulaArt(f.id) as RecipeIconKind" :size="30" />
                   <h3 class="min-w-0 flex-1 text-[15px] font-semibold"><button type="button" class="text-left after:absolute after:inset-0 after:rounded-[22px] after:content-['']" :aria-label="`查看详情 ${f.name}`" @click="selectedBuiltin = f">{{ f.name }}</button></h3>
                   <button class="icon-btn relative z-10 size-7 shrink-0" :title="`试运行 ${f.name}`" :aria-label="`试运行 ${f.name}`" @click="trialing = f"><FlaskConical class="size-4" /></button>
                   <button class="icon-btn relative z-10 -mr-1.5 size-7 shrink-0 hover:text-error" :title="`删除公式 ${f.name}`" :aria-label="`删除公式 ${f.name}`" @click="removeBuiltin(f)"><Trash2 class="size-4" /></button>

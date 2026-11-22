@@ -1021,11 +1021,13 @@ def overview(user: User, conversation_id: str) -> dict[str, Any]:
                 item["sheets"] = privacy_columns.masked_sheets(item["file_id"], item["sheets"])
             except Exception:
                 logger.exception("按维护页的判断整理脱敏概览失败：%s", item["file_id"])
-    # 正式生成的输出文件直接展示在「输出文件」标题下（含识别中/已完成/无需替换）；
-    # 输入文件仅列出有脱敏列、识别中或识别失败的。
-    files = [item for item in files if item["kind"] == "output"
-             or item["status"] in {"pending", "failed"}
-             or (item["status"] == "ready" and any(sheet["columns"] for sheet in item["sheets"]))]
+    # 输入与输出文件统一口径：仅保留真正有脱敏列（或识别失败）的文件，无需替换的不展示。
+    files = [
+        {**item, "sheets": [sheet for sheet in item["sheets"] if sheet["columns"]]} if item["status"] == "ready" else item
+        for item in files
+        if item["status"] == "failed"
+        or (item["status"] == "ready" and any(sheet["columns"] for sheet in item["sheets"]))
+    ]
     if not privacy.enabled:
         files = []          # 脱敏开关关着：不分析文件，文件脱敏这一块整个不展示（模型脱敏照常）
     columns = sum(len(s["columns"]) for f in files for s in f["sheets"])
