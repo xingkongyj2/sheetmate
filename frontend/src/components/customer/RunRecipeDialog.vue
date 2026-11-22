@@ -23,15 +23,23 @@ import { useToast } from '@/composables/useToast'
 import RunDetailDialog from './RunDetailDialog.vue'
 
 
+export interface PickedRunItem {
+  title: string
+  label: string
+  mapping: Record<string, string>
+}
+
 // customerId / conversationId：新上传的文件放到哪里（客户页传客户；对话里的流程传会话；都没有就只能选已有文件）。
 // recipe 只用到这几项，客户页的 CustomerWorkflow 和全屏流程图里现取的流程都能直接传进来。
+// pickOnly：仅用于选文件（全屏流程图点击执行时，选好文件后关闭弹窗并直接在流程图节点上实时执行）。
 const props = defineProps<{
   customerId?: string | null
   conversationId?: string | null
   recipe: Pick<CustomerWorkflow, 'recipe_id' | 'name' | 'version' | 'flow' | 'recipe' | 'files'>
   elevated?: boolean
+  pickOnly?: boolean
 }>()
-const emit = defineEmits<{ close: []; done: [] }>()
+const emit = defineEmits<{ close: []; done: []; start: [payload: { items: PickedRunItem[]; pool: FileInfo[] }] }>()
 const toast = useToast()
 
 interface Choice { fileId: string; sheet: string }
@@ -218,7 +226,15 @@ async function execute(indices: number[]) {
 
 function run() {
   if (!ready.value || running.value) return
-  items.value = buildItems()
+  const built = buildItems()
+  if (props.pickOnly) {
+    emit('start', {
+      items: built.map(({ title, label, mapping }) => ({ title, label, mapping })),
+      pool: [...pool.value],
+    })
+    return
+  }
+  items.value = built
   activeIndex.value = 0
   viewing.value = null
   stage.value = 'run'

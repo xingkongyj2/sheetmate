@@ -34,6 +34,7 @@ const props = defineProps<{
   error?: string
   repairs?: { attempt: number; status: string; explanation?: string }[]
   canRerun?: boolean
+  elevated?: boolean
 }>()
 const emit = defineEmits<{ close: []; rerun: [params: Record<string, unknown>] }>()
 
@@ -123,7 +124,7 @@ async function loadFull(offset: number, limit: number) {
 </script>
 
 <template>
-  <BaseModal width="max-w-3xl" @close="emit('close')">
+  <BaseModal width="max-w-3xl" :elevated="elevated" @close="emit('close')">
     <template #title>
       <div class="flex min-w-0 items-center gap-2.5">
         <span class="step-no">{{ stepId }}</span>

@@ -21,7 +21,7 @@ import { readExecutionState } from '@/composables/executionStatus'
 import { useFilePreview } from '@/composables/useFilePreview'
 import { useToast } from '@/composables/useToast'
 
-const props = defineProps<{ runId: string; sequence?: number }>()
+const props = defineProps<{ runId: string; sequence?: number; elevated?: boolean }>()
 const emit = defineEmits<{ close: []; changed: [] }>()
 const toast = useToast()
 
@@ -158,7 +158,7 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
 </script>
 
 <template>
-  <BaseModal width="max-w-3xl" @close="emit('close')">
+  <BaseModal width="max-w-3xl" :elevated="elevated" @close="emit('close')">
     <template #title>
       <div class="flex min-w-0 items-center gap-2.5">
         <RunStatusMascot v-if="run" :status="run.status" :size="30" />
@@ -308,6 +308,7 @@ async function rerun(step: StepReport, params: Record<string, unknown>) {
       :run-id="run?.run_id ?? activeRunId"
       :error="selected.error"
       :can-rerun="!!run?.recipe_id && !rerunning"
+      :elevated="elevated"
       @close="selected = null"
       @rerun="(params) => rerun(selected!, params)"
     />

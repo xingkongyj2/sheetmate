@@ -173,9 +173,12 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
           <span v-if="!compact" class="mt-1 line-clamp-2 text-xs leading-relaxed text-mute">{{ step.description }}</span>
           <span v-if="!compact && state(step.id)" class="mt-auto flex w-full items-center gap-1.5 pt-2.5 text-[11px] text-faint">
             <component :is="stateIcon(step.id)" v-if="stateIcon(step.id)" class="recipe-flow-status size-3.5 shrink-0" :class="[`is-${stepTone(step.id)}`, { 'flow-spinner': state(step.id)?.status === 'running' }]" aria-hidden="true" />
-            <span>{{ stateLabel(step.id) }}</span>
-            <span v-if="rowsText(state(step.id))" class="ml-auto">{{ rowsText(state(step.id)) }}</span>
+            <span class="recipe-flow-status font-medium" :class="`is-${stepTone(step.id)}`">{{ stateLabel(step.id) }}</span>
+            <span v-if="rowsText(state(step.id))" class="ml-auto tabular-nums">{{ rowsText(state(step.id)) }}</span>
             <span v-if="state(step.id)?.report?.metrics?.match_rate !== undefined">匹配 {{ percent(state(step.id)!.report!.metrics!.match_rate as number, 0) }}</span>
+          </span>
+          <span v-if="!compact && state(step.id)?.error" class="mt-1.5 line-clamp-2 text-[11px] leading-snug text-error" :title="state(step.id)!.error">
+            {{ state(step.id)!.error }}
           </span>
         </button>
       </template>
@@ -285,23 +288,23 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
 <style scoped>
 .recipe-flow-row { width: max-content; margin-inline: auto; }
 .recipe-flow-file, .recipe-flow-step { cursor: pointer; transition: border-color .25s ease, background-color .25s ease, box-shadow .25s ease; }
-.recipe-flow-file:focus-visible, .recipe-flow-step:focus-visible, .recipe-flow-canvas:focus-visible { outline: 2px solid #6265dc; outline-offset: 3px; }
+.recipe-flow-file:focus-visible, .recipe-flow-step:focus-visible, .recipe-flow-canvas:focus-visible { outline: 2px solid var(--color-ink); outline-offset: 3px; }
 .recipe-flow-file-name { overflow-wrap: anywhere; }
 .recipe-flow-connector { color: #ccc9c2; }
 .recipe-flow-connector svg { overflow: visible; }
 .recipe-flow-connector line, .recipe-flow-connector path { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
 .recipe-flow-connector.is-pending .flow-line { stroke-dasharray: 3 4; }
-.recipe-flow-connector.is-active { color: #6265dc; }
+.recipe-flow-connector.is-active { color: var(--color-info); }
 .recipe-flow-connector.is-active .flow-line { stroke-dasharray: 4 4; animation: flow-travel .8s linear infinite; }
 .recipe-flow-connector.is-completed { color: #22a16a; }
 .recipe-flow-connector.is-warning { color: #c58a13; }
 .recipe-flow-connector.is-failed { color: #ef4444; }
 .recipe-flow-connector-vertical { display: flex; width: 12px; justify-content: center; }
-.recipe-flow-status.is-active { color: #6265dc; }
+.recipe-flow-status.is-active { color: var(--color-info); }
 .recipe-flow-status.is-completed { color: #169b61; }
 .recipe-flow-status.is-warning { color: #bc8314; }
 .recipe-flow-status.is-failed { color: #ef4444; }
-.recipe-flow-number.is-active { border-color: #6265dc; background: #eeeefc; color: #6265dc; }
+.recipe-flow-number.is-active { border-color: var(--color-info); background: #eef4ff; color: var(--color-info); }
 .recipe-flow-number.is-completed { border-color: #1fa463; background: #e9f8f0; color: #169b61; }
 .recipe-flow-number.is-warning { border-color: #e1b04f; background: #fff8e9; color: #bc8314; }
 .recipe-flow-number.is-failed { border-color: #ef4444; background: #fff1f1; color: #ef4444; }
@@ -318,23 +321,24 @@ const inputTone = computed<Tone>(() => props.flow.steps[0] ? stepTone(props.flow
 .recipe-flow-compact .recipe-flow-input > svg, .recipe-flow-compact .recipe-flow-output > span:first-child { flex-shrink: 0; }
 .recipe-flow-compact .recipe-flow-file-name { font-size: 11px; line-height: 1.5; }
 .recipe-flow-vertical.recipe-flow-compact .recipe-flow-file { width: 100%; }
-.recipe-flow-step.is-active, .recipe-flow-file.is-active { border-color: #6265dc; animation: flow-node-pulse 1.8s ease-in-out infinite; }
-.recipe-flow-step.is-completed { border-color: #a5d6bb; }
+.recipe-flow-step.is-active, .recipe-flow-file.is-active { border-color: var(--color-info); animation: flow-node-pulse 1.8s ease-in-out infinite; }
+.recipe-flow-step.is-completed { border-color: #9fd8b9; }
+.recipe-flow-output.is-completed { box-shadow: 0 0 0 2px rgba(34, 181, 115, 0.28), 0 10px 22px -12px rgba(11, 11, 12, 0.42); }
 .recipe-flow-step.is-warning { border-color: #e5c273; }
 .recipe-flow-step.is-failed, .recipe-flow-file.is-failed { border-color: #ef7b7b; }
-.recipe-flow-step.is-selected, .recipe-flow-file.is-selected { border-color: #6265dc; box-shadow: 0 0 0 2px #6265dc33; }
+.recipe-flow-step.is-selected, .recipe-flow-file.is-selected { border-color: var(--color-ink); box-shadow: 0 0 0 2px rgba(24, 24, 27, 0.14); }
 /* 悬浮：只让边框颜色渐变加深，不位移、不加阴影（流程图外层会裁剪溢出的内容）。放在各状态之后，按状态各给一条。 */
-.recipe-flow-step:hover, .recipe-flow-input:hover { border-color: #b4b5ee; }
+.recipe-flow-step:hover, .recipe-flow-input:hover { border-color: #c9c6be; }
 .recipe-flow-step.is-completed:hover { border-color: #5db98a; }
 .recipe-flow-step.is-warning:hover { border-color: #d9a43a; }
 .recipe-flow-step.is-failed:hover, .recipe-flow-file.is-failed:hover { border-color: #e65b5b; }
-.recipe-flow-step.is-active:hover { border-color: #4a4dc4; }
-.recipe-flow-step.is-selected:hover, .recipe-flow-file.is-selected:hover { border-color: #6265dc; }
+.recipe-flow-step.is-active:hover { border-color: var(--color-info); }
+.recipe-flow-step.is-selected:hover, .recipe-flow-file.is-selected:hover { border-color: var(--color-ink); }
 .recipe-flow-output:hover { background-color: #26262b; }
 .flow-spinner { animation: flow-spin 1s linear infinite; }
 @keyframes flow-travel { to { stroke-dashoffset: -16; } }
 @keyframes flow-spin { to { transform: rotate(360deg); } }
-@keyframes flow-node-pulse { 0%, 100% { box-shadow: 0 0 0 1px #6265dc18; } 50% { box-shadow: 0 0 0 4px #6265dc24; } }
+@keyframes flow-node-pulse { 0%, 100% { box-shadow: 0 0 0 1px rgba(47, 123, 255, 0.16); } 50% { box-shadow: 0 0 0 4px rgba(47, 123, 255, 0.24); } }
 @media (prefers-reduced-motion: reduce) {
   .recipe-flow-step, .recipe-flow-file, .recipe-flow-connector .flow-line, .flow-spinner { animation: none !important; transition: none !important; }
 }
