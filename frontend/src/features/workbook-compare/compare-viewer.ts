@@ -4,7 +4,7 @@ import { createUniver, LocaleType, type IWorkbookData } from '@univerjs/presets'
 
 import '@univerjs/preset-sheets-core/lib/index.css'
 
-import { autoFitSheetRows, createRenderedGate } from '@/features/workbook-preview/autoFitRows'
+import { autoFitSheetRows, createRenderedGate, prepareFormulaWaiter } from '@/features/workbook-preview/autoFitRows'
 
 export interface ScrollSyncState {
   sheetViewStartRow: number
@@ -47,6 +47,7 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
       disableAutoFocus: true,
       formulaBar: false,
       footer: false,
+      formula: { initialFormulaComputing: 1 },
     })],
   })
 
@@ -180,6 +181,7 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
         ...snapshot,
         id: unitId,
       }
+      const formulaWaiter = prepareFormulaWaiter(univerAPI, nextSnapshot)
       const workbook = univerAPI.createWorkbook(nextSnapshot)
       const previous = currentUnitId
       currentUnitId = workbook.getId()
@@ -189,10 +191,13 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
       try {
         await renderedGate.wait()
         if (disposed || currentUnitId !== unitId) return
+        await formulaWaiter.wait()
+        if (disposed || currentUnitId !== unitId) return
         autoFitSheetRows(workbook, nextSnapshot)
         workbook.setEditable(false)
         await workbook.getWorkbookPermission().setReadOnly()
       } finally {
+        formulaWaiter.dispose()
         if (!disposed && currentUnitId === unitId) {
           if (savedScroll) {
             requestAnimationFrame(() => setScrollState(savedScroll))

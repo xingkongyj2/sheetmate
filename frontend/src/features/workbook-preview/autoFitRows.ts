@@ -69,6 +69,55 @@ function toContiguousRanges(rows: number[], lastColumn: number): IRange[] {
   return ranges
 }
 
+/** 检查快照中是否存在未缓存结果的公式单元格（需由 Univer 公式引擎实时计算）。 */
+export function hasPendingFormulas(snapshot: IWorkbookData): boolean {
+  for (const sheet of Object.values(snapshot.sheets)) {
+    const cellData = sheet?.cellData
+    if (!cellData) continue
+    for (const rowCells of Object.values(cellData)) {
+      if (!rowCells) continue
+      for (const cell of Object.values(rowCells as Record<string, ICellData | null | undefined>)) {
+        if (cell && typeof cell.f === 'string' && cell.f.length > 0 && (cell.v === undefined || cell.v === null)) {
+          return true
+        }
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * 订阅一次公式计算完成事件：在 createWorkbook 之前调用，避免错过快速计算；
+ * 若快照不含未缓存公式，则立即返回已完成状态，零额外等待。
+ */
+export function prepareFormulaWaiter(univerAPI: UniverFacade, snapshot: IWorkbookData): { wait(): Promise<void>; dispose(): void } {
+  if (!hasPendingFormulas(snapshot)) {
+    return { wait: () => Promise.resolve(), dispose: () => undefined }
+  }
+  const formulaEngine = (univerAPI as unknown as { getFormula?: () => { calculationEnd?: (cb: () => void) => { dispose(): void } } }).getFormula?.()
+  if (!formulaEngine?.calculationEnd) {
+    return { wait: () => Promise.resolve(), dispose: () => undefined }
+  }
+  let done = false
+  let resolveWait!: () => void
+  const promise = new Promise<void>((resolve) => {
+    resolveWait = resolve
+  })
+  const finish = () => {
+    if (done) return
+    done = true
+    clearTimeout(timer)
+    sub.dispose()
+    resolveWait()
+  }
+  const sub = formulaEngine.calculationEnd(() => finish())
+  const timer = setTimeout(finish, 1500)
+  return {
+    wait: () => promise,
+    dispose: finish,
+  }
+}
+
 /** 对当前活动工作表中有内容的可见行按内容自适应行高，且不低于原始行高。 */
 export function autoFitSheetRows(workbook: FacadeWorkbook, snapshot: IWorkbookData): void {
   const sheet = workbook.getActiveSheet()
@@ -88,7 +137,7 @@ export function autoFitSheetRows(workbook: FacadeWorkbook, snapshot: IWorkbookDa
     if (rowData[row]?.hd === 1) continue
     const cells = Object.values(rowCells as Record<string, ICellData | null | undefined>)
     const hasContent = cells.some(
-      (cell) => cell && ((cell.v !== undefined && cell.v !== null && cell.v !== '') || Boolean(cell.p)),
+      (cell) => cell && ((cell.v !== undefined && cell.v !== null && cell.v !== '') || Boolean(cell.p) || Boolean(cell.f)),
     )
     if (!hasContent) continue
     contentRows.push(row)

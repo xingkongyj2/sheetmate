@@ -136,11 +136,69 @@ async function readDirectory(zip: JSZipInstance): Promise<{ sheets: SheetEntry[]
 }
 
 /** 清掉预览用不到的对象，并检查这张表有没有超出预览范围。 */
-function cleanWorksheetXml(original: string, warnings: Set<string>): string {
-  checkWorksheetXml(original, { cells: 0, mergedCells: 0, merges: 0 })
+function cleanWorksheetXml(original: string, warnings: Set<string>, budget?: { cells: number; mergedCells: number; merges: number }): string {
+  checkWorksheetXml(original, budget ?? { cells: 0, mergedCells: 0, merges: 0 })
   const cleaned = withoutNodes(original, ['drawing', 'legacyDrawing', 'legacyDrawingHF', 'picture', 'tableParts', 'dataValidations', 'conditionalFormatting', 'extLst'])
   if (/<(?:[\w.-]+:)?conditionalFormatting\b/i.test(original)) warnings.add('条件格式暂未应用，预览显示单元格的基础样式。')
   return cleaned
+}
+
+/** 提取工作表 XML 中没有缓存结果（<v> 缺失）且包含跨表引用（!）的公式文本。 */
+function uncachedCrossSheetFormulas(xml: string): string[] {
+  const formulas: string[] = []
+  for (const cell of xml.matchAll(/<(?:[\w.-]+:)?c\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?c>/gi)) {
+    const inner = cell[1] ?? ''
+    if (!/<(?:[\w.-]+:)?f\b/i.test(inner)) continue
+    if (/<(?:[\w.-]+:)?v\b[^>]*>[^<]+<\/(?:[\w.-]+:)?v>/i.test(inner)) continue
+    const match = /<(?:[\w.-]+:)?f\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?f>/i.exec(inner)
+    if (!match?.[1]) continue
+    const text = decodeXml(match[1])
+    if (text.includes('!')) formulas.push(text)
+  }
+  return formulas
+}
+
+/** 找出跨表未缓存公式所依赖的其他工作表（供 Univer 实时求值），在预览单元格预算内按需加载。 */
+async function collectFormulaDependencies(
+  zip: JSZipInstance,
+  target: SheetEntry,
+  targetXml: string,
+  allSheets: SheetEntry[],
+  budget: { cells: number; mergedCells: number; merges: number },
+): Promise<{ entries: SheetEntry[]; cleanedXml: Map<string, string> }> {
+  const cleanedXml = new Map<string, string>()
+  const entries: SheetEntry[] = []
+  const visited = new Set<string>([target.path])
+  const queue: Array<{ sheet: SheetEntry; xml: string; depth: number }> = [{ sheet: target, xml: targetXml, depth: 0 }]
+
+  while (queue.length) {
+    const current = queue.shift()!
+    if (current.depth >= 3) continue
+    const formulas = uncachedCrossSheetFormulas(current.xml)
+    if (!formulas.length) continue
+    for (const candidate of allSheets) {
+      if (visited.has(candidate.path)) continue
+      const escaped = candidate.name.replace(/'/g, "''")
+      const referenced = formulas.some((formula) => formula.includes(`${candidate.name}!`) || formula.includes(`'${escaped}'!`))
+      if (!referenced) continue
+      visited.add(candidate.path)
+      const rawXml = await zip.file(candidate.path)?.async('string')
+      if (!rawXml) continue
+      const nextBudget = { ...budget }
+      try {
+        const cleaned = cleanWorksheetXml(rawXml, new Set(), nextBudget)
+        budget.cells = nextBudget.cells
+        budget.mergedCells = nextBudget.mergedCells
+        budget.merges = nextBudget.merges
+        cleanedXml.set(candidate.path, cleaned)
+        entries.push(candidate)
+        queue.push({ sheet: candidate, xml: rawXml, depth: current.depth + 1 })
+      } catch {
+        // 依赖表超出预览体量上限时跳过，不影响当前主表预览
+      }
+    }
+  }
+  return { entries, cleanedXml }
 }
 
 function cleanWorksheetRels(original: string): string {
@@ -192,13 +250,20 @@ export async function openWorkbook(buffer: ArrayBuffer, filename: string): Promi
     if (!target) throw new WorkbookPreviewError('没有找到这张工作表。')
     try {
       const warnings = new Set<string>()
+      const budget = { cells: 0, mergedCells: 0, merges: 0 }
+      const targetRawXml = await zip.file(target.path)?.async('string')
+      if (!targetRawXml) throw new WorkbookPreviewError('没有找到这张工作表。')
+      const targetCleanedXml = cleanWorksheetXml(targetRawXml, warnings, budget)
+      const deps = await collectFormulaDependencies(zip, target, targetRawXml, directory.sheets, budget)
       const out = new JSZipCtor()
       for (const [name, content] of await sharedParts()) out.file(name, content)
       for (const entry of Object.values(zip.files)) {
         if (entry.dir) continue
         const name = entry.name.replace(/^\//, '')
         if (sheetPaths.has(name)) {
-          out.file(entry.name, name === target.path ? cleanWorksheetXml(await entry.async('string'), warnings) : STUB_SHEET)
+          if (name === target.path) out.file(entry.name, targetCleanedXml)
+          else if (deps.cleanedXml.has(name)) out.file(entry.name, deps.cleanedXml.get(name)!)
+          else out.file(entry.name, STUB_SHEET)
         } else if (name === relsPathOf(target.path)) {
           out.file(entry.name, cleanWorksheetRels(await entry.async('string')))
         }
@@ -207,9 +272,14 @@ export async function openWorkbook(buffer: ArrayBuffer, filename: string): Promi
       const { default: ExcelJS } = await import('exceljs')
       const source = new ExcelJS.Workbook()
       await source.xlsx.load(prepared, { ignoreNodes: ['dataValidations', 'conditionalFormatting', 'extLst'] })
-      const worksheet = source.worksheets[index]?.name === target.name ? source.worksheets[index] : source.getWorksheet(target.name)
+      const resolveWorksheet = (meta: SheetEntry) =>
+        source.worksheets[meta.index]?.name === meta.name ? source.worksheets[meta.index] : source.getWorksheet(meta.name)
+      const worksheet = resolveWorksheet(target)
       if (!worksheet) throw new WorkbookPreviewError('没有找到这张工作表。')
-      const parsed = buildWorkbookSnapshot(source, filename, { only: worksheet })
+      const depWorksheets = deps.entries.map(resolveWorksheet).filter((ws): ws is NonNullable<typeof ws> => Boolean(ws))
+      const parsed = depWorksheets.length
+        ? buildWorkbookSnapshot(source, filename, { include: [worksheet, ...depWorksheets] })
+        : buildWorkbookSnapshot(source, filename, { only: worksheet })
       parsed.warnings = [...new Set([...warnings, ...parsed.warnings])]
       return parsed
     } catch (error) {

@@ -4,7 +4,7 @@ import { createUniver, LocaleType, type IWorkbookData } from '@univerjs/presets'
 
 import '@univerjs/preset-sheets-core/lib/index.css'
 
-import { autoFitSheetRows, createRenderedGate } from './autoFitRows'
+import { autoFitSheetRows, createRenderedGate, prepareFormulaWaiter } from './autoFitRows'
 
 export interface WorkbookViewer {
   /** 显示一张工作表：换掉当前显示的内容，不重新创建整个查看器 */
@@ -31,6 +31,7 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
       disableAutoFocus: true,
       formulaBar: true,
       footer: false,
+      formula: { initialFormulaComputing: 1 }, // WHEN_EMPTY：仅对无缓存结果的公式实时计算
     })],
   })
   const renderedGate = createRenderedGate(univerAPI)
@@ -70,18 +71,26 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
     async show(snapshot) {
       // 先建新的、再销毁旧的：分配唯一 unit id 防止缓存复用快照与未销毁的旧 unit 冲突
       const unitId = `${snapshot.id || 'preview'}-${++unitSeq}`
-      const workbook = univerAPI.createWorkbook({
+      const nextSnapshot: IWorkbookData = {
         ...snapshot,
         id: unitId,
-      })
+      }
+      const formulaWaiter = prepareFormulaWaiter(univerAPI, nextSnapshot)
+      const workbook = univerAPI.createWorkbook(nextSnapshot)
       const previous = current
       current = workbook.getId()
       if (previous) univerAPI.disposeUnit(previous)
-      await renderedGate.wait()
-      if (disposed || current !== unitId) return
-      autoFitSheetRows(workbook, snapshot)
-      workbook.setEditable(false)
-      await workbook.getWorkbookPermission().setReadOnly()
+      try {
+        await renderedGate.wait()
+        if (disposed || current !== unitId) return
+        await formulaWaiter.wait()
+        if (disposed || current !== unitId) return
+        autoFitSheetRows(workbook, nextSnapshot)
+        workbook.setEditable(false)
+        await workbook.getWorkbookPermission().setReadOnly()
+      } finally {
+        formulaWaiter.dispose()
+      }
     },
     setZoom,
     getZoom,

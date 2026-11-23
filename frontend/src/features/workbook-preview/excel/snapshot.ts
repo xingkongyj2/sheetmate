@@ -51,24 +51,28 @@ function storedValue(value: CellValue | undefined, date1904: boolean, warnings: 
   return {}
 }
 
-function cellValue(cell: Cell, date1904: boolean, warnings: Set<string>, formulaStats: { count: number; missing: number; examples: string[] }): Pick<ICellData, 'v' | 't' | 'custom'> {
+function cellValue(cell: Cell, date1904: boolean, warnings: Set<string>, formulaStats: { count: number; missing: number; examples: string[] }): Pick<ICellData, 'v' | 't' | 'f' | 'custom'> {
   // ExcelJS exposes a merged slave's master's value; keep that value only once.
   if (cell.isMerged && cell.master.address !== cell.address) return {}
   const value = cell.value
   if (value && typeof value === 'object' && !(value instanceof Date) && ('formula' in value || 'sharedFormula' in value)) {
     formulaStats.count++
     const formula = cell.formula || ('formula' in value ? value.formula : '')
-    const custom = formula ? { excelFormula: `=${formula.replace(/^=/, '')}` } : undefined
+    const normalizedFormula = formula ? `=${formula.replace(/^=/, '')}` : ''
+    const custom = normalizedFormula ? { excelFormula: normalizedFormula } : undefined
     // ExcelJS 4.4's value getter omits falsy formula results (0, false, '').
     // Its public cell model retains the exact cached value.
     const result = cell.model.result as CellValue | undefined
     if (result === undefined || result === null) {
+      // 没有已保存的缓存结果（如 openpyxl / 脚本生成的公式）：交给 Univer 内置公式引擎实时计算展示
+      if (normalizedFormula) {
+        return { f: normalizedFormula, custom }
+      }
       formulaStats.missing++
       if (formulaStats.examples.length < 3) formulaStats.examples.push(`${cell.worksheet.name}!${cell.address}`)
       return { v: '（公式结果未缓存）', t: 1, custom }
     }
-    // Do not emit f: a read-only preview must show the saved result rather than
-    // recalculate it with a potentially different formula engine.
+    // 已有缓存结果时直接展示保存的结果（不发 f），避免与原 Excel 缓存结果出现差异。
     return { ...storedValue(result, date1904, warnings), custom }
   }
   return storedValue(value, date1904, warnings)
@@ -76,10 +80,12 @@ function cellValue(cell: Cell, date1904: boolean, warnings: Set<string>, formula
 
 /**
  * Map a loaded ExcelJS workbook into a sparse, read-only Univer snapshot.
- * only：只转换这一张表（按表加载时，其余工作表是空壳）；快照里只有这一张表，并且一定显示出来。
+ * only：只转换这一张表（按表加载时，其余工作表是空壳）；
+ * include：第一张为当前展示的主表，其余为跨表未缓存公式依赖的辅助表（供 Univer 公式引擎求值）。
  */
-export function buildWorkbookSnapshot(source: Workbook, filename: string, options: { only?: Worksheet } = {}): ParsedWorkbook {
-  const worksheets = options.only ? [options.only] : source.worksheets
+export function buildWorkbookSnapshot(source: Workbook, filename: string, options: { only?: Worksheet; include?: Worksheet[] } = {}): ParsedWorkbook {
+  const worksheets = options.include?.length ? options.include : options.only ? [options.only] : source.worksheets
+  const primaryOnly = Boolean(options.only || options.include?.length)
   if (!worksheets.length) throw new WorkbookPreviewError('这个文件没有可预览的工作表。')
   if (worksheets.length > PREVIEW_LIMITS.sheets) tooLarge(`工作表超过 ${PREVIEW_LIMITS.sheets} 张的预览范围`)
   const warnings = new Set<string>()
@@ -121,7 +127,11 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
   }
   let cellCount = 0
   const formulas = { count: 0, missing: 0, examples: [] as string[] }
-  for (const worksheet of worksheets) {
+  for (let sheetIndex = 0; sheetIndex < worksheets.length; sheetIndex++) {
+    const worksheet = worksheets[sheetIndex]!
+    const isPrimary = !primaryOnly || sheetIndex === 0
+    const sheetWarnings = isPrimary ? warnings : new Set<string>()
+    const sheetFormulas = isPrimary ? formulas : { count: 0, missing: 0, examples: [] as string[] }
     const id = `sheet-${worksheet.id}`
     const storedSheet = worksheet as PreviewWorksheet
     const cellData: IWorksheetData['cellData'] = {}
@@ -166,7 +176,7 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
           if (styleId(cell.style)) omittedFormatting = true
           continue
         }
-        const value = cellValue(cell, date1904, warnings, formulas)
+        const value = cellValue(cell, date1904, sheetWarnings, sheetFormulas)
         let cellStyle = styleId(cell.style)
         const raw = cell.value
         const date = raw instanceof Date || (raw && typeof raw === 'object' && 'result' in raw && raw.result instanceof Date)
@@ -174,7 +184,7 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
           const defaultDateStyle = { ...(cellStyle ? workbook.styles[cellStyle] : {}), n: { pattern: 'yyyy-mm-dd' } }
           cellStyle = registerStyle(defaultDateStyle)
         }
-        if (value.v === undefined && !cellStyle) continue
+        if (value.v === undefined && value.f === undefined && !cellStyle) continue
         if (++cellCount > PREVIEW_LIMITS.cells) tooLarge(`工作簿有效单元格超过 ${PREVIEW_LIMITS.cells.toLocaleString()} 个的预览范围`)
         const cells = cellData[row.number - 1] ??= {}
         cells[column - 1] = { ...value, ...(cellStyle ? { s: cellStyle } : {}) }
@@ -197,7 +207,7 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
         maxColumn = Math.max(maxColumn, index + 1)
       }
     })
-    if (omittedFormatting) warnings.add(`「${worksheet.name}」超出预览范围的空白行列格式已省略。`)
+    if (omittedFormatting && isPrimary) warnings.add(`「${worksheet.name}」超出预览范围的空白行列格式已省略。`)
     const view = worksheet.views?.[0]
     const xSplit = view?.state === 'frozen' ? view.xSplit ?? 0 : 0
     const ySplit = view?.state === 'frozen' ? view.ySplit ?? 0 : 0
@@ -274,13 +284,15 @@ export function buildWorkbookSnapshot(source: Workbook, filename: string, option
     }
     workbook.sheetOrder.push(id)
     workbook.sheets[id] = sheet
-    if (worksheet.getImages().length) warnings.add('文件中的图片暂不在表格预览中显示，请下载原文件查看。')
-    if (storedSheet.conditionalFormattings?.length) warnings.add('条件格式暂未应用，预览显示单元格的基础样式。')
+    if (isPrimary && worksheet.getImages().length) warnings.add('文件中的图片暂不在表格预览中显示，请下载原文件查看。')
+    if (isPrimary && storedSheet.conditionalFormattings?.length) warnings.add('条件格式暂未应用，预览显示单元格的基础样式。')
   }
   if (formulas.missing) warnings.add(`${formulas.missing} 个公式单元格没有已保存的计算结果（如 ${formulas.examples.join('、')}），预览已作标记。`)
-  if (!worksheets.some((sheet) => sheet.state === 'visible')) {
+  if (primaryOnly) {
     workbook.sheets[workbook.sheetOrder[0]!]!.hidden = 0
-    if (!options.only) warnings.add('所有工作表均为隐藏状态，预览临时显示第一张工作表。')
+  } else if (!worksheets.some((sheet) => sheet.state === 'visible')) {
+    workbook.sheets[workbook.sheetOrder[0]!]!.hidden = 0
+    warnings.add('所有工作表均为隐藏状态，预览临时显示第一张工作表。')
   }
   return { workbook, warnings: [...warnings], stats: { sheetCount: worksheets.length, cellCount, formulaCount: formulas.count } }
 }
