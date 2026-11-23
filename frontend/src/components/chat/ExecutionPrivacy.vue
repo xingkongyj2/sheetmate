@@ -151,7 +151,7 @@ function levelClass(level: PrivacyEventItem['level']): string {
           </button>
         </div>
         <div v-if="overview.enabled === false" class="flex items-center gap-2 rounded-xl bg-paper px-3 py-2.5 text-[13px] leading-5 text-mute" data-testid="privacy-off">
-          <ShieldOff class="size-4 shrink-0" aria-hidden="true" />脱敏已关闭，上传的文件不做分析
+          <ShieldOff class="size-4 shrink-0" aria-hidden="true" />脱敏已关闭，上传的文件不做脱敏处理
         </div>
         <template v-else>
           <p v-if="failed" class="flex items-start gap-2 rounded-xl bg-error/5 px-3 py-2.5 text-[13px] leading-5 text-error" role="alert">
@@ -180,17 +180,22 @@ function levelClass(level: PrivacyEventItem['level']): string {
             明细<ChevronRight class="size-3.5" />
           </button>
         </div>
-        <div v-if="sendStatus" class="flex items-start gap-2 rounded-xl px-3 py-2.5 text-[13px] leading-5" :class="sendStatus.error ? 'bg-error/5 text-error' : 'bg-paper text-ink'" :role="sendStatus.error ? 'alert' : 'status'" data-testid="privacy-status">
-          <ShieldAlert v-if="sendStatus.error" class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-          <ShieldCheck v-else class="mt-0.5 size-4 shrink-0 text-[#318b76]" aria-hidden="true" />
-          <span class="min-w-0 break-words">{{ sendStatus.text }}</span>
+        <div v-if="overview.enabled === false" class="flex items-center gap-2 rounded-xl bg-paper px-3 py-2.5 text-[13px] leading-5 text-mute" data-testid="model-privacy-off">
+          <ShieldOff class="size-4 shrink-0" aria-hidden="true" />脱敏已关闭，发给模型的内容不做脱敏和拦截
         </div>
-        <dl class="grid grid-cols-3 gap-2">
-          <div v-for="item in sendNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
-            <dd class="text-xl font-medium tabular-nums tracking-tight" :class="item.warn ? 'text-error' : ''">{{ formatCount(item.value) }}</dd>
-            <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>
+        <template v-if="overview.enabled !== false || overview.totals.requests > 0 || overview.totals.blocked > 0">
+          <div v-if="sendStatus" class="flex items-start gap-2 rounded-xl px-3 py-2.5 text-[13px] leading-5" :class="sendStatus.error ? 'bg-error/5 text-error' : 'bg-paper text-ink'" :role="sendStatus.error ? 'alert' : 'status'" data-testid="privacy-status">
+            <ShieldAlert v-if="sendStatus.error" class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+            <ShieldCheck v-else class="mt-0.5 size-4 shrink-0 text-[#318b76]" aria-hidden="true" />
+            <span class="min-w-0 break-words">{{ sendStatus.text }}</span>
           </div>
-        </dl>
+          <dl class="grid grid-cols-3 gap-2">
+            <div v-for="item in sendNumbers" :key="item.label" class="min-w-0 rounded-xl border border-line px-3 py-2.5">
+              <dd class="text-xl font-medium tabular-nums tracking-tight" :class="item.warn ? 'text-error' : ''">{{ formatCount(item.value) }}</dd>
+              <dt class="mt-0.5 text-[11px] text-faint">{{ item.label }}</dt>
+            </div>
+          </dl>
+        </template>
       </section>
 
       <section class="grid gap-2" aria-label="处理记录">

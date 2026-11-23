@@ -233,10 +233,19 @@ IM_CTX_RE = re.compile(r"(?<![A-Za-z])(?:(?:微信号?|威信|v信|扣扣)\s*[:=
                        r"([A-Za-z][A-Za-z0-9_\-]{4,19}|[1-9]\d{4,11})(?![A-Za-z0-9_])", re.I)
 PHONE_CTX_RE = re.compile(r"(?<![A-Za-z])(?:手机号?码?|联系电话|联系方式|联系人电话|电话号码|电话|座机|固话|mobile|phone|tel|cell)"
                           r"\s*[:=]?\s*(\+?\d[\d\s\-()]{6,22}\d)(?!\d)", re.I)
-ADDR_CTX_RE = re.compile(r"(?<!下载)(?<!网)(?<!邮件)(?<!IP)(?<!MAC)(?<!URL)(?<!链接)"
+ADDR_CTX_RE = re.compile(r"(?<!下载)(?<!网)(?<!邮件)(?<!IP)(?<!MAC)(?<!URL)(?<!链接)(?<!\.)"
                          r"(?<!IP )(?<!MAC )(?<!URL )(?<!ip )(?<!mac )(?<!url )(?<!下载 )(?<!邮件 )(?<!链接 )"
                          r"(?:收货地址|收件地址|收货地|收件地|寄件地址|寄件地|派送地址|取件地址|详细地址|联系地址|家庭住址|住址|地址)"
-                         r"\s*[:=]\s*([^\n,;|。，；]{4,60})")
+                         r"\s*(?::|(?<![!<>])=(?!=))\s*([^\r\n,;|。，；]{4,60})")
+
+# SQL / 代码表达式（如 s.地址=n.地址、COALESCE(...)、JSON 转义换行 \n）：不是自然语言里的详细地址
+_CODE_EXPR_RE = re.compile(
+    r"(?:\\[nrt])"
+    r"|^[A-Za-z_]\w*(?:\.|\[|\()"
+    r"|\b(?:SELECT\s+|GROUP\s+BY\b|ORDER\s+BY\b|(?:LEFT|RIGHT|INNER|OUTER)\s+JOIN\b|CASE\s+WHEN\b|IS\s+(?:NOT\s+)?NULL\b|UNION\s+(?:ALL\s+)?SELECT\b)"
+    r"|\b(?:COALESCE|TRIM|CAST|SUBSTR|REPLACE)\s*\(",
+    re.I,
+)
 
 
 def phone_context_ok(value: str) -> bool:
@@ -246,7 +255,7 @@ def phone_context_ok(value: str) -> bool:
 
 def address_context_ok(value: str) -> bool:
     """标签后面的值是否值得当作地址遮住：里面已经有令牌（复查时令牌会被换成 §）的不用再遮；
-    太短又没有数字的（「地址：无」）不算。"""
+    代码/SQL 表达式以及太短又没有数字的（「地址：无」）不算。"""
     if "§" in value:
         return False
     # 脱敏副本检查时把各单元格用「¦」连起来：标签单元格后面紧跟的下一格如果本身也是个标签（「开票信息：」「发货地」），
@@ -258,11 +267,14 @@ def address_context_ok(value: str) -> bool:
         if not parts:
             return False
         value = parts[0]
+    stripped = value.strip()
+    if _CODE_EXPR_RE.search(stripped):
+        return False
     # 「收货地址： / 开票信息： / 制表人：」：模板表头里一串空着的标签，标签后面跟的是下一个标签，不是地址
-    segments = [part.strip() for part in re.split(r"\s*[/／]\s*", value)]
+    segments = [part.strip() for part in re.split(r"\s*[/／]\s*", stripped)]
     if all(not part or part.endswith((":", "：")) or is_label(part) for part in segments):
         return False
-    return len(value.strip()) >= 6 or any(ch.isdigit() for ch in value)
+    return len(stripped) >= 6 or any(ch.isdigit() for ch in stripped)
 
 # ---- 全角 → 半角 ----
 # 位置一一对应（一个字换一个字），所以在折叠后的文字里找到的位置可以直接用在原文上，

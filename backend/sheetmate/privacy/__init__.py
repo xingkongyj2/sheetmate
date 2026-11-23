@@ -38,7 +38,7 @@ class Privacy:
         self.data_dir: Path | None = None
         self.healthy = False
         self.error: str | None = None
-        self.enabled = True                                   # 总开关（设置页）：只管上传文件时的自动分析和脱敏；发给 AI 的内容什么时候都要检查替换
+        self.enabled = True                                   # 总开关（设置页）：关闭后文件脱敏与模型脱敏全部停用
         self.rule_ids: frozenset[str] = frozenset(rule.id for rule in RULES)   # 打开的规则
         self._lock = threading.RLock()
 

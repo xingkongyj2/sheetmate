@@ -9,7 +9,7 @@ import BaseModal from '@/components/common/BaseModal.vue'
 import { usePrivacySwitch } from '@/composables/usePrivacySwitch'
 import { useToast } from '@/composables/useToast'
 
-/** 脱敏设置：总开关（只管上传文件时的自动分析和脱敏；发给 AI 的内容什么时候都会检查、替换）+ 每条脱敏规则的开关，规则的匹配逻辑可以查看 */
+/** 脱敏设置：总开关（统一控制文件脱敏与模型脱敏，关闭后不再执行任何脱敏逻辑）+ 每条脱敏规则的开关，规则的匹配逻辑可以查看 */
 const toast = useToast()
 const shared = usePrivacySwitch()
 const enabled = ref(true)

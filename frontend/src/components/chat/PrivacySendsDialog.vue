@@ -100,15 +100,18 @@ function clock(iso: string | null): string {
             <span v-if="block.items.length" class="ml-auto text-mute">{{ block.items.length }} 个值没能处理</span>
           </div>
           <p class="border-t border-line/70 px-3.5 py-2 text-[13px] leading-5 text-error">{{ block.reason }}</p>
-          <table v-if="block.items.length" class="w-full text-[13px] leading-5">
-            <tbody>
-              <tr v-for="item in block.items" :key="item.token" class="border-t border-line/70">
-                <td class="w-1/2 max-w-0 break-all px-3.5 py-2 text-ink">{{ item.value ?? '—' }}</td>
-                <td class="w-1/2 max-w-0 break-all px-3.5 py-2"><code class="font-mono text-[12px] text-mute">{{ item.token }}</code></td>
-                <td class="whitespace-nowrap px-3.5 py-2 text-right text-xs text-mute">{{ item.kind_label }}</td>
-              </tr>
-            </tbody>
-          </table>
+          <div v-if="block.items.length" class="border-t border-line/70">
+            <div class="flex items-center justify-between bg-paper/40 px-3.5 py-1.5 text-[11px] text-faint">
+              <span>拦截到的内容</span>
+              <span>命中类型</span>
+            </div>
+            <ul class="divide-y divide-line/70">
+              <li v-for="item in block.items" :key="item.token" class="flex items-start gap-3 px-3.5 py-2 text-[13px] leading-5">
+                <span class="min-w-0 flex-1 break-all whitespace-pre-wrap text-ink">{{ item.value ?? '—' }}</span>
+                <span class="shrink-0 rounded-full bg-paper px-2 py-0.5 text-xs text-mute">{{ item.kind_label }}</span>
+              </li>
+            </ul>
+          </div>
         </li>
       </ol>
     </template>

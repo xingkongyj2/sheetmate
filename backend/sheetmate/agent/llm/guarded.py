@@ -1,9 +1,11 @@
 """包在所有「正常模型」外面的脱敏拦截器。
 
 get_llm() 是项目里调用 AI 的唯一入口，这里把它拿到的模型（真实的或测试用的假模型）包一层：
-  发出去：消息、提示词先过 Guard，联系方式和地址换成令牌；检查不通过就不发（PrivacyBlockedError）
-  回来的：回复里的令牌原样保留，不在本机还原——数据从上传起就是令牌，只有下载文件时才换回真实值
-底线：宁可不处理，也不能让没脱敏的数据被正常模型读到。
+  - 受后台管理「脱敏设置」总开关控制：总开关关闭时完全跳过所有脱敏检查、替换、拦截与提示注入；
+  - 总开关开启时：
+    发出去：消息、提示词先过 Guard，联系方式和地址换成令牌；检查不通过就不发（PrivacyBlockedError）
+    回来的：回复里的令牌原样保留，不在本机还原——数据从上传起就是令牌，只有下载文件时才换回真实值
+底线：开启脱敏时宁可不处理，也不能让没脱敏的数据被正常模型读到。
 """
 
 from __future__ import annotations
@@ -97,10 +99,12 @@ class GuardedLLM:
         return guard
 
     @staticmethod
-    def _sync_rules() -> None:
-        """把设置页的规则开关应用到脱敏模块。总开关不影响这里：发给 AI 的内容什么时候都要检查、替换，总开关只管上传文件时的自动分析。"""
-        _ensure_ready()
-        sync_privacy_settings()
+    def _sync_rules() -> bool:
+        """同步设置页的总开关和规则开关；总开关关闭时直接放行，不再执行任何模型脱敏或拦截逻辑。"""
+        enabled = sync_privacy_settings()
+        if enabled:
+            _ensure_ready()
+        return enabled
 
     async def _verify_files(self) -> None:
         """每次发给 AI 之前，确认这个会话里的表格文件都脱敏完成了；没完成就结束本次对话，不发任何内容。"""
@@ -153,21 +157,26 @@ class GuardedLLM:
     # ------------------------------------------------------------------ 模型接口
 
     async def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, **extra: Any) -> Any:
-        self._sync_rules()
+        if not self._sync_rules():
+            return await self._inner.chat(messages, tools, **extra)
         await self._verify_files()
         guard, protected = self._protect_messages(messages)
         return await self._inner.chat(protected, tools, **extra)       # 回来的内容原样给，令牌不还原
 
     async def stream_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
                           *args: Any, **kwargs: Any) -> AsyncIterator[Any]:
-        self._sync_rules()
+        if not self._sync_rules():
+            async for chunk in self._inner.stream_chat(messages, tools, *args, **kwargs):
+                yield chunk
+            return
         await self._verify_files()
         _, protected = self._protect_messages(messages)
         async for chunk in self._inner.stream_chat(protected, tools, *args, **kwargs):
             yield chunk                                                # 回来的内容原样给，令牌不还原
 
     async def complete_json(self, prompt: str, system: str | None = None, *args: Any, **kwargs: Any) -> Any:
-        self._sync_rules()
+        if not self._sync_rules():
+            return await self._inner.complete_json(prompt, system, *args, **kwargs)
         await self._verify_files()
         _, (prompt_p, system_p) = self._protect_strings(prompt, system)
         system_p = f"{system_p}\n\n{token_legend()}" if system_p else token_legend()

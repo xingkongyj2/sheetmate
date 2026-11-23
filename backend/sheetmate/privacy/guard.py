@@ -575,11 +575,11 @@ class Guard:
         """处理完之后再查一遍：还剩下什么联系方式或地址（令牌本身不算）。"""
         return list(dict.fromkeys(KIND_LABELS.get(kind, kind) for kind, _ in self.leak_values(text)))
 
-    def leak_values(self, text: str, limit: int = 20) -> list[tuple[str, str]]:
-        """同 leaks，但给出具体是哪些值 [(类型, 原文)]，拦截时记下来给用户看。"""
+    def _scan_leaks(self, text: str, found: list[tuple[str, str]], limit: int) -> None:
+        if len(found) >= limit or not text:
+            return
         bare = fold(TOKEN_RE.sub("§", text))
         active = self.active
-        found: list[tuple[str, str]] = []
 
         def add(kind: str, values: Iterable[str]) -> None:
             for value in values:
@@ -601,6 +601,43 @@ class Guard:
             add("address", (bare[start:end] for start, end in find_addresses(bare)))
             add("address", (m.group(1) for m in ADDR_CTX_RE.finditer(bare)
                             if address_context_ok(m.group(1)) and split_address(m.group(1))[1].strip()))
+
+    def _walk_leaks(self, obj: Any, found: list[tuple[str, str]], limit: int, depth: int = 0) -> None:
+        if len(found) >= limit:
+            return
+        if isinstance(obj, str):
+            nested = self._try_json(obj) if depth < _MAX_DEPTH else None
+            if nested is not None:
+                self._walk_leaks(nested, found, limit, depth + 1)
+            else:
+                self._scan_leaks(obj, found, limit)
+        elif isinstance(obj, list):
+            for item in obj:
+                self._walk_leaks(item, found, limit, depth)
+                if len(found) >= limit:
+                    break
+        elif isinstance(obj, dict):
+            for key, value in obj.items():
+                if isinstance(key, str):
+                    self._scan_leaks(key, found, limit)
+                self._walk_leaks(value, found, limit, depth)
+                if len(found) >= limit:
+                    break
+        elif isinstance(obj, (int, float)) and not isinstance(obj, bool):
+            text = cell_text(obj)
+            if "phone" in self.active and is_mobile(text) and ("phone", text) not in found and len(found) < limit:
+                found.append(("phone", text))
+
+    def leak_values(self, text: str, limit: int = 20) -> list[tuple[str, str]]:
+        """同 leaks，但给出具体是哪些值 [(类型, 原文)]，拦截时记下来给用户看。
+
+        JSON 文本与 _protect 保持同一粒度，逐个检查解码后的字符串叶子，避免 JSON 转义符（如 \\n）造成假阳性拦截。"""
+        found: list[tuple[str, str]] = []
+        data = self._try_json(text)
+        if data is not None:
+            self._walk_leaks(data, found, limit)
+            return found
+        self._scan_leaks(text, found, limit)
         return found
 
     def protect_text(self, text: str, stats: Stats) -> str:

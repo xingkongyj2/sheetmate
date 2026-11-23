@@ -35,6 +35,10 @@ _XML_PARTS = re.compile(r"^xl/(sharedStrings\.xml|worksheets/[^/]+\.xml|comments
 
 def protecting() -> bool:
     """设置页的脱敏总开关打开、模块可用时才在载入时脱敏。"""
+    from sheetmate.core.config.privacy_switch import sync_privacy_settings
+
+    if not sync_privacy_settings():
+        return False
     return bool(privacy.enabled and privacy.guard is not None and privacy.healthy)
 
 
