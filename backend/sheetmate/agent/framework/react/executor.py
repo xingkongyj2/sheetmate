@@ -168,19 +168,28 @@ class _ReadProgress:
     repetitions: int = 0
     recent: list[str] = field(default_factory=list)
 
-    def observe(self, key: str | None) -> bool:
+    def observe(self, key: str | None, *, progressed: bool = False) -> bool:
         if key is None:
-            self.recent.clear()
-            self.repetitions = 0
-        else:
-            # Alternating two already observed queries is also a stalled loop.
-            repeated = key == self.key or key in self.recent
-            self.repetitions = self.repetitions + 1 if repeated else 0
-            self.recent = [item for item in self.recent if item != key]
-            self.recent.append(key)
-            self.recent = self.recent[-_OBSERVATION_HISTORY_LIMIT:]
+            # 仅当非读取调用确实成功（产生写操作或交付进展）时才清零无进展计数；
+            # 失败的穿插调用不重置计数也不清空近期窗口，防止 A(读)→B(错)→A(读) 交替死循环绕过检测。
+            if progressed:
+                self.repetitions = 0
+            self.key = None
+            return False
+        # Alternating two already observed queries or interleaving failed calls is also a stalled loop.
+        repeated = key == self.key or key in self.recent
+        self.repetitions = self.repetitions + 1 if repeated else 0
+        self.recent = [item for item in self.recent if item != key]
+        self.recent.append(key)
+        self.recent = self.recent[-_OBSERVATION_HISTORY_LIMIT:]
         self.key = key
         return self.repetitions >= _MAX_IDENTICAL_OBSERVATIONS
+
+    def reset_all(self) -> None:
+        """Clear both streak and recent window when resuming after pause or accepting a user steer."""
+        self.recent.clear()
+        self.repetitions = 0
+        self.key = None
 
     def reset_streak(self) -> None:
         """Reset consecutive repetition count while keeping recent keys so alternating loops stop fast."""
@@ -634,7 +643,7 @@ class AgentExecutor:
                         FINAL_ROUND_MESSAGE, NO_PROGRESS_STOP_MESSAGE}:
                     msgs.pop()
                 no_progress, progress_warned, completion_retries, compose_only = False, False, 0, False
-                read_progress.observe(None)
+                read_progress.reset_all()
                 msgs.append({"role": "user", "content": RESUME_AFTER_NO_PROGRESS_MESSAGE})
             if saved.get("terminal_events") and applied_revision == runtime.revision:
                 if transcript is not None:
@@ -695,7 +704,7 @@ class AgentExecutor:
             applied_revision = runtime.revision
             no_progress = False
             compose_only, progress_pending, progress_review = False, False, {}
-            read_progress.observe(None)
+            read_progress.reset_all()
             protocol_pending = False
             # New inbound work has its own bounded decision window. The
             # shared tool/model/token/time budgets remain spent across it.
@@ -1418,7 +1427,7 @@ class AgentExecutor:
                         recovery_finish_prompts = 0
                     observation = _read_observation_key(name, args, sources, ToolResult(**safe_payload))
                     budget.results[evidence["id"]]["observation_key"] = observation
-                    no_progress = read_progress.observe(observation)
+                    no_progress = read_progress.observe(observation, progressed=bool(result.ok and observation is None))
                 elif repeated_read:
                     no_progress = read_progress.observe(previous_read[1].get("observation_key"))
                 elif read_blocked and read_blocked_key:

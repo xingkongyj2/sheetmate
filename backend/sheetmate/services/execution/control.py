@@ -1,6 +1,7 @@
 """Conversation ownership, durable loop checkpoints and user steering."""
 from __future__ import annotations
 
+import asyncio
 from contextlib import ExitStack, asynccontextmanager
 from copy import deepcopy
 from datetime import datetime
@@ -258,12 +259,18 @@ class ExecutionControl:
             self._recipe_binding_starts.pop(receipt[0], None)
 
     async def save(self, state: dict[str, Any]) -> None:
-        self.persist(state)
+        await asyncio.to_thread(self.persist, state)
 
-    async def start_tool(self, call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
-        readonly = name in {"table_info", "preview_table", "value_counts", "column_stats", "list_files",
-                            "show_files", "list_recipes", "get_recipe", "inspect_recipe_nodes", "inspect_python_script",
-                            "inspect_task", "inspect_history", "inspect_memory", "inspect_evidence", "read_tool_result"}
+    def _start_tool_sync(self, call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        readonly = name in {
+            "table_info", "preview_table", "value_counts", "column_stats",
+            "list_files", "show_files", "list_recipes", "get_recipe",
+            "inspect_recipe_nodes", "inspect_python_script", "inspect_workbook_creation",
+            "inspect_task_context", "inspect_conversation_history", "inspect_saved_memories",
+            "inspect_execution_evidence", "read_tool_result", "load_tool_group", "reconsider_approach",
+            # 保留旧工具名，兼容历史检查点回放
+            "inspect_task", "inspect_history", "inspect_memory", "inspect_evidence",
+        }
         with session_scope() as db:
             start = state_store.start_tool(db, self.job.execution_id, user_id=self.user_id,
                 call_id=call_id, tool_name=name, arguments=arguments, side_effect=not readonly)
@@ -280,8 +287,11 @@ class ExecutionControl:
                     }
             return None if start.should_execute else deepcopy(start.receipt.result)
 
+    async def start_tool(self, call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
+        return await asyncio.to_thread(self._start_tool_sync, call_id, name, arguments)
+
     async def finish_tool(self, call_id: str, result: dict[str, Any], state: dict[str, Any]) -> None:
-        self.persist(state, receipt=(call_id, result))
+        await asyncio.to_thread(self.persist, state, receipt=(call_id, result))
 
     async def poll(self) -> list[dict[str, Any]]:
         from sheetmate.agent.memory.short_term.task_state import advance_task

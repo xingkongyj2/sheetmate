@@ -33,10 +33,15 @@ _PROGRESS_SAMPLE_COLUMNS = 8
 DEFAULT_PROJECTION_CHARS = 80_000
 
 
-def _over_target(kwargs: dict[str, Any], max_chars: int, max_tokens: int) -> bool:
+_HIGH_WATER_RATIO = 0.8
+_LOW_WATER_RATIO = 0.55
+
+
+def _over_target(kwargs: dict[str, Any], max_chars: int, max_tokens: int, *,
+                 ratio: float = _HIGH_WATER_RATIO) -> bool:
     chars, tokens = request_size(kwargs)
-    return bool((max_chars > 0 and chars > max_chars * 0.8)
-                or (max_tokens > 0 and tokens > max_tokens * 0.8))
+    return bool((max_chars > 0 and chars > max_chars * ratio)
+                or (max_tokens > 0 and tokens > max_tokens * ratio))
 
 
 def _callable_tool(kwargs: dict[str, Any], name: str) -> dict[str, Any] | None:
@@ -316,20 +321,35 @@ def _smaller(before: dict[str, Any], after: dict[str, Any]) -> bool:
     return chars < old_chars and tokens <= old_tokens
 
 
-def prepare_context(kwargs: dict[str, Any], max_chars: int, *, max_tokens: int = 0) -> dict[str, Any]:
+def prepare_context(kwargs: dict[str, Any], max_chars: int, *, max_tokens: int = 0,
+                    sticky_cutoff: dict[str, int] | None = None) -> dict[str, Any]:
     """Project recoverable old work; both targets are soft input budgets.
 
     ``max_tokens`` has already had output headroom reserved by the caller.
     It is a provider-neutral estimate, not a claim of exact tokenization.
+    When ``sticky_cutoff`` is supplied, previously compacted prefixes are
+    replayed deterministically and new compactions jump from the high-water
+    mark (80%) down to the low-water mark (55%), preserving KV-cache prefix
+    stability across subsequent turns.
     """
-    if not _over_target(kwargs, max_chars, max_tokens):
-        return kwargs
     messages = kwargs.get("messages") or []
+    if sticky_cutoff is not None and sticky_cutoff.get("end", 0) > len(messages):
+        sticky_cutoff.clear()
+    prior_end = sticky_cutoff.get("end", 0) if sticky_cutoff is not None else 0
+    prior_body_end = sticky_cutoff.get("body_end", 0) if sticky_cutoff is not None else 0
+    if not prior_end and not prior_body_end and not _over_target(kwargs, max_chars, max_tokens):
+        return kwargs
+
+    stop_ratio = _LOW_WATER_RATIO if sticky_cutoff is not None else _HIGH_WATER_RATIO
     projected = [dict(item) for item in messages]
     changed = False
+    new_end = prior_end
     if _args_retrievable(kwargs):
         replacements: dict[int, tuple[int, dict[str, Any]]] = {}
-        for exchange in _old_exchanges(messages):
+        old_exchanges = _old_exchanges(messages)
+
+        def apply_exchange(exchange: _Exchange) -> tuple[bool, dict[str, Any]]:
+            nonlocal projected, changed, new_end
             replacements[exchange.start] = (exchange.end, _progress_message(messages[exchange.start], exchange))
             candidate_messages = []
             index = 0
@@ -345,10 +365,38 @@ def prepare_context(kwargs: dict[str, Any], max_chars: int, *, max_tokens: int =
             before = {**kwargs, "messages": projected}
             if not _smaller(before, candidate):
                 replacements.pop(exchange.start)
-                continue
+                return False, before
             projected, changed = candidate_messages, True
-            if not _over_target(candidate, max_chars, max_tokens):
-                return candidate
+            new_end = max(new_end, exchange.end)
+            return True, candidate
+
+        # 1. Replay the sticky prefix boundary first so subsequent turns stay append-only for KV cache.
+        current = kwargs
+        if prior_end:
+            for exchange in old_exchanges:
+                if exchange.end <= prior_end:
+                    _, current = apply_exchange(exchange)
+        # 2. Only compact further when the (replayed) request crosses the high-water mark;
+        #    once triggered, compact down to low-water so the next many turns keep an identical prefix.
+        if _over_target(current, max_chars, max_tokens, ratio=_HIGH_WATER_RATIO):
+            for exchange in old_exchanges:
+                if exchange.start in replacements:
+                    continue
+                applied, candidate = apply_exchange(exchange)
+                if not applied:
+                    continue
+                current = candidate
+                if not _over_target(candidate, max_chars, max_tokens, ratio=stop_ratio):
+                    if sticky_cutoff is not None:
+                        sticky_cutoff["end"] = new_end
+                    return candidate
+            if sticky_cutoff is not None and new_end > prior_end:
+                sticky_cutoff["end"] = new_end
+        elif changed:
+            return {**kwargs, "messages": projected}
+
+    if not prior_body_end and not _over_target({**kwargs, "messages": projected}, max_chars, max_tokens, ratio=_HIGH_WATER_RATIO):
+        return {**kwargs, "messages": projected} if changed else kwargs
 
     # Legacy exchanges without recoverable arguments keep their original
     # pairing. Only the result body can shrink, if a lookup tool is exposed.
@@ -356,11 +404,13 @@ def prepare_context(kwargs: dict[str, Any], max_chars: int, *, max_tokens: int =
     candidates = [index for index, item in enumerate(projected)
                   if index not in protected and item.get("role") == "tool"
                   and isinstance(item.get("content"), str)]
-    for index in candidates:
+
+    def shrink_body(index: int) -> bool:
+        nonlocal projected, changed
         content = projected[index]["content"]
         reference = _EVIDENCE.match(content)
         if not reference or len(content) < 1200:
-            continue
+            return False
         evidence_id, output_id = reference.group(1), result_reference(content)
         if output_id and _callable_tool(kwargs, "read_tool_result"):
             lookup = (f"read_tool_result(result_id='{output_id}', "
@@ -368,7 +418,7 @@ def prepare_context(kwargs: dict[str, Any], max_chars: int, *, max_tokens: int =
         elif _callable_tool(kwargs, "inspect_execution_evidence"):
             lookup = f"inspect_execution_evidence(evidence_id='{evidence_id}', offset=0, limit=4000)"
         else:
-            continue
+            return False
         head = content[reference.end():reference.end() + 700]
         item = {**projected[index], "content": (
             f"[evidence_id={evidence_id}]\n{head}\n"
@@ -378,8 +428,24 @@ def prepare_context(kwargs: dict[str, Any], max_chars: int, *, max_tokens: int =
         candidate_messages = [*projected[:index], item, *projected[index + 1:]]
         candidate = {**kwargs, "messages": candidate_messages}
         if not _smaller({**kwargs, "messages": projected}, candidate):
-            continue
+            return False
         projected, changed = candidate_messages, True
-        if not _over_target(candidate, max_chars, max_tokens):
-            break
+        return True
+
+    new_body_end = prior_body_end
+    if prior_body_end:
+        for index in candidates:
+            if index < prior_body_end:
+                shrink_body(index)
+    if _over_target({**kwargs, "messages": projected}, max_chars, max_tokens, ratio=_HIGH_WATER_RATIO):
+        for index in candidates:
+            if index < prior_body_end:
+                continue
+            if not shrink_body(index):
+                continue
+            new_body_end = max(new_body_end, index + 1)
+            if not _over_target({**kwargs, "messages": projected}, max_chars, max_tokens, ratio=stop_ratio):
+                break
+        if sticky_cutoff is not None and new_body_end > prior_body_end:
+            sticky_cutoff["body_end"] = new_body_end
     return {**kwargs, "messages": projected} if changed else kwargs

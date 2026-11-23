@@ -12,9 +12,12 @@ import hashlib
 import json
 import logging
 import math
+import os
+import random
 import re
 import time
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Callable
 from collections import OrderedDict
 from contextlib import contextmanager
@@ -47,6 +50,68 @@ _UNCAPPED_GROWTH_LIMIT = 32768
 _AUTO_RESERVE_TOKENS = 8192
 # 按（接口地址, 模型）记住服务端实际接受的输出上限；0 表示该模型不接受或无需传 max_tokens。
 _ACCEPTED_MAX_TOKENS: dict[tuple[str, str], int] = {}
+# 按（接口地址, 模型）记住明确不支持 stream_options={"include_usage": True} 的兼容端点。
+_UNSUPPORTED_STREAM_OPTIONS: set[tuple[str, str]] = set()
+_STREAM_OPTIONS_ERROR = re.compile(r"stream_options|include_usage", re.I)
+# 按事件循环复用 AsyncOpenAI 连接池，避免每次请求重做 TCP/TLS 握手和泄漏未关闭的 httpx.AsyncClient。
+_CLIENT_POOL: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, OrderedDict[tuple[str, str, float], AsyncOpenAI]] = weakref.WeakKeyDictionary()
+_CLIENT_POOL_LIMIT = 16
+
+
+def _pooled_openai_client(cfg: LLMSettings) -> AsyncOpenAI:
+    """Return a shared AsyncOpenAI client bound to the current event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout, max_retries=0)
+    pool = _CLIENT_POOL.get(loop)
+    if pool is None:
+        pool = OrderedDict()
+        _CLIENT_POOL[loop] = pool
+    key = (cfg.base_url.rstrip("/"), hashlib.sha256(cfg.api_key.encode()).hexdigest(), float(cfg.timeout))
+    existing = pool.get(key)
+    if existing is not None:
+        pool.move_to_end(key)
+        return existing
+    created = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout, max_retries=0)
+    pool[key] = created
+    while len(pool) > _CLIENT_POOL_LIMIT:
+        _, evicted = pool.popitem(last=False)
+        loop.create_task(evicted.close())
+    return created
+
+
+async def close_llm_clients() -> None:
+    """Close all pooled AsyncOpenAI clients bound to the current event loop."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    pool = _CLIENT_POOL.pop(loop, None)
+    if not pool:
+        return
+    await asyncio.gather(*(client.close() for client in pool.values()), return_exceptions=True)
+
+
+def _retry_delay(exc: BaseException, attempt: int) -> float:
+    """Honor Retry-After header when present; otherwise bounded exponential backoff with jitter."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers:
+        raw = headers.get("retry-after") or headers.get("Retry-After")
+        if raw is not None:
+            try:
+                seconds = float(str(raw).strip())
+                if math.isfinite(seconds) and seconds >= 0:
+                    return min(30.0, seconds)
+            except ValueError:
+                pass
+    base = min(8.0, 0.25 * (2 ** attempt))
+    return base * random.uniform(0.5, 1.0)
+
+
+def _auxiliary_model_override() -> str:
+    return os.environ.get("LLM_AUXILIARY_MODEL", "").strip()
 _MAX_TOKENS_ERROR = re.compile(r"max_(?:completion_)?tokens|output tokens|completion tokens|maximum context|context length|上下文", re.I)
 _MAX_TOKENS_PARAM = re.compile(r"max_(?:completion_)?tokens", re.I)
 _CONTEXT_BOUND = re.compile(r"context|input|prompt|上下文|输入", re.I)
@@ -424,41 +489,58 @@ def _complete_tool_stream(calls: dict[int, dict[str, str]], tools: list[dict[str
 class LLMClient:
     """异步客户端。chat / stream_chat 与 TabClaw 一致，另加 complete_json。"""
 
-    def __init__(self, cfg: LLMSettings):
+    def __init__(self, cfg: LLMSettings, *, pooled: bool = True):
         if not cfg.configured:
             raise LLMNotConfigured()
         self.cfg = cfg
         self.model = cfg.model
+        self._pooled = pooled
         # Retry here so every network attempt consumes the same task budget.
-        self.client = AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout, max_retries=0)
+        self._override_client: Any = (
+            None if pooled else AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, timeout=cfg.timeout, max_retries=0)
+        )
         self.budget = RequestBudget(cfg.runtime_policy)
         self.usage = {"prompt_tokens": 0, "completion_tokens": 0}
         self.usage_by_stage: dict[str, dict[str, int]] = {}
         self.usage_calls: list[dict[str, Any]] = []
         self._cache_prefixes: dict[tuple[str, str], dict[str, Any]] = {}
+        self._projection_cutoffs: dict[tuple[str, str], dict[str, int]] = {}
 
-    def _accepted_key(self) -> tuple[str, str]:
-        return (self.cfg.base_url.rstrip("/"), self.model)
+    @property
+    def client(self) -> Any:
+        if self._override_client is not None:
+            return self._override_client
+        return _pooled_openai_client(self.cfg)
 
-    def _auto_output_tokens(self) -> int:
+    @client.setter
+    def client(self, value: Any) -> None:
+        self._override_client = value
+
+    def _accepted_key(self, model: str | None = None) -> tuple[str, str]:
+        return (self.cfg.base_url.rstrip("/"), model or self.model)
+
+    def _auto_output_tokens(self, model: str | None = None) -> int:
         """请求的输出 Token：先试最大值，服务端拒绝后用它报错里给出的真实上限（0 表示不传），并按模型记住。"""
-        return _ACCEPTED_MAX_TOKENS.get(self._accepted_key(), AUTO_MAX_TOKENS)
+        return _ACCEPTED_MAX_TOKENS.get(self._accepted_key(model), AUTO_MAX_TOKENS)
 
     def _output_reserve(self, kwargs: dict[str, Any]) -> int:
         """预算与上下文预留使用的输出量：自动最大值只按常见输出量预留，避免占满窗口和任务预算。"""
         requested = int(kwargs.get("max_tokens") or _AUTO_RESERVE_TOKENS)
-        if requested == self._auto_output_tokens():
+        if requested == self._auto_output_tokens(kwargs.get("model")):
             return min(requested, _AUTO_RESERVE_TOKENS)
         return requested
 
     def _kwargs(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None, **extra: Any) -> dict[str, Any]:
         context_metrics = extra.pop("_context_metrics", None)
         auxiliary = extra.pop("_auxiliary", False)
+        stage_key = extra.pop("_stage_key", None) or _LLM_STAGE.get() or "execution"
+        aux_model = _auxiliary_model_override() if auxiliary else ""
+        active_model = aux_model or self.model
         extra_body = {**self.cfg.extra_body, **(extra.pop("extra_body", None) or {})}
         protocol = self.cfg.resolve_thinking_protocol(extra_body)
         qwen = protocol == "qwen"
         deepseek_thinking = protocol == "deepseek"
-        legacy_chat = (self.cfg.capabilities.thinking_protocol == "auto" and protocol == "none" and self.model == "deepseek-chat"
+        legacy_chat = (self.cfg.capabilities.thinking_protocol == "auto" and protocol == "none" and active_model == "deepseek-chat"
                        and is_deepseek_url(self.cfg.base_url))
         if tools and deepseek_thinking:
             # 历史摘要没有原始思考字段；新模型携带 tools 时仍要求该字段存在。
@@ -470,11 +552,11 @@ class LLMClient:
                         for message in messages]
         temperature = extra.pop("temperature", None)
         kwargs: dict[str, Any] = {
-            "model": self.model,
+            "model": active_model,
             "messages": messages,
             "temperature": self.cfg.temperature if temperature is None else temperature,
         }
-        output_tokens = self._auto_output_tokens()
+        output_tokens = self._auto_output_tokens(active_model)
         if output_tokens > 0:
             kwargs["max_tokens"] = output_tokens
         # An explicitly selected dialect controls both the primary switch and
@@ -512,7 +594,8 @@ class LLMClient:
                                 else policy.max_input_chars)
         # 不预设模型窗口：只按字符目标整理较早的执行过程，超出窗口时由模型服务报错，报错原文会展示给使用者。
         before_chars, before_tokens = request_size(kwargs) if context_metrics is not None else (0, 0)
-        prepared = prepare_context(kwargs, projection_chars)
+        cutoff = self._projection_cutoffs.setdefault((stage_key, active_model), {})
+        prepared = prepare_context(kwargs, projection_chars, sticky_cutoff=cutoff)
         if context_metrics is not None:
             after_profile = context_profile(prepared)
             after_chars, after_tokens = request_size(prepared)
@@ -562,7 +645,8 @@ class LLMClient:
 
     async def _create(self, kwargs: dict[str, Any], call_id: str, stage: str) -> Any:
         # 只有「自动最大值」才允许根据服务端报错降级；调用方明确指定的值和用户开启的上限原样使用。
-        auto_sent = bool(kwargs.get("max_tokens")) and kwargs["max_tokens"] == self._auto_output_tokens()
+        model_name = kwargs.get("model") or self.model
+        auto_sent = bool(kwargs.get("max_tokens")) and kwargs["max_tokens"] == self._auto_output_tokens(model_name)
         for attempt in range(self.cfg.runtime_policy.sdk_retries + 1):
             try:
                 self.budget.reserve(call_id, kwargs, self._output_reserve(kwargs))
@@ -574,9 +658,15 @@ class LLMClient:
                 return await self._within_deadline(self.client.chat.completions.create(**kwargs))
             except BaseException as exc:
                 self.budget.finish(call_id, None)
+                if ("stream_options" in kwargs and isinstance(exc, openai.APIStatusError)
+                        and exc.status_code in {400, 422} and _STREAM_OPTIONS_ERROR.search(str(exc.message))):
+                    _UNSUPPORTED_STREAM_OPTIONS.add(self._accepted_key(model_name))
+                    kwargs.pop("stream_options", None)
+                    log.info("模型 %s 不支持 stream_options.include_usage，已自动回退重试", model_name)
+                    return await self._create(kwargs, call_id, stage)
                 if (auto_sent and isinstance(exc, openai.APIStatusError) and exc.status_code in {400, 422}
-                        and lower_max_tokens(kwargs, str(exc.message), self._accepted_key())):
-                    log.info("模型 %s 不接受 max_tokens=%s，已改为 %s 重试", self.model, AUTO_MAX_TOKENS,
+                        and lower_max_tokens(kwargs, str(exc.message), self._accepted_key(model_name))):
+                    log.info("模型 %s 不接受 max_tokens=%s，已改为 %s 重试", model_name, AUTO_MAX_TOKENS,
                              kwargs.get("max_tokens", "不传"))
                     return await self._create(kwargs, call_id, stage)
                 retryable = (isinstance(exc, (openai.APIConnectionError, openai.APITimeoutError))
@@ -585,10 +675,10 @@ class LLMClient:
                 will_retry = retryable and attempt < self.cfg.runtime_policy.sdk_retries
                 self._record_usage(stage, f"{call_id}:attempt{attempt + 1}", None,
                                    "retry" if will_retry else "cancelled" if isinstance(exc, asyncio.CancelledError) else "error",
-                                   round((time.monotonic() - started) * 1000), model=kwargs.get("model"))
+                                   round((time.monotonic() - started) * 1000), model=model_name)
                 if not retryable or attempt >= self.cfg.runtime_policy.sdk_retries:
                     raise
-                await self._within_deadline(asyncio.sleep(min(2.0, 0.25 * 2 ** attempt)), retrying=True)
+                await self._within_deadline(asyncio.sleep(_retry_delay(exc, attempt)), retrying=True)
 
     def _add_usage(self, usage: Any) -> None:
         if usage is None:
@@ -650,7 +740,7 @@ class LLMClient:
         request_model = self.model
         try:
             context_metrics: dict[str, Any] = {}
-            kwargs = self._kwargs(messages, tools, _context_metrics=context_metrics, **extra)
+            kwargs = self._kwargs(messages, tools, _context_metrics=context_metrics, _stage_key=stage, **extra)
             request_model = kwargs["model"]
             context_metrics["cache_prefix"] = self._profile_cache_prefix(kwargs, stage)
             record_event("llm.context", function, context_metrics, call_id=call_id, stage=stage)
@@ -702,8 +792,11 @@ class LLMClient:
         reasoning_parts: list[str] = []
         calls: dict[int, dict[str, str]] = {}
         context_metrics: dict[str, Any] = {}
-        kwargs = self._kwargs(messages, tools, stream=True, tool_choice=tool_choice if tools else None,
-                              _context_metrics=context_metrics)
+        stream_options = ({"include_usage": True}
+                          if self._accepted_key() not in _UNSUPPORTED_STREAM_OPTIONS else None)
+        kwargs = self._kwargs(messages, tools, stream=True, stream_options=stream_options,
+                              tool_choice=tool_choice if tools else None,
+                              _context_metrics=context_metrics, _stage_key=stage)
         context_metrics["cache_prefix"] = self._profile_cache_prefix(kwargs, stage)
         finish_reason: str | None = None
         try:
@@ -1039,7 +1132,7 @@ def get_privacy_llm() -> LanguageModel:
 
 async def test_connection(cfg: LLMSettings) -> dict[str, Any]:
     """设置页「测试连接」：只是探测接口是否可用，等待时间不超过 5 分钟。"""
-    client = LLMClient(replace(cfg, thinking_enabled=False))
+    client = LLMClient(replace(cfg, thinking_enabled=False), pooled=False)
     wait = min(cfg.timeout, 300)
     try:
         # 思考内容可能计入输出额度，不能为两个字的回复强制缩成 10 Token。

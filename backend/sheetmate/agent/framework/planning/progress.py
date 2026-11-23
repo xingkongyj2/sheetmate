@@ -35,7 +35,8 @@ instruction 写清实际问题、调整方法及如何核验。不能仅改名�
 
 async def repair_unfinished_plan(llm: Any, requirement: str, plan: Plan, states: dict[int, str],
                                  summaries: dict[int, str], evidence: list[dict[str, Any]], *,
-                                 failure_issues: dict[int, list[str]] | None = None) -> dict[int, str]:
+                                 failure_issues: dict[int, list[str]] | None = None,
+                                 remaining_rounds: int = 1) -> dict[int, str]:
     """Return advice only; executable objectives/dependencies never come from this model."""
     failed = {step["id"] for step in plan.steps if states.get(step["id"]) == "failed"}
     if not failed:
@@ -55,7 +56,7 @@ async def repair_unfinished_plan(llm: Any, requirement: str, plan: Plan, states:
                       "summary": summaries.get(step["id"], "")[:1500],
                       "failure_issues": (failure_issues or {}).get(step["id"], [])} for step in plan.steps],
         "actual_results": actual_results, "omitted_results": len(evidence) - len(actual_results),
-        "remaining_repair_rounds": 1,
+        "remaining_repair_rounds": max(1, int(remaining_rounds)),
     }
     outcome = await aux_json(llm, json.dumps(payload, ensure_ascii=False), system=_SYSTEM,
                              schema=_SCHEMA, schema_name="plan_repair", timeout=REPAIR_TIMEOUT,

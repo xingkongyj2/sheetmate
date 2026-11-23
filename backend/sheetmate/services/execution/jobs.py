@@ -88,25 +88,56 @@ class Job:
         if cancelled and propagate_cancel:
             raise asyncio.CancelledError
 
-    async def events(self, *, snapshot: bool = False) -> AsyncIterator[dict[str, Any]]:
+    async def events(self, *, snapshot: bool = False, after_id: int | None = None) -> AsyncIterator[dict[str, Any]]:
         """订阅任务；恢复页面时把已有事件一次性发出，再继续实时事件。
 
         快照和续传游标在同一把锁里取得，避免快照之后、订阅之前产生的事件丢失或重复。
         """
+        async for _, event in self.events_with_ids(snapshot=snapshot, after_id=after_id):
+            yield event
+
+    async def events_with_ids(
+        self,
+        *,
+        snapshot: bool = False,
+        after_id: int | None = None,
+        heartbeat_seconds: float | None = None,
+    ) -> AsyncIterator[tuple[int | None, dict[str, Any] | None]]:
+        """带递增事件编号（1-based）与可选心跳的订阅流，供 SSE 断点续传与防断流。"""
         cursor = 0
-        if snapshot:
+        if after_id is not None and after_id > 0:
+            async with self._changed:
+                cursor = min(after_id, len(self._history))
+        elif snapshot:
             async with self._changed:
                 history = list(self._history)
                 cursor = len(history)
-            yield {"type": "stream_snapshot", "events": history}
+            yield cursor if cursor else None, {"type": "stream_snapshot", "events": history}
         while True:
             async with self._changed:
-                await self._changed.wait_for(lambda: cursor < len(self._history) or self.finished)
-                if cursor == len(self._history):
-                    return
-                event = self._history[cursor]
-                cursor += 1
-            yield event
+                if cursor >= len(self._history) and not self.finished:
+                    waiter = self._changed.wait_for(lambda: cursor < len(self._history) or self.finished)
+                    if heartbeat_seconds is not None and heartbeat_seconds > 0:
+                        try:
+                            await asyncio.wait_for(waiter, timeout=heartbeat_seconds)
+                        except asyncio.TimeoutError:
+                            event = None
+                            seq = None
+                            yield_now = True
+                        else:
+                            yield_now = False
+                    else:
+                        await waiter
+                        yield_now = False
+                else:
+                    yield_now = False
+                if not yield_now:
+                    if cursor >= len(self._history):
+                        return
+                    event = self._history[cursor]
+                    cursor += 1
+                    seq = cursor
+            yield seq, event
 
 
 class JobManager:

@@ -35,12 +35,15 @@ def _memory_identity(item: dict[str, Any]) -> tuple[Any, ...]:
 
 def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
                       max_chars: int = MEMORY_CONTEXT_CHARS, *,
-                      scorer: MemoryScorer | None = None) -> dict[str, Any]:
+                      scorer: MemoryScorer | None = None,
+                      allow_overflow_index: bool = False) -> dict[str, Any]:
     """Select already-scoped memories using an injectable scorer and MMR.
 
     The default scorer uses lexical terms, without an embedding model. Service
-    order is newest first. Every human rule survives or raises explicitly. Only
-    same-scope, exact-value duplicates are removed, regardless of scorer.
+    order is newest first. Every human rule survives or raises explicitly unless
+    ``allow_overflow_index=True``, in which case excess human rules are exposed
+    as an explicit memory_id index for on-demand inspection rather than blocking
+    the entire turn. Only same-scope, exact-value duplicates are removed.
     """
     scorer = scorer if scorer is not None else get_memory_scorer()
     queried_failures = set(re.findall(r"[a-z0-9_]+", str(query or "").lower())) & REPAIR_FAILURE_KINDS
@@ -50,11 +53,31 @@ def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
     chosen = [item for _, item, _ in human]
     selection = [{"memory_id": item.get("id"), "reason": "human_required", "lexical_score": score}
                  for _, item, score in human]
+    deferred_human: list[dict[str, Any]] = []
     if len(format_memories(chosen)) > max_chars:
-        raise MemoryContextLimit(
-            f"当前适用的 {len(human)} 条人工记忆超出上下文预算（{max_chars} 字符）。"
-            "请精简重复规则或缩小流程范围后继续；本轮未截断或忽略人工规则。"
-        )
+        if not allow_overflow_index:
+            raise MemoryContextLimit(
+                f"当前适用的 {len(human)} 条人工记忆超出上下文预算（{max_chars} 字符）。"
+                "请精简重复规则或缩小流程范围后继续；本轮未截断或忽略人工规则。"
+            )
+        chosen = []
+        selection = []
+        # 预留空间给延迟加载的人工规则索引目录，确保超预算时不阻断对话、也不静默丢失任何人工规则。
+        index_reserve = min(1200, max(240, max_chars // 5))
+        human_budget = max(0, max_chars - index_reserve)
+        for _, item, score in human:
+            if len(format_memories([*chosen, item])) <= human_budget:
+                chosen.append(item)
+                selection.append({"memory_id": item.get("id"), "reason": "human_required", "lexical_score": score})
+            else:
+                value = " ".join(str(item.get("value") or "").split())
+                deferred_human.append({
+                    "id": item.get("id"), "key": item.get("key"),
+                    "version": item.get("version") or 1,
+                    "scope_label": item.get("scope_label", ""),
+                    "excerpt": value[:48] + ("…" if len(value) > 48 else ""),
+                })
+                selection.append({"memory_id": item.get("id"), "reason": "human_deferred_index", "lexical_score": score})
 
     seen = {_memory_identity(item) for _, item, _ in human}
     candidates = []
@@ -99,7 +122,8 @@ def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
         return bool(score), mmr, -index
 
     experiences = []
-    while pool and len(chosen) - len(human) < ai_limit:
+    human_selected = len(chosen)
+    while pool and not deferred_human and len(chosen) - human_selected < ai_limit:
         row = max(pool, key=rank)
         pool.remove(row)
         index, item, score = row
@@ -121,6 +145,7 @@ def retrieve_memories(items: list[dict[str, Any]], query: str, limit: int = 30,
         "scope_filter": "caller_required_before_ranking",
         "available_count": len(items), "candidate_count": len(candidates),
         "selected_count": len(chosen), "required_human_count": len(human),
+        "deferred_human": deferred_human, "deferred_human_count": len(deferred_human),
         "duplicate_count": duplicate_count, "unrelated_count": unrelated_count,
         "unverified_experience_count": unverified_experience_count,
         "selected_experience_count": len(experiences),

@@ -64,6 +64,47 @@ def decode_value(value):
     raise ValueError("单元格只能是数字、文字、日期或空值")
 
 
+_SCALAR_TYPES = {str, int, float, bool}
+
+
+def _encode_column(series):
+    dtype = series.dtype
+    if isinstance(dtype, pd.StringDtype):
+        max_len = series.str.len().max()
+        if pd.notna(max_len) and max_len > 32767:
+            raise ValueError("单元格文字超过 Excel 的 32767 字符上限")
+        values = series.tolist()
+        if not series.isna().any():
+            return values
+        return [value if type(value) is str else None for value in values]
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return [None if pd.isna(value) else {"__type__": "datetime", "value": value.isoformat()}
+                for value in series.tolist()]
+    if not isinstance(dtype, pd.api.extensions.ExtensionDtype):
+        if pd.api.types.is_integer_dtype(dtype) or dtype == np.bool_:
+            return series.tolist()
+        if pd.api.types.is_float_dtype(dtype):
+            array = series.to_numpy()
+            values = array.tolist()
+            finite = np.isfinite(array)
+            if finite.all():
+                return values
+            return [value if ok else None for value, ok in zip(values, finite.tolist())]
+    values = series.tolist()
+    encoded = []
+    for value in values:
+        kind = type(value)
+        if value is None or kind is int or kind is bool:
+            encoded.append(value)
+        elif kind is str:
+            if len(value) > 32767:
+                raise ValueError("单元格文字超过 Excel 的 32767 字符上限")
+            encoded.append(value)
+        else:
+            encoded.append(encode_value(value))
+    return encoded
+
+
 def encode_frame(frame):
     if not isinstance(frame, pd.DataFrame):
         raise ValueError("result_tables 的每个值必须是 pandas DataFrame")
@@ -73,12 +114,22 @@ def encode_frame(frame):
     names = [str(column) for column in frame.columns]
     if len(names) != len(set(names)) or any(not name or len(name) > 255 for name in names):
         raise ValueError("结果表列名必须非空、唯一且不超过 255 字符")
-    return {"columns": names,
-            "rows": [[encode_value(value) for value in row] for row in frame.itertuples(index=False, name=None)]}
+    if rows == 0 or columns == 0:
+        return {"columns": names, "rows": [[] for _ in range(rows)]}
+    encoded_columns = [_encode_column(frame.iloc[:, idx]) for idx in range(columns)]
+    return {"columns": names, "rows": [list(row) for row in zip(*encoded_columns)]}
 
 
 def decode_frame(data):
-    return pd.DataFrame([[decode_value(value) for value in row] for row in data["rows"]], columns=data["columns"])
+    rows, columns = data["rows"], data["columns"]
+    if not rows or not columns:
+        return pd.DataFrame(rows, columns=columns)
+    decoded = [
+        row if all(value is None or type(value) in _SCALAR_TYPES for value in row)
+        else [value if (value is None or type(value) in _SCALAR_TYPES) else decode_value(value) for value in row]
+        for row in rows
+    ]
+    return pd.DataFrame(decoded, columns=columns)
 
 
 def delivery_names(items, output_root):
@@ -119,19 +170,27 @@ def displayed_table_names(items, tables):
 def _limits(seconds):
     try:
         import resource
+    except ImportError:
+        return
 
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        resource.setrlimit(resource.RLIMIT_CPU, (max(1, math.ceil(seconds)), max(2, math.ceil(seconds) + 1)))
-        resource.setrlimit(resource.RLIMIT_FSIZE, (64 * 1024 * 1024, 64 * 1024 * 1024))
-        resource.setrlimit(resource.RLIMIT_NOFILE, (128, 128))
-        if hasattr(resource, "RLIMIT_NPROC"):
-            resource.setrlimit(resource.RLIMIT_NPROC, (1, 1))
-        # macOS 的 RLIMIT_AS 对当前 Python/NumPy 不可靠；父进程另外监测实际 RSS。
-        if sys.platform.startswith("linux"):
-            maximum = 2 * 1024 * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (maximum, maximum))
-    except (ImportError, ValueError, OSError):
-        pass
+    def _apply(limit_name, value):
+        limit = getattr(resource, limit_name, None)
+        if limit is None:
+            return
+        try:
+            resource.setrlimit(limit, value)
+        except (ValueError, OSError):
+            pass
+
+    _apply("RLIMIT_CORE", (0, 0))
+    _apply("RLIMIT_CPU", (max(1, math.ceil(seconds)), max(2, math.ceil(seconds) + 1)))
+    _apply("RLIMIT_FSIZE", (64 * 1024 * 1024, 64 * 1024 * 1024))
+    _apply("RLIMIT_NOFILE", (128, 128))
+    _apply("RLIMIT_NPROC", (1, 1))
+    # macOS 的 RLIMIT_AS 对当前 Python/NumPy 不可靠；父进程另外监测实际 RSS。
+    if sys.platform.startswith("linux"):
+        maximum = 2 * 1024 * 1024 * 1024
+        _apply("RLIMIT_AS", (maximum, maximum))
 
 
 def _block_linux_process_creation():
@@ -218,7 +277,10 @@ def main():
     except BaseException as exc:
         response.update(ok=False, error=f"{type(exc).__name__}: {exc}", tables={}, result={}, deliver_files=[], display_tables=[])
         traceback.print_exc(limit=8)
-    (root / "response.json").write_text(json.dumps(response, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    (root / "response.json").write_text(
+        json.dumps(response, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
+        encoding="utf-8",
+    )
 
 
 if __name__ == "__main__":

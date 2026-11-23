@@ -14,7 +14,7 @@ from sheetmate.agent.tools.contracts import AgentContext, Tool, ToolResult, vali
 from sheetmate.agent.tools.execution import execute_tool
 from sheetmate.agent.framework.shared.watchdog import track_tool_workers
 
-PARALLEL_READ_TOOLS = frozenset({"table_info", "value_counts", "column_stats", "preview_table"})
+PARALLEL_READ_TOOLS = frozenset({"table_info", "value_counts", "column_stats", "preview_table", "run_sql"})
 
 
 def read_resource(call: dict[str, Any], tools: dict[str, Tool], ctx: AgentContext) -> str | None:
@@ -25,6 +25,18 @@ def read_resource(call: dict[str, Any], tools: dict[str, Tool], ctx: AgentContex
         return None
     try:
         args = validate_tool_args(tool, json.loads(call["function"]["arguments"]))
+        if tool.name == "run_sql":
+            if args.get("result_name"):
+                return None
+            from sheetmate.agent.tools.sql_scope import checked_sql_tables
+            from sheetmate.engine.tables.sql import assert_single_select
+
+            sql = assert_single_select(str(args.get("sql", "")))
+            references = checked_sql_tables(ctx, sql)
+            if any(not ctx.ws.exists(table) or (ctx.table_filter is not None and table not in ctx.table_filter)
+                   for table in references):
+                return None
+            return f"sql_ro:{call.get('id') or id(call)}"
         table = args.get("table")
         if (not isinstance(table, str) or not table or not ctx.ws.exists(table)
                 or ctx.table_filter is not None and table not in ctx.table_filter):

@@ -33,16 +33,42 @@ def admin_user(user: User = Depends(current_user)) -> User:
     return user
 
 
-def _sse(event: dict[str, Any]) -> str:
-    return f"data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+SSE_HEARTBEAT_SECONDS = 15.0
 
 
-def sse_response(job: Job, *, snapshot: bool = False) -> StreamingResponse:
-    """把后台任务的事件流转成 Server-Sent Events。客户端断开不影响后台任务继续执行。"""
+def _sse(event: dict[str, Any], *, event_id: int | None = None) -> str:
+    prefix = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{prefix}data: {json.dumps(event, ensure_ascii=False, default=str)}\n\n"
+
+
+def parse_last_event_id(raw: str | None) -> int | None:
+    if not raw:
+        return None
+    try:
+        value = int(str(raw).strip())
+        return value if value > 0 else None
+    except ValueError:
+        return None
+
+
+def sse_response(
+    job: Job,
+    *,
+    snapshot: bool = False,
+    last_event_id: int | str | None = None,
+    heartbeat_seconds: float | None = SSE_HEARTBEAT_SECONDS,
+) -> StreamingResponse:
+    """把后台任务的事件流转成 Server-Sent Events；带周期心跳与 Last-Event-ID 断点续传。"""
+    after_id = last_event_id if isinstance(last_event_id, int) else parse_last_event_id(last_event_id)
 
     async def stream() -> AsyncIterator[str]:
-        async for event in job.events(snapshot=snapshot):
-            yield _sse(event)
+        async for seq, event in job.events_with_ids(
+            snapshot=snapshot, after_id=after_id, heartbeat_seconds=heartbeat_seconds,
+        ):
+            if event is None:
+                yield ": ping\n\n"
+            else:
+                yield _sse(event, event_id=seq)
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream",

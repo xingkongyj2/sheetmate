@@ -24,24 +24,61 @@ from sheetmate.engine.tables.workspace import Workspace
 _SINGLE_TABLE_READS = frozenset({"table_info", "value_counts", "column_stats", "preview_table"})
 
 
-# 只读、单表的轻量工具：表不大时子进程启动（约 0.4 秒）远比计算本身（毫秒级）昂贵，直接在进程内执行。
+# 只读、单表的轻量工具以及轻量只读 SQL：表不大时子进程启动（约 0.4 秒）远比计算本身（毫秒级）昂贵，直接在进程内执行。
 # 大表仍走可杀死的子进程。超时/取消依旧由调用方的协作式取消和 DuckDB interrupt 负责。
 IN_PROCESS_READ_MAX_CELLS = 400_000
+IN_PROCESS_JOIN_MAX_ROWS_PER_TABLE = 50_000
+
+_WORKER_ENV_ALLOWLIST = (
+    "PATH", "HOME", "TMPDIR", "TEMP", "TMP",
+    "LANG", "LC_ALL", "LC_CTYPE", "PYTHONUTF8", "PYTHONIOENCODING",
+    "SYSTEMROOT", "SystemRoot", "COMSPEC", "WINDIR", "USERPROFILE",
+    "VIRTUAL_ENV", "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH",
+    "OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+)
+
+
+def _worker_environment() -> dict[str, str]:
+    """只向隔离数据计算子进程传递最小运行环境变量，不泄露模型密钥、数据库连接等凭据。"""
+    env = {key: value for key in _WORKER_ENV_ALLOWLIST if (value := os.environ.get(key)) is not None}
+    env["PYTHONPATH"] = str(Path(sheetmate.__file__).resolve().parent.parent)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    return env
 
 
 def runs_in_process(name: str, args: dict[str, Any], ctx: Any) -> bool:
-    """小表上的纯读取工具是否可以不经子进程执行。任何不确定都回到子进程，由子进程路径给出原有的报错。"""
-    if name not in _SINGLE_TABLE_READS:
-        return False
-    try:
-        from sheetmate.agent.tools.presentation import _assert_table_scope
+    """小表上的纯读取工具与轻量只读 SQL 是否可以不经子进程执行。任何不确定都回到子进程，由子进程路径给出原有的报错。"""
+    if name in _SINGLE_TABLE_READS:
+        try:
+            from sheetmate.agent.tools.presentation import _assert_table_scope
 
-        table = args["table"]
-        _assert_table_scope(ctx, [table])
-        info = ctx.ws.require(table)
-        return info.rows * max(1, len(info.columns)) <= IN_PROCESS_READ_MAX_CELLS
-    except Exception:
-        return False
+            table = args["table"]
+            _assert_table_scope(ctx, [table])
+            info = ctx.ws.require(table)
+            return info.rows * max(1, len(info.columns)) <= IN_PROCESS_READ_MAX_CELLS
+        except Exception:
+            return False
+    if name == "run_sql" and not args.get("result_name"):
+        try:
+            from sheetmate.agent.tools.presentation import _assert_table_scope
+            from sheetmate.agent.tools.sql_scope import checked_sql_tables
+            from sheetmate.engine.tables.sql import assert_single_select
+
+            sql = assert_single_select(str(args.get("sql", "")))
+            references = list(dict.fromkeys(checked_sql_tables(ctx, sql)))
+            _assert_table_scope(ctx, references)
+            total_cells = 0
+            for table in references:
+                info = ctx.ws.require(table)
+                if len(references) > 1 and info.rows > IN_PROCESS_JOIN_MAX_ROWS_PER_TABLE:
+                    return False
+                total_cells += info.rows * max(1, len(info.columns))
+                if total_cells > IN_PROCESS_READ_MAX_CELLS:
+                    return False
+            return True
+        except Exception:
+            return False
+    return False
 
 
 class DataWorkerCancelled(BaseException):
@@ -154,7 +191,7 @@ def run_data_tool(name: str, args: dict[str, Any], ctx: Any, cancelled: threadin
         source.write_bytes(pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL))
         command = [sys.executable, "-m", "sheetmate.agent.tools.worker", str(source), str(output)]
         options = {"start_new_session": True} if os.name != "nt" else {}
-        environment = {**os.environ, "PYTHONPATH": str(Path(sheetmate.__file__).resolve().parent.parent)}
+        environment = _worker_environment()
         with (root / "stderr.txt").open("wb") as stderr:
             process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                        stderr=stderr, env=environment, **options)
@@ -184,12 +221,18 @@ def run_data_tool(name: str, args: dict[str, Any], ctx: Any, cancelled: threadin
         if response["result"].ok:
             published = response["state"]
             if getattr(ctx, "parallel_read_only", False):
-                # Sibling reads started with older snapshots of other tables.
-                # Publishing their full snapshots would overwrite fresh probes.
-                target = args["table"]
-                published = [item for item in published if item["meta"]["name"] == target]
-                baseline = {target: baseline[target]}
-            ctx.ws.import_state(published, baseline=baseline)
+                if name == "run_sql":
+                    # 只读 SQL 不修改任何表数据或探测元数据，无需写回父工作区。
+                    published = []
+                    baseline = {}
+                else:
+                    # Sibling reads started with older snapshots of other tables.
+                    # Publishing their full snapshots would overwrite fresh probes.
+                    target = args["table"]
+                    published = [item for item in published if item["meta"]["name"] == target]
+                    baseline = {target: baseline[target]}
+            if published:
+                ctx.ws.import_state(published, baseline=baseline)
             if ctx.table_filter is not None and not getattr(ctx, "parallel_read_only", False):
                 ctx.table_filter.update(response["table_filter"] or set())
         return response["result"]

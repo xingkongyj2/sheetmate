@@ -115,7 +115,7 @@ async def conversation_events(conversation_id: str, job_id: str, request: Reques
     job = jobs.get(conv.id)
     if job is None or job.id != job_id:
         raise Conflict("任务状态已更新，请重新加载对话")
-    return sse_response(job, snapshot=snapshot)
+    return sse_response(job, snapshot=snapshot, last_event_id=request.headers.get("last-event-id"))
 
 
 @router.put("/{conversation_id}")

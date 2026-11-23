@@ -50,6 +50,18 @@ def snapshot_inputs(ctx: Any, tool: str, args: dict[str, Any] | None) -> list[di
             result.append(_source(ctx.ws.require(name)))
         except ValueError:
             continue  # Tool validation reports missing or inaccessible inputs.
+    # 纯文件脚本或流程（如 run_python_script(input_tables=[], input_files={...})）直接读取完整原文件，
+    # 必须把输入文件记入证据，避免 full_data=None 导致完成核对误杀已完成的结果。
+    input_files = args.get("input_files")
+    if isinstance(input_files, dict) and input_files:
+        seen_file_ids = {item.get("file_id") for item in result if item.get("file_id")}
+        for alias, file_id in input_files.items():
+            if not isinstance(file_id, str) or not file_id or file_id in seen_file_ids:
+                continue
+            seen_file_ids.add(file_id)
+            result.append({"table": str(alias), "revision": file_id, "rows": None,
+                           "file_id": file_id, "file_version": None, "full_data": True,
+                           "read_quality": {"source_kind": "input_file"}})
     return result
 
 

@@ -366,6 +366,38 @@ async def _stream(executor: AgentExecutor, messages: list[dict[str, Any]], tools
             yield _activity(activity)
 
 
+def _workspace_delta(ctx: AgentContext, seen_tables: dict[str, str]) -> str:
+    """只报告本步骤前新增或版本更新的表，避免重写 conversation[0] 破坏模型 KV Cache。"""
+    changes: list[str] = []
+    for table in ctx.visible_tables():
+        previous = seen_tables.get(table.name)
+        if previous == table.revision:
+            continue
+        seen_tables[table.name] = table.revision
+        cols = ", ".join(table.column_names[:12]) + (f" …（共 {len(table.columns)} 列）" if len(table.columns) > 12 else "")
+        kind = "更新" if previous else "新增"
+        changes.append(f"- [{kind}] `{table.name}`（{table.label}，{table.rows} 行 × {len(table.columns)} 列；列：{cols}）")
+    return ("\n当前工作区新增/更新的表（可直接按表名使用）：\n" + "\n".join(changes)) if changes else ""
+
+
+def _restore_plan(data: dict[str, Any]) -> Plan:
+    fields = {name: data[name] for name in Plan.__dataclass_fields__ if name in data}
+    return Plan(**fields)
+
+
+def _restore_ledger(data: dict[str, Any]) -> _Ledger:
+    raw_summaries = data.get("summaries") or {}
+    summaries = {int(key): str(value) for key, value in raw_summaries.items()}
+    checks = [(str(item[0]), str(item[1])) for item in (data.get("checks") or []) if isinstance(item, (list, tuple)) and len(item) >= 2]
+    return _Ledger(
+        digests=list(data.get("digests") or []),
+        summaries=summaries,
+        checks=checks,
+        files=list(data.get("files") or []),
+        tables=list(data.get("tables") or []),
+    )
+
+
 async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: str, history: list[dict[str, Any]],
                            steps: list[dict[str, Any]] | None = None) -> AsyncIterator[dict[str, Any]]:
     """steps 不为空时使用调用方自带的步骤，跳过起草和审查，其余核对照常进行。"""
@@ -375,88 +407,105 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         async for event in executor.resume_runtime(ctx, message, history):
             yield event
         return
-    if runtime and runtime.state.get("planning_state"):
-        # Resume the last serial ReAct boundary first. The Python planner stack
-        # is intentionally not replayed: its completed steps and actual tool
-        # transcript are retained, and a whole-task continuation reconciles the
-        # remaining goals against those results.
-        saved_loop = runtime.state.get("loop") or {}
-        budget = executor.new_budget()
-        budget.restore(runtime.state.get("budget", {}))
-        if saved_loop:
-            messages = restore_messages(saved_loop["messages"], runtime_images(ctx))
-            if messages:
-                async for event in executor.agent_stream(
-                    messages, executor.registry.for_context(ctx), ctx, budget=budget,
-                    scope=saved_loop.get("original_scope", saved_loop["scope"]),
-                    stop_scope=saved_loop.get("stop_scope", "task"),
-                ):
-                    if event["type"] not in {"text_chunk", "final_text", "execution_stop"}:
-                        yield event
-                    if event["type"] in {"error", "clarify"}:
-                        return
-        async for event in executor.continue_runtime(ctx, message, history):
-            yield event
-        return
     configure = getattr(executor, "configure_tools", None)
     if callable(configure):
         configure(ctx, message)
-    yield {"type": "think_start"}
 
-    # ---- 1~2. 勘察数据、起草并审查计划
-    if steps:
-        plan = plan_from_steps(steps)
+    restored_state = runtime.state.get("planning_state") if runtime else None
+    restoring = isinstance(restored_state, dict) and bool(restored_state.get("plan"))
+    if restoring:
+        plan = _restore_plan(restored_state["plan"])
+        total = len(plan.steps)
+        tools = executor.registry.for_context(ctx)
+        conversation = restore_messages(restored_state.get("conversation") or [], runtime_images(ctx))
+        if not conversation:
+            conversation = [
+                {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)},
+                *model_history(stage_history(history, "execution")),
+                {"role": "user", "content": user_content(THINK_TASK_MESSAGE.format(message=message, plan=plan.overview(), seen=""), ctx.image_parts)},
+            ]
+        budget = executor.new_budget()
+        if runtime and runtime.state.get("budget"):
+            budget.restore(runtime.state["budget"])
+        ledger = _restore_ledger(restored_state.get("ledger") or {})
+        health = _CheckHealth(degraded=bool(restored_state.get("health_degraded", False)))
+        executed = int(restored_state.get("executed", 0))
+        carry = str(restored_state.get("carry", ""))
+        step_states = {int(key): str(value) for key, value in (restored_state.get("step_states") or {}).items()}
+        failed_checks = {int(key): list(value) for key, value in (restored_state.get("failed_checks") or {}).items()}
+        schedule = [int(value) for value in (restored_state.get("schedule") or range(1, total + 1))]
+        position = int(restored_state.get("position", 0))
+        repair_round = int(restored_state.get("repair_round", 0))
+        repairs = {int(key): str(value) for key, value in (restored_state.get("repairs") or {}).items()}
+        # 如果是在某个步骤执行中途崩溃的，退回到该步骤继续从 saved_loop 检查点续跑，不丢计划栈。
+        active_step = restored_state.get("active_step")
+        if active_step is not None and step_states.get(int(active_step)) != "done" and position > 0:
+            if schedule[position - 1] == int(active_step):
+                position -= 1
+        seen_tables = {table.name: table.revision for table in ctx.visible_tables()}
     else:
-        yield _activity("正在了解数据、制定计划")
-        brief = await _in_thread(ctx, data_brief, ctx)
-        plan = await make_plan(llm, ctx, message, history, brief)
-        if plan.worth_reviewing:
-            yield _activity("正在审查计划")
-        plan = await review_plan(llm, ctx, message, plan, brief, history)
-        yield {"type": "plan_review", "reviewed": plan.reviewed, "changes": plan.changes, "fallback": plan.fallback,
-               "step_count": len(plan.steps), "reason": plan.reason}
-    intro = plan.intro()
-    if intro:
-        yield _note(intro)
-    total = len(plan.steps)
-    # 开启思考模式即显示紧凑进度；show_plan 仅影响最终回答是否逐项回顾。
-    yield {"type": "plan_start", "title": plan.title, "checklist": bool(plan.steps),
-           "steps": [{"id": s["id"], "description": plan.display_description(index)}
-                     for index, s in enumerate(plan.steps, 1)]}
+        yield {"type": "think_start"}
 
-    # ---- 3. 逐项执行并核对
-    tools = executor.registry.for_context(ctx)
-    seen = "用户已经看到进度面板中的简短步骤，不必复述完整计划。"
-    if plan.narrated:
-        seen += "每一项开始时也会看到一句说明。"
-    conversation: list[dict[str, Any]] = [
-        {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}, *model_history(stage_history(history, "execution")),
-        {"role": "user", "content": user_content(THINK_TASK_MESSAGE.format(message=message, plan=plan.overview(), seen=seen), ctx.image_parts)},
-    ]
-    budget = executor.new_budget()
-    ledger = _Ledger()
-    health = _CheckHealth()
-    executed = 0
-    carry = ""
-    step_states: dict[int, str] = {}
-    failed_checks: dict[int, list[str]] = {}
+        # ---- 1~2. 勘察数据、起草并审查计划
+        if steps:
+            plan = plan_from_steps(steps)
+        else:
+            yield _activity("正在了解数据、制定计划")
+            brief = await _in_thread(ctx, data_brief, ctx)
+            plan = await make_plan(llm, ctx, message, history, brief)
+            if plan.worth_reviewing:
+                yield _activity("正在审查计划")
+            plan = await review_plan(llm, ctx, message, plan, brief, history)
+            yield {"type": "plan_review", "reviewed": plan.reviewed, "changes": plan.changes, "fallback": plan.fallback,
+                   "step_count": len(plan.steps), "reason": plan.reason}
+        intro = plan.intro()
+        if intro:
+            yield _note(intro)
+        total = len(plan.steps)
+        # 开启思考模式即显示紧凑进度；show_plan 仅影响最终回答是否逐项回顾。
+        yield {"type": "plan_start", "title": plan.title, "checklist": bool(plan.steps),
+               "steps": [{"id": s["id"], "description": plan.display_description(index)}
+                         for index, s in enumerate(plan.steps, 1)]}
+
+        # ---- 3. 逐项执行并核对
+        tools = executor.registry.for_context(ctx)
+        seen = "用户已经看到进度面板中的简短步骤，不必复述完整计划。"
+        if plan.narrated:
+            seen += "每一项开始时也会看到一句说明。"
+        conversation = [
+            {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}, *model_history(stage_history(history, "execution")),
+            {"role": "user", "content": user_content(THINK_TASK_MESSAGE.format(message=message, plan=plan.overview(), seen=seen), ctx.image_parts)},
+        ]
+        seen_tables = {table.name: table.revision for table in ctx.visible_tables()}
+        budget = executor.new_budget()
+        ledger = _Ledger()
+        health = _CheckHealth()
+        executed = 0
+        carry = ""
+        step_states = {}
+        failed_checks = {}
+        schedule = list(range(1, total + 1))
+        position, repair_round = 0, 0
+        repairs = {}
+
     step_scopes = {step["id"]: f"计划步骤 {step['id']}：{step['description']}\n验收：{step['check']}" for step in plan.steps}
-    schedule = list(range(1, total + 1))
-    position, repair_round = 0, 0
-    repairs: dict[int, str] = {}
+    resuming_active_step = int(restored_state["active_step"]) if restoring and restored_state.get("active_step") is not None else None
 
-    async def checkpoint_plan() -> None:
+    async def checkpoint_plan(*, active_step: int | None = None) -> None:
         if runtime:
             runtime.state["planning_state"] = durable_value({
                 "plan": asdict(plan), "step_states": {str(key): value for key, value in step_states.items()},
                 "ledger": asdict(ledger), "conversation": conversation, "executed": executed,
                 "failed_checks": {str(key): value for key, value in failed_checks.items()},
                 "schedule": schedule, "position": position, "repair_round": repair_round,
+                "carry": carry, "repairs": {str(key): value for key, value in repairs.items()},
+                "health_degraded": health.degraded, "active_step": active_step,
             })
             runtime.state["budget"] = budget.to_state()
             await runtime.checkpoint()
 
-    await checkpoint_plan()
+    if not restoring:
+        await checkpoint_plan()
     while True:
         if runtime and await runtime.consume(ctx):
             await checkpoint_plan()
@@ -470,7 +519,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
                 break
             yield _activity("正在调整未完成部分的处理方法")
             repairs = await repair_unfinished_plan(llm, message, plan, step_states, ledger.summaries, ledger.digests,
-                                                   failure_issues=failed_checks)
+                                                   failure_issues=failed_checks,
+                                                   remaining_rounds=MAX_PLAN_REPAIRS - repair_round)
             if not repairs:
                 break
             repair_round += 1
@@ -492,24 +542,28 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
             continue
         budget.allow_dependencies(getattr(ctx, "branch_id", None), step_scopes[num], {step_scopes[dep] for dep in dependencies})
         doing = plan.doing(num)
-        yield {"type": "step_start", "step_num": num, "total": total,
-               "description": plan.display_description(num), "quiet": True}
-        lead = plan.lead_in(num) if plan.narrated else ""
-        if lead:
-            yield _note(lead, num)  # 这一项开始前先说一句现在要做什么
-        yield _activity(doing)
-        # 每一项都刷新系统提示里的表清单：前面生成的表要让模型看得到
-        conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}
-        step_instruction = THINK_STEP_MESSAGE.format(
-            num=num, total=total, description=description,
-            check=step.get("check") or "本项目标完成，结论和数字都有工具返回的数据支撑",
-            carry=f"\n前面的提醒：{carry}" if carry else "",
-            opener=THINK_OPENER_SAID if lead else THINK_OPENER_UNSAID,
-        )
-        if num in repairs:
-            step_instruction += ("\n根据真实反馈补做本项（原目标、验收和依赖仍有效）：\n" + repairs[num]
-                                 + "\n已完成的其他步骤无需重复执行。")
-        conversation.append({"role": "user", "content": step_instruction})
+        is_resuming_step = resuming_active_step == num
+        if is_resuming_step:
+            resuming_active_step = None
+        else:
+            yield {"type": "step_start", "step_num": num, "total": total,
+                   "description": plan.display_description(num), "quiet": True}
+            lead = plan.lead_in(num) if plan.narrated else ""
+            if lead:
+                yield _note(lead, num)  # 这一项开始前先说一句现在要做什么
+            yield _activity(doing)
+            # 保持 conversation[0] 系统提示不变以命中 KV Cache，仅在步骤指令中追加新增/更新表增量。
+            delta = _workspace_delta(ctx, seen_tables)
+            step_instruction = THINK_STEP_MESSAGE.format(
+                num=num, total=total, description=description,
+                check=step.get("check") or "本项目标完成，结论和数字都有工具返回的数据支撑",
+                carry=f"\n前面的提醒：{carry}" if carry else "",
+                opener=THINK_OPENER_SAID if lead else THINK_OPENER_UNSAID,
+            ) + delta
+            if num in repairs:
+                step_instruction += ("\n根据真实反馈补做本项（原目标、验收和依赖仍有效）：\n" + repairs[num]
+                                     + "\n已完成的其他步骤无需重复执行。")
+            conversation.append({"role": "user", "content": step_instruction})
         # 修复可以复用先前真实成果，但不能丢弃曾经明确失败的验收。
         step_digest = [item for item in ledger.digests if item["step"] == num]
         verdict = Verdict()
@@ -520,7 +574,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
         exhausted = False
         max_fixes = MAX_STEP_FIXES if repair_round == 0 else 0
         for attempt in range(max_fixes + 1):
-            await checkpoint_plan()
+            await checkpoint_plan(active_step=num)
             run = _Run()
             async for event in _stream(executor, conversation, tools, ctx, budget, run, ledger, step=num, activity=doing,
                                        scope=step_scopes[num]):
@@ -643,10 +697,9 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     # ---- 4. 整理结论；最终回答先扣住，核对后再发出
     yield {"type": "reflect_start", "quiet": True}
     yield _activity("正在整理结论")
-    conversation[0] = {"role": "system", "content": build_system_prompt(ctx, message, thinking=True)}
     record = check_record(plan, ledger)
     template = THINK_REFLECT_MESSAGE if plan.checklist else THINK_REFLECT_MESSAGE_SMALL
-    reflect = template.format(message=message, total=executed, record=record)
+    reflect = template.format(message=message, total=executed, record=record) + _workspace_delta(ctx, seen_tables)
     if executed < total:
         reflect += f"\n计划中还有 {total - executed} 个步骤未执行，不得称已完成。"
     reflect_messages = [*conversation, {"role": "user", "content": reflect}]

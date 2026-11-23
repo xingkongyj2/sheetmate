@@ -845,14 +845,14 @@ function answer(option: string) {
           <input
             v-if="editingTitle"
             v-model="titleDraft"
-            class="w-full max-w-md rounded-lg border border-line px-2 py-0.5 text-sm font-semibold outline-none"
+            class="w-full max-w-md rounded-lg border border-line px-2 py-0.5 text-[15px] font-semibold tracking-tight text-ink outline-none"
             autofocus
             @blur="saveTitle"
             @keydown.enter="saveTitle"
           />
           <!-- 编辑图标平时不占位置（不然标题和后面的「脱敏已关闭」中间空出一大块），悬停时才展开 -->
           <button v-else class="group flex max-w-full items-center text-left" @click="startEditTitle">
-            <span class="truncate text-[15px] text-ink/85">{{ detail?.title ?? '…' }}</span>
+            <span class="truncate text-[15px] font-semibold tracking-tight text-ink">{{ detail?.title ?? '…' }}</span>
             <Pencil class="size-3.5 max-w-0 shrink-0 text-faint opacity-0 transition-all group-hover:ml-1.5 group-hover:max-w-3.5 group-hover:opacity-100 group-focus-visible:ml-1.5 group-focus-visible:max-w-3.5 group-focus-visible:opacity-100" />
           </button>
           <span

@@ -111,14 +111,66 @@ def _decode(value: Any) -> Any:
     raise ValueError("脚本返回的单元格类型不受支持")
 
 
+def _encode_column(series: pd.Series) -> list[Any]:
+    dtype = series.dtype
+    if isinstance(dtype, pd.StringDtype):
+        values = series.tolist()
+        if not series.isna().any():
+            return values
+        return [value if type(value) is str else None for value in values]
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return [None if pd.isna(value) else {"__type__": "datetime", "value": value.isoformat()}
+                for value in series.tolist()]
+    if not isinstance(dtype, pd.api.extensions.ExtensionDtype):
+        if pd.api.types.is_integer_dtype(dtype) or dtype == np.bool_:
+            return series.tolist()
+        if pd.api.types.is_float_dtype(dtype):
+            array = series.to_numpy()
+            values = array.tolist()
+            finite = np.isfinite(array)
+            if finite.all():
+                return values
+            return [value if ok else None for value, ok in zip(values, finite.tolist())]
+    values = series.tolist()
+    return [
+        value if (value is None or type(value) is str or type(value) is int or type(value) is bool)
+        else _encode(value)
+        for value in values
+    ]
+
+
+def _decode_row(row: list[Any]) -> list[Any]:
+    fast = True
+    for value in row:
+        kind = type(value)
+        if value is None or kind is int or kind is bool:
+            continue
+        if kind is str:
+            if len(value) > 32767:
+                raise ValueError("脚本返回的单元格文字过长")
+            continue
+        if kind is float:
+            if not math.isfinite(value):
+                raise ValueError("脚本返回的数字必须为有限值")
+            continue
+        fast = False
+        break
+    if fast:
+        return row
+    return [_decode(value) for value in row]
+
+
 def _frame_payload(frame: pd.DataFrame) -> dict[str, Any]:
     if not isinstance(frame, pd.DataFrame):
         raise ValueError("脚本输入表必须是 DataFrame")
     rows, columns = frame.shape
     if rows > MAX_ROWS or columns > MAX_COLUMNS or rows * columns > MAX_CELLS:
         raise ValueError("脚本输入表超过行数、列数或单元格上限")
-    return {"columns": [str(column) for column in frame.columns],
-            "rows": [[_encode(value) for value in row] for row in frame.itertuples(index=False, name=None)]}
+    names = [str(column) for column in frame.columns]
+    if rows == 0 or columns == 0:
+        return {"columns": names, "rows": [[] for _ in range(rows)]}
+    encoded_columns = [_encode_column(frame.iloc[:, idx]) for idx in range(columns)]
+    return {"columns": names, "rows": [list(row) for row in zip(*encoded_columns)]}
 
 
 def _read_frames(payload: Any) -> dict[str, pd.DataFrame]:
@@ -136,7 +188,7 @@ def _read_frames(payload: Any) -> dict[str, pd.DataFrame]:
         total += len(rows) * len(columns)
         if total > MAX_CELLS or any(not isinstance(row, list) or len(row) != len(columns) for row in rows):
             raise ValueError("脚本返回的表格单元格数量或行宽无效")
-        frames[name] = pd.DataFrame([[_decode(value) for value in row] for row in rows], columns=columns)
+        frames[name] = pd.DataFrame([_decode_row(row) for row in rows], columns=columns)
     return frames
 
 
@@ -358,7 +410,10 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
             if interrupted():
                 return outcome
             manifest = {"tables": prepared, "files": aliases, "timeout_seconds": deadline - time.monotonic()}
-            (root / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+            (root / "manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, allow_nan=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
             command = _sandbox_command(root)
             environment = {"PATH": "/usr/bin:/bin", "HOME": str(root / "home"), "TMPDIR": str(root), "LANG": "en_US.UTF-8",
                            "PYTHONIOENCODING": "utf-8", "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}

@@ -28,7 +28,7 @@ from sheetmate.core.errors import Conflict, Forbidden, NotFound, ServiceError
 SCHEMA_VERSION = 1
 DEFAULT_RECOVERY_WINDOW = timedelta(hours=4)
 RECOVERABLE_STATUSES = frozenset({"running", "interrupted", "paused"})
-TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "expired", "blocked"})
+TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "expired", "blocked", "waiting"})
 STATUSES = RECOVERABLE_STATUSES | TERMINAL_STATUSES
 MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
 _UI_EVENT_TOOL = "__checkpoint_ui_event__"
@@ -158,7 +158,10 @@ _GROWING: tuple[tuple[tuple[str, ...], bool], ...] = (
     (("context", "evidence_store"), True),
     (("runtime", "conversation"), True),
     (("runtime", "loop", "messages"), True),
+    (("runtime", "planning_state", "conversation"), True),
+    (("runtime", "planning_state", "ledger", "digests"), True),
     (("runtime", "budget", "results"), True),
+    (("runtime", "budget", "script_attempts"), True),
     (("runtime", "budget", "recoveries"), False),   # 进行中的那条每次都在变，不单独存
     (("runtime", "budget", "recoveries", "*", "state", "results"), True),
     (("ui", "stored"), False),

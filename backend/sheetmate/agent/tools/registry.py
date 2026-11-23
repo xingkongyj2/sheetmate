@@ -277,7 +277,7 @@ class ToolRegistry:
         self._static = {t.name: t for t in _static_tools()}
         for name in ("run_sql", "column_stats", "value_counts", "table_info", "preview_table"):
             self._static[name].process_safe = True
-        for name in ("column_stats", "value_counts", "table_info", "preview_table"):
+        for name in ("column_stats", "value_counts", "table_info", "preview_table", "run_sql"):
             self._static[name].parallel_read_safe = True
 
     def for_context(self, ctx: AgentContext, *, group: str | None = None) -> list[Tool]:

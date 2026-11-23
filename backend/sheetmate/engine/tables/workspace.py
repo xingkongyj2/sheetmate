@@ -119,6 +119,7 @@ class Workspace:
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._lock_depth = 0
         self._con = self._connect()
         self._query_cache: OrderedDict[tuple, tuple[pd.DataFrame, int]] = OrderedDict()
         self._query_cache_bytes = 0
@@ -219,7 +220,11 @@ class Workspace:
     def locked(self):
         """对读取版本、分析与保存记忆等复合操作持有同一把可重入锁。"""
         with self._lock:
-            yield self
+            self._lock_depth += 1
+            try:
+                yield self
+            finally:
+                self._lock_depth -= 1
 
     def exists(self, name: str) -> bool:
         with self._lock:
@@ -512,7 +517,52 @@ class WorkspaceManager:
         self.root = root
         self.max_open = max_open
         self._open: OrderedDict[str, Workspace] = OrderedDict()
+        self._pins: dict[str, int] = {}
         self._lock = threading.Lock()
+
+    def pin(self, key: str) -> None:
+        """标记工作区正在被长任务占用，LRU 淘汰期间不得关闭其 DuckDB 连接。"""
+        with self._lock:
+            self._pins[key] = self._pins.get(key, 0) + 1
+
+    def unpin(self, key: str) -> None:
+        with self._lock:
+            remaining = self._pins.get(key, 0) - 1
+            if remaining <= 0:
+                self._pins.pop(key, None)
+            else:
+                self._pins[key] = remaining
+            self._evict_locked()
+
+    @contextmanager
+    def hold(self, key: str):
+        """在上下文期间固定工作区，防止并发会话超过 max_open 时把活动连接挤掉。"""
+        self.pin(key)
+        try:
+            yield self.get(key)
+        finally:
+            self.unpin(key)
+
+    def _evict_locked(self, *, protect: str | None = None) -> None:
+        if len(self._open) <= self.max_open:
+            return
+        for candidate, old in list(self._open.items()):
+            if len(self._open) <= self.max_open:
+                break
+            if candidate == protect or self._pins.get(candidate, 0) > 0:
+                continue
+            if not old._lock.acquire(blocking=False):
+                continue
+            try:
+                if old._lock_depth > 0:
+                    continue
+                self._open.pop(candidate, None)
+                try:
+                    old._con.close()
+                except duckdb.Error:
+                    pass
+            finally:
+                old._lock.release()
 
     def get(self, key: str) -> Workspace:
         with self._lock:
@@ -522,9 +572,7 @@ class WorkspaceManager:
                 return ws
             ws = Workspace(self.root / f"{key}.duckdb")
             self._open[key] = ws
-            while len(self._open) > self.max_open:
-                _, old = self._open.popitem(last=False)
-                old.close()
+            self._evict_locked(protect=key)
             return ws
 
     def existing_tables(self, key: str) -> list[TableInfo]:
@@ -544,6 +592,7 @@ class WorkspaceManager:
 
     def delete(self, key: str) -> None:
         with self._lock:
+            self._pins.pop(key, None)
             ws = self._open.pop(key, None)
             if ws is not None:
                 ws.close()
@@ -557,3 +606,4 @@ class WorkspaceManager:
             for ws in self._open.values():
                 ws.close()
             self._open.clear()
+            self._pins.clear()

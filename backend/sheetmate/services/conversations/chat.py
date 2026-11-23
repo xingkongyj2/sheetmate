@@ -435,8 +435,8 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         if control:
             result = recorder.execution().get("status")
             status = {"completed": "completed", "failed": "failed", "cancelled": "cancelled",
-                      "interrupted": "interrupted"}.get(result, "paused")
-            control.persist(control.runtime.state if control.runtime else None, status=status)
+                      "interrupted": "interrupted", "waiting": "waiting"}.get(result, "paused")
+            await asyncio.to_thread(control.persist, control.runtime.state if control.runtime else None, status=status)
         if verified and recorder.message_id is not None:
             try:
                 with session_scope() as db:
@@ -762,7 +762,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         await asyncio.to_thread(host.refresh_stale_files)
         # 上传时识别还没完成、载入的是原文的表，现在换成令牌版：AI 和工具从这里开始只碰令牌
         await asyncio.to_thread(privacy_workspace.protect_workspace, ctx.ws)
-        if job.execution_id:     # 脱敏会把原文件改成脱敏版：这是本轮自己的准备工作，不能算成「输入文件被用户改了」而不让续跑
+        if job.execution_id and not resumed:     # 脱敏会把原文件改成脱敏版：仅在首次准备阶段刷新基线，断点续跑时不得覆盖原检查点指纹
             await asyncio.to_thread(_refresh_input_baseline, conversation_id, job.execution_id)
         current = privacy_scope()
         if current is not None:
@@ -901,12 +901,16 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
             await emit({"type": "text_chunk", "content": content})
             await emit({"type": "final_text", "content": content})
 
+    privacy_blocked = False
     try:
         async with execution_resources(job) as resources:
+            resources.enter_context(conv_service.conversation_workspaces.hold(conversation_id))
             if intent.action == "process":
                 ready = bool(control and control.checkpoint.get("analysis_ready"))
-                analysis = resources.enter_context(analysis_workspace(ctx.ws,
-                    root=execution_root(job.execution_id) if control else None, resume=ready))
+                analysis = await asyncio.to_thread(
+                    resources.enter_context,
+                    analysis_workspace(ctx.ws, root=execution_root(job.execution_id) if control else None, resume=ready),
+                )
                 ctx.ws = host.ws = analysis.ws
                 host.analysis = analysis
                 for table in ctx.ws.list_tables():
@@ -917,14 +921,14 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
                         if event.get("type") == "table":
                             name = (event.get("table") or {}).get("name")
                             if name and analysis.ws.exists(name):
-                                analysis.publish(name)
+                                await asyncio.to_thread(analysis.publish, name)
                 if ctx.mode == "analyze" and run_id is None:
                     with session_scope() as db:
                         run_id = run_service.create_run(db, kind="analysis", user_id=user_id, customer_id=ctx.host.customer_id,
                                                         conversation_id=conversation_id, request_text=message).id
                 if control:
                     control.checkpoint["analysis_ready"] = True
-                    control.persist(control.runtime.state)
+                    await asyncio.to_thread(control.persist, control.runtime.state)
             await job.emit({"type": "start", "mode": ctx.mode, "customer": ctx.customer["name"] if ctx.customer else None,
                             "resumed": resumed, "request_message_id": message_id,
                             "assistant_message_id": recorder.message_id, "job_id": job.id})
@@ -991,11 +995,15 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
     except Exception as exc:
         record_event("chat.error", "sheetmate.services.conversations.chat._run_chat.execute", error_data(exc))
         blocked = isinstance(exc, PrivacyBlocked) or getattr(exc, "code", None) == "privacy_blocked"
+        privacy_blocked = blocked
+        if blocked:
+            candidate_parts.clear()
+            candidate_final = ""
         # 脱敏没完成不是「处理出错」，原因本身就是要告诉用户的话
         await emit({"type": "error", "content": str(exc) if blocked else f"处理出错：{exc}",
                     "code": "privacy_blocked" if blocked else getattr(exc, "code", "execution_error")})
 
-    answer = await guard_creation_delivery()
+    answer = "" if privacy_blocked else await guard_creation_delivery()
     if not answer:
         answer = candidate_final or "".join(candidate_parts).strip() or final_text or "".join(text_parts).strip()
     try:
