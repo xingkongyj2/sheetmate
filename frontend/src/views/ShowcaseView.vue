@@ -22,7 +22,7 @@ const router = useRouter()
 const rootEl = ref<HTMLElement | null>(null)
 const navReady = ref(false)
 const scrolled = ref(false)
-const activeSection = ref<'workspace' | 'features' | 'mascots'>('workspace')
+const activeSection = ref<'banner' | 'workspace' | 'features' | 'mascots'>('banner')
 
 let observer: IntersectionObserver | null = null
 
@@ -34,7 +34,7 @@ function enterApp() {
 }
 
 function scrollToSection(id: 'banner' | 'workspace' | 'features' | 'mascots') {
-  if (id !== 'banner') activeSection.value = id
+  activeSection.value = id
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
@@ -42,10 +42,12 @@ function onScroll() {
   scrolled.value = window.scrollY > 32
   const mascotsEl = document.getElementById('mascots')
   const featuresEl = document.getElementById('features')
+  const workspaceEl = document.getElementById('workspace')
   const y = window.scrollY + 280
   if (mascotsEl && y >= mascotsEl.offsetTop) activeSection.value = 'mascots'
   else if (featuresEl && y >= featuresEl.offsetTop) activeSection.value = 'features'
-  else activeSection.value = 'workspace'
+  else if (workspaceEl && y >= workspaceEl.offsetTop) activeSection.value = 'workspace'
+  else activeSection.value = 'banner'
 }
 
 onMounted(() => {
@@ -141,13 +143,21 @@ onBeforeUnmount(() => {
       </nav>
     </header>
 
-    <!-- 首屏：3D 丝绸光雕 + 4 张核心功能悬浮卡 + 抬升呈现的宽幅真实工作台 -->
-    <ShowcaseHeroBanner :cta-label="ctaLabel" @enter="enterApp">
-      <ShowcaseHeroStage />
-    </ShowcaseHeroBanner>
+    <!-- 首屏：100svh 全屏 3D 珠光丝绸光雕 + 多彩小团子群像 + 核心功能悬浮卡 -->
+    <ShowcaseHeroBanner :cta-label="ctaLabel" @enter="enterApp" @explore="scrollToSection('workspace')" />
 
     <!-- 以下全部为干净纯白背景 -->
     <main class="bg-white">
+      <!-- 第二屏：单屏完整呈现宽幅真实工作台演示卡 + 底部 5 场景功能切换 Tab -->
+      <section
+        id="workspace"
+        class="flex min-h-[100svh] flex-col justify-center bg-white px-4 pb-5 pt-[78px] sm:px-6"
+      >
+        <div class="reveal-item w-full">
+          <ShowcaseHeroStage />
+        </div>
+      </section>
+
       <!-- 核心功能区（6 张简约白卡） -->
       <section id="features" class="scroll-mt-20 mx-auto max-w-[1200px] px-4 py-16 sm:px-6 sm:py-24">
         <h2 class="reveal-item mb-12 text-center text-[28px] font-semibold tracking-[-0.025em] text-ink sm:text-[36px]">

@@ -197,13 +197,13 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="mx-auto w-full max-w-[1320px]">
-    <!-- 实际软件壳层（按正常桌面浏览器 16:10 比例展示：1320 × 760） -->
+  <div class="mx-auto flex w-full max-w-[1320px] flex-col">
+    <!-- 实际软件壳层：自适应视口高度，保证卡片 + 下方 5 场景切换 Tab 完整收纳在单屏内 -->
     <div class="relative overflow-hidden rounded-[24px] border border-[#e3e1dc] bg-canvas shadow-[0_30px_90px_-34px_rgba(15,14,12,0.16),0_4px_18px_rgba(15,14,12,0.04)]">
-      <div class="flex min-h-[680px] flex-col lg:h-[760px] lg:flex-row">
+      <div class="flex min-h-[500px] flex-col lg:h-[clamp(500px,calc(100svh-168px),780px)] lg:min-h-0 lg:flex-row">
         <!-- 左侧真实侧边栏（AppSidebar 1:1 复刻） -->
         <aside class="hidden w-[236px] shrink-0 flex-col justify-between p-3 lg:flex">
-          <div>
+          <div class="min-h-0 flex-1 overflow-y-auto">
             <div class="flex h-11 items-center px-2">
               <LogoMark :size="22" with-text class="[&_span]:text-[17px]" />
             </div>
@@ -236,7 +236,7 @@ onBeforeUnmount(() => {
             </nav>
 
             <!-- 客户列表 -->
-            <div class="mt-5 px-3 text-[11px] font-medium text-faint">客户</div>
+            <div class="mt-4 px-3 text-[11px] font-medium text-faint">客户</div>
             <div class="mt-1 space-y-0.5">
               <button
                 v-for="cust in CUSTOMERS"
@@ -252,7 +252,7 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- 对话列表 -->
-            <div class="mt-5 px-3 text-[11px] font-medium text-faint">对话</div>
+            <div class="mt-4 px-3 text-[11px] font-medium text-faint">对话</div>
             <div class="mt-1 space-y-0.5 text-[13px]">
               <button
                 type="button"
@@ -287,23 +287,23 @@ onBeforeUnmount(() => {
         </aside>
 
         <!-- 右侧主内容悬浮白板（AppShell 1:1 复刻） -->
-        <div class="flex flex-1 p-2.5 lg:pl-0">
-          <div class="app-panel flex flex-1 flex-col overflow-hidden rounded-[18px] bg-panel">
+        <div class="flex min-h-0 min-w-0 flex-1 p-2.5 lg:pl-0">
+          <div class="app-panel flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[18px] bg-panel">
             <Transition name="scene-fade" mode="out-in">
               <!-- ========== 01 真实空首页（HomeView 1:1 复刻） ========== -->
               <div
                 v-if="activeScene === 'home'"
                 key="home"
-                class="flex flex-1 flex-col justify-between px-6 pb-5 pt-10 sm:px-12"
+                class="flex min-h-0 flex-1 flex-col justify-between overflow-y-auto px-6 pb-4 pt-8 sm:px-12"
               >
-                <div class="mx-auto flex w-full max-w-[640px] flex-1 flex-col justify-center pb-8">
+                <div class="mx-auto flex w-full max-w-[640px] flex-1 flex-col justify-center pb-4">
                   <div class="flex items-center justify-center gap-3 text-[24px] font-semibold tracking-tight text-ink sm:text-[28px]">
                     <LogoMark :size="30" />
                     <span>你的专属手工账单助手</span>
                   </div>
 
                   <!-- 干净空输入框 + 右上角探头墨墨 + 底部「选择客户」抽屉 -->
-                  <div class="mt-20 w-full">
+                  <div class="mt-12 w-full xl:mt-16">
                     <div class="relative z-10">
                       <div class="pointer-events-none absolute bottom-full right-6 aspect-[33/20] w-[144px] overflow-hidden">
                         <Transition name="peek-pop" mode="out-in">
@@ -392,7 +392,7 @@ onBeforeUnmount(() => {
               <div
                 v-else-if="activeScene === 'chat'"
                 key="chat"
-                class="grid flex-1 divide-y divide-line/80 lg:grid-cols-[1.25fr_0.85fr] lg:divide-x lg:divide-y-0"
+                class="grid min-h-0 flex-1 divide-y divide-line/80 lg:grid-cols-[1.25fr_0.85fr] lg:divide-x lg:divide-y-0"
               >
                 <!-- 左：对话主栏 -->
                 <div class="flex min-h-0 flex-col">
@@ -515,11 +515,11 @@ onBeforeUnmount(() => {
                 </div>
 
                 <!-- 右：真实 ExecutionPanel（5 个标签均可点击切换！） -->
-                <div class="flex flex-col bg-[#fdfdfc]">
-                  <div class="flex h-[52px] items-center px-4">
+                <div class="flex min-h-0 flex-col bg-[#fdfdfc]">
+                  <div class="flex h-[52px] shrink-0 items-center px-4">
                     <span class="text-[15px] font-semibold tracking-tight text-ink">工作区面板</span>
                   </div>
-                  <div class="px-4 pb-3">
+                  <div class="shrink-0 px-4 pb-3">
                     <div class="grid grid-cols-5 gap-0.5 rounded-xl bg-paper p-1 text-xs">
                       <button
                         v-for="t in ([
@@ -540,7 +540,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
 
-                  <div class="flex-1 px-4 pb-5 pt-1">
+                  <div class="min-h-0 flex-1 overflow-y-auto px-4 pb-5 pt-1">
                     <!-- 文件 -->
                     <div v-if="panelTab === 'files'" class="space-y-4">
                       <div>
@@ -658,7 +658,7 @@ onBeforeUnmount(() => {
               <div
                 v-else-if="activeScene === 'customers'"
                 key="customers"
-                class="flex flex-1 flex-col px-6 py-7 sm:px-8"
+                class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-7 sm:px-8"
               >
                 <div class="flex items-center gap-3">
                   <h3 class="text-xl font-semibold tracking-tight text-ink">客户库</h3>
@@ -705,7 +705,7 @@ onBeforeUnmount(() => {
               <div
                 v-else-if="activeScene === 'customer'"
                 key="customer"
-                class="flex flex-1 flex-col px-6 py-6 sm:px-10"
+                class="flex min-h-0 flex-1 flex-col overflow-y-auto px-6 py-6 sm:px-10"
               >
                 <div class="mx-auto w-full max-w-[740px]">
                   <button type="button" class="btn-ink size-8 !p-0" title="返回客户库" @click="goScene('customers')">
@@ -806,7 +806,7 @@ onBeforeUnmount(() => {
               <div
                 v-else
                 key="recipe"
-                class="flex flex-1 flex-col justify-between px-6 py-7 sm:px-10"
+                class="flex min-h-0 flex-1 flex-col justify-between overflow-y-auto px-6 py-6 sm:px-10"
               >
                 <div class="flex flex-wrap items-center justify-between gap-3">
                   <div>
@@ -876,13 +876,13 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- 底部极简 5 场景切换条（默认停在 01 首页，点击自由体验其他页面） -->
-    <div class="mx-auto mt-5 max-w-[780px]">
+    <div class="mx-auto mt-3.5 w-full max-w-[780px] shrink-0">
       <div class="grid grid-cols-2 gap-1.5 rounded-2xl border border-[#e6e4df] bg-white p-1.5 shadow-[0_6px_22px_-12px_rgba(15,14,12,0.1)] sm:grid-cols-5">
         <button
           v-for="scene in SCENES"
           :key="scene.id"
           type="button"
-          class="relative rounded-xl px-3 py-2.5 text-left transition"
+          class="relative rounded-xl px-3 py-2 text-left transition"
           :class="activeScene === scene.id ? 'bg-[#f4f3ef] text-ink' : 'text-mute hover:bg-[#faf9f7] hover:text-ink'"
           @click="goScene(scene.id)"
         >

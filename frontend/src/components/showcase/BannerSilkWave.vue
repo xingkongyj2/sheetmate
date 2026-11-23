@@ -157,11 +157,14 @@ function render(now: number) {
       c.closePath()
 
       const midA = rowA[Math.floor(SEGMENTS * 0.5)]!
-      const shadeAlpha = (0.022 + (1 - vNorm) * 0.026) * openAlpha * opacityScale
+      const shadeAlpha = (0.032 + (1 - vNorm) * 0.036) * openAlpha * opacityScale
       const grad = c.createLinearGradient(0, height * 0.1, width, height * 0.9)
-      grad.addColorStop(0, `rgba(210, 205, 195, ${shadeAlpha})`)
-      grad.addColorStop(Math.max(0.05, Math.min(0.95, sweepPos)), `rgba(255, 255, 255, ${shadeAlpha * 2.5})`)
-      grad.addColorStop(1, `rgba(186, 189, 200, ${shadeAlpha * (midA.sheen + 0.5)})`)
+      // 柔和珠光丝缎色带：暖蜜桃 → 冰雾蓝 → 晶白高光 → 香芋粉 → 鼠尾草绿
+      grad.addColorStop(0, `rgba(244, 174, 140, ${shadeAlpha * 1.15})`)
+      grad.addColorStop(0.28, `rgba(138, 198, 176, ${shadeAlpha * 1.05})`)
+      grad.addColorStop(Math.max(0.32, Math.min(0.68, sweepPos)), `rgba(255, 255, 255, ${shadeAlpha * 2.8})`)
+      grad.addColorStop(0.74, `rgba(164, 152, 234, ${shadeAlpha * 1.15})`)
+      grad.addColorStop(1, `rgba(238, 154, 182, ${shadeAlpha * (midA.sheen + 0.65)})`)
       c.fillStyle = grad
       c.fill()
     }
@@ -205,16 +208,25 @@ function render(now: number) {
       const isHighlightRibbon = s === 0 || s === strandCount - 1 || s === Math.floor(strandCount * 0.5) || s % 9 === 0
 
       const strokeGrad = c.createLinearGradient(0, 0, width, 0)
-      const baseOpacity = (isHighlightRibbon ? 0.3 : 0.115) * Math.max(0.35, edgeFactor) * openAlpha * opacityScale
-      const peakCenter = Math.max(0.12, Math.min(0.88, sweepPos))
+      const baseOpacity = (isHighlightRibbon ? 0.32 : 0.13) * Math.max(0.35, edgeFactor) * openAlpha * opacityScale
+      const peakCenter = Math.max(0.14, Math.min(0.86, sweepPos))
+      // 每条丝线按层位轻染极细腻的珠光粉彩（蜜桃 / 鼠尾草 / 冰蓝 / 香芋），保留高质感克制感
+      const tintStops = [
+        [232, 146, 108], // 蜜桃橘
+        [98, 174, 148],  // 鼠尾草绿
+        [106, 142, 224], // 雾霾蓝
+        [152, 134, 224], // 香芋紫
+        [224, 132, 162], // 草莓粉
+      ] as const
+      const tint = tintStops[s % tintStops.length]!
 
-      strokeGrad.addColorStop(0, 'rgba(24, 24, 27, 0)')
-      strokeGrad.addColorStop(0.12, `rgba(34, 33, 31, ${baseOpacity})`)
-      strokeGrad.addColorStop(Math.max(0.14, peakCenter - 0.14), `rgba(24, 24, 27, ${baseOpacity * 1.18})`)
-      strokeGrad.addColorStop(peakCenter, isHighlightRibbon ? `rgba(255, 255, 255, ${Math.min(0.96, openAlpha * 0.94)})` : `rgba(148, 144, 136, ${baseOpacity * 1.45})`)
-      strokeGrad.addColorStop(Math.min(0.86, peakCenter + 0.14), `rgba(24, 24, 27, ${baseOpacity * 1.18})`)
-      strokeGrad.addColorStop(0.88, `rgba(34, 33, 31, ${baseOpacity})`)
-      strokeGrad.addColorStop(1, 'rgba(24, 24, 27, 0)')
+      strokeGrad.addColorStop(0, `rgba(${tint[0]}, ${tint[1]}, ${tint[2]}, 0)`)
+      strokeGrad.addColorStop(0.12, `rgba(${tint[0]}, ${tint[1]}, ${tint[2]}, ${baseOpacity})`)
+      strokeGrad.addColorStop(Math.max(0.14, peakCenter - 0.14), `rgba(74, 72, 82, ${baseOpacity * 0.95})`)
+      strokeGrad.addColorStop(peakCenter, isHighlightRibbon ? `rgba(255, 255, 255, ${Math.min(0.96, openAlpha * 0.94)})` : `rgba(${tint[0]}, ${tint[1]}, ${tint[2]}, ${baseOpacity * 1.55})`)
+      strokeGrad.addColorStop(Math.min(0.86, peakCenter + 0.14), `rgba(74, 72, 82, ${baseOpacity * 0.95})`)
+      strokeGrad.addColorStop(0.88, `rgba(${tint[0]}, ${tint[1]}, ${tint[2]}, ${baseOpacity})`)
+      strokeGrad.addColorStop(1, `rgba(${tint[0]}, ${tint[1]}, ${tint[2]}, 0)`)
 
       c.beginPath()
       c.moveTo(row[0]!.sx, row[0]!.sy)
@@ -259,13 +271,21 @@ function render(now: number) {
       const breathe = 0.55 + 0.45 * Math.sin(t * 2.1 + g.phase)
       const strength = edgeFade * breathe * glintAlphaBase * (g.veil === 1 ? 1 : 0.65)
 
-      // 渐变高光丝：两头透明渐隐，中段晶润银白
+      // 渐变高光丝：两头透明渐隐，中段晶润微彩高光
+      const glintColors = [
+        [242, 155, 114],
+        [108, 184, 156],
+        [111, 150, 232],
+        [157, 140, 232],
+        [235, 140, 168],
+      ] as const
+      const gc = glintColors[strandIdx % glintColors.length]!
       const grad = c.createLinearGradient(pStart.sx, pStart.sy, pEnd.sx, pEnd.sy)
-      grad.addColorStop(0, 'rgba(255, 255, 255, 0)')
-      grad.addColorStop(0.28, `rgba(42, 40, 38, ${0.26 * strength})`)
+      grad.addColorStop(0, `rgba(${gc[0]}, ${gc[1]}, ${gc[2]}, 0)`)
+      grad.addColorStop(0.28, `rgba(${gc[0]}, ${gc[1]}, ${gc[2]}, ${0.42 * strength})`)
       grad.addColorStop(0.55, `rgba(255, 255, 255, ${0.98 * strength})`)
-      grad.addColorStop(0.78, `rgba(42, 40, 38, ${0.22 * strength})`)
-      grad.addColorStop(1, 'rgba(255, 255, 255, 0)')
+      grad.addColorStop(0.78, `rgba(${gc[0]}, ${gc[1]}, ${gc[2]}, ${0.36 * strength})`)
+      grad.addColorStop(1, `rgba(${gc[0]}, ${gc[1]}, ${gc[2]}, 0)`)
 
       // 外层极轻银白柔光
       c.beginPath()
