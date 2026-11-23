@@ -47,29 +47,17 @@ const fullscreen = ref(false)
 const selection = ref<FlowSelection | null>(null)
 const openFilePreview = useFilePreview()
 const dialog = ref<HTMLElement | null>(null)
-// 右侧节点详情面板：默认宽一点，可以拖左边缘调宽度（记住上次的宽度）
-const SIDE_KEY = 'sheetmate.flow.sidePanelWidth'
-const SIDE_DEFAULT = 460
-const SIDE_MIN = 360
-const SIDE_MAX = 960
+// 右侧节点详情面板：默认与聊天页面工作区面板一致（390px），可以拖左边缘调宽度
+const SIDE_DEFAULT = 390
+const SIDE_MIN = 280
+const SIDE_MAX = 600
 const SIDE_CANVAS_MIN = 320   // 至少给流程图留的宽度
-function loadSideWidth(): number {
-  try {
-    const saved = Number(localStorage.getItem(SIDE_KEY))
-    return Number.isFinite(saved) && saved >= SIDE_MIN && saved <= SIDE_MAX ? saved : SIDE_DEFAULT
-  } catch {
-    return SIDE_DEFAULT
-  }
-}
-const sideWidth = ref(loadSideWidth())
+const sideWidth = ref(SIDE_DEFAULT)
 const workspaceEl = ref<HTMLElement | null>(null)
 const resizingSide = ref(false)
 function clampSide(width: number): number {
   const room = (workspaceEl.value?.clientWidth ?? Infinity) - SIDE_CANVAS_MIN
   return Math.round(Math.max(SIDE_MIN, Math.min(SIDE_MAX, room, width)))
-}
-function saveSideWidth() {
-  try { localStorage.setItem(SIDE_KEY, String(sideWidth.value)) } catch { /* 存不了就只在这次生效 */ }
 }
 function startSideResize(event: PointerEvent) {
   if (event.button !== 0) return
@@ -84,7 +72,6 @@ function moveSideResize(event: PointerEvent) {
 function endSideResize() {
   if (!resizingSide.value) return
   resizingSide.value = false
-  saveSideWidth()
 }
 function keySideResize(event: KeyboardEvent) {
   const step = event.shiftKey ? 80 : 24
@@ -92,11 +79,9 @@ function keySideResize(event: KeyboardEvent) {
   else if (event.key === 'ArrowRight') sideWidth.value = clampSide(sideWidth.value - step)
   else return
   event.preventDefault()
-  saveSideWidth()
 }
 function resetSideWidth() {
   sideWidth.value = clampSide(SIDE_DEFAULT)
-  saveSideWidth()
 }
 const viewport = ref<HTMLElement | null>(null)
 const canvas = ref<HTMLElement | null>(null)
@@ -849,7 +834,7 @@ onBeforeUnmount(() => {
 .flow-hud-btn.is-primary { border-radius: 9999px; background: var(--color-ink); padding: 0 10px; color: #fff; }
 .flow-hud-btn.is-primary:hover { background: #26262a; }
 .flow-workspace.is-resizing { cursor: col-resize; user-select: none; }
-.flow-side { position: relative; width: var(--side-w, 460px); min-width: 360px; max-width: calc(100% - 320px); min-height: 0; flex: none; }
+.flow-side { position: relative; width: var(--side-w, 390px); min-width: 280px; max-width: calc(100% - 320px); min-height: 0; flex: none; }
 .flow-side-panel { width: 100%; height: 100%; min-height: 0; overflow-y: auto; border-radius: 14px; background: var(--color-panel); }
 /* 拖动条：落在两块悬浮面板的 8px 缝隙里，悬停和拖动时亮起柔和细线 */
 .flow-side-resizer { position: absolute; top: 12px; bottom: 12px; left: -9px; z-index: 3; width: 10px; cursor: col-resize; touch-action: none; }

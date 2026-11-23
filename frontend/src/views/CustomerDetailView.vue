@@ -216,43 +216,47 @@ async function importRecipePackage(event: Event) {
       <RouterLink :to="{ name: 'customers' }" class="btn-ink size-8 p-0 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink" title="返回全部客户" aria-label="返回全部客户"><ArrowLeft class="size-3.5" aria-hidden="true" /></RouterLink>
 
       <!-- 头部 -->
-      <header class="mt-5 grid grid-cols-[72px_minmax(0,1fr)] items-center gap-x-4 gap-y-4 sm:grid-cols-[96px_minmax(0,1fr)] sm:gap-x-5">
-        <div class="relative flex size-[72px] items-center justify-center overflow-hidden rounded-[22px] bg-paper sm:size-24 sm:rounded-[28px]">
-          <Mascot :variant="customer.mascot" :size="100" :shadow="false" class="size-[76px] shrink-0 sm:size-[100px]" />
+      <header class="mt-5 flex items-start gap-4 sm:gap-5">
+        <div class="relative flex size-[84px] shrink-0 items-center justify-center overflow-hidden rounded-[24px] bg-paper sm:size-24 sm:rounded-[28px]">
+          <Mascot :variant="customer.mascot" :size="100" :shadow="false" class="size-[88px] shrink-0 sm:size-[100px]" />
         </div>
-        <div class="min-w-0">
-          <div class="flex items-center gap-2">
-            <div class="flex min-w-0 flex-wrap items-baseline gap-x-3 gap-y-1">
-              <h1 class="min-w-0 break-words text-2xl font-semibold leading-snug tracking-tight sm:text-[26px]">{{ customer.name }}</h1>
-              <span v-if="customer.code" class="shrink-0 font-mono text-xs text-faint">{{ customer.code }}</span>
+        <div class="flex min-w-0 flex-1 flex-col sm:min-h-24 sm:justify-between">
+          <div>
+            <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <div class="flex min-w-0 flex-wrap items-baseline gap-x-2.5 gap-y-1">
+                <h1 class="min-w-0 break-words text-2xl font-semibold leading-tight tracking-tight sm:text-[26px]">{{ customer.name }}</h1>
+                <span v-if="customer.code" class="shrink-0 font-mono text-xs text-faint">{{ customer.code }}</span>
+              </div>
+              <div class="flex shrink-0 items-center gap-0.5">
+                <button class="icon-btn size-7 shrink-0" title="编辑客户" @click="editing = true"><Pencil class="size-3.5" /></button>
+                <label
+                  class="icon-btn size-7 shrink-0 cursor-pointer"
+                  :class="{ 'pointer-events-none opacity-45': importingRecipe }"
+                  title="导入完整流程包（.zip）"
+                  aria-label="导入完整流程包"
+                >
+                  <LoaderCircle v-if="importingRecipe" class="size-3.5 animate-spin" /><FolderUp v-else class="size-3.5" />
+                  <input type="file" class="hidden" accept=".zip" :disabled="importingRecipe" @change="importRecipePackage" />
+                </label>
+                <button class="icon-btn size-7 shrink-0 hover:text-error" title="删除客户" aria-label="删除客户" @click="removeCustomer"><Trash2 class="size-3.5" /></button>
+              </div>
             </div>
-            <button class="icon-btn size-7 shrink-0" title="编辑客户" @click="editing = true"><Pencil class="size-3.5" /></button>
-            <label
-              class="icon-btn size-7 shrink-0 cursor-pointer"
-              :class="{ 'pointer-events-none opacity-45': importingRecipe }"
-              title="导入完整流程包（.zip）"
-              aria-label="导入完整流程包"
-            >
-              <LoaderCircle v-if="importingRecipe" class="size-3.5 animate-spin" /><FolderUp v-else class="size-3.5" />
-              <input type="file" class="hidden" accept=".zip" :disabled="importingRecipe" @change="importRecipePackage" />
-            </label>
-            <button class="icon-btn size-7 shrink-0 hover:text-error" title="删除客户" aria-label="删除客户" @click="removeCustomer"><Trash2 class="size-3.5" /></button>
+            <p v-if="customer.description" class="mt-1.5 text-sm leading-relaxed text-mute">{{ customer.description }}</p>
+            <div class="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs leading-5 text-mute">
+              <button
+                type="button"
+                class="rounded transition hover:text-ink hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink"
+                title="查看客户对话"
+                aria-haspopup="dialog"
+                :aria-expanded="conversationsOpen"
+                @click="conversationsOpen = true"
+              ><b class="font-medium text-ink">{{ customer.conversation_count }}</b> 个对话</button>
+              <span>最近活动 {{ timeAgo(customer.last_activity) }}</span>
+            </div>
           </div>
-          <p v-if="customer.description" class="mt-2 text-sm leading-relaxed text-mute">{{ customer.description }}</p>
-          <div class="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-mute">
-            <button
-              type="button"
-              class="rounded transition hover:text-ink hover:underline underline-offset-4 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink"
-              title="查看客户对话"
-              aria-haspopup="dialog"
-              :aria-expanded="conversationsOpen"
-              @click="conversationsOpen = true"
-            ><b class="font-medium text-ink">{{ customer.conversation_count }}</b> 个对话</button>
-            <span>最近活动 {{ timeAgo(customer.last_activity) }}</span>
+          <div class="mt-2.5 flex flex-wrap items-center gap-2 sm:mt-2">
+            <button type="button" class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3.5 py-0 text-xs" @click="newChat"><MessageSquarePlus class="size-3.5" />新建对话</button>
           </div>
-        </div>
-        <div class="col-span-2 flex flex-wrap items-center gap-2 sm:col-span-1 sm:col-start-2">
-          <button type="button" class="btn-ink h-8 gap-1.5 whitespace-nowrap px-3 py-0 text-xs" @click="newChat"><MessageSquarePlus class="size-3.5" />新建对话</button>
         </div>
       </header>
 
@@ -279,9 +283,9 @@ async function importRecipePackage(event: Event) {
         <div class="mx-auto max-w-3xl">
           <h2 v-if="primaryRecipe" class="mb-3 break-words px-1 text-[16px] font-semibold leading-relaxed [text-wrap:balance]">{{ primaryRecipe.name }}</h2>
           <div class="rounded-[26px] bg-white px-6 py-4 shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)] sm:px-9 sm:py-5">
-            <div v-if="hasDisplaySummary" class="mb-3 flex items-center gap-3">
-              <span v-if="customer.summary_updated_at" class="text-xs text-faint">{{ customer.summary_by === 'human' ? '更新于' : '自动更新于' }} {{ timeAgo(customer.summary_updated_at) }}</span>
-              <button v-if="hasSummaryMaterial" class="btn-text ml-auto shrink-0" :disabled="summarizing" @click="regenerate">
+            <div v-if="hasDisplaySummary" class="mb-3 flex items-center justify-between gap-3">
+              <span v-if="customer.summary_updated_at" class="text-xs leading-5 text-faint">{{ customer.summary_by === 'human' ? '更新于' : '自动更新于' }} {{ timeAgo(customer.summary_updated_at) }}</span>
+              <button v-if="hasSummaryMaterial" type="button" class="btn-text -mr-2 ml-auto shrink-0 px-2 py-1 text-xs leading-5" :disabled="summarizing" @click="regenerate">
                 <LoaderCircle v-if="summarizing" class="size-3.5 animate-spin" /><Sparkles v-else class="size-3.5" />重新总结
               </button>
             </div>

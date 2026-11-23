@@ -840,7 +840,7 @@ function answer(option: string) {
   <div class="chat-page flex h-full min-h-0 gap-2">
     <div class="chat-workspace app-panel flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-[14px] bg-panel">
       <!-- 顶部 -->
-      <header class="flex h-[52px] shrink-0 items-center gap-2 px-5">
+      <header class="flex h-10 shrink-0 items-center gap-2 px-5">
         <div class="flex min-w-0 flex-1 items-center gap-2">
           <input
             v-if="editingTitle"
@@ -855,15 +855,14 @@ function answer(option: string) {
             <span class="truncate text-[15px] text-ink/85">{{ detail?.title ?? '…' }}</span>
             <Pencil class="size-3.5 max-w-0 shrink-0 text-faint opacity-0 transition-all group-hover:ml-1.5 group-hover:max-w-3.5 group-hover:opacity-100 group-focus-visible:ml-1.5 group-focus-visible:max-w-3.5 group-focus-visible:opacity-100" />
           </button>
-          <RouterLink
+          <span
             v-if="privacySwitch.enabled.value === false"
-            to="/settings"
             class="flex shrink-0 items-center gap-1 rounded-full bg-error/10 px-2 py-0.5 text-xs font-medium text-error"
-            title="脱敏已关闭：上传文件和发给模型的内容均不做脱敏。点击去设置"
+            title="脱敏已关闭：上传文件和发给模型的内容均不做脱敏"
             data-testid="privacy-off-notice"
           >
             <ShieldOff class="size-3.5" />脱敏已关闭
-          </RouterLink>
+          </span>
         </div>
 
         <RouterLink
@@ -951,7 +950,18 @@ function answer(option: string) {
 
           <!-- 空对话 -->
           <div v-else-if="!messages.length" class="flex flex-col items-center py-16 text-center">
-            <Mascot :variant="customer?.mascot ?? 'blob'" :size="96" />
+            <RouterLink
+              v-if="customer"
+              :to="{ name: 'customer', params: { id: customer.id } }"
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex rounded-2xl transition-transform hover:scale-105 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-ink"
+              title="在新标签页打开客户详情"
+              :aria-label="`在新标签页打开 ${customer.name} 详情`"
+            >
+              <Mascot :variant="customer.mascot" :size="96" />
+            </RouterLink>
+            <Mascot v-else variant="blob" :size="96" />
             <h2 class="mt-5 text-xl font-semibold">{{ customer ? `我已经了解「${customer.name}」了` : '把表格拖进来，告诉我要做什么' }}</h2>
             <p class="mt-2 max-w-md text-sm leading-relaxed text-mute">
               {{ customer ? '我会按这个客户的处理逻辑、流程和业务规则来处理。' : '直接说你的需求，我会自动判断处理方式。' }}
@@ -1064,7 +1074,7 @@ function answer(option: string) {
 
 <style scoped>
 .chat-page {
-  --chat-header-space: 44px;
+  --chat-header-space: 40px;
 }
 .chat-workspace {
   container: chat-workspace / inline-size;

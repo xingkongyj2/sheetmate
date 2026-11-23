@@ -5,7 +5,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 import { conversationApi } from '@/api'
 import { errorText } from '@/api/http'
-import type { ConversationDetail, PrivacyEventItem, PrivacyOverview } from '@/api/types'
+import type { ConversationDetail, PrivacyOverview } from '@/api/types'
 import MascotLoader from '@/components/brand/MascotLoader.vue'
 import type { UiMessage } from '@/composables/chatModel'
 import { cachedOverview, rememberOverview } from '@/composables/privacyOverviewCache'
@@ -111,10 +111,6 @@ const hasDetail = computed(() => { const totals = overview.value?.totals
   return (totals?.sent_values ?? 0) > 0 || (totals?.blocked ?? 0) > 0 })
 const firstTab = computed<DetailTab>(() => { const totals = overview.value?.totals
   return (totals?.sent_values ?? 0) > 0 ? 'sends' : 'blocks' })
-// 处理记录里的「发送检查」「拦截」可以点开，直接看对应的明细
-function detailTab(event: PrivacyEventItem): DetailTab | null {
-  return event.kind === '发送检查' ? 'sends' : event.kind === '拦截' ? 'blocks' : null
-}
 
 // 输入（含期望结果）和输出分开列；仅展示真正有脱敏列（或识别失败）的文件，无需替换的不展示
 const fileGroups = computed(() => {
@@ -126,14 +122,6 @@ const fileGroups = computed(() => {
     { key: 'output', label: '输出文件', files: files.filter((file) => file.kind === 'output') },
   ].filter((group) => group.files.length)
 })
-
-function clock(iso: string): string {
-  const date = new Date(iso)
-  return Number.isNaN(date.getTime()) ? iso : date.toLocaleTimeString('zh-CN', { hour12: false })
-}
-function levelClass(level: PrivacyEventItem['level']): string {
-  return level === 'error' ? '!bg-error/10 !text-error' : level === 'warn' ? '!bg-[#fff1d2] !text-[#9a6b00]' : ''
-}
 </script>
 
 <template>
@@ -196,24 +184,6 @@ function levelClass(level: PrivacyEventItem['level']): string {
             </div>
           </dl>
         </template>
-      </section>
-
-      <section class="grid gap-2" aria-label="处理记录">
-        <div class="label-mini flex items-center gap-2 px-0.5">处理记录<span class="font-normal tabular-nums tracking-normal">{{ overview.events.length }}</span></div>
-        <p v-if="!overview.events.length" class="px-0.5 text-xs text-faint">暂无记录</p>
-        <ol v-else class="divide-y divide-line rounded-xl border border-line">
-          <li v-for="event in overview.events" :key="event.id">
-            <component :is="detailTab(event) ? 'button' : 'div'" :type="detailTab(event) ? 'button' : undefined"
-              class="group/event flex w-full items-start gap-2 px-3 py-2 text-left text-xs leading-6"
-              :class="detailTab(event) ? 'transition hover:bg-paper/60' : ''"
-              @click="detailTab(event) && (showSends = detailTab(event)!)">
-              <time class="shrink-0 font-mono text-[11px] leading-6 tabular-nums text-faint" :datetime="event.time">{{ clock(event.time) }}</time>
-              <span class="tag mt-0.5 shrink-0 !py-0 leading-5" :class="levelClass(event.level)">{{ event.kind }}</span>
-              <span class="min-w-0 flex-1 break-words" :class="event.level === 'error' ? 'text-error' : 'text-mute'">{{ event.text }}</span>
-              <ChevronRight v-if="detailTab(event)" class="mt-[5px] size-3.5 shrink-0 text-faint transition group-hover/event:text-ink" aria-hidden="true" />
-            </component>
-          </li>
-        </ol>
       </section>
     </template>
     <PrivacySendsDialog v-if="showSends && detail" :conversation-id="detail.id" :tab="showSends" @close="showSends = false" />

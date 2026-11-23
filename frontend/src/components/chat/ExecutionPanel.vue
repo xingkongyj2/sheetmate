@@ -213,7 +213,7 @@ onBeforeUnmount(() => {
       @keydown="resizeWithKey"
     />
     <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[13px]">
-    <div class="flex h-[52px] shrink-0 items-center px-4">
+    <div class="flex h-10 shrink-0 items-center px-4">
       <span class="text-[15px] font-semibold tracking-tight text-ink">工作区面板</span>
     </div>
     <div class="shrink-0 px-4 pb-2">
