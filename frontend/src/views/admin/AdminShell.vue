@@ -5,6 +5,7 @@ import {
   ChartColumn,
   Component as FormulaIcon,
   Cpu,
+  House,
   LayoutDashboard,
   LogOut,
   PanelLeft,
@@ -16,7 +17,6 @@ import { useRoute, useRouter } from 'vue-router'
 
 import LogoMark from '@/components/brand/LogoMark.vue'
 import UserAvatar from '@/components/brand/UserAvatar.vue'
-import WorkspaceReturnIcon from '@/components/brand/WorkspaceReturnIcon.vue'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
@@ -150,7 +150,7 @@ async function logout() {
           role="menu"
         >
           <RouterLink :to="{ name: 'home' }" role="menuitem" class="flex items-center gap-2 rounded-xl px-3 py-2 text-sm hover:bg-paper" @click="menuOpen = false">
-            <WorkspaceReturnIcon class="size-4" />返回工作台
+            <House class="size-4" />返回工作台
           </RouterLink>
           <button role="menuitem" class="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-error hover:bg-error/5" @click="logout">
             <LogOut class="size-4" />退出登录

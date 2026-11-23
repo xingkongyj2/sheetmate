@@ -51,6 +51,8 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
     })],
   })
 
+  // 只读比对：静默拦截编辑，允许选中并复制单元格内容
+  univerAPI.setPermissionDialogVisible(false)
   const renderedGate = createRenderedGate(univerAPI)
   let currentUnitId: string | undefined
   let currentSheetId: string | undefined
@@ -195,7 +197,9 @@ export function createCompareViewer(container: HTMLElement): CompareViewer {
         if (disposed || currentUnitId !== unitId) return
         autoFitSheetRows(workbook, nextSnapshot)
         workbook.setEditable(false)
-        await workbook.getWorkbookPermission().setReadOnly()
+        const permission = workbook.getWorkbookPermission()
+        await permission.setReadOnly()
+        await permission.setPoint(univerAPI.Enum.WorkbookPermissionPoint.CopyContent, true)
       } finally {
         formulaWaiter.dispose()
         if (!disposed && currentUnitId === unitId) {

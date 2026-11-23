@@ -34,6 +34,8 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
       formula: { initialFormulaComputing: 1 }, // WHEN_EMPTY：仅对无缓存结果的公式实时计算
     })],
   })
+  // 只读预览：禁止编辑但静默拦截，双击或误按键时不弹出「该范围已被保护」提示框
+  univerAPI.setPermissionDialogVisible(false)
   const renderedGate = createRenderedGate(univerAPI)
   let current: string | undefined
   let disposed = false
@@ -87,7 +89,9 @@ export function createViewer(container: HTMLElement): WorkbookViewer {
         if (disposed || current !== unitId) return
         autoFitSheetRows(workbook, nextSnapshot)
         workbook.setEditable(false)
-        await workbook.getWorkbookPermission().setReadOnly()
+        const permission = workbook.getWorkbookPermission()
+        await permission.setReadOnly()
+        await permission.setPoint(univerAPI.Enum.WorkbookPermissionPoint.CopyContent, true)
       } finally {
         formulaWaiter.dispose()
       }
