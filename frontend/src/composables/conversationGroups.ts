@@ -25,7 +25,7 @@ export function groupByCustomer(customers: CustomerCard[], conversations: Conver
     .sort((a, b) => b.activeAt - a.activeAt)
 }
 
-/** 列表里的短时间：今天显示时刻，昨天显示「昨天」，今年显示月/日，更早显示年/月/日。 */
+/** 列表里的短时间：今天显示时刻，昨天显示「昨天」，今年显示 M月d日，更早显示 YYYY年M月d日。 */
 export function shortTime(at: number | string | null | undefined, now = new Date()): string {
   const value = typeof at === 'number' ? at : time(at)
   if (!value) return ''
@@ -34,6 +34,6 @@ export function shortTime(at: number | string | null | undefined, now = new Date
   const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
   if (value >= dayStart) return `${pad(date.getHours())}:${pad(date.getMinutes())}`
   if (value >= dayStart - 86_400_000) return '昨天'
-  if (date.getFullYear() === now.getFullYear()) return `${date.getMonth() + 1}/${date.getDate()}`
-  return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()}`
+  if (date.getFullYear() === now.getFullYear()) return `${date.getMonth() + 1}月${date.getDate()}日`
+  return `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`
 }
