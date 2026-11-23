@@ -265,6 +265,14 @@ export const recipeApi = {
     (await http.get<RecipeVersionChanges>(`/recipes/${id}/versions/${version}/changes`)).data,
   update: async (id: string, recipe: RecipeJSON) => (await http.put<{ recipe: RecipeBrief }>(`/recipes/${id}`, recipe)).data.recipe,
   remove: async (id: string) => http.delete(`/recipes/${id}`),
+  /** 导入「完整流程包（.zip）」到指定客户（含空客户，仅支持完整格式导入） */
+  importPackage: async (customerId: string, file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return (await http.post<{ recipe: RecipeBrief; imported_files: number }>(
+      `/customers/${customerId}/recipes/import`, form,
+    )).data
+  },
   match: async (id: string, fileIds: string[]) =>
     (await http.post<{ inputs: { alias: string; kind?: 'table' | 'file'; description: string; file_pattern: string; required_columns: string[]; match: { key: string; score: number; filename: string; sheet: string | null } | null }[]; candidates: { key: string; kind?: 'table' | 'file'; filename: string; sheet: string | null; rows: number }[] }>(
       `/recipes/${id}/match`, { file_ids: fileIds })).data,

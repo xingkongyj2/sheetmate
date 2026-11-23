@@ -4,7 +4,7 @@
  * 选客户相当于 Qoder 里「选择目录」，可以不选。发送时：建会话 → 上传附件 → 跳到对话页继续。
  */
 import { storeToRefs } from 'pinia'
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { isNavigationFailure, useRoute, useRouter } from 'vue-router'
 
 import { conversationApi } from '@/api'
@@ -40,6 +40,18 @@ let active = true
 onBeforeUnmount(() => { active = false })
 
 const customer = computed(() => store.customers.find((c) => c.id === customerId.value))
+// 草稿里残留的已删除/无权限客户 ID，列表加载完后自动清掉，避免界面显示「选择客户」却带着失效 ID 发送。
+watch(
+  [() => store.customersLoaded, () => store.customers, customerId, ready],
+  () => {
+    if (!ready.value || !store.customersLoaded || !customerId.value) return
+    if (!store.customers.some((c) => c.id === customerId.value)) {
+      customerId.value = null
+      draft.resetInitializationIfEmpty()
+    }
+  },
+  { immediate: true },
+)
 const fileReferences = computed<FileReference[]>(() => attachments.value.map((item) => ({ filename: item.name, sourceId: item.key, kind: item.kind })))
 const { tableReferences, referencesLoading, referenceErrors } = useLocalFileReferences(files)
 const referencesError = computed(() => {
@@ -86,19 +98,27 @@ async function send() {
   const submittedText = text.value
   const submittedFiles = [...files.value]
   const submittedThinking = thinking.value
-  const submittedCustomer = customerId.value
   const generation = draft.generation
-  function clearSubmitted() {
-    // 上传期间仍可编辑草稿，只清除本次实际提交的内容。
-    if (text.value === submittedText) text.value = ''
-    const submittedKeys = new Set(submittedFiles.map((file) => file.key))
-    files.value = files.value.filter((file) => !submittedKeys.has(file.key))
-    attachments.value = attachments.value.filter((attachment) => !submittedKeys.has(attachment.key))
-    if (customerId.value === submittedCustomer) customerId.value = null
-    draft.resetInitializationIfEmpty()
-  }
   busy.value = true
   try {
+    if (customerId.value && !customer.value && !store.customersLoaded) {
+      await store.refreshCustomers().catch(() => undefined)
+      if (generation !== draft.generation) return
+    }
+    const submittedCustomer = customer.value?.id ?? null
+    if (customerId.value && !submittedCustomer) {
+      customerId.value = null
+      draft.resetInitializationIfEmpty()
+    }
+    function clearSubmitted() {
+      // 上传期间仍可编辑草稿，只清除本次实际提交的内容。
+      if (text.value === submittedText) text.value = ''
+      const submittedKeys = new Set(submittedFiles.map((file) => file.key))
+      files.value = files.value.filter((file) => !submittedKeys.has(file.key))
+      attachments.value = attachments.value.filter((attachment) => !submittedKeys.has(attachment.key))
+      if (customerId.value === submittedCustomer) customerId.value = null
+      draft.resetInitializationIfEmpty()
+    }
     await draft.flush()
     if (generation !== draft.generation) return
     const conv = await conversationApi.create({ customer_id: submittedCustomer })

@@ -4,24 +4,19 @@
  * 「详情」进入流程详情页（运行记录、版本历史、处理详情、设为主流程、删除都在那里）。
  */
 import { Play, SlidersHorizontal, Star } from '@lucide/vue'
-import { computed } from 'vue'
 
 import type { CustomerDetail, FileInfo } from '@/api/types'
 import RecipeFlow from '@/components/recipe/RecipeFlow.vue'
-import { inspectorStates } from '@/composables/recipeFlowInspector'
 
 type CustomerRecipe = CustomerDetail['recipes'][number]
 
-const props = defineProps<{
+defineProps<{
   recipe: CustomerRecipe
   customerId: string
   files?: FileInfo[]
   primary?: boolean
 }>()
 const emit = defineEmits<{ run: [recipeId: string]; changed: [] }>()
-
-const latestRun = computed(() => props.recipe.runs.find((run) => run.recipe_version === props.recipe.version))
-const states = computed(() => inspectorStates([], latestRun.value?.steps ?? []))
 </script>
 
 <template>
@@ -41,8 +36,7 @@ const states = computed(() => inspectorStates([], latestRun.value?.steps ?? []))
       <RecipeFlow
         toolbar-placement="hidden"
         :flow="recipe.flow"
-        :states="states"
-        :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id, recipe: recipe.recipe, files, runId: latestRun?.run_id }"
+        :context="{ title: recipe.name, recipeId: recipe.recipe_id, version: recipe.version, customerId: recipe.customer_id, conversationId: recipe.conversation_id, recipe: recipe.recipe, files }"
         @changed="emit('changed')"
       />
     </div>

@@ -5,7 +5,7 @@ from __future__ import annotations
 from sheetmate.api.customers.schemas import FormulaGenerateBody
 from sheetmate.api.recipes.schemas import GlobalTrialBody, MatchBody, NodeEditBody, RunBody
 
-from typing import Any
+from typing import Any, Literal
 
 from urllib.parse import quote
 
@@ -71,13 +71,36 @@ def version_changes(recipe_id: str, version: int, db: Session = Depends(get_db),
 
 
 @router.get("/recipes/{recipe_id}/package")
-def export_package(recipe_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> Response:
-    """导出流程包（样例输入输出文件 + 处理逻辑）：在聊天里发回来，AI 就能据此重新建立这个流程。"""
+def export_package(recipe_id: str, mode: Literal["exact", "rebuild"] = "exact",
+                   db: Session = Depends(get_db), user: User = Depends(current_user)) -> Response:
+    """导出流程包（.zip）：
+    - mode=exact：完整流程包（*_完整流程包.zip），供客户页直接按原格式导入；
+    - mode=rebuild：对话重建包（*_对话重建包.zip），供拖入聊天页由 AI 重建执行。"""
     recipe = recipe_service.get_recipe(db, recipe_id)
     recipe_service.require_recipe_access(db, user, recipe)
-    filename, data = package_service.export_package(db, recipe)
+    filename, data = package_service.export_package(db, recipe, mode=mode)
     return Response(data, media_type="application/zip",
                     headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"})
+
+
+@router.post("/customers/{customer_id}/recipes/import")
+async def import_package(customer_id: str, background: BackgroundTasks, file: UploadFile = File(...),
+                         db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+    """导入「完整流程包（.zip）」到指定客户（支持导入到空客户，拒绝对话重建包等非完整格式文件）。"""
+    require_customer(db, user, customer_id)
+    data = await file.read()
+    result = package_service.import_package(db, data=data, filename=file.filename or "recipe.zip",
+                                            customer_id=customer_id, user=user)
+    db.commit()
+    for file_id in result["uploaded_file_ids"]:
+        background.add_task(privacy_service.identify_uploaded, file_id)
+    if not result["has_summary"]:
+        background.add_task(customer_service.auto_refresh_summary, customer_id)
+    return {
+        "ok": True,
+        "recipe": recipe_service.recipe_brief(result["record"]),
+        "imported_files": result["imported_files"],
+    }
 
 
 @router.put("/recipes/{recipe_id}")

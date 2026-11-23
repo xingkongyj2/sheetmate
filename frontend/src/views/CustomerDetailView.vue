@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import {
-  ArrowLeft, ArrowRight, LoaderCircle, MessageSquarePlus, Pencil, Sparkles, Star, Trash2,
+  ArrowLeft, ArrowRight, FolderUp, LoaderCircle, MessageSquarePlus, Pencil, Sparkles, Star, Trash2,
 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { customerApi } from '@/api'
+import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerDetail } from '@/api/types'
 import ConversationIcon from '@/components/brand/ConversationIcon.vue'
@@ -167,6 +167,10 @@ async function removeCustomer() {
     action: () => customerApi.remove(customerId),
   })) return
   try {
+    if (homeDraft.customerId === customerId) {
+      homeDraft.selectCustomer(null)
+      homeDraft.resetInitializationIfEmpty()
+    }
     await store.refreshCustomers()
     router.replace({ name: 'customers' })
   } catch (err) {
@@ -177,6 +181,31 @@ async function removeCustomer() {
 async function onEdited() {
   editing.value = false
   await Promise.all([load(), store.refreshCustomers()])
+}
+
+const importingRecipe = ref(false)
+async function importRecipePackage(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || importingRecipe.value) return
+  if (!/\.zip$/i.test(file.name)) {
+    toast.error('客户页仅支持导入「完整流程包（.zip）」')
+    return
+  }
+  importingRecipe.value = true
+  try {
+    const result = await recipeApi.importPackage(props.id, file)
+    if (!active) return
+    const suffix = result.imported_files ? `（含 ${result.imported_files} 个样例文件）` : ''
+    toast.success(`已导入流程「${result.recipe.name}」${suffix}`)
+    await Promise.all([load(), store.refreshCustomers()])
+    if (tab.value !== 'recipes') setTab('recipes')
+  } catch (err) {
+    if (active) toast.error(errorText(err))
+  } finally {
+    if (active) importingRecipe.value = false
+  }
 }
 </script>
 
@@ -198,6 +227,15 @@ async function onEdited() {
               <span v-if="customer.code" class="shrink-0 font-mono text-xs text-faint">{{ customer.code }}</span>
             </div>
             <button class="icon-btn size-7 shrink-0" title="编辑客户" @click="editing = true"><Pencil class="size-3.5" /></button>
+            <label
+              class="icon-btn size-7 shrink-0 cursor-pointer"
+              :class="{ 'pointer-events-none opacity-45': importingRecipe }"
+              title="导入完整流程包（.zip）"
+              aria-label="导入完整流程包"
+            >
+              <LoaderCircle v-if="importingRecipe" class="size-3.5 animate-spin" /><FolderUp v-else class="size-3.5" />
+              <input type="file" class="hidden" accept=".zip" :disabled="importingRecipe" @change="importRecipePackage" />
+            </label>
             <button class="icon-btn size-7 shrink-0 hover:text-error" title="删除客户" aria-label="删除客户" @click="removeCustomer"><Trash2 class="size-3.5" /></button>
           </div>
           <p v-if="customer.description" class="mt-2 text-sm leading-relaxed text-mute">{{ customer.description }}</p>
@@ -274,6 +312,11 @@ async function onEdited() {
         <div v-if="!customer.recipes.length" class="flex flex-col items-center rounded-[24px] bg-white px-6 py-12 text-center shadow-[0_4px_24px_-8px_rgba(34,34,66,0.10),0_0_0_1px_rgba(34,34,66,0.035)]">
           <CustomerEmptyIllustration kind="recipes" />
           <p class="mt-3 text-sm text-faint">还没有流程</p>
+          <label class="btn-ink mt-4 h-9 cursor-pointer gap-1.5 px-4 py-0 text-xs" :class="{ 'pointer-events-none opacity-45': importingRecipe }" title="仅支持导入完整流程包（.zip）">
+            <LoaderCircle v-if="importingRecipe" class="size-3.5 animate-spin" /><FolderUp v-else class="size-3.5" />
+            <span>{{ importingRecipe ? '导入中…' : '导入完整流程包' }}</span>
+            <input type="file" class="hidden" accept=".zip" :disabled="importingRecipe" @change="importRecipePackage" />
+          </label>
         </div>
       </section>
 

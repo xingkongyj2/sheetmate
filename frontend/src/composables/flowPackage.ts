@@ -1,9 +1,10 @@
 /**
- * 流程包：在前端解开，当成一次全新的输入。
+ * 对话重建包：在前端解开，当成一次全新的输入。
  *
  * 解出的输入表格，和用户自己选的文件走同一条上传路径；处理逻辑写进输入框，等同于用户自己打了一段需求。
- * 后端不认识压缩包，也不做任何特殊处理——流程包只是帮用户把「文件 + 需求」一次放进输入框。
+ * 后端不认识压缩包，也不做任何特殊处理——对话重建包只是帮用户把「文件 + 需求」一次放进输入框。
  *
+ * 只接受「对话重建包」（mode="rebuild" 或兼容旧版 v1 流程包）；「完整流程包」（mode="exact"）会提示改到客户页直接导入。
  * 只取输入文件和处理逻辑：包里的输出样例、人工结果样例不导入，也就不做目标文件校验。
  */
 import JSZip from 'jszip'
@@ -70,6 +71,9 @@ export async function unpackFlowPackage(source: Blob | ArrayBuffer): Promise<Unp
     return null
   }
   if (!manifest || typeof manifest !== 'object' || manifest.format !== FORMAT) return null
+  if (manifest.mode === 'exact' || manifest.action === 'import_exact') {
+    throw new Error('这是「完整流程包」，请前往客户页点击导入图标直接导入；如需在聊天中重建，请导出「对话重建包」。')
+  }
   if (Object.keys(zip.files).length > MAX_ENTRIES) throw new Error('流程包里的文件太多。')
 
   let total = 0

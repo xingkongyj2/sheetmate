@@ -10,6 +10,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   const conversations = ref<ConversationBrief[]>([])
   const customers = ref<CustomerCard[]>([])
   const loaded = ref(false)
+  const customersLoaded = ref(false)
 
   async function refreshConversations() {
     conversations.value = await conversationApi.list()
@@ -18,6 +19,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
   async function refreshCustomers() {
     customers.value = await customerApi.list()
+    customersLoaded.value = true
   }
 
   function upsertConversation(conv: ConversationBrief) {
@@ -39,13 +41,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     conversations.value = []
     customers.value = []
     loaded.value = false
+    customersLoaded.value = false
   }
 
   const recent = computed(() => sortByRecent(conversations.value))
   const customerGroups = computed(() => groupByCustomer(customers.value, conversations.value))
 
   return {
-    conversations, customers, loaded, recent, customerGroups,
+    conversations, customers, loaded, customersLoaded, recent, customerGroups,
     refreshConversations, refreshCustomers, upsertConversation, patchConversation, removeConversation, clear,
   }
 })

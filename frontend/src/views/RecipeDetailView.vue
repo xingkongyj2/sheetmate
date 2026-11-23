@@ -3,10 +3,10 @@
  * 流程详情页（整页、单列）：头部（名称、版本、比对、流程图、执行）下面三个标签——
  * 概览（说明 → 输入文件 → 处理节点 → 输出文件 → 核对规则 → 列名对应）、运行记录、版本历史；标签记在地址栏 ?tab= 里。
  * 版本历史里点开某个版本，看它的完整信息和与上一版相比改了什么。
- * 设为主流程、流程数据、导出、删除这些低频操作放在页面最底部。
+ * 设为主流程、两类流程导出、删除这些低频操作放在页面最底部。
  */
 import {
-  ArrowLeft, Braces, Check, ChevronRight, FolderDown, LoaderCircle, Pencil, Play, ShieldCheck, Star, Trash2, Workflow, X,
+  ArrowLeft, Check, ChevronRight, LoaderCircle, MessageSquareText, PackageCheck, Pencil, Play, ShieldCheck, Star, Trash2, Workflow, X,
 } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -15,7 +15,6 @@ import { customerApi, recipeApi } from '@/api'
 import { errorText } from '@/api/http'
 import type { CustomerDetail, RecipeVersion } from '@/api/types'
 import MascotLoader from '@/components/brand/MascotLoader.vue'
-import BaseModal from '@/components/common/BaseModal.vue'
 import RecipeRunsList from '@/components/customer/RecipeRunsList.vue'
 import RecipeVersionDialog from '@/components/customer/RecipeVersionDialog.vue'
 import RunRecipeDialog from '@/components/customer/RunRecipeDialog.vue'
@@ -146,7 +145,6 @@ const versionSource = (v: RecipeVersion) => (v.created_by === 'human' ? '人工�
 // ---- 操作 ----
 const flowView = ref<InstanceType<typeof RecipeFlow> | null>(null)
 const running = ref(false)
-const showJson = ref(false)
 const settingPrimary = ref(false)
 
 async function setPrimary() {
@@ -278,11 +276,21 @@ async function removeRecipe() {
       <!-- 底部操作区：统一的暖灰托盘 + 等高胶囊按钮 -->
       <footer class="recipe-footer mt-10">
         <div class="flex flex-wrap items-center gap-2">
-          <button type="button" class="footer-pill" @click="showJson = true">
-            <Braces class="size-3.5 text-mute" />流程数据
-          </button>
-          <a :href="`/api/recipes/${recipe.recipe_id}/package`" class="footer-pill" download>
-            <FolderDown class="size-3.5 text-mute" />流程导出
+          <a
+            :href="`/api/recipes/${recipe.recipe_id}/package?mode=exact`"
+            class="footer-pill"
+            download
+            title="导出完整流程包（.zip），可直接导入客户页"
+          >
+            <PackageCheck class="size-3.5 text-mute" />导出完整流程包
+          </a>
+          <a
+            :href="`/api/recipes/${recipe.recipe_id}/package?mode=rebuild`"
+            class="footer-pill"
+            download
+            title="导出对话重建包（.zip），拖入聊天页由 AI 重建执行"
+          >
+            <MessageSquareText class="size-3.5 text-mute" />导出对话重建包
           </a>
           <button v-if="!primary" type="button" class="footer-pill" :disabled="settingPrimary" @click="setPrimary">
             <Star class="size-3.5 text-mute" />设为主流程
@@ -305,9 +313,6 @@ async function removeRecipe() {
     />
     <RecipeVersionDialog v-if="openedVersion" :key="openedVersion.version" :recipe-id="recipeId" :item="openedVersion" @close="openedVersion = null" />
     <RunRecipeDialog v-if="running && recipe" :customer-id="customer?.id" :recipe="customer ? { ...recipe, files: workflowFiles([...recipe.files, ...customer.files]) } : recipe" @close="running = false" @done="load" />
-    <BaseModal v-if="showJson && recipe" :title="`${recipe.name} · 流程数据`" width="max-w-4xl" @close="showJson = false">
-      <pre class="max-h-[65vh] overflow-auto rounded-xl bg-paper p-4 font-mono text-xs leading-relaxed">{{ JSON.stringify(recipe.recipe, null, 2) }}</pre>
-    </BaseModal>
   </div>
 </template>
 
