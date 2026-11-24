@@ -142,9 +142,24 @@ def _recipe_result_text(result: dict[str, Any]) -> str:
     if result.get("verification"):
         lines.append(f"与人工结果比对：{result['verification']['summary']}")
     if result.get("file"):
-        sheets = "；".join(f"「{x['sheet']}」{x['rows']} 行 × {len(x.get('columns') or [])} 列（{'、'.join(x.get('columns') or [])}）"
-                          for x in result["report"].get("outputs", []))
-        lines.append(f"输出文件：「{result['file']['filename']}」（右侧可下载），包含 {sheets}")
+        delivered_files = result["file"].get("files") or [result["file"]]
+        for item in delivered_files:
+            item_sheets = item.get("sheets") or []
+            if item_sheets:
+                sheets = "；".join(
+                    f"「{s.get('sheet', '')}」{s.get('rows', '?')} 行 × {len(s.get('columns') or [])} 列（"
+                    + "、".join(c["name"] if isinstance(c, dict) else str(c) for c in (s.get("columns") or []))
+                    + "）"
+                    for s in item_sheets
+                )
+                lines.append(f"输出文件：「{item['filename']}」（右侧可下载），包含 {sheets}")
+            else:
+                sheets = "；".join(
+                    f"「{x['sheet']}」{x['rows']} 行 × {len(x.get('columns') or [])} 列（{'、'.join(x.get('columns') or [])}）"
+                    for x in result["report"].get("outputs", [])
+                )
+                suffix = f"，包含 {sheets}" if sheets else ""
+                lines.append(f"输出文件：「{item['filename']}」（右侧可下载）{suffix}")
     questions = recipe.metadata.get("questions") or []
     delivered = bool(result.get("file")) and result["report"].get("status") in {"success", "warning"}
     if questions and not delivered:

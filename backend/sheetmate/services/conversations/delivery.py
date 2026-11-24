@@ -152,8 +152,12 @@ async def select_delivery(llm: Any, *, request: str, answer: str, candidates: li
         result = result_by_id.get(call_id, {})
         return result.get("ok") is True and result.get("tool") in _GENERATING_TOOLS
 
-    one_batch = len(unique) == 1 or (len(producer_ids) == 1
-        and all(item.get("tool_call_id") == next(iter(producer_ids)) for item in unique))
+    _RECIPE_TOOLS = {"build_recipe", "revise_recipe", "run_recipe"}
+    single_producer = (len(producer_ids) == 1
+                       and all(item.get("tool_call_id") == next(iter(producer_ids)) for item in unique))
+    # 单文件交付直接沿用；单次 Recipe 若产出多个文件，须核对是否存在脚本交付与 output_spec 重复导出。
+    single_tool = result_by_id.get(next(iter(producer_ids)), {}).get("tool") if single_producer else None
+    one_batch = len(unique) == 1 or (single_producer and single_tool not in _RECIPE_TOOLS)
     if one_batch and not _has_later_failure(events, producer_ids):
         if any(not successful_producer(call_id) for call_id in producer_ids):
             return DeliverySelection(summary="候选文件尚无成功的执行结果，尚未确认正式交付。")

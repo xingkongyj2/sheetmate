@@ -39,6 +39,7 @@ from sheetmate.recipe.definition.schema import (
     ValidationRule,
     file_pattern_from_name,
     shorten_recipe_name,
+    step_file_refs,
     step_output_tables,
     step_table_refs,
 )
@@ -240,6 +241,15 @@ def build_recipe(result: dict[str, Any], ctx: LearnContext, base: Recipe | None 
     inputs = build_inputs(ctx, steps, key_columns or {}, base)
     outputs = parse_outputs(result, steps, ctx, base)
     rules = [ValidationRule(**raw) for raw in result.get("validation_rules", [])]
+    if not outputs and _python_delivered_input_tables(steps):
+        # 最终交付已由纯文件 Python 步骤完成，移除针对已省略 output_sheets 的工作表级规则（脚本自带 check 校验仍生效）。
+        rules = []
+    elif outputs:
+        valid_sheets = {out.name for out in outputs}
+        rules = [
+            rule for rule in rules
+            if not rule.params.get("sheet") or rule.params.get("sheet") in valid_sheets
+        ]
     metadata = dict(base.metadata) if base else {}
     if base is not None:
         metadata["revision_base_version"] = ctx.revision.get("base_version", base.version)
@@ -375,6 +385,32 @@ def _dynamic_schema_outputs(steps: list[RecipeStep], library: FormulaLibrary) ->
     return dynamic
 
 
+def _python_delivered_input_tables(steps: list[RecipeStep]) -> set[str]:
+    """返回已被终端纯文件交付 Python 步骤消费的中间表名，避免 output_spec 把同一份数据再重复导出一次。"""
+    consumed_refs = {ref for step in steps if step.enabled for ref in step_file_refs(step)}
+    delivered_inputs: set[str] = set()
+    for step in steps:
+        if not step.enabled or step.kind != "python":
+            continue
+        if step_output_tables(step):
+            continue
+        if any(ref.startswith(f"{step.output}/") for ref in consumed_refs):
+            continue
+        has_delivery = bool(step.params.get("output_files"))
+        if not has_delivery:
+            try:
+                code = resolve_script_code(step.params)
+            except (OSError, ValueError):
+                code = ""
+            has_delivery = bool(code and re.search(r"\bdeliver_files\b", code))
+        if not has_delivery:
+            continue
+        for table in step.params.get("input_tables") or []:
+            if isinstance(table, str) and table:
+                delivered_inputs.add(table)
+    return delivered_inputs
+
+
 def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnContext, base: Recipe | None = None) -> list[OutputSheet]:
     outputs: list[OutputSheet] = []
     table_outputs = [name for step in steps for name in step_output_tables(step)]
@@ -396,8 +432,13 @@ def parse_outputs(result: dict[str, Any], steps: list[RecipeStep], ctx: LearnCon
             split_by=raw.get("split_by"),
             columns=[str(c) for c in columns] if isinstance(columns, list) and columns else None,
         ))
-    if not outputs and known and not ctx.output_revision:
-        last = table_outputs[-1]
+    delivered_sources = _python_delivered_input_tables(steps)
+    if outputs and delivered_sources and not ctx.output_revision and not ctx.expected:
+        # 终端纯文件 Python 步骤已经把这些中间表写入模板/工作簿交付，避免再按 output_spec 重复导出第二份文件。
+        outputs = [out for out in outputs if out.source not in delivered_sources]
+    last_step_tables = step_output_tables(steps[-1]) if steps else []
+    if not outputs and last_step_tables and not ctx.output_revision:
+        last = last_step_tables[-1]
         name = next(iter(ctx.expected)) if len(ctx.expected) == 1 else "结果"
         outputs.append(OutputSheet(name=name, source=last))
     previous = {o.name: o for o in (base.output_spec if base else [])}
