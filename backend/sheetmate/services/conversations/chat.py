@@ -725,8 +725,6 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
             await job.emit({"type": "done"})
             return
         llm = get_llm()
-        if not resumed:
-            _start_early_title(job, user_id, conversation_id, llm, message)    # 标题不等回答：和正式处理同时生成
         ctx, host = await asyncio.to_thread(build_context, user_id, conversation_id, llm)
         if control:
             from sheetmate.agent.memory.short_term.runtime import AgentRuntime
@@ -814,6 +812,9 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         host.defer_delivery = intent.action == "process"
         replace_file_ids = list(intent.replace_file_ids)
         ctx.replace_file_ids = intent.replace_file_ids
+        # 意图确认非纯寒暄后再并行生成标题，避免首轮「你好/你能干什么」永久锁死会话标题。
+        if not resumed and _should_generate_title(intent):
+            _start_early_title(job, user_id, conversation_id, llm, effective_request)
         if intent.files is not None:
             selected_files = select_files(intent.files, files, references)
             with session_scope() as db:
@@ -1082,6 +1083,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         recipe_id=ctx.host.recipe_id, source_message_id=message_id,
         source_turn_id=trace.turn_id if trace is not None else None,
         assistant_message_id=recorder.message_id, memory_candidate=intent.memory_candidate,
+        generate_title=_should_generate_title(intent),
         additional_memory_sources=deepcopy(control.runtime.state.get("steers", [])) if control and control.runtime else None,
     ))
     _background.add(task)
@@ -1750,14 +1752,20 @@ async def shutdown_background() -> None:
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+def _should_generate_title(intent: RequestIntent) -> bool:
+    """仅对进入实际任务或文件查看的轮次起标题，跳过纯寒暄/试探，让首个真实需求决定会话名称。"""
+    return intent.action != "chat"
+
+
 async def _finish_background(llm: Any, user_id: int, conversation_id: str, customer_id: str | None,
                              message: str, answer: str, *, recipe_id: str | None = None,
                              source_message_id: int | None = None, source_turn_id: str | None = None,
                              assistant_message_id: int | None = None,
                              memory_candidate: bool | None = None,
+                             generate_title: bool = True,
                              additional_memory_sources: list[dict[str, Any]] | None = None) -> None:
     started_at = time.monotonic()
-    work = [_maybe_title(conversation_id, llm, message, answer)]
+    work = [_maybe_title(conversation_id, llm, message, answer)] if generate_title else []
     memory_sources = []
     if memory_candidate is not False:
         memory_sources.append((source_message_id, message))

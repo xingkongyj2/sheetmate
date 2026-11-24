@@ -1067,13 +1067,13 @@ async def aux_json(llm: Any, prompt: str, *, system: str | None = None, timeout:
     """限时的 JSON 调用，给计划审查、步骤核对、回答核对这类「可有可无」的环节用。
 
     超时、模型报错和意外异常都不往外抛，而是把原因带回去，由调用方降级并如实告诉用户，同时写一行日志。
-    沿用用户配置的模型等待时间，避免较慢模型被步骤核对的短时钟提前截断。
+    遵循调用方给定的超时上限，并受运行时 hard_idle 约束，避免被主模型长超时静默放大。
     用户点「停止」引发的取消照常向上传递。"""
     cfg = getattr(llm, "cfg", None)
     policy = getattr(cfg, "runtime_policy", None)
-    model_timeout = getattr(cfg, "timeout", timeout)
-    hard_idle = getattr(policy, "llm_hard_idle_seconds", model_timeout)
-    timeout = max(timeout, min(model_timeout, hard_idle))
+    hard_idle = getattr(policy, "llm_hard_idle_seconds", None)
+    if isinstance(hard_idle, (int, float)) and hard_idle > 0:
+        timeout = min(timeout, float(hard_idle))
     extra: dict[str, Any] = {}
     if image_parts:
         extra["image_parts"] = image_parts

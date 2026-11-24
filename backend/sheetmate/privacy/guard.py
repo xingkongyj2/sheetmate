@@ -27,7 +27,7 @@ from sheetmate.privacy.rules import (
     MOBILE_MASKED_RE, MOBILE_RE, PHONE_CTX_RE,
     address_context_ok, cell_text, fold, header_kind, is_label, is_mobile, normalize_header, phone_context_ok,
 )
-from sheetmate.privacy.vault import MIN_KNOWN_CHARS, TOKEN_RE, Vault
+from sheetmate.privacy.vault import MIN_KNOWN_CHARS, PREFIXES, TOKEN_BODY, TOKEN_RE, Vault
 
 FORCED = "!"       # 列类型后面带它：手动指定的整列，不管内容是什么每一格都换成这个类型的令牌
 _JSON_START = re.compile(r"(?:^|(?<=[\s:：=]))[\[{]", re.M)      # 一段 JSON 可能的起点：行首，或前面是空白、冒号、等号
@@ -45,10 +45,18 @@ _QUOTED_NAME = re.compile(r"^(?:新列)?[「『\"“](.+?)[」』\"”]")
 _NAME_END = re.compile(r"[（(：:，,\s]")
 # 已知的敏感值整段出现时才替换：以空白、引号、逗号、顿号、括号、竖线为界，所以不会误伤别的值里恰好含有它的片段
 _VALUE_RUN = re.compile(r"""[^\s'"“”‘’,，、;；|\[\](){}<>（）]+""")
-_PARTIAL_TOKEN = re.compile(
-    r"(?:T(?:E(?:L(?:_[A-Z2-7]{0,13})?)?)?|M(?:A(?:I(?:L(?:_[A-Z2-7]{0,13})?)?)?)?|I(?:M(?:_[A-Z2-7]{0,13})?)?"
-    r"|A(?:D(?:D(?:R(?:_[A-Z2-7]{0,13})?)?)?)?)$"
-)
+def _partial_token_pattern() -> re.Pattern[str]:
+    """按当前全部令牌前缀（含手动列 TXT 等）动态生成半截令牌匹配，供流式还原跨分片暂存。"""
+    branches: list[str] = []
+    for prefix in PREFIXES:
+        expr = f"(?:_[A-Z2-7]{{0,{TOKEN_BODY}}})?"
+        for ch in reversed(prefix[1:]):
+            expr = f"(?:{re.escape(ch)}{expr})?"
+        branches.append(f"{re.escape(prefix[0])}{expr}")
+    return re.compile(f"(?:{'|'.join(branches)})$")
+
+
+_PARTIAL_TOKEN = _partial_token_pattern()
 _WORD_CHAR = re.compile(r"[A-Za-z0-9_]")
 
 
@@ -598,9 +606,13 @@ class Guard:
         if "im" in active:
             add("im", (m.group(1) for m in IM_CTX_RE.finditer(bare)))
         if "address" in active:
-            add("address", (bare[start:end] for start, end in find_addresses(bare)))
+            add("address", (bare[start:end] for start, end in find_addresses(bare)
+                            if split_address(bare[start:end])[1].strip()))
             add("address", (m.group(1) for m in ADDR_CTX_RE.finditer(bare)
-                            if address_context_ok(m.group(1)) and split_address(m.group(1))[1].strip()))
+                            if address_context_ok(m.group(1))
+                            and not is_label(m.group(1))
+                            and not _cannot_be("address", m.group(1), m.group(1).strip())
+                            and split_address(m.group(1))[1].strip()))
 
     def _walk_leaks(self, obj: Any, found: list[tuple[str, str]], limit: int, depth: int = 0) -> None:
         if len(found) >= limit:

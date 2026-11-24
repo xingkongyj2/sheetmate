@@ -331,12 +331,14 @@ def check_record(plan: Plan, ledger: _Ledger) -> str:
 
 
 async def _stream(executor: AgentExecutor, messages: list[dict[str, Any]], tools: list[Any], ctx: AgentContext, budget: Any,
-                  run: _Run, ledger: _Ledger, *, step: int | None, scope: str, activity: str = "") -> AsyncIterator[dict[str, Any]]:
+                  run: _Run, ledger: _Ledger, *, step: int | None, scope: str, activity: str = "",
+                  skip_completion_check: bool = False) -> AsyncIterator[dict[str, Any]]:
     """跑一次 ReAct 循环。step 不为空时是某一项：文字是这一项的汇报，不是最终回答；
     为空时是最终回答阶段：回答文字先扣在 run.held 里，等核对完再放出。
     activity 不为空时，每次工具返回之后补一条临时状态：模型接着分析、写汇报时界面上没有别的变化，要让用户知道还在做什么。"""
     async for event in executor.agent_stream(messages, tools, ctx, transcript=run.transcript, budget=budget,
-                                             scope=scope, stop_scope="step" if step is not None else "task"):
+                                             scope=scope, stop_scope="step" if step is not None else "task",
+                                             skip_completion_check=skip_completion_check):
         kind = event["type"]
         if kind == "text_chunk":
             if step is None:
@@ -577,7 +579,7 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
             await checkpoint_plan(active_step=num)
             run = _Run()
             async for event in _stream(executor, conversation, tools, ctx, budget, run, ledger, step=num, activity=doing,
-                                       scope=step_scopes[num]):
+                                       scope=step_scopes[num], skip_completion_check=not health.degraded):
                 yield event
             if run.steered:
                 async for event in executor.continue_runtime(ctx, message, history):
@@ -705,7 +707,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
     reflect_messages = [*conversation, {"role": "user", "content": reflect}]
     final = _Run()
     async for event in _stream(executor, reflect_messages, tools, ctx, budget, final, ledger, step=None, activity="正在整理结论",
-                               scope=f"原始任务：{message}\n整体验收：{'；'.join(plan.acceptance)}\n根据实际执行证据整理最终回答，核对全部目标是否完成。"):
+                               scope=f"原始任务：{message}\n整体验收：{'；'.join(plan.acceptance)}\n根据实际执行证据整理最终回答，核对全部目标是否完成。",
+                               skip_completion_check=bool(ledger.digests)):
         yield event
     held = final.held
     ledger.digests.extend(_tool_digest(final.transcript, final.results_ok, 0, final.protocol_results, final.evidence))
@@ -726,7 +729,8 @@ async def execute_thinking(executor: AgentExecutor, ctx: AgentContext, message: 
             fix_messages = [*reflect_messages, *final.transcript, {"role": "user", "content": THINK_AUDIT_FIX_MESSAGE.format(
                 issues="\n".join(f"- {issue}" for issue in audit.issues))}]
             async for event in _stream(executor, fix_messages, tools, ctx, budget, fix, ledger, step=None, activity="正在核实更正",
-                                       scope=f"原始任务：{message}\n核实更正回答并确认全部目标已完成。"):
+                                       scope=f"原始任务：{message}\n核实更正回答并确认全部目标已完成。",
+                                       skip_completion_check=True):
                 yield event
             # A correction is only publishable after the same audit is run
             # against the corrected answer. A successful ReAct stop or a

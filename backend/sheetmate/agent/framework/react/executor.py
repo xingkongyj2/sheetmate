@@ -554,7 +554,8 @@ class AgentExecutor:
     async def agent_stream(self, messages: list[dict[str, Any]], tools: list[Tool], ctx: AgentContext,
                            transcript: list[dict[str, Any]] | None = None,
                            budget: _ToolBudget | None = None, scope: str | None = None,
-                           stop_scope: str = "task") -> AsyncIterator[dict[str, Any]]:
+                           stop_scope: str = "task", *,
+                           skip_completion_check: bool = False) -> AsyncIterator[dict[str, Any]]:
         """transcript 不为空时，把这一轮新增的消息（工具调用、工具结果、最终回答）追加进去，供计划模式接续上下文。"""
         msgs = list(messages)
         start = len(msgs)
@@ -978,7 +979,15 @@ class AgentExecutor:
                     recovery_finish_prompts += 1
                     continue
                 conflicts_accepted = False
-                if tools:
+                # 思考模式在步骤结束后由外层 verify_step、终稿后由 audit_answer 专职核对；
+                # 当本轮已有工具证据（步骤内）或已有正文（终稿）且未触发上限时，跳过重复的内层 check_completion。
+                run_completion_check = bool(tools) and not (
+                    skip_completion_check and not limit_code and (
+                        (stop_scope == "step" and any(item.get("role") == "tool" for item in msgs[start:]))
+                        or (stop_scope == "task" and bool(display.strip()))
+                    )
+                )
+                if run_completion_check:
                     yield {"type": "activity", "text": "正在确认任务完成情况"}
                     check_id = uuid4().hex
                     yield {"type": "completion_check_start", **model_call, "call_id": check_id,
@@ -1043,8 +1052,9 @@ class AgentExecutor:
                         return
                 terminal = (stop("completed", "conflict_unresolved", "回答已交付，个别说法与自动核对存在分歧，已在回答中标注。")
                             if conflicts_accepted else
-                            stop("completed", limit_code or "model_stop", "任务完成情况已核对。" if tools else "本轮回答已结束。",
-                                 verified=bool(tools)))
+                            stop("completed", limit_code or "model_stop",
+                                 "任务完成情况已核对。" if run_completion_check else ("待外层核对。" if skip_completion_check and tools else "本轮回答已结束。"),
+                                 verified=run_completion_check))
                 if runtime is not None:
                     snapshot_loop(snapshot_messages=msgs + ([reply] if display else []), terminal_events=[
                         terminal, {"type": "final_text", "content": display}])

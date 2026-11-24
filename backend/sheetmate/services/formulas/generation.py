@@ -150,8 +150,15 @@ async def generate_formula(db: Session, customer: Customer | None, llm: Any, *, 
             picked.setdefault(file_id, None)
         elif picked.get(file_id, []) is not None:
             picked[file_id] = [*(picked.get(file_id) or []), sheet]
-    files = list(await asyncio.gather(*(asyncio.to_thread(_file_context, records[file_id].filename, records[file_id].stored_path, picked[file_id])
-                                        for file_id in unique_ids)))
+    def _protected_file_context(file_id: str, filename: str, stored_path: str, sheet_names: list[str] | None) -> dict[str, Any]:
+        from sheetmate.services.privacy.masked_files import masked_path
+
+        resolved = masked_path(file_id, Path(stored_path))
+        return _file_context(filename, resolved, sheet_names)
+
+    files = list(await asyncio.gather(*(asyncio.to_thread(
+        _protected_file_context, file_id, records[file_id].filename, records[file_id].stored_path, picked[file_id]
+    ) for file_id in unique_ids)))
     contexts = {records[file_id].filename: item for file_id, item in zip(unique_ids, files)}
     # 选的表的先后顺序：指定了工作表的按选的来；只给文件的取它的第一张
     order: list[tuple[str, str]] = []

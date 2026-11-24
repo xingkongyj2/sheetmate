@@ -238,12 +238,14 @@ ADDR_CTX_RE = re.compile(r"(?<!下载)(?<!网)(?<!邮件)(?<!IP)(?<!MAC)(?<!URL)
                          r"(?:收货地址|收件地址|收货地|收件地|寄件地址|寄件地|派送地址|取件地址|详细地址|联系地址|家庭住址|住址|地址)"
                          r"\s*(?::|(?<![!<>])=(?!=))\s*([^\r\n,;|。，；]{4,60})")
 
-# SQL / 代码表达式（如 s.地址=n.地址、COALESCE(...)、JSON 转义换行 \n）：不是自然语言里的详细地址
+# SQL / 代码表达式（如 s.地址=n.地址、表1.地址=表2.地址、WHERE 地址 = 0 AND 金额 > 100、COALESCE(...)、JSON 转义换行 \n）：不是自然语言里的详细地址
 _CODE_EXPR_RE = re.compile(
     r"(?:\\[nrt])"
-    r"|^[A-Za-z_]\w*(?:\.|\[|\()"
-    r"|\b(?:SELECT\s+|GROUP\s+BY\b|ORDER\s+BY\b|(?:LEFT|RIGHT|INNER|OUTER)\s+JOIN\b|CASE\s+WHEN\b|IS\s+(?:NOT\s+)?NULL\b|UNION\s+(?:ALL\s+)?SELECT\b)"
-    r"|\b(?:COALESCE|TRIM|CAST|SUBSTR|REPLACE)\s*\(",
+    r"|^[^\W\d]\w*(?:\.[^\W\d]\w*|\[|\()"
+    r"|\b(?:SELECT\s+|GROUP\s+BY\b|ORDER\s+BY\b|(?:LEFT|RIGHT|INNER|OUTER|FULL|CROSS)\s+JOIN\b"
+    r"|CASE\s+WHEN\b|IS\s+(?:NOT\s+)?NULL\b|UNION\s+(?:ALL\s+)?SELECT\b|LIMIT\s+\d+\b|OFFSET\s+\d+\b|HAVING\s+)"
+    r"|\b(?:AND|OR)\s+(?:NOT\s+)?(?:[\"'`\[]?[^\W\d]\w*(?:\.[^\W\d]\w*)?[\"'`\]]?\s*(?:=|!=|<>|>=|<=|>|<|\b(?:IS|IN|NOT|LIKE|ILIKE|BETWEEN)\b)|\()"
+    r"|\b(?:COALESCE|TRIM|LTRIM|RTRIM|CAST|SUBSTR|SUBSTRING|REPLACE|NULLIF|CONCAT|LOWER|UPPER|LENGTH)\s*\(",
     re.I,
 )
 

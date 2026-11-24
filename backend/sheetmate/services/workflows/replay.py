@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -154,11 +156,22 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
                 repairer = LLMStepRepairer(get_llm())
             except LLMError:
                 repairer = None
+        active_sources = sources
+        if repair:
+            from sheetmate.services.privacy.masked_files import masked_path
+
+            async def _mask_source(src: InputSource) -> InputSource:
+                if not src.file_id or src.path is None:
+                    return src
+                resolved = await asyncio.to_thread(masked_path, src.file_id, src.path)
+                return replace(src, path=resolved)
+
+            active_sources = {alias: await _mask_source(src) for alias, src in sources.items()}
         ws = run_service.run_workspaces.get(run_id)
         runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=repairer,
                               field_mapping_authoritative=bool(recipe.customer_id),
                               max_repair=settings.repair_max_attempts, run_id=run_id)
-        async for event in runner.run(sources, output_path=out_path, history=history):
+        async for event in runner.run(active_sources, output_path=out_path, history=history):
             if event.get("type") == "recipe_run_start":
                 event = {**event, "recipe_persisted": True}
             elif event.get("type") == "recipe_run_done":

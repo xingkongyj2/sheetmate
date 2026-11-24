@@ -82,7 +82,11 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
                    for table in ctx.visible_tables()],
         "plan_steps": plan_steps or [],
         "files": [{key: file.get(key) for key in ("file_id", "filename", "kind", "created_at", "scope_label", "tables", "media_type", "intermediate", "delivery_status")}
-                  | {"sheets": [sheet.get("sheet") for sheet in file.get("sheets", [])]}
+                  | {
+                      "sheets": [sheet.get("sheet") for sheet in file.get("sheets", [])],
+                      "replaceable": (file.get("kind") == "output" and not file.get("intermediate")
+                                      and file.get("delivery_status") in {None, "final"}),
+                  }
                   for file in files or []],
         "file_references": file_references or [],
         "message": message,
@@ -112,11 +116,15 @@ async def infer_request(llm: Any, ctx: AgentContext, message: str, history: list
     available = {file["file_id"]: file for file in files or []}
     if (not isinstance(replacements, list) or any(not isinstance(file_id, str) or file_id not in available
             or available[file_id].get("kind") != "output"
-            or available[file_id].get("intermediate")
-            or available[file_id].get("delivery_status") not in {None, "final"}
             for file_id in replacements)):
         raise LLMError("无法确认要更新的已有结果，本次尚未处理文件。只能更新当前可访问的已交付结果，上传原件保持不变。")
-    return RequestIntent(mode, replace_file_ids=tuple(dict.fromkeys(replacements)),
+    # 未确认的候选文件（candidate）或过程文件（intermediate）不属于已交付结果，忽略替换目标而不中断续跑。
+    confirmed_replacements = tuple(dict.fromkeys(
+        file_id for file_id in replacements
+        if not available[file_id].get("intermediate")
+        and available[file_id].get("delivery_status") in {None, "final"}
+    ))
+    return RequestIntent(mode, replace_file_ids=confirmed_replacements,
                          save_recipe=result.get("save_recipe") is True,
                          task_relation=result.get("task_relation", "continue"), **hints)
 

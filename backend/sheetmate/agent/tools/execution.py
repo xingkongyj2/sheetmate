@@ -129,32 +129,28 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
             for name in host_baseline.keys() - vars(host).keys() - {"ws"}:
                 vars(ctx.host).pop(name, None)
 
-    def trace(frame, event, arg):
-        if (cancelled.is_set() and event == "line"
-                and frame.f_globals.get("__name__") not in {__name__, "sheetmate.agent.tools.worker"}):
-            raise _ToolCancelled()
-        return trace
-
     def run():
         future.set_running_or_notify_cancel()
         try:
             # The cooperative tracer handles Python work; native pure data
             # computations run in a separate, killable process instead.
             if not use_worker:
-                # Restrict cancellation checks to the tool and domain code.
-                # Raising inside SQLAlchemy/SQLite/threading cleanup would
-                # interrupt the very rollback/release paths we must preserve.
+                # 仅在函数调用（call）边界且已触发取消时检查，避免返回行级 tracer 导致
+                # 正常执行路径承受 ~4x 纯 Python 逐行回调减速；同时跳过 DB/工作区清理帧。
                 implementation_module = getattr(tool.run, "__module__", "")
 
                 def domain_trace(frame, event, arg):
+                    if event != "call" or not cancelled.is_set():
+                        return None
                     module = frame.f_globals.get("__name__", "")
-                    if (module.startswith("sheetmate.db.")
+                    if (module in {__name__, "sheetmate.agent.tools.worker"}
+                            or module.startswith("sheetmate.db.")
                             or module in {"sheetmate.engine.tables.workspace", "sheetmate.engine.workbooks.copies",
                                           "sheetmate.services.execution.workspace"}
                             or frame.f_code.co_name in {"close", "aclose", "__exit__", "__aexit__", "cleanup"}):
                         return None
                     if module == implementation_module or module.startswith("sheetmate."):
-                        return trace(frame, event, arg)
+                        raise _ToolCancelled()
                     return None
 
                 sys.settrace(domain_trace)

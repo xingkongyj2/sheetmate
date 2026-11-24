@@ -24,10 +24,13 @@ from sheetmate.engine.tables.workspace import Workspace
 _SINGLE_TABLE_READS = frozenset({"table_info", "value_counts", "column_stats", "preview_table"})
 
 
-# 只读、单表的轻量工具以及轻量只读 SQL：表不大时子进程启动（约 0.4 秒）远比计算本身（毫秒级）昂贵，直接在进程内执行。
-# 大表仍走可杀死的子进程。超时/取消依旧由调用方的协作式取消和 DuckDB interrupt 负责。
+# 小表上的纯读取工具、轻量 SQL（含物化结果表）和公式算子：表不大时子进程冷启动（约 0.5 秒）与
+# DataFrame pickle 往返远比计算本身（毫秒级）昂贵，直接在进程内执行；大表及复杂多表关联仍走可杀死的子进程。
+# 超时/取消依旧由调用方的协作式取消和 DuckDB interrupt 负责。
 IN_PROCESS_READ_MAX_CELLS = 400_000
 IN_PROCESS_JOIN_MAX_ROWS_PER_TABLE = 50_000
+IN_PROCESS_WRITE_JOIN_MAX_ROWS_PER_TABLE = 20_000
+IN_PROCESS_WRITE_MAX_TABLES = 3
 
 _WORKER_ENV_ALLOWLIST = (
     "PATH", "HOME", "TMPDIR", "TEMP", "TMP",
@@ -46,36 +49,39 @@ def _worker_environment() -> dict[str, str]:
     return env
 
 
+def _within_in_process_limits(ctx: Any, references: list[str], *, write: bool) -> bool:
+    if write and (getattr(ctx, "parallel_read_only", False) or len(references) > IN_PROCESS_WRITE_MAX_TABLES):
+        return False
+    max_join_rows = IN_PROCESS_WRITE_JOIN_MAX_ROWS_PER_TABLE if write else IN_PROCESS_JOIN_MAX_ROWS_PER_TABLE
+    total_cells = 0
+    for table in references:
+        info = ctx.ws.require(table)
+        if len(references) > 1 and info.rows > max_join_rows:
+            return False
+        total_cells += info.rows * max(1, len(info.columns))
+        if total_cells > IN_PROCESS_READ_MAX_CELLS:
+            return False
+    return True
+
+
 def runs_in_process(name: str, args: dict[str, Any], ctx: Any) -> bool:
-    """小表上的纯读取工具与轻量只读 SQL 是否可以不经子进程执行。任何不确定都回到子进程，由子进程路径给出原有的报错。"""
+    """小表上的读取工具、轻量 SQL 与公式算子是否可直接在进程内执行。任何不确定均回退到隔离子进程。"""
     if name in _SINGLE_TABLE_READS:
         try:
             from sheetmate.agent.tools.presentation import _assert_table_scope
 
             table = args["table"]
             _assert_table_scope(ctx, [table])
-            info = ctx.ws.require(table)
-            return info.rows * max(1, len(info.columns)) <= IN_PROCESS_READ_MAX_CELLS
+            return _within_in_process_limits(ctx, [table], write=False)
         except Exception:
             return False
-    if name == "run_sql" and not args.get("result_name"):
+    if name == "run_sql" or (getattr(ctx, "library", None) is not None and ctx.library.has(name)):
         try:
-            from sheetmate.agent.tools.presentation import _assert_table_scope
-            from sheetmate.agent.tools.sql_scope import checked_sql_tables
-            from sheetmate.engine.tables.sql import assert_single_select
-
-            sql = assert_single_select(str(args.get("sql", "")))
-            references = list(dict.fromkeys(checked_sql_tables(ctx, sql)))
-            _assert_table_scope(ctx, references)
-            total_cells = 0
-            for table in references:
-                info = ctx.ws.require(table)
-                if len(references) > 1 and info.rows > IN_PROCESS_JOIN_MAX_ROWS_PER_TABLE:
-                    return False
-                total_cells += info.rows * max(1, len(info.columns))
-                if total_cells > IN_PROCESS_READ_MAX_CELLS:
-                    return False
-            return True
+            references = _input_tables(name, args, ctx)
+            if references is None:
+                return False
+            write = name != "run_sql" or bool(args.get("result_name"))
+            return _within_in_process_limits(ctx, references, write=write)
         except Exception:
             return False
     return False

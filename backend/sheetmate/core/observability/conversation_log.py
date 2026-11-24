@@ -9,10 +9,12 @@ remain unchanged.
 
 from __future__ import annotations
 
+import atexit
 import contextvars
 import json
 import logging
 import os
+import queue
 import re
 import threading
 from collections.abc import Callable, Iterator, Mapping
@@ -36,6 +38,10 @@ except ImportError:  # Windows uses the process lock (the server runs one worker
 
 log = logging.getLogger(__name__)
 _LOCK = threading.RLock()
+_WRITE_QUEUE: queue.Queue[tuple[ConversationTrace, bytes, int] | None] = queue.Queue()
+_DELETE_GEN: dict[str, int] = {}
+_WRITER_THREAD: threading.Thread | None = None
+_WRITER_START_LOCK = threading.Lock()
 _CURRENT: contextvars.ContextVar[ConversationTrace | None] = contextvars.ContextVar("conversation_trace", default=None)
 _PHASE: contextvars.ContextVar[str | None] = contextvars.ContextVar("conversation_trace_phase", default=None)
 _SECRET_FIELDS = {"authorization", "proxy_authorization", "cookie", "set_cookie", "x_api_key", "api_key",
@@ -121,20 +127,57 @@ class ConversationTrace:
     _started: bool = field(default=False, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
     _marker_pos: int | None = field(default=None, init=False, repr=False)
+    _last_llm_msg_hashes: list[str] = field(default_factory=list, init=False, repr=False)
+    _last_llm_tools_hash: str | None = field(default=None, init=False, repr=False)
+    _compact_lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     @property
     def end_marker(self) -> bytes:
         return f"===== TURN END {self.turn_id} =====\n".encode("ascii")
 
+    def _compact_llm_request(self, data: Any) -> Any:
+        """同轮连续 LLM 调用只增量记录新增消息与变化的 tools 定义，避免 O(N^2) 百兆级日志膨胀。"""
+        if not isinstance(data, Mapping):
+            return data
+        out = dict(data)
+        with self._compact_lock:
+            tools = out.get("tools")
+            if isinstance(tools, list):
+                tools_hash = sha256(
+                    json.dumps(tools, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+                ).hexdigest()
+                if tools_hash == self._last_llm_tools_hash:
+                    out["tools"] = {"_unchanged": True, "count": len(tools), "sha256": tools_hash[:16]}
+                else:
+                    self._last_llm_tools_hash = tools_hash
+            messages = out.get("messages")
+            if isinstance(messages, list):
+                current_hashes = [
+                    sha256(json.dumps(item, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")).hexdigest()
+                    for item in messages
+                ]
+                prefix = 0
+                for prev, curr in zip(self._last_llm_msg_hashes, current_hashes):
+                    if prev != curr:
+                        break
+                    prefix += 1
+                self._last_llm_msg_hashes = current_hashes
+                if prefix > 0:
+                    out["messages_prefix_omitted"] = prefix
+                    out["messages_total"] = len(messages)
+                    out["messages"] = messages[prefix:]
+        return out
+
     def record(self, event: str, function: str, data: Any = None, **metadata: Any) -> None:
         try:
             stamp = datetime.now().astimezone().isoformat(timespec="milliseconds")
+            logged_data = self._compact_llm_request(data) if event == "llm.request" else data
             payload = {**({"phase": _PHASE.get()} if _PHASE.get() else {}),
-                       **metadata, "data": data}
+                       **metadata, "data": logged_data}
             # Header strings are supplied by code, never by a user or model.
             entry = f"[{stamp}] {event} | {function}\n" + json.dumps(
                 _normalise(payload), ensure_ascii=False, separators=(",", ":"), allow_nan=False) + "\n"
-            self._write(entry.encode("utf-8"))
+            _enqueue_write(self, entry.encode("utf-8"))
         except Exception:
             log.exception("无法写入对话日志 conversation=%s turn=%s", self.conversation_id, self.turn_id)
 
@@ -239,9 +282,67 @@ def _conversation_exists(conversation_id: str) -> bool:
     return _conversation_probe is not None and _conversation_probe(conversation_id)
 
 
+def _writer_loop() -> None:
+    while True:
+        item = _WRITE_QUEUE.get()
+        try:
+            if item is None:
+                return
+            trace, entry, generation = item
+            with _LOCK:
+                if _DELETE_GEN.get(trace.conversation_id, 0) != generation:
+                    trace._closed = True
+                    continue
+                trace._write(entry)
+        except Exception:
+            log.exception("后台写入对话日志失败")
+        finally:
+            _WRITE_QUEUE.task_done()
+
+
+def _ensure_writer() -> None:
+    global _WRITER_THREAD
+    if _WRITER_THREAD is not None and _WRITER_THREAD.is_alive():
+        return
+    with _WRITER_START_LOCK:
+        if _WRITER_THREAD is not None and _WRITER_THREAD.is_alive():
+            return
+        thread = threading.Thread(target=_writer_loop, daemon=True, name="sheetmate-conversation-log-writer")
+        thread.start()
+        _WRITER_THREAD = thread
+
+
+def _enqueue_write(trace: ConversationTrace, entry: bytes) -> None:
+    with _LOCK:
+        if trace._closed:
+            return
+        generation = _DELETE_GEN.get(trace.conversation_id, 0)
+    _ensure_writer()
+    _WRITE_QUEUE.put((trace, entry, generation))
+
+
+def flush_conversation_logs(timeout: float = 5.0) -> bool:
+    """等待后台日志队列全部落盘；供关闭进程或测试同步读取日志前使用。"""
+    if _WRITER_THREAD is None or not _WRITER_THREAD.is_alive():
+        return True
+    done = threading.Event()
+
+    def _wait() -> None:
+        _WRITE_QUEUE.join()
+        done.set()
+
+    waiter = threading.Thread(target=_wait, daemon=True)
+    waiter.start()
+    return done.wait(timeout)
+
+
+atexit.register(flush_conversation_logs)
+
+
 def delete_conversation_log(conversation_id: str) -> None:
     """Commit-time cleanup, serialized with a trace's first check/create write."""
     with _LOCK:
+        _DELETE_GEN[conversation_id] = _DELETE_GEN.get(conversation_id, 0) + 1
         conversation_log_path(conversation_id).unlink(missing_ok=True)
 
 

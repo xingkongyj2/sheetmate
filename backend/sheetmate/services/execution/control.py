@@ -17,6 +17,7 @@ from sheetmate.db.models import AgentExecution, AgentToolReceipt, Conversation, 
 from sheetmate.services.conversations import service as conversations
 from sheetmate.services.execution import state as state_store
 from sheetmate.services.files import service as files
+from sheetmate.services.memory.table_profiles import FILE_VERSION_KEY, cached_content_digest
 from sheetmate.core.errors import Conflict, ServiceError
 from sheetmate.services.execution.jobs import Job, jobs
 
@@ -34,12 +35,11 @@ def input_snapshot(db: Any, conv: Conversation, baseline: dict[str, Any] | None 
         if baseline is not None and record.kind == "output" and record.id not in previous:
             continue
         path = Path(record.stored_path)
-        digest = hashlib.sha256()
         if path.is_file():
-            with path.open("rb") as stream:
-                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            identities[record.id] = digest.hexdigest()
+            previous_version = (record.profile or {}).get(FILE_VERSION_KEY)
+            identities[record.id] = cached_content_digest(
+                path, previous=previous_version if isinstance(previous_version, dict) else None,
+            )
         else:
             identities[record.id] = "missing"
     tables = {table.name: table.revision for table in conversations.workspace(conv.id).list_tables()

@@ -430,6 +430,7 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
             with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
                 process = subprocess.Popen(command, cwd=root, env=environment, stdin=subprocess.DEVNULL,
                                            stdout=stdout, stderr=stderr, **options)
+                last_resource_check = time.monotonic()
                 try:
                     while process.poll() is None:
                         if interrupted():
@@ -437,15 +438,18 @@ def execute_script(code: str, tables: dict[str, pd.DataFrame], files: dict[str, 
                         if _regular_size(stdout_path) + _regular_size(stderr_path) > MAX_LOG_BYTES:
                             outcome.status, outcome.error = "output_limit", "脚本日志过多，请只打印摘要"
                             break
-                        total_bytes = _temporary_usage(root)
-                        if total_bytes > MAX_TOTAL_BYTES + input_bytes + MAX_RESPONSE_BYTES:
-                            outcome.status, outcome.error = "output_limit", "脚本临时输出超过大小上限"
-                            break
-                        if sys.platform == "darwin":
-                            rss = subprocess.run(["/bin/ps", "-o", "rss=", "-p", str(process.pid)], capture_output=True, text=True, timeout=1)
-                            if rss.stdout.strip().isdigit() and int(rss.stdout.strip()) * 1024 > MAX_RSS_BYTES:
-                                outcome.status, outcome.error = "memory_limit", "脚本内存使用超过上限，请分批处理"
+                        now_tick = time.monotonic()
+                        if now_tick - last_resource_check >= 0.25:
+                            last_resource_check = now_tick
+                            total_bytes = _temporary_usage(root)
+                            if total_bytes > MAX_TOTAL_BYTES + input_bytes + MAX_RESPONSE_BYTES:
+                                outcome.status, outcome.error = "output_limit", "脚本临时输出超过大小上限"
                                 break
+                            if sys.platform == "darwin":
+                                rss = subprocess.run(["/bin/ps", "-o", "rss=", "-p", str(process.pid)], capture_output=True, text=True, timeout=1)
+                                if rss.stdout.strip().isdigit() and int(rss.stdout.strip()) * 1024 > MAX_RSS_BYTES:
+                                    outcome.status, outcome.error = "memory_limit", "脚本内存使用超过上限，请分批处理"
+                                    break
                         time.sleep(0.05)
                 finally:
                     if process.poll() is None:
