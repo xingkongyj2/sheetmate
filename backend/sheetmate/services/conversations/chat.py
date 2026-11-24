@@ -399,14 +399,23 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
     run_id = saved.get("run_id")
     llm = None
     last_checkpoint = 0.0
+    checkpoint_lock = asyncio.Lock()
 
-    def checkpoint(*, force: bool = False) -> None:
+    async def checkpoint(*, force: bool = False) -> None:
         nonlocal last_checkpoint
-        if force or time.monotonic() - last_checkpoint >= 1:
+        if not force and time.monotonic() - last_checkpoint < 1:
+            return
+        async with checkpoint_lock:
+            if not force and time.monotonic() - last_checkpoint < 1:
+                return
             snapshot = getattr(llm, "usage_snapshot", None)
             if callable(snapshot):
                 recorder.llm_usage = snapshot()
-            _save_assistant(conversation_id, "".join(text_parts).strip() or final_text, stored, recorder, run_id, finalize=False)
+            content_snapshot = "".join(text_parts).strip() or final_text
+            stored_snapshot = list(stored)
+            await asyncio.to_thread(
+                _save_assistant, conversation_id, content_snapshot, stored_snapshot, recorder, run_id, finalize=False,
+            )
             if control:
                 control.assistant_message_id = recorder.message_id
             last_checkpoint = time.monotonic()
@@ -464,7 +473,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
                               "code": "user_stop" if user_stop else "system_cancelled",
                               "summary": recorder.error, "source": job.cancel_source or "system"})
 
-    checkpoint(force=True)
+    await checkpoint(force=True)
 
     async def finish_reply() -> None:
         if not reply_parts:
@@ -472,7 +481,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         event = {"type": "reply", "content": "".join(reply_parts)}
         reply_parts.clear()
         stored.append(_slim(event))
-        checkpoint(force=True)
+        await checkpoint(force=True)
         await job.emit(event)
 
     async def emit(event: dict[str, Any]) -> None:
@@ -512,15 +521,15 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
                 reply_parts.append(content)
             final_text = "".join(text_parts).strip()
             await finish_reply()
-            checkpoint(force=True)
+            await checkpoint(force=True)
             return  # reply 结束当前正文块，兼顾实时展示与历史恢复。
         elif event["type"] in _KEEP_EVENTS:
             stored.append(_slim(event))
         if analysis is not None and event["type"] == "table":
             name = event.get("table", {}).get("name")
             if name and analysis.ws.exists(name):
-                analysis.publish(name)
-        checkpoint(force=event["type"] != "text_chunk" and event["type"] not in {"thinking", "recipe_thinking"})
+                await asyncio.to_thread(analysis.publish, name)
+        await checkpoint(force=event["type"] != "text_chunk" and event["type"] not in {"thinking", "recipe_thinking"})
         await job.emit(event)
 
     async def finalize_deliveries(answer: str) -> str:
@@ -630,7 +639,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
             if durable_confirmation is not None:
                 control.checkpoint, control.version = durable_confirmation, confirmation_version
         if confirmed_ids is not None:
-            ctx, host = build_context(user_id, conversation_id, None)
+            ctx, host = await asyncio.to_thread(build_context, user_id, conversation_id, None)
             await job.emit({"type": "start", "mode": "analyze", "customer": ctx.customer["name"] if ctx.customer else None,
                             "resumed": resumed, "request_message_id": message_id,
                             "assistant_message_id": recorder.message_id, "job_id": job.id})
@@ -703,7 +712,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
                 text_parts.append(answer)
                 final_text = answer
                 await job.emit({"type": "reply", "content": answer, "replayed": True})
-                checkpoint(force=True)
+                await checkpoint(force=True)
             else:
                 await emit({"type": "text_chunk", "content": answer})
                 await emit({"type": "final_text", "content": answer})
@@ -718,7 +727,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
         llm = get_llm()
         if not resumed:
             _start_early_title(job, user_id, conversation_id, llm, message)    # 标题不等回答：和正式处理同时生成
-        ctx, host = build_context(user_id, conversation_id, llm)
+        ctx, host = await asyncio.to_thread(build_context, user_id, conversation_id, llm)
         if control:
             from sheetmate.agent.memory.short_term.runtime import AgentRuntime
             control.restore_context(ctx, llm)
@@ -845,7 +854,7 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
                             relation="continue", save_recipe=ctx.save_recipe_requested)
             if control:
                 control.checkpoint["intent"] = asdict(intent)
-                control.persist(control.runtime.state)
+                await asyncio.to_thread(control.persist, control.runtime.state)
     except asyncio.CancelledError:
         cancel_execution()
         await finish_execution("")
@@ -913,9 +922,12 @@ async def _run_chat_body(job: Job, user_id: int, conversation_id: str, message: 
                 )
                 ctx.ws = host.ws = analysis.ws
                 host.analysis = analysis
-                for table in ctx.ws.list_tables():
-                    if table.file_id:
-                        host.file_path(table.file_id)
+                def _stage_file_copies() -> None:
+                    for table in ctx.ws.list_tables():
+                        if table.file_id:
+                            host.file_path(table.file_id)
+
+                await asyncio.to_thread(_stage_file_copies)
                 if resumed:
                     for event in stored:
                         if event.get("type") == "table":
@@ -1916,7 +1928,7 @@ async def clarify(user: User, conversation_id: str, message: str, *, http_reques
         status = "failed"
         try:
             llm = get_llm()
-            ctx, host = build_context(user.id, conversation_id, llm)
+            ctx, host = await asyncio.to_thread(build_context, user.id, conversation_id, llm)
             # 澄清判断要看这个会话里的文件：只给正式输入和输出文件脱敏，不扫描中间过程文件
             files = [item["file_id"] for item in host.list_files()
                      if item.get("file_id") and privacy_service.needs_scan(item.get("kind", ""), item)]

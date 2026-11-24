@@ -184,8 +184,12 @@ export const conversationApi = {
   /** thinking=true 是思考模式：后端先规划、再逐步执行并核对，中途不需要用户确认计划 */
   chat: (id: string, body: { message: string; attachments?: string[]; thinking?: boolean; recipe_edit?: RecipeEditRequest }, onEvent: (e: AgentEvent) => void) =>
     postStream(`/conversations/${id}/chat`, body, onEvent),
-  events: (id: string, jobId: string, onEvent: (e: AgentEvent) => void) =>
-    getStream(`/conversations/${id}/events?job_id=${encodeURIComponent(jobId)}&snapshot=true`, onEvent),
+  events: (id: string, jobId: string, onEvent: (e: AgentEvent) => void, lastEventId?: string | null) =>
+    getStream(
+      `/conversations/${id}/events?job_id=${encodeURIComponent(jobId)}${lastEventId ? '' : '&snapshot=true'}`,
+      onEvent,
+      lastEventId ?? undefined,
+    ),
 }
 
 // ---------------------------------------------------------------- 文件

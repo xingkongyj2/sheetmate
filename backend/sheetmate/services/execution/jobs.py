@@ -21,6 +21,27 @@ from sheetmate.core.observability.conversation_log import (
 from sheetmate.core.errors import Conflict
 
 
+def _coalesce_snapshot_events(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """合并快照里相邻的纯 text_chunk 碎片，减少刷新页面时的快照事件数量与前端渲染开销。"""
+    merged: list[dict[str, Any]] = []
+    text_buf: list[str] = []
+
+    def flush() -> None:
+        if text_buf:
+            merged.append({"type": "text_chunk", "content": "".join(text_buf)})
+            text_buf.clear()
+
+    for event in history:
+        if (event.get("type") == "text_chunk" and len(event) == 2
+                and isinstance(event.get("content"), str)):
+            text_buf.append(event["content"])
+        else:
+            flush()
+            merged.append(event)
+    flush()
+    return merged
+
+
 @dataclass
 class Job:
     key: str
@@ -112,7 +133,7 @@ class Job:
             async with self._changed:
                 history = list(self._history)
                 cursor = len(history)
-            yield cursor if cursor else None, {"type": "stream_snapshot", "events": history}
+            yield cursor if cursor else None, {"type": "stream_snapshot", "events": _coalesce_snapshot_events(history)}
         while True:
             async with self._changed:
                 if cursor >= len(self._history) and not self.finished:
@@ -180,7 +201,7 @@ class JobManager:
                 if job.message_id is not None:
                     from sheetmate.services.conversations.chat import persist_unfinished_job
 
-                    event = persist_unfinished_job(job, status=status, code=code, summary=summary)
+                    event = await asyncio.to_thread(persist_unfinished_job, job, status=status, code=code, summary=summary)
                     if event:
                         await job.emit(event)
                         needs_error = True
@@ -202,7 +223,7 @@ class JobManager:
                 if job.message_id is not None:
                     from sheetmate.services.conversations.chat import persist_unfinished_job
 
-                    event = persist_unfinished_job(job, status="failed", code=code, summary=summary)
+                    event = await asyncio.to_thread(persist_unfinished_job, job, status="failed", code=code, summary=summary)
                     if event:
                         await job.emit(event)
                         needs_error = True

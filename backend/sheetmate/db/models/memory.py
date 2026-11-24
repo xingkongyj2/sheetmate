@@ -57,12 +57,12 @@ class Memory(Base):
     __tablename__ = "memories"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True, default=_memory_id_default)
-    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     customer_id: Mapped[str | None] = mapped_column(
-        ForeignKey("customers.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("customers.id", ondelete="CASCADE"), nullable=True, index=True
     )
     conversation_id: Mapped[str | None] = mapped_column(
-        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("conversations.id", ondelete="CASCADE"), nullable=True, index=True
     )
     # 流程身份不随版本变化；未绑定流程的旧记忆在主流程初始化时迁移。
     recipe_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)

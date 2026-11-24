@@ -16,10 +16,10 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("cv"))
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
     # 绑定客户后按客户记忆对话；为空表示临时会话，数据只属于这个会话
     customer_id: Mapped[str | None] = mapped_column(
-        ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("customers.id", ondelete="SET NULL"), nullable=True, index=True
     )
     recipe_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     title: Mapped[str] = mapped_column(String(200), default="新对话")
@@ -43,7 +43,7 @@ class Message(Base):
     __tablename__ = "messages"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"))
+    conversation_id: Mapped[str] = mapped_column(ForeignKey("conversations.id", ondelete="CASCADE"), index=True)
     role: Mapped[str] = mapped_column(String(16))  # user / assistant
     content: Mapped[str] = mapped_column(Text, default="")
     # 执行过程事件（工具调用、结果表、Recipe 步骤、文件…），刷新页面后用来还原右侧执行明细

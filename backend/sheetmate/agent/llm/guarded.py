@@ -10,6 +10,7 @@ get_llm() 是项目里调用 AI 的唯一入口，这里把它拿到的模型（
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any, AsyncIterator
 
@@ -160,7 +161,7 @@ class GuardedLLM:
         if not self._sync_rules():
             return await self._inner.chat(messages, tools, **extra)
         await self._verify_files()
-        guard, protected = self._protect_messages(messages)
+        guard, protected = await asyncio.to_thread(self._protect_messages, messages)
         return await self._inner.chat(protected, tools, **extra)       # 回来的内容原样给，令牌不还原
 
     async def stream_chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None,
@@ -170,7 +171,7 @@ class GuardedLLM:
                 yield chunk
             return
         await self._verify_files()
-        _, protected = self._protect_messages(messages)
+        _, protected = await asyncio.to_thread(self._protect_messages, messages)
         async for chunk in self._inner.stream_chat(protected, tools, *args, **kwargs):
             yield chunk                                                # 回来的内容原样给，令牌不还原
 
@@ -178,6 +179,6 @@ class GuardedLLM:
         if not self._sync_rules():
             return await self._inner.complete_json(prompt, system, *args, **kwargs)
         await self._verify_files()
-        _, (prompt_p, system_p) = self._protect_strings(prompt, system)
+        _, (prompt_p, system_p) = await asyncio.to_thread(self._protect_strings, prompt, system)
         system_p = f"{system_p}\n\n{token_legend()}" if system_p else token_legend()
         return await self._inner.complete_json(prompt_p, system_p, *args, **kwargs)     # 令牌不还原

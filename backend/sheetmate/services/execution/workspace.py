@@ -16,13 +16,14 @@ from sheetmate.services.memory.table_profiles import persist_workspace_memories
 logger = logging.getLogger(__name__)
 
 
-def _copy_table(source: Workspace, target: Workspace, name: str) -> None:
+def _copy_table(source: Workspace, target: Workspace, name: str):
     info = source.require(name)
     meta = info.to_dict()
     for key in ("name", "rows", "columns"):
         meta.pop(key, None)
-    target.put_dataframe(name, source.df(name), **meta)
+    copied = target.put_dataframe(name, source.df(name), **meta)
     copy_table_memory(info, target, name)
+    return copied
 
 
 @dataclass
@@ -64,8 +65,8 @@ def analysis_workspace(source: Workspace, *, root: Path | None = None, resume: b
             expected_revisions = {name: tuple(value) for name, value in json.loads(manifest.read_text()).items()}
         else:
             for table in source.list_tables():
-                _copy_table(source, scratch, table.name)
-                expected_revisions[table.name] = (table.revision, scratch.require(table.name).revision)
+                copied = _copy_table(source, scratch, table.name)
+                expected_revisions[table.name] = (table.revision, copied.revision)
             manifest.write_text(json.dumps(expected_revisions), encoding="utf-8")
         yield AnalysisWorkspace(source, scratch, root)
     finally:

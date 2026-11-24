@@ -8,6 +8,7 @@ import { ApiError } from './http.ts'
 export interface StreamHandle {
   done: Promise<void>
   abort: () => void
+  getLastEventId: () => string | null
 }
 
 export function postStream(url: string, body: unknown, onEvent: (event: AgentEvent) => void): StreamHandle {
@@ -18,12 +19,20 @@ export function postStream(url: string, body: unknown, onEvent: (event: AgentEve
   }, onEvent)
 }
 
-export function getStream(url: string, onEvent: (event: AgentEvent) => void): StreamHandle {
-  return stream(url, { method: 'GET', headers: { Accept: 'text/event-stream' } }, onEvent)
+export function getStream(url: string, onEvent: (event: AgentEvent) => void, lastEventId?: string): StreamHandle {
+  const headers: Record<string, string> = { Accept: 'text/event-stream' }
+  if (lastEventId) headers['Last-Event-ID'] = lastEventId
+  return stream(url, { method: 'GET', headers }, onEvent, lastEventId ?? null)
 }
 
-function stream(url: string, init: RequestInit, onEvent: (event: AgentEvent) => void): StreamHandle {
+function stream(
+  url: string,
+  init: RequestInit,
+  onEvent: (event: AgentEvent) => void,
+  initialEventId: string | null = null,
+): StreamHandle {
   const controller = new AbortController()
+  let lastEventId: string | null = initialEventId
   const done = (async () => {
     const resp = await fetch(`/api${url}`, {
       ...init,
@@ -52,10 +61,17 @@ function stream(url: string, init: RequestInit, onEvent: (event: AgentEvent) => 
         while ((boundary = /\r?\n\r?\n/.exec(buffer))) {
           const chunk = buffer.slice(0, boundary.index)
           buffer = buffer.slice(boundary.index + boundary[0].length)
-          const payload = chunk.split(/\r?\n/)
-            .filter((line) => line.startsWith('data:'))
-            .map((line) => line.slice(5).replace(/^ /, ''))
-            .join('\n')
+          const lines = chunk.split(/\r?\n/)
+          const dataLines: string[] = []
+          for (const line of lines) {
+            if (line.startsWith('id:')) {
+              const idValue = line.slice(3).replace(/^ /, '')
+              if (idValue && !idValue.includes('\0')) lastEventId = idValue
+            } else if (line.startsWith('data:')) {
+              dataLines.push(line.slice(5).replace(/^ /, ''))
+            }
+          }
+          const payload = dataLines.join('\n')
           if (!payload) continue
           if (payload === '[DONE]') return
           let event: AgentEvent
@@ -72,5 +88,5 @@ function stream(url: string, init: RequestInit, onEvent: (event: AgentEvent) => 
       reader.releaseLock()
     }
   })()
-  return { done, abort: () => controller.abort() }
+  return { done, abort: () => controller.abort(), getLastEventId: () => lastEventId }
 }

@@ -120,6 +120,7 @@ class ConversationTrace:
     _require_conversation: bool = field(default=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
     _closed: bool = field(default=False, init=False, repr=False)
+    _marker_pos: int | None = field(default=None, init=False, repr=False)
 
     @property
     def end_marker(self) -> bytes:
@@ -169,12 +170,20 @@ class ConversationTrace:
                     marker = self.end_marker
                     # Starting a new UUID turn must not scan a potentially huge
                     # existing conversation log. Recovery still finds its marker.
-                    position = None if self._fresh else _find_marker(stream, size, marker)
+                    position: int | None = None
+                    if not self._fresh:
+                        if self._marker_pos is not None and self._marker_pos + len(marker) <= size:
+                            stream.seek(self._marker_pos)
+                            if stream.read(len(marker)) == marker:
+                                position = self._marker_pos
+                        if position is None:
+                            position = _find_marker(stream, size, marker)
                     if position is None:
                         stream.seek(size)
                         prefix = _SEPARATOR if size else b""
-                        stream.write(prefix + f"===== TURN BEGIN {self.turn_id} =====\n".encode("ascii") + entry
-                                     + marker)
+                        begin = f"===== TURN BEGIN {self.turn_id} =====\n".encode("ascii")
+                        stream.write(prefix + begin + entry + marker)
+                        self._marker_pos = size + len(prefix) + len(begin) + len(entry)
                     else:
                         # Usually just the end marker; only late background work
                         # needs to move subsequent turns. Never read the whole log.
@@ -188,6 +197,7 @@ class ConversationTrace:
                             cursor = start
                         stream.seek(position)
                         stream.write(entry)
+                        self._marker_pos = position + len(entry)
                     stream.flush()
                     self._fresh = False
                 finally:

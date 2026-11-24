@@ -120,7 +120,7 @@ class RecipePipeline:
         revising = base is not None and bool(instruction)
         yield {"type": "recipe_learn_start", "mode": mode, "inputs": list(ctx.input_frames), "expected": list(ctx.expected)}
         if ctx.expected and ctx.diff is None:
-            ctx.diff = diff_tables(ctx.input_frames, ctx.expected)
+            ctx.diff = await asyncio.to_thread(diff_tables, ctx.input_frames, ctx.expected)
         if ctx.diff:
             yield {"type": "recipe_evidence", "diff": diff_view(ctx.diff)}
 
@@ -172,14 +172,14 @@ class RecipePipeline:
                 feedback = _validation_feedback(report["validation"])
             elif ctx.expected and revising:
                 # 修订是用户有意改了规则：和原人工结果的对比只作参考（看看改动之外有没有误伤），不据此自动修正
-                attempt.verification = verify_outputs(runner.collect_outputs(), ctx.expected)
+                attempt.verification = await asyncio.to_thread(lambda: verify_outputs(runner.collect_outputs(), ctx.expected))
                 attempt.verification["informational"] = True
                 yield {"type": "recipe_verify", "report": attempt.verification, "round": round_no, "informational": True}
                 if stage != "validation":
                     break
                 feedback = _validation_feedback(report["validation"])
             elif ctx.expected:
-                attempt.verification = verify_outputs(runner.collect_outputs(), ctx.expected)
+                attempt.verification = await asyncio.to_thread(lambda: verify_outputs(runner.collect_outputs(), ctx.expected))
                 yield {"type": "recipe_verify", "report": attempt.verification, "round": round_no}
                 rate = attempt.verification["overall_match_rate"]
                 if stage == "validation" and rate >= 0.999:
@@ -219,8 +219,11 @@ class RecipePipeline:
         ok = report["status"] not in {"failed", "escalated"}
 
         # ---- 3. 前后对比 ----
-        outputs: dict[str, pd.DataFrame] = runner.collect_outputs() if ok else {}
-        before_after = diff_view(diff_tables(ctx.input_frames, outputs)) if outputs else None
+        def _collect_and_diff() -> tuple[dict[str, pd.DataFrame], dict[str, Any] | None]:
+            outs = runner.collect_outputs() if ok else {}
+            return outs, (diff_view(diff_tables(ctx.input_frames, outs)) if outs else None)
+
+        outputs, before_after = await asyncio.to_thread(_collect_and_diff)
         if before_after:
             yield {"type": "recipe_diff", "diff": before_after}
 

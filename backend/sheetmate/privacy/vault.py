@@ -67,9 +67,10 @@ class Vault:
         database = directory / "vault.db"
         if not database.exists():
             os.close(os.open(database, os.O_WRONLY | os.O_CREAT, 0o600))   # 新建时就是 600，不留「先宽后紧」的空档
-        self._db = sqlite3.connect(database, check_same_thread=False, isolation_level=None)
+        self._db = sqlite3.connect(database, timeout=30.0, check_same_thread=False, isolation_level=None)
         try:
             self._db.execute("PRAGMA journal_mode=WAL")
+            self._db.execute("PRAGMA busy_timeout=30000")
             self._db.execute("PRAGMA synchronous=NORMAL")   # WAL 下的推荐设置：每个新令牌不用等磁盘同步，大文件脱敏快很多
         except sqlite3.DatabaseError:
             pass

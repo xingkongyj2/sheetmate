@@ -30,11 +30,17 @@ def stable_request(kwargs: dict[str, Any]) -> dict[str, Any]:
     preparation cannot modify a durable history or a shared tool definition.
     """
     result = _ordered(kwargs)
-    if isinstance(result.get("tools"), list):
-        result["tools"].sort(key=lambda item: (
-            str(item.get("type", "")), str((item.get("function") or {}).get("name", "")),
-            _serialized(item),
-        ))
+    tools = result.get("tools")
+    if isinstance(tools, list) and len(tools) > 1:
+        # 绝大多数工具名唯一：先按 (type, name) 快速排序，仅在重名时才序列化整段 schema 消歧。
+        primary = [(str(item.get("type", "")), str((item.get("function") or {}).get("name", ""))) for item in tools]
+        if len(set(primary)) == len(primary):
+            result["tools"] = [item for _, item in sorted(zip(primary, tools), key=lambda pair: pair[0])]
+        else:
+            result["tools"].sort(key=lambda item: (
+                str(item.get("type", "")), str((item.get("function") or {}).get("name", "")),
+                _serialized(item),
+            ))
     return result
 
 
@@ -42,26 +48,37 @@ def request_prefix_profile(
     kwargs: dict[str, Any], previous: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Hash the actual prepared request without retaining any prompt text."""
+    encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), default=str)
+
     def fingerprint(value: Any) -> str:
         digest = hashlib.sha256()
-        encoder = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"), default=str)
         for fragment in encoder.iterencode(value):
             digest.update(fragment.encode("utf-8"))
         return digest.hexdigest()
 
     messages = kwargs.get("messages") or []
-    leading_system = []
+    leading_count = 0
     for message in messages:
         if message.get("role") not in {"system", "developer"}:
             break
-        leading_system.append(message)
+        leading_count += 1
     controls = {key: value for key, value in kwargs.items() if key not in {"messages", "tools"}}
+    message_hashes = [fingerprint(item) for item in messages]
+    tools_sha256 = fingerprint(kwargs.get("tools"))
+    controls_sha256 = fingerprint(controls)
+    system_sha256 = fingerprint(message_hashes[:leading_count])
+    # 用各段哈希组成 Merkle 根，避免把 messages/tools/base64 图片重复序列化与哈希 3 遍。
+    request_sha256 = fingerprint({
+        "controls": controls_sha256,
+        "tools": tools_sha256,
+        "messages": message_hashes,
+    })
     snapshot = {
-        "request_sha256": fingerprint(kwargs),
-        "system_sha256": fingerprint(leading_system),
-        "tools_sha256": fingerprint(kwargs.get("tools")),
-        "controls_sha256": fingerprint(controls),
-        "message_sha256": [fingerprint(item) for item in messages],
+        "request_sha256": request_sha256,
+        "system_sha256": system_sha256,
+        "tools_sha256": tools_sha256,
+        "controls_sha256": controls_sha256,
+        "message_sha256": message_hashes,
     }
     common = 0
     changed = []

@@ -41,7 +41,7 @@ def context_profile(kwargs: dict[str, Any]) -> dict[str, Any]:
     heuristic. Image payload bytes are replaced by a marker and counted as a
     fixed allowance so this profile is safe to emit into diagnostics.
     """
-    def measure(value: Any) -> dict[str, int]:
+    def measure(value: Any) -> tuple[dict[str, int], int]:
         images = 0
 
         def omit_image_bytes(item: Any) -> Any:
@@ -60,28 +60,76 @@ def context_profile(kwargs: dict[str, Any]) -> dict[str, Any]:
         serialized = json.dumps(omit_image_bytes(value), ensure_ascii=False,
                                 separators=(",", ":"), default=str)
         encoded = len(serialized.encode("utf-8"))
-        return {"serialized_chars": len(serialized),
-                "estimated_tokens": math.ceil(encoded / 2) + images * 4096,
-                "image_parts": images}
+        return (
+            {"serialized_chars": len(serialized),
+             "estimated_tokens": math.ceil(encoded / 2) + images * 4096,
+             "image_parts": images},
+            encoded,
+        )
 
-    messages = kwargs.get("messages") or []
+    messages_raw = kwargs.get("messages")
+    messages = messages_raw or []
     by_role: dict[str, dict[str, int]] = {}
+    msg_chars_sum = 0
+    msg_bytes_sum = 0
+    msg_images_sum = 0
     for message in messages:
         role = str(message.get("role") or "unknown") if isinstance(message, dict) else "unknown"
         totals = by_role.setdefault(role, {"messages": 0, "serialized_chars": 0,
                                            "estimated_tokens": 0, "image_parts": 0})
-        item = measure(message)
+        item, item_bytes = measure(message)
         totals["messages"] += 1
         for key, value in item.items():
             totals[key] += value
+        msg_chars_sum += item["serialized_chars"]
+        msg_bytes_sum += item_bytes
+        msg_images_sum += item["image_parts"]
 
+    tools_present = "tools" in kwargs
     tools = kwargs.get("tools") or []
-    tool_profile = measure(tools)
+    tool_profile, tool_bytes = measure(kwargs.get("tools")) if tools_present else (
+        {"serialized_chars": 0, "estimated_tokens": 0, "image_parts": 0}, 0,
+    )
     format_present = "response_format" in kwargs
-    format_profile = measure(kwargs.get("response_format")) if format_present else {
-        "serialized_chars": 0, "estimated_tokens": 0, "image_parts": 0,
-    }
-    total_chars, total_tokens = request_size(kwargs)
+    format_profile, format_bytes = measure(kwargs.get("response_format")) if format_present else (
+        {"serialized_chars": 0, "estimated_tokens": 0, "image_parts": 0}, 0,
+    )
+
+    # 与 request_size(kwargs) 保持字节级一致，直接由各分片结果合成总字符与总估算 token，避免二次全量序列化。
+    top_chars = 2  # "{}"
+    top_bytes = 2
+    top_images = 0
+    top_fields = 0
+    if "messages" in kwargs:
+        if isinstance(messages_raw, list):
+            m_chars = 2 + msg_chars_sum + max(0, len(messages_raw) - 1)
+            m_bytes = 2 + msg_bytes_sum + max(0, len(messages_raw) - 1)
+            m_images = msg_images_sum
+        else:
+            m_item, m_bytes = measure(messages_raw)
+            m_chars, m_images = m_item["serialized_chars"], m_item["image_parts"]
+        key_len = len('"messages":')
+        top_chars += key_len + m_chars
+        top_bytes += key_len + m_bytes
+        top_images += m_images
+        top_fields += 1
+    if tools_present:
+        key_len = len('"tools":')
+        top_chars += key_len + tool_profile["serialized_chars"]
+        top_bytes += key_len + tool_bytes
+        top_images += tool_profile["image_parts"]
+        top_fields += 1
+    if format_present:
+        key_len = len('"response_format":')
+        top_chars += key_len + format_profile["serialized_chars"]
+        top_bytes += key_len + format_bytes
+        top_images += format_profile["image_parts"]
+        top_fields += 1
+    if top_fields > 1:
+        top_chars += top_fields - 1
+        top_bytes += top_fields - 1
+    total_chars = top_chars
+    total_tokens = math.ceil(top_bytes / 2) + top_images * 4096
     return {
         "estimate_method": "serialized UTF-8 bytes / 2 plus 4096 tokens per image; heuristic, not provider tokenizer",
         "request": {"serialized_chars": total_chars, "estimated_tokens": total_tokens},
@@ -120,9 +168,10 @@ class RequestBudget:
             raise BudgetExceeded("本次任务已达到总时长上限，已停止后续模型调用。", "task_timeout")
         return remaining
 
-    def reserve(self, call_id: str, kwargs: dict[str, Any], output_estimate: int | None = None) -> None:
+    def reserve(self, call_id: str, kwargs: dict[str, Any], output_estimate: int | None = None, *,
+                size: tuple[int, int] | None = None) -> None:
         self.remaining_seconds()
-        chars, prompt = request_size(kwargs)
+        chars, prompt = size if size is not None else request_size(kwargs)
         policy = self.policy
         output = int(output_estimate if output_estimate is not None else (kwargs.get("max_tokens") or 8192))
         pending_prompt = sum(item[0] for item in self.active.values())

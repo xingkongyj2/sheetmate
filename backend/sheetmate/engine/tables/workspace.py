@@ -253,10 +253,20 @@ class Workspace:
     # 写入
     # ------------------------------------------------------------------
 
+    def _invalidate_query_cache(self, table_name: str) -> None:
+        """表被覆盖或删除时立即清掉引用它的旧缓存条目，释放 16MB 缓存配额。"""
+        if not self._query_cache:
+            return
+        stale_keys = [key for key in self._query_cache if any(name == table_name for name, _ in key[1])]
+        for key in stale_keys:
+            _, old_size = self._query_cache.pop(key)
+            self._query_cache_bytes = max(0, self._query_cache_bytes - old_size)
+
     def put_dataframe(self, name: str, df: pd.DataFrame, **meta: Any) -> TableInfo:
         """把 DataFrame 存成表（同名覆盖）。"""
-        df = df.copy()
-        df.columns = [str(c) for c in df.columns]
+        if any(type(c) is not str for c in df.columns):
+            df = df.copy(deep=False)
+            df.columns = [str(c) for c in df.columns]
         with self._lock:
             self._con.register(_TMP_VIEW, df)
             try:
@@ -266,13 +276,17 @@ class Workspace:
                     self._con.unregister(_TMP_VIEW)
                 except duckdb.Error:
                     pass
-            return self._register(name, **meta)
+            info = self._register(name, **meta)
+            self._invalidate_query_cache(name)
+            return info
 
     def create_table_as(self, name: str, select_sql: str, **meta: Any) -> TableInfo:
         """执行引擎生成的 SELECT，结果存成新表（同名覆盖）。select_sql 只能来自引擎内部。"""
         with self._lock:
             self._run(f"CREATE OR REPLACE TABLE {quote_ident(name)} AS {select_sql}")
-            return self._register(name, **meta)
+            info = self._register(name, **meta)
+            self._invalidate_query_cache(name)
+            return info
 
     def create_table_as_with_lineage(
         self, name: str, select_sql: str, *, lineage_source: str, lineage_column: str, **meta: Any,
@@ -313,6 +327,7 @@ class Workspace:
                 meta["row_lineage"] = output_lineage
                 info = self._register(name, **meta)
                 self._run("COMMIT")
+                self._invalidate_query_cache(name)
                 return info
             except BaseException:
                 try:
@@ -337,6 +352,7 @@ class Workspace:
         with self._lock:
             self._run(f"DROP TABLE IF EXISTS {quote_ident(name)}")
             self._run(f"DELETE FROM {_CATALOG} WHERE name = ?", [name])
+            self._invalidate_query_cache(name)
 
     def update_meta(self, name: str, **meta: Any) -> TableInfo:
         with self._lock:
@@ -373,20 +389,24 @@ class Workspace:
                 self.query_cache_hits += 1
                 return self._query_cache[key][0].copy(deep=True)
             result = self._run(text, as_df=True)
-            # pandas deep copies still share list/dict/ndarray cell contents.
-            # Cache only scalar cells so callers cannot mutate cached evidence.
-            scalar_cells = key is not None and all(
-                pd.api.types.is_scalar(value)
-                for column in result.select_dtypes(include="object").items()
-                for value in column[1]
-            )
-            size = int(result.memory_usage(index=True, deep=True).sum()) if scalar_cells else 0
-            if scalar_cells and size <= 4 * 1024 * 1024:
-                self._query_cache[key] = (result.copy(deep=True), size)
-                self._query_cache_bytes += size
-                while len(self._query_cache) > 32 or self._query_cache_bytes > 16 * 1024 * 1024:
-                    _, (_, old_size) = self._query_cache.popitem(last=False)
-                    self._query_cache_bytes -= old_size
+            # 先按内存大小门控，超 4MB 直接跳过，避免白白对 object 列做逐格 Python 扫描。
+            if key is not None:
+                size = int(result.memory_usage(index=True, deep=True).sum())
+                if size <= 4 * 1024 * 1024:
+                    object_cols = result.select_dtypes(include="object")
+                    # pandas deep copies still share list/dict/ndarray cell contents.
+                    # Cache only scalar cells so callers cannot mutate cached evidence.
+                    scalar_cells = object_cols.empty or all(
+                        pd.api.types.is_scalar(value)
+                        for _, series in object_cols.items()
+                        for value in series
+                    )
+                    if scalar_cells:
+                        self._query_cache[key] = (result.copy(deep=True), size)
+                        self._query_cache_bytes += size
+                        while len(self._query_cache) > 32 or self._query_cache_bytes > 16 * 1024 * 1024:
+                            _, (_, old_size) = self._query_cache.popitem(last=False)
+                            self._query_cache_bytes -= old_size
             return result
 
     def _query_cache_key(self, sql: str) -> tuple | None:

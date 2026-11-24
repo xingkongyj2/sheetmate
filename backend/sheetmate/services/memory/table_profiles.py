@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import threading
+from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterable
@@ -25,12 +27,38 @@ FILE_VERSION_KEY = "file_probe_version"
 FILE_MEMORY_KEY = "table_probe_memory"
 
 
+_STAT_DIGEST_CACHE: OrderedDict[tuple[str, int, int, int, int], str] = OrderedDict()
+_STAT_DIGEST_LOCK = threading.Lock()
+_STAT_DIGEST_LIMIT = 512
+
+
 def content_digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def cached_content_digest(path: Path, *, previous: dict[str, Any] | None = None) -> str:
+    """结合文件 stat 签名与历史版本信息，未改动的大文件免于每轮整盘重算 SHA-256。"""
+    stat = path.stat()
+    signature = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns, "ctime_ns": stat.st_ctime_ns}
+    if isinstance(previous, dict) and previous.get("sha256") and all(previous.get(k) == v for k, v in signature.items()):
+        return str(previous["sha256"])
+    key = (str(path), stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    with _STAT_DIGEST_LOCK:
+        hit = _STAT_DIGEST_CACHE.get(key)
+        if hit is not None:
+            _STAT_DIGEST_CACHE.move_to_end(key)
+            return hit
+    value = content_digest(path)
+    with _STAT_DIGEST_LOCK:
+        _STAT_DIGEST_CACHE[key] = value
+        _STAT_DIGEST_CACHE.move_to_end(key)
+        while len(_STAT_DIGEST_CACHE) > _STAT_DIGEST_LIMIT:
+            _STAT_DIGEST_CACHE.popitem(last=False)
+    return value
 
 
 def file_version(path: Path, previous: dict[str, Any] | None = None) -> dict[str, Any]:

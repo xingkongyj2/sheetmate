@@ -239,7 +239,7 @@ async function load(silent = false) {
       if (job) {
         const assistant = restored.assistant!
         selectedKey.value = assistant.key
-        void receiveStream(assistant, (onEvent) => conversationApi.events(props.id, job.id, onEvent), true)
+        void receiveStream(assistant, (onEvent) => conversationApi.events(props.id, job.id, onEvent), true, undefined, job.id)
       }
       scheduleUsageRefresh()
     }
@@ -594,7 +594,14 @@ async function send(message: string, opts: { attachments?: string[]; thinking?: 
   } : undefined)
 }
 
-async function receiveStream(assistant: UiMessage, open: (onEvent: (event: AgentEvent) => void) => StreamHandle, resuming = false, onRejected?: (err: unknown) => void) {
+async function receiveStream(
+  assistant: UiMessage,
+  open: (onEvent: (event: AgentEvent) => void) => StreamHandle,
+  resuming = false,
+  onRejected?: (err: unknown) => void,
+  initialJobId?: string,
+  reconnectAttempt = 0,
+) {
   streaming.value = true
   serverEnded = false
   scheduleUsageRefresh()
@@ -602,14 +609,19 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
   let received = false
   let retry = false
   let retryDelay = 1000
+  let lastStatus = 0
+  let aborted = false
+  let activeJobId = initialJobId ?? ''
   const currentHandle = open((event) => {
     if (disposed) return
     received = true
+    reconnecting.value = false
     applyEvent(assistant, event)
     const events: AgentEvent[] = event.type === 'stream_snapshot' && Array.isArray(event.events) ? event.events : [event]
     const title = events.filter((item) => item.type === 'title').at(-1)
     const deletionTargets = event.type === 'stream_snapshot' ? messages.value.filter((message) => message !== assistant) : messages.value
     for (const item of events) {
+      if ('job_id' in item && typeof item.job_id === 'string' && item.job_id) activeJobId = item.job_id
       if (['steer_queued', 'steer_committed', 'steer_withdrawn'].includes(item.type)) steerRevision++
       steers.value = applyRunSteerEvent(steers.value, item)
       if (item.type === 'recipe_deleted') markRecipeDeleted(deletionTargets, item.recipe_id)
@@ -626,8 +638,11 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
   try {
     await currentHandle.done
   } catch (err) {
-    if ((err as Error).name !== 'AbortError') {
+    if ((err as Error).name === 'AbortError') {
+      aborted = true
+    } else {
       const status = err instanceof ApiError ? err.status : 0
+      lastStatus = status
       retry = received || status === 409 || (resuming && (status === 0 || status >= 500 || status === 404))
       if ([401, 403].includes(status)) retry = false
       if (resuming && [404, 409].includes(status)) retryDelay = 0
@@ -642,8 +657,25 @@ async function receiveStream(assistant: UiMessage, open: (onEvent: (event: Agent
     streaming.value = false
     handle = null
     reconnecting.value = retry
-    if (retry) schedulePoll(retryDelay)
-    else {
+    if (retry) {
+      const lastId = currentHandle.getLastEventId()
+      if (activeJobId && lastId && !aborted && reconnectAttempt < 3 && (lastStatus === 0 || lastStatus >= 500)) {
+        clearTimeout(pollTimer)
+        pollTimer = window.setTimeout(() => {
+          if (disposed || streaming.value) return
+          void receiveStream(
+            assistant,
+            (onEvent) => conversationApi.events(props.id, activeJobId, onEvent, lastId),
+            true,
+            undefined,
+            activeJobId,
+            reconnectAttempt + 1,
+          )
+        }, retryDelay)
+      } else {
+        schedulePoll(retryDelay)
+      }
+    } else {
       const stale = serverEnded
       serverEnded = false
       finishMessage(assistant)

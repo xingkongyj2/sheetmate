@@ -49,7 +49,7 @@ class PrivacyEvent(Base):
     kind: Mapped[str] = mapped_column(String(16))  # 启动 / 识别 / 发送检查 / 还原 / 拦截 / 错误
     text: Mapped[str] = mapped_column(Text)
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 

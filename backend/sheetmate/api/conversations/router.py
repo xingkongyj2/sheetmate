@@ -91,7 +91,7 @@ def create_conversation(body: CreateBody, db: Session = Depends(get_db), user: U
 
 
 @router.get("/{conversation_id}")
-async def get_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
+def get_conversation(conversation_id: str, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict[str, Any]:
     conv = conv_service.get_conversation(db, user, conversation_id)
     if conv.customer_id:
         require_customer(db, user, conv.customer_id)

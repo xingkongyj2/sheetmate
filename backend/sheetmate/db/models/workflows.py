@@ -23,7 +23,7 @@ class FormulaRecord(Base):
     version: Mapped[int] = mapped_column(Integer, default=1)
     scope: Mapped[str] = mapped_column(String(16), default="customer")
     customer_id: Mapped[str | None] = mapped_column(
-        ForeignKey("customers.id", ondelete="CASCADE"), nullable=True
+        ForeignKey("customers.id", ondelete="CASCADE"), nullable=True, index=True
     )
     name: Mapped[str] = mapped_column(String(128))
     status: Mapped[str] = mapped_column(String(16), default="draft")  # draft / active / deprecated
@@ -53,9 +53,9 @@ class RecipeRecord(Base):
     name: Mapped[str] = mapped_column(String(200))
     scope: Mapped[str] = mapped_column(String(16), default="customer")
     customer_id: Mapped[str | None] = mapped_column(
-        ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("customers.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    conversation_id: Mapped[str | None] = mapped_column(String(32), nullable=True)  # 来源会话
+    conversation_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)  # 来源会话
     # 仅兼容旧数据库的非空列；流程业务、接口与快照均不再使用状态。
     status: Mapped[str] = mapped_column(String(16), default="active")
     created_by: Mapped[str] = mapped_column(String(16), default="ai")
@@ -84,10 +84,10 @@ class Run(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("run"))
     kind: Mapped[str] = mapped_column(String(16))  # analysis / modify / replay / create / script
-    conversation_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    customer_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    customer_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    recipe_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    recipe_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     recipe_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     request_text: Mapped[str] = mapped_column(Text, default="")
     status: Mapped[str] = mapped_column(String(16), default="running")  # running/success/failed/escalated

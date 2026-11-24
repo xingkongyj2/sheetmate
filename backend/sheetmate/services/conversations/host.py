@@ -146,13 +146,18 @@ class ConversationHost:
         with session_scope() as db:
             records = file_service.list_files(db, customer_id=self.customer_id, conversation_id=self.conversation_id,
                                               kinds=("input", "expected", "output"))
+            run_ids = list({r.run_id for r in records if r.run_id})
+            script_runs = (
+                set(db.scalars(select(run_service.Run.id).where(
+                    run_service.Run.id.in_(run_ids), run_service.Run.kind == "script",
+                )).all())
+                if run_ids else set()
+            )
             result = []
             for r in records:
                 item = file_service.file_dict(r)
-                if r.run_id:
-                    run = db.get(run_service.Run, r.run_id)
-                    if run is not None and run.kind == "script":
-                        item["script_run_id"] = run.id
+                if r.run_id and r.run_id in script_runs:
+                    item["script_run_id"] = r.run_id
                 item["tables"] = loaded.get(r.id, [])
                 item["scope_label"] = "本会话" if (r.conversation_id == self.conversation_id
                                                    or r.customer_id != self.customer_id) else "客户资料"
@@ -190,14 +195,27 @@ class ConversationHost:
     def refresh_stale_files(self) -> list[str]:
         """工作区里的表和文件现在的内容对不上（文件被改了：客户文件页里替换、脱敏设置改了原文件……）：
         以文件现在的内容为准，从文件重新载入这些表。返回重新载入的文件。"""
-        stale: dict[str, str] = {}
+        from sheetmate.services.memory.table_profiles import FILE_VERSION_KEY, cached_content_digest
+
+        candidates: dict[str, tuple[str, str]] = {}
         for info in self.ws.list_tables():
-            if info.source == "uploaded" and info.file_id and info.file_version and info.file_id not in stale:
-                with session_scope() as db:
-                    record = db.get(FileRecord, info.file_id)
-                    path = Path(record.stored_path) if record is not None else None
-                if path is not None and path.is_file() and file_service.content_digest(path) != info.file_version:
-                    stale[info.file_id] = info.name
+            if info.source == "uploaded" and info.file_id and info.file_version and info.file_id not in candidates:
+                candidates[info.file_id] = (info.name, info.file_version)
+        if not candidates:
+            return []
+        records: dict[str, tuple[Path, dict[str, Any] | None]] = {}
+        with session_scope() as db:
+            for record in db.scalars(select(FileRecord).where(FileRecord.id.in_(list(candidates)))).all():
+                previous = (record.profile or {}).get(FILE_VERSION_KEY)
+                records[record.id] = (Path(record.stored_path), previous if isinstance(previous, dict) else None)
+        stale: dict[str, str] = {}
+        for file_id, (name, expected_version) in candidates.items():
+            entry = records.get(file_id)
+            if entry is None:
+                continue
+            path, previous = entry
+            if path.is_file() and cached_content_digest(path, previous=previous) != expected_version:
+                stale[file_id] = name
         refreshed = []
         for file_id, name in stale.items():
             try:

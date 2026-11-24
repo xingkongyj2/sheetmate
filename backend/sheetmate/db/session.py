@@ -21,16 +21,20 @@ class Base(DeclarativeBase):
 settings.ensure_dirs()
 engine = create_engine(
     f"sqlite:///{settings.db_path}",
-    connect_args={"check_same_thread": False},
+    connect_args={"check_same_thread": False, "timeout": 30},
 )
 
 
 @event.listens_for(engine, "connect")
 def _sqlite_pragmas(dbapi_connection, _record) -> None:
-    """启用外键约束 + WAL（读写并发更好）。"""
+    """启用外键约束、WAL 并发读写、锁等待超时与合理刷盘策略。"""
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA busy_timeout=30000")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.execute("PRAGMA temp_store=MEMORY")
+    cursor.execute("PRAGMA cache_size=-16000")
     cursor.close()
 
 
@@ -44,6 +48,19 @@ def init_db() -> None:
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         _add_missing_columns(conn)
+        _ensure_indexes(conn)
+
+
+def _ensure_indexes(conn) -> None:
+    """为老库补齐模型上新增的索引（幂等），避免消息/文件/记忆/运行记录全表扫描。"""
+    inspector = inspect(conn)
+    for table in Base.metadata.sorted_tables:
+        if not inspector.has_table(table.name):
+            continue
+        existing = {idx["name"] for idx in inspector.get_indexes(table.name)}
+        for index in table.indexes:
+            if index.name not in existing:
+                index.create(conn, checkfirst=True)
 
 
 def _add_missing_columns(conn) -> list[str]:

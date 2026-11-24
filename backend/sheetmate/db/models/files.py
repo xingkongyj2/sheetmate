@@ -17,12 +17,12 @@ class FileRecord(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=lambda: new_id("f"))
     customer_id: Mapped[str | None] = mapped_column(
-        ForeignKey("customers.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("customers.id", ondelete="SET NULL"), nullable=True, index=True
     )
     conversation_id: Mapped[str | None] = mapped_column(
-        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("conversations.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     filename: Mapped[str] = mapped_column(String(255))
     stored_path: Mapped[str] = mapped_column(String(1024))
     size: Mapped[int] = mapped_column(Integer, default=0)

@@ -593,12 +593,16 @@ class LLMClient:
             projection_chars = (min(projection_chars, policy.max_input_chars) if projection_chars
                                 else policy.max_input_chars)
         # 不预设模型窗口：只按字符目标整理较早的执行过程，超出窗口时由模型服务报错，报错原文会展示给使用者。
-        before_chars, before_tokens = request_size(kwargs) if context_metrics is not None else (0, 0)
         cutoff = self._projection_cutoffs.setdefault((stage_key, active_model), {})
         prepared = prepare_context(kwargs, projection_chars, sticky_cutoff=cutoff)
         if context_metrics is not None:
             after_profile = context_profile(prepared)
-            after_chars, after_tokens = request_size(prepared)
+            after_chars = after_profile["request"]["serialized_chars"]
+            after_tokens = after_profile["request"]["estimated_tokens"]
+            if prepared is kwargs:
+                before_chars, before_tokens = after_chars, after_tokens
+            else:
+                before_chars, before_tokens = request_size(kwargs)
             context_metrics.update(after_profile)
             context_metrics["projection"] = {
                 "applied": after_chars < before_chars,
@@ -643,13 +647,14 @@ class LLMClient:
             message = ("本次任务已达到总时长上限，已停止模型调用。" if code == "task_timeout" else str(exc))
             raise LLMTimeout(message, code=exc.code) from exc
 
-    async def _create(self, kwargs: dict[str, Any], call_id: str, stage: str) -> Any:
+    async def _create(self, kwargs: dict[str, Any], call_id: str, stage: str, *,
+                      _request_size: tuple[int, int] | None = None) -> Any:
         # 只有「自动最大值」才允许根据服务端报错降级；调用方明确指定的值和用户开启的上限原样使用。
         model_name = kwargs.get("model") or self.model
         auto_sent = bool(kwargs.get("max_tokens")) and kwargs["max_tokens"] == self._auto_output_tokens(model_name)
         for attempt in range(self.cfg.runtime_policy.sdk_retries + 1):
             try:
-                self.budget.reserve(call_id, kwargs, self._output_reserve(kwargs))
+                self.budget.reserve(call_id, kwargs, self._output_reserve(kwargs), size=_request_size)
             except BudgetExceeded as exc:
                 cls = LLMTimeout if exc.code == "task_timeout" else LLMError
                 raise cls(str(exc), code=exc.code) from exc
@@ -745,7 +750,9 @@ class LLMClient:
             context_metrics["cache_prefix"] = self._profile_cache_prefix(kwargs, stage)
             record_event("llm.context", function, context_metrics, call_id=call_id, stage=stage)
             record_event("llm.request", function, kwargs, call_id=call_id)
-            resp = await self._create(kwargs, call_id, stage)
+            req_meta = context_metrics.get("request")
+            req_size = (req_meta["serialized_chars"], req_meta["estimated_tokens"]) if req_meta else None
+            resp = await self._create(kwargs, call_id, stage, _request_size=req_size)
             response = resp
             self._add_usage(resp.usage)
             if not resp.choices:
@@ -802,7 +809,9 @@ class LLMClient:
         try:
             record_event("llm.context", function, context_metrics, call_id=call_id, stage=stage)
             record_event("llm.request", function, kwargs, call_id=call_id)
-            stream = await self._create(kwargs, call_id, stage)
+            req_meta = context_metrics.get("request")
+            req_size = (req_meta["serialized_chars"], req_meta["estimated_tokens"]) if req_meta else None
+            stream = await self._create(kwargs, call_id, stage, _request_size=req_size)
             failure: BaseException | None = None
             try:
                 saw_choice, has_content, has_reasoning = False, False, False

@@ -41,20 +41,32 @@ _BEARER = re.compile(r"\bBearer\s+[a-zA-Z0-9._~+/=-]{12,}", re.IGNORECASE)
 def redact_derived_text(text: str) -> str:
     """Hide recognizable personal contacts, credentials and inline image bytes."""
     value = str(text or "")
-    value = _PRIVATE_KEY.sub("[PRIVATE_KEY_REDACTED]", value)
-    value = _IMAGE_DATA.sub("[IMAGE_DATA_REDACTED]", value)
-    value = _LABELED_SECRET.sub(lambda match: match["label"] + "[REDACTED]", value)
-    value = _BEARER.sub("Bearer [REDACTED]", value)
-    value = _TOKEN.sub("[TOKEN_REDACTED]", value)
-    value = _EMAIL.sub("[EMAIL_REDACTED]", value)
+    if len(value) < 6:
+        return value
+    if "PRIVATE KEY" in value:
+        value = _PRIVATE_KEY.sub("[PRIVATE_KEY_REDACTED]", value)
+    lower = value.lower()
+    if "data:image/" in lower:
+        value = _IMAGE_DATA.sub("[IMAGE_DATA_REDACTED]", value)
+        lower = value.lower()
+    if ":" in value or "：" in value or "=" in value:
+        value = _LABELED_SECRET.sub(lambda match: match["label"] + "[REDACTED]", value)
+        lower = value.lower()
+    if "bearer" in lower:
+        value = _BEARER.sub("Bearer [REDACTED]", value)
+    if ("sk-" in value or "gh" in value or "github_pat_" in value or "AKIA" in value or "eyJ" in value):
+        value = _TOKEN.sub("[TOKEN_REDACTED]", value)
+    if "@" in value:
+        value = _EMAIL.sub("[EMAIL_REDACTED]", value)
+    if len(value) >= 11 and "1" in value:
+        def mobile(match: re.Match[str]) -> str:
+            # An explicitly labeled order/amount is a business value, even if its
+            # digits happen to have the shape of a mobile telephone number.
+            before = value[max(0, match.start() - 40):match.start()]
+            return match[0] if _BUSINESS_NUMBER_LABEL.search(before) else "[PHONE_REDACTED]"
 
-    def mobile(match: re.Match[str]) -> str:
-        # An explicitly labeled order/amount is a business value, even if its
-        # digits happen to have the shape of a mobile telephone number.
-        before = value[max(0, match.start() - 40):match.start()]
-        return match[0] if _BUSINESS_NUMBER_LABEL.search(before) else "[PHONE_REDACTED]"
-
-    return _MOBILE.sub(mobile, value)
+        value = _MOBILE.sub(mobile, value)
+    return value
 
 
 def contains_sensitive_memory(text: str) -> bool:

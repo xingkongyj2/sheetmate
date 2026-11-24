@@ -33,6 +33,26 @@ def dtype_label(series: pd.Series) -> str:
     return "text"
 
 
+def _first_unique_samples(series: pd.Series, limit: int) -> list[Any]:
+    """早停取前 limit 个不重复样本，避免对十万行整列做 drop_duplicates()。"""
+    samples: list[Any] = []
+    seen_hashable: set[Any] = set()
+    seen_other: list[Any] = []
+    for value in series:
+        try:
+            if value in seen_hashable:
+                continue
+            seen_hashable.add(value)
+        except TypeError:
+            if any(value == prev for prev in seen_other):
+                continue
+            seen_other.append(value)
+        samples.append(to_jsonable(value))
+        if len(samples) >= limit:
+            break
+    return samples
+
+
 def profile_columns(df: pd.DataFrame) -> list[dict[str, Any]]:
     """逐列画像。"""
     total = len(df)
@@ -40,17 +60,20 @@ def profile_columns(df: pd.DataFrame) -> list[dict[str, Any]]:
     for col in df.columns:
         series = df[col]
         non_null = series.dropna()
-        if series.dtype == object or pd.api.types.is_string_dtype(series):
+        if isinstance(series.dtype, pd.StringDtype):
+            non_null = non_null[non_null.str.strip() != ""]
+        elif series.dtype == object or pd.api.types.is_string_dtype(series):
             non_null = non_null[non_null.astype(str).str.strip() != ""]
+        dtype = dtype_label(series)
         info: dict[str, Any] = {
             "name": str(col),
-            "dtype": dtype_label(series),
+            "dtype": dtype,
             "null_rate": round(1 - len(non_null) / total, 4) if total else 0.0,
             "unique": int(non_null.nunique()) if len(non_null) else 0,
-            "samples": [to_jsonable(v) for v in non_null.drop_duplicates().head(_SAMPLE_SIZE).tolist()],
+            "samples": _first_unique_samples(non_null, _SAMPLE_SIZE) if len(non_null) else [],
         }
-        if info["dtype"] in {"integer", "float"} and len(non_null):
-            numeric = pd.to_numeric(non_null, errors="coerce")
+        if dtype in {"integer", "float"} and len(non_null):
+            numeric = non_null if pd.api.types.is_numeric_dtype(non_null) else pd.to_numeric(non_null, errors="coerce")
             info.update(
                 {
                     "min": to_jsonable(numeric.min()),
