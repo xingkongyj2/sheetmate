@@ -12,6 +12,8 @@ export type SheetMatchKind = 'matched' | 'added' | 'deleted' | 'manual'
 /** 比对目标来源 */
 export type CompareSource =
   | { kind: 'remote'; fileId: string }
+  /** 任意表格链接（后端代取，不依赖当前对话文件） */
+  | { kind: 'url'; url: string }
   | { kind: 'local'; blobUrl: string; name: string }
   | { kind: 'file'; file: File }
 

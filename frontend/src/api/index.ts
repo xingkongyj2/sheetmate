@@ -255,6 +255,14 @@ export const fileApi = {
   remove: async (id: string, customerId?: string, recipeId?: string, conversationId?: string) =>
     http.delete(`/files/${id}`, { params: { customer_id: customerId, recipe_id: recipeId, conversation_id: conversationId } }),
   downloadUrl: (id: string) => `/api/files/${id}/download?t=${Date.now()}`,
+  /** 按链接读取任意在线表格（后端代取）：返回文件内容与文件名。 */
+  fetchUrl: async (url: string, signal?: AbortSignal) => {
+    const resp = await http.post<Blob>('/files/fetch-url', { url }, { responseType: 'blob', signal, timeout: 60_000 })
+    const header = String(resp.headers['x-filename'] ?? '')
+    let filename = header
+    try { filename = decodeURIComponent(header) } catch { /* 保留原样 */ }
+    return { filename: filename || '在线表格', buffer: await resp.data.arrayBuffer() }
+  },
 }
 
 // ---------------------------------------------------------------- 流程 / 运行

@@ -20,6 +20,7 @@ from sheetmate.db.models import FileRecord, User
 from sheetmate.services.customers import service as customer_service
 from sheetmate.services.files import service as file_service
 from sheetmate.services.files import inspection
+from sheetmate.services.files import remote as remote_files
 from sheetmate.services.privacy import columns as privacy_columns_service
 from sheetmate.services.privacy import masked_copy
 from sheetmate.services.privacy import service as privacy_service
@@ -49,6 +50,19 @@ def preview_upload(file: UploadFile = File(...), sheet: str | None = None,
     preview = inspection.preview_upload(file.file, filename=file.filename, sheet=sheet,
                                         offset=offset, limit=limit, raw=raw)
     return {"ok": True, "preview": preview}
+
+
+class FetchUrlBody(BaseModel):
+    url: str
+
+
+@router.post("/fetch-url")
+def fetch_url(body: FetchUrlBody, user: User = Depends(current_user)) -> Response:
+    """表格比对页：按链接读取任意在线表格（由后端代取，避开浏览器跨域；只读，不落库）。文件名在 X-Filename 响应头里（URL 编码）。"""
+    table = remote_files.fetch_table(body.url)
+    return Response(table.content, media_type="application/octet-stream",
+                    headers={"X-Filename": quote(table.filename), "Cache-Control": "no-store",
+                             "Access-Control-Expose-Headers": "X-Filename"})
 
 
 @router.post("/privacy-status")

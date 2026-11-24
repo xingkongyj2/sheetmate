@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
  * 极简双栏表格比对页：
- * - 顶部居中展示左右两个文件名，点击可直接从当前聊天页面的输入/输出文件中切换；
- * - 仅允许选择当前聊天页面「工作区面板 → 文件」中的输入与输出表格文件；
+ * - 顶部居中展示左右两个文件名，点击可从当前聊天页面的输入/输出文件中切换，也可粘贴任意表格链接；
+ * - 可选当前聊天页面「工作区面板 → 文件」中的输入与输出表格，或任意公开的 .xlsx / .xlsm / .csv 链接（由后端代取）；
  * - 默认保留原样式并高亮差异，左右双栏同步滚动与选区联动。
  */
 import {
@@ -27,6 +27,7 @@ import { executionFileGroups, executionFileSize } from '@/composables/executionP
 import type { SheetMeta } from '../workbook-preview/excel'
 import ZoomControl from '../workbook-preview/ZoomControl.vue'
 import type { CellPos, CompareViewer, ScrollSyncState } from './compare-viewer'
+import CompareUrlInput from './CompareUrlInput.vue'
 import { buildSheetPairs } from './diff'
 import type { CellDiffEntry, CompareSource, DiffOptions, SheetDiffResult, SheetPair } from './types'
 import { isSameCompareSource } from './url'
@@ -53,8 +54,11 @@ interface SideFileMeta {
   name: string
   size: number
   source: CompareSource
-  fileId: string
+  /** 当前对话里的文件 id；链接 / 本地来源的表格没有 */
+  fileId: string | null
 }
+
+const MAX_COMPARE_BYTES = 25 * 1024 * 1024
 
 interface CandidateGroup {
   key: string
@@ -128,7 +132,6 @@ const candidateGroups = computed<CandidateGroup[]>(() => {
     .filter((group) => group.files.length > 0)
 })
 
-const totalCandidates = computed(() => candidateGroups.value.reduce((sum, g) => sum + g.files.length, 0))
 const hasOtherCandidateForRight = computed(() =>
   candidateGroups.value.some((g) => g.files.some((f) => f.file_id !== leftMeta.value?.fileId)),
 )
@@ -271,8 +274,8 @@ function validateFileName(filename: string, mediaType?: string) {
 }
 
 async function loadSide(side: CompareSide, source: CompareSource, syncUrl = true) {
-  if (source.kind !== 'remote') {
-    const msg = '仅支持比对当前聊天页面中的输入和输出表格文件。'
+  if (source.kind === 'file') {
+    const msg = '暂不支持这种表格来源。'
     if (side === 'left') leftError.value = msg
     else rightError.value = msg
     return
@@ -294,29 +297,47 @@ async function loadSide(side: CompareSide, source: CompareSource, syncUrl = true
 
   try {
     void loadViewerModule()
-    const info = await fileApi.get(source.fileId)
-    if (signal.aborted) return
+    let name: string
+    let size: number
+    let fileId: string | null = null
+    let buffer: ArrayBuffer
 
-    // 若 URL 未携带 conversation，从文件所属会话自动补全并拉取当前对话文件列表
-    if (!activeConversationId.value && info.conversation_id) {
-      void loadConversationFiles(info.conversation_id)
+    if (source.kind === 'remote') {
+      const info = await fileApi.get(source.fileId)
+      if (signal.aborted) return
+
+      // 若 URL 未携带 conversation，从文件所属会话自动补全并拉取当前对话文件列表
+      if (!activeConversationId.value && info.conversation_id) {
+        void loadConversationFiles(info.conversation_id)
+      }
+
+      validateFileName(info.filename, info.media_type)
+      if (info.size > MAX_COMPARE_BYTES) throw new Error('文件超过 25 MB，暂不支持在线比对。')
+      buffer = await fileApi.content(info.file_id, signal)
+      name = info.filename
+      size = info.size
+      fileId = info.file_id
+    } else if (source.kind === 'url') {
+      // 任意表格链接：由后端代取（避开浏览器跨域），只读不入库
+      const fetched = await fileApi.fetchUrl(source.url, signal)
+      validateFileName(fetched.filename)
+      buffer = fetched.buffer
+      name = fetched.filename
+      size = buffer.byteLength
+    } else {
+      const resp = await fetch(source.blobUrl, { signal })
+      buffer = await resp.arrayBuffer()
+      name = source.name
+      size = buffer.byteLength
+      validateFileName(name)
     }
-
-    validateFileName(info.filename, info.media_type)
-    if (info.size > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂不支持在线比对。')
-    const buffer = await fileApi.content(info.file_id, signal)
     if (signal.aborted) return
-    if (buffer.byteLength > 25 * 1024 * 1024) throw new Error('文件超过 25 MB，暂不支持在线比对。')
+    if (buffer.byteLength > MAX_COMPARE_BYTES) throw new Error('文件超过 25 MB，暂不支持在线比对。')
 
-    const opened = await ensureWorker().open(side, buffer, info.filename)
+    const opened = await ensureWorker().open(side, buffer, name)
     if (signal.aborted) return
 
-    const meta: SideFileMeta = {
-      name: info.filename,
-      size: info.size,
-      source,
-      fileId: info.file_id,
-    }
+    const meta: SideFileMeta = { name, size, source, fileId }
 
     if (isLeft) {
       leftMeta.value = meta
@@ -455,8 +476,28 @@ function chooseFileForSide(side: CompareSide, file: FileInfo) {
 }
 
 function toggleMenu(side: CompareSide) {
-  if (!totalCandidates.value) return
   openMenu.value = openMenu.value === side ? null : side
+}
+
+/** 粘贴链接加载：本站文件、本地文件或任意在线表格都走这里 */
+function chooseSourceForSide(side: CompareSide, source: CompareSource) {
+  openMenu.value = null
+  const otherSource = side === 'left' ? rightMeta.value?.source : leftMeta.value?.source
+  if (isSameCompareSource(source, otherSource ?? null)) {
+    const msg = '这份表格已在另一侧打开，请选择不同的表格。'
+    if (side === 'left') leftError.value = msg
+    else rightError.value = msg
+    return
+  }
+  void loadSide(side, source, true)
+}
+
+/** 已有表格时，换表失败的原因显示在顶部提示条（不遮挡现有内容） */
+const inlineError = computed(() => (rightMeta.value && rightError.value) || (leftMeta.value && leftError.value) || '')
+
+function dismissInlineError() {
+  if (leftMeta.value) leftError.value = ''
+  if (rightMeta.value) rightError.value = ''
 }
 
 async function swapSides() {
@@ -569,7 +610,6 @@ onBeforeUnmount(() => {
             type="button"
             class="file-trigger"
             :class="{ 'is-open': openMenu === 'left' }"
-            :disabled="!totalCandidates && !leftMeta"
             :title="leftMeta?.name || '选择改前表格'"
             aria-haspopup="menu"
             :aria-expanded="openMenu === 'left'"
@@ -580,7 +620,7 @@ onBeforeUnmount(() => {
             <span v-else class="min-w-0 max-w-[30vw] truncate sm:max-w-[260px]" :class="leftMeta ? 'font-medium text-ink' : 'text-faint'">
               {{ leftMeta?.name || '选择表格' }}
             </span>
-            <ChevronDown v-if="totalCandidates" class="size-3.5 shrink-0 text-faint transition-transform" :class="{ 'rotate-180': openMenu === 'left' }" />
+            <ChevronDown class="size-3.5 shrink-0 text-faint transition-transform" :class="{ 'rotate-180': openMenu === 'left' }" />
           </button>
 
           <!-- 左侧文件下拉菜单 -->
@@ -607,6 +647,9 @@ onBeforeUnmount(() => {
                 <span v-else-if="rightMeta?.fileId === file.file_id" class="shrink-0 text-[10px] text-faint">当前改后</span>
               </button>
             </div>
+            <div class="menu-url" :class="{ 'has-files': candidateGroups.length }">
+              <CompareUrlInput :busy="leftLoading" @submit="chooseSourceForSide('left', $event)" />
+            </div>
           </div>
         </div>
 
@@ -628,7 +671,6 @@ onBeforeUnmount(() => {
             type="button"
             class="file-trigger"
             :class="{ 'is-open': openMenu === 'right' }"
-            :disabled="!totalCandidates"
             :title="rightMeta?.name || '选择改后表格'"
             aria-haspopup="menu"
             :aria-expanded="openMenu === 'right'"
@@ -639,7 +681,7 @@ onBeforeUnmount(() => {
             <span v-else class="min-w-0 max-w-[30vw] truncate sm:max-w-[260px]" :class="rightMeta ? 'font-medium text-ink' : 'text-mute'">
               {{ rightMeta?.name || '选择对比表格' }}
             </span>
-            <ChevronDown v-if="totalCandidates" class="size-3.5 shrink-0 text-faint transition-transform" :class="{ 'rotate-180': openMenu === 'right' }" />
+            <ChevronDown class="size-3.5 shrink-0 text-faint transition-transform" :class="{ 'rotate-180': openMenu === 'right' }" />
           </button>
 
           <!-- 右侧文件下拉菜单 -->
@@ -666,10 +708,20 @@ onBeforeUnmount(() => {
                 <span v-else-if="leftMeta?.fileId === file.file_id" class="shrink-0 text-[10px] text-faint">当前改前</span>
               </button>
             </div>
+            <div class="menu-url" :class="{ 'has-files': candidateGroups.length }">
+              <CompareUrlInput :busy="rightLoading" @submit="chooseSourceForSide('right', $event)" />
+            </div>
           </div>
         </div>
       </div>
     </header>
+
+    <!-- 换表失败（现有内容保持不变）：顶部提示条 -->
+    <div v-if="inlineError" role="alert" class="flex shrink-0 items-center justify-center gap-2 border-b border-rose-100 bg-rose-50 px-4 py-1.5 text-xs text-rose-700">
+      <CircleAlert class="size-3.5 shrink-0" />
+      <span class="min-w-0 truncate" :title="inlineError">{{ inlineError }}</span>
+      <button type="button" class="shrink-0 font-medium underline-offset-2 hover:underline" @click="dismissInlineError">知道了</button>
+    </div>
 
     <!-- 点中差异单元格时，轻展示一行改前/改后值与公式对照 -->
     <div v-if="hasBothFiles && selectedDiff" class="flex shrink-0 flex-wrap items-center justify-center gap-2 border-b border-line bg-[#fafaf9] px-4 py-1.5 text-xs">
@@ -697,23 +749,29 @@ onBeforeUnmount(() => {
       <section class="relative min-h-0 bg-white" aria-label="改前表格">
         <div ref="leftHost" class="absolute inset-0" data-testid="compare-left-canvas" />
 
-        <!-- 左侧未选择文件时：直接展示当前会话文件选择器 -->
-        <div v-if="!leftMeta && !leftLoading && !leftError" class="absolute inset-0 z-10 flex items-center justify-center bg-[#fafaf9] p-6">
+        <!-- 左侧未选择文件时：展示当前会话文件选择器，也可粘贴任意表格链接 -->
+        <div v-if="!leftMeta && !leftLoading" class="absolute inset-0 z-10 flex items-center justify-center bg-[#fafaf9] p-6">
           <div class="w-full max-w-[400px] rounded-2xl border border-line bg-white p-5 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
             <h2 class="text-sm font-semibold text-ink">选择改前表格</h2>
-            <p class="mt-0.5 text-xs text-mute">从当前对话的输入与输出文件中选择</p>
+
+            <div v-if="leftError" role="alert" class="mt-3 flex items-start gap-2 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">
+              <span class="min-w-0 flex-1">{{ leftError }}</span>
+              <button v-if="props.initialLeft" type="button" class="inline-flex shrink-0 items-center gap-1 font-medium underline-offset-2 hover:underline" @click="loadSide('left', props.initialLeft, false)">
+                <RotateCw class="size-3" />重试
+              </button>
+            </div>
 
             <div v-if="filesLoading" class="flex items-center justify-center gap-2 py-10 text-xs text-mute">
               <LoaderCircle class="size-4 animate-spin" />正在获取当前对话文件…
             </div>
             <div v-else-if="filesError" class="py-8 text-center text-xs text-error">{{ filesError }}</div>
-            <div v-else-if="!activeConversationId" class="py-8 text-center text-xs leading-5 text-mute">
-              请从聊天页面打开表格后再进入比对。
+            <div v-else-if="!activeConversationId" class="py-6 text-center text-xs leading-5 text-mute">
+              未关联聊天对话，可在下方粘贴表格链接。
             </div>
-            <div v-else-if="!candidateGroups.length" class="py-8 text-center text-xs text-mute">
+            <div v-else-if="!candidateGroups.length" class="py-6 text-center text-xs text-mute">
               当前对话中暂无可比对的表格文件。
             </div>
-            <div v-else class="mt-4 max-h-[52vh] space-y-4 overflow-y-auto pr-0.5">
+            <div v-else class="mt-4 max-h-[40vh] space-y-4 overflow-y-auto pr-0.5">
               <div v-for="group in candidateGroups" :key="group.key">
                 <div class="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-faint">
                   <span>{{ group.label }}</span>
@@ -741,20 +799,16 @@ onBeforeUnmount(() => {
                 </div>
               </div>
             </div>
+
+            <div class="mt-4 border-t border-line pt-3.5">
+              <CompareUrlInput :busy="leftLoading" @submit="chooseSourceForSide('left', $event)" />
+            </div>
           </div>
         </div>
 
         <div v-if="leftLoading" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2.5 bg-white/95" role="status">
           <LoaderCircle class="size-6 animate-spin text-mute" />
           <span class="text-xs text-mute">正在读取表格…</span>
-        </div>
-
-        <div v-else-if="leftError" class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-3 bg-white px-6 text-center">
-          <CircleAlert class="size-7 text-mute" />
-          <p class="max-w-md text-xs leading-5 text-mute">{{ leftError }}</p>
-          <button v-if="props.initialLeft" type="button" class="btn-line !h-8 text-xs" @click="loadSide('left', props.initialLeft, false)">
-            <RotateCw class="size-3.5" />重试
-          </button>
         </div>
 
         <div v-else-if="hasBothFiles && currentPair?.kind === 'added'" class="pointer-events-none absolute inset-0 z-10 flex items-center justify-center bg-[#fafaf9]/85">
@@ -776,7 +830,6 @@ onBeforeUnmount(() => {
         <div v-else-if="!rightLoading" class="absolute inset-0 z-10 flex items-center justify-center bg-[#fafaf9] p-6">
           <div class="w-full max-w-[400px] rounded-2xl border border-line bg-white p-5 shadow-[0_1px_3px_rgba(0,0,0,0.03)]">
             <h2 class="text-sm font-semibold text-ink">选择对比表格</h2>
-            <p class="mt-0.5 text-xs text-mute">仅显示当前对话工作区中的输入和输出表格</p>
 
             <p v-if="rightError" role="alert" class="mt-3 rounded-lg bg-rose-50 px-3 py-2 text-xs text-rose-700">{{ rightError }}</p>
 
@@ -789,13 +842,13 @@ onBeforeUnmount(() => {
                 <RotateCw class="size-3.5" />重新加载
               </button>
             </div>
-            <div v-else-if="!activeConversationId" class="py-8 text-center text-xs leading-5 text-mute">
-              请从聊天页面打开表格后再进入比对。
+            <div v-else-if="!activeConversationId" class="py-6 text-center text-xs leading-5 text-mute">
+              未关联聊天对话，可在下方粘贴表格链接。
             </div>
-            <div v-else-if="!hasOtherCandidateForRight" class="py-8 text-center text-xs leading-5 text-mute">
+            <div v-else-if="!hasOtherCandidateForRight" class="py-6 text-center text-xs leading-5 text-mute">
               当前对话中暂无其他可比对的表格文件。
             </div>
-            <div v-else class="mt-4 max-h-[56vh] space-y-4 overflow-y-auto pr-0.5">
+            <div v-else class="mt-4 max-h-[40vh] space-y-4 overflow-y-auto pr-0.5">
               <div v-for="group in candidateGroups" :key="group.key">
                 <div class="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-faint">
                   <span>{{ group.label }}</span>
@@ -822,6 +875,10 @@ onBeforeUnmount(() => {
                   </button>
                 </div>
               </div>
+            </div>
+
+            <div class="mt-4 border-t border-line pt-3.5">
+              <CompareUrlInput :busy="rightLoading" @submit="chooseSourceForSide('right', $event)" />
             </div>
           </div>
         </div>
@@ -958,6 +1015,13 @@ onBeforeUnmount(() => {
 .file-menu-item.is-disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+.menu-url {
+  padding: 8px 6px 4px;
+}
+.menu-url.has-files {
+  margin-top: 4px;
+  border-top: 1px solid var(--color-line);
 }
 
 /* 右侧/左侧文件选择卡片行 */
