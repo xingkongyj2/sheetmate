@@ -12,6 +12,7 @@ TabClaw 把会话里的表放在内存字典 tables[table_id] 里；SheetMate �
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from collections import OrderedDict
@@ -620,6 +621,9 @@ class WorkspaceManager:
                 path = self.root / f"{key}{suffix}"
                 if path.exists():
                     path.unlink()
+            files_dir = self.root / f"{key}_files"
+            if files_dir.is_dir():
+                shutil.rmtree(files_dir, ignore_errors=True)
 
     def close_all(self) -> None:
         with self._lock:

@@ -167,17 +167,17 @@ def start_replay(user: User, recipe_id: str, *, file_ids: list[str], inputs: dic
                 return replace(src, path=resolved)
 
             active_sources = {alias: await _mask_source(src) for alias, src in sources.items()}
-        ws = run_service.run_workspaces.get(run_id)
-        runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=repairer,
-                              field_mapping_authoritative=bool(recipe.customer_id),
-                              max_repair=settings.repair_max_attempts, run_id=run_id)
-        async for event in runner.run(active_sources, output_path=out_path, history=history):
-            if event.get("type") == "recipe_run_start":
-                event = {**event, "recipe_persisted": True}
-            elif event.get("type") == "recipe_run_done":
-                event = {**event, "recipe_persisted": not runner.recipe_changed}
-            await job.emit(event)
-        await _finish(job, user.id, runner, runner.output_path or out_path, note="执行时自动修复", save_recipe=save_recipe, label=label)
+        with run_service.run_workspaces.hold(run_id) as ws:
+            runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=repairer,
+                                  field_mapping_authoritative=bool(recipe.customer_id),
+                                  max_repair=settings.repair_max_attempts, run_id=run_id)
+            async for event in runner.run(active_sources, output_path=out_path, history=history):
+                if event.get("type") == "recipe_run_start":
+                    event = {**event, "recipe_persisted": True}
+                elif event.get("type") == "recipe_run_done":
+                    event = {**event, "recipe_persisted": not runner.recipe_changed}
+                await job.emit(event)
+            await _finish(job, user.id, runner, runner.output_path or out_path, note="执行时自动修复", save_recipe=save_recipe, label=label)
 
     return jobs.start(f"run:{run_id}", work)
 
@@ -232,27 +232,26 @@ def start_rerun_from(user: User, run_id: str, step_id: int, params: dict[str, An
             recipe_service._definition(recipe_service.record_to_recipe(saved)) == recipe_service._definition(recipe))
 
     async def work(job: Job) -> None:
-        original_ws = run_service.run_workspaces.get(run_id)
-        ws = run_service.run_workspaces.get(resumed_run_id)
-        for table in original_ws.list_tables():
-            metadata = {key: value for key, value in table.to_dict().items() if key not in {"name", "columns", "rows"}}
-            ws.put_dataframe(table.name, original_ws.df(table.name), **metadata)
-        runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=None, run_id=resumed_run_id,
-                              field_mapping_authoritative=bool(recipe.customer_id))
-        runner.report["inputs"] = []
-        runner.restore_sources(kept_inputs, lambda fid: _file_path(fid, user))
-        runner.restore_artifacts(kept_artifacts)
-        async for event in runner.run(None, start_step=step_id, output_path=out_path):
-            if event.get("type") == "recipe_run_start":
-                event = {**event, "recipe_persisted": recipe_persisted}
-            elif event.get("type") == "recipe_run_done":
-                event = {**event, "recipe_persisted": recipe_persisted and not runner.recipe_changed}
-            await job.emit(event)
-        if edited and runner.report["status"] not in {"failed", "escalated"}:
-            runner.recipe_changed = True
-        runner.report["steps"] = kept_steps + runner.report["steps"]
-        runner.report["inputs"] = kept_inputs
-        await _finish(job, user.id, runner, runner.output_path or out_path, note=f"手动调整第 {step_id} 步参数后重跑", save_recipe=save_recipe)
+        with run_service.run_workspaces.hold(run_id) as original_ws, run_service.run_workspaces.hold(resumed_run_id) as ws:
+            for table in original_ws.list_tables():
+                metadata = {key: value for key, value in table.to_dict().items() if key not in {"name", "columns", "rows"}}
+                ws.put_dataframe(table.name, original_ws.df(table.name), **metadata)
+            runner = RecipeRunner(recipe, library, ws, field_mapping=mapping, repairer=None, run_id=resumed_run_id,
+                                  field_mapping_authoritative=bool(recipe.customer_id))
+            runner.report["inputs"] = []
+            runner.restore_sources(kept_inputs, lambda fid: _file_path(fid, user))
+            runner.restore_artifacts(kept_artifacts)
+            async for event in runner.run(None, start_step=step_id, output_path=out_path):
+                if event.get("type") == "recipe_run_start":
+                    event = {**event, "recipe_persisted": recipe_persisted}
+                elif event.get("type") == "recipe_run_done":
+                    event = {**event, "recipe_persisted": recipe_persisted and not runner.recipe_changed}
+                await job.emit(event)
+            if edited and runner.report["status"] not in {"failed", "escalated"}:
+                runner.recipe_changed = True
+            runner.report["steps"] = kept_steps + runner.report["steps"]
+            runner.report["inputs"] = kept_inputs
+            await _finish(job, user.id, runner, runner.output_path or out_path, note=f"手动调整第 {step_id} 步参数后重跑", save_recipe=save_recipe)
 
     return jobs.start(f"run:{resumed_run_id}", work)
 

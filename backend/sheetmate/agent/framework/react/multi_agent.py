@@ -31,6 +31,11 @@ def should_activate(ctx: AgentContext, message: str) -> bool:
     每个专员只看一张表反而比不了，这种情况交给单个 Agent。"""
     if ctx.mode != "analyze" or ctx.delete_recipe_ids:
         return False
+    # 若持久化运行态里已有未完成的多专员进度（例如上轮专员触发 clarify 后用户回复简短口径），直接续跑多专员。
+    runtime = getattr(ctx, "runtime", None)
+    if runtime is not None and isinstance(runtime.state.get("multi_state"), dict):
+        if runtime.state["multi_state"].get("current") in {"specialists", "aggregate"}:
+            return True
     # 流程管理是一次会话级操作；拆到每张表会重复提问并覆盖待确认清单。
     text = message.lower()
     if re.search(r"流程|配方|\brecipes?\b", text) and re.search(r"删|清空|移除|查看|列出|delete|remove|list", text):
@@ -115,6 +120,13 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
                 if event["type"] == "execution_stop":
                     status, reason = event.get("status", "incomplete"), event.get("summary", "")
                 await queue.put({**event, "agent_id": table_name})
+                if event["type"] == "clarify":
+                    question = event.get("question") or reason or ""
+                    conclusions[table_name] = question
+                    await queue.put({"type": "agent_done", "agent_id": table_name, "conclusion": question,
+                                     "status": "waiting", "error": False})
+                    await queue.put({"type": "__branch_abort__", "kind": "clarify", "summary": question})
+                    return
             if status != "completed":
                 conclusion = conclusion or reason or "本项尚未完成。"
             conclusions[table_name] = conclusion
@@ -138,6 +150,15 @@ async def execute_multi(executor: AgentExecutor, ctx: AgentContext, message: str
             event = await queue.get()
             if event is done_marker:
                 finished += 1
+            elif isinstance(event, dict) and event.get("type") == "__branch_abort__":
+                kind = event.get("kind")
+                summary = event.get("summary") or ""
+                yield {"type": "execution_stop", "scope": "task",
+                       "status": "waiting" if kind == "clarify" else "failed",
+                       "code": "clarification_requested" if kind == "clarify" else "agent_error",
+                       "summary": summary, "verified": False}
+                yield {"type": "final_text", "content": ""}
+                return
             else:
                 yield event
     finally:
@@ -193,10 +214,11 @@ async def _execute_durable_multi(executor: AgentExecutor, ctx: AgentContext, mes
     pending_tables = []
     for table in tables:
         name = table.name
-        if name in completed:
+        if name in completed and completed[name] != "waiting":
             yield {"type": "agent_done", "agent_id": name, "conclusion": conclusions.get(name, ""),
                    "status": completed[name], "error": completed[name] == "failed", "restored": True}
         else:
+            completed.pop(name, None)
             pending_tables.append(table)
 
     if pending_tables:
@@ -241,10 +263,13 @@ async def _execute_durable_multi(executor: AgentExecutor, ctx: AgentContext, mes
                         status, reason = event.get("status", "incomplete"), event.get("summary", "")
                     await queue.put({**event, "agent_id": table_name})
                     if kind in {"error", "clarify"}:
-                        conclusions[table_name] = conclusion or reason or event.get("content", "")
+                        summary = conclusion or reason or event.get("question") or event.get("content", "")
+                        conclusions[table_name] = summary
                         completed[table_name] = "failed" if kind == "error" else "waiting"
                         await save()
-                        await queue.put({"type": "__branch_abort__", "kind": kind})
+                        await queue.put({"type": "agent_done", "agent_id": table_name, "conclusion": summary,
+                                         "status": completed[table_name], "error": kind == "error"})
+                        await queue.put({"type": "__branch_abort__", "kind": kind, "summary": summary})
                         return
                 conclusions[table_name] = conclusion or reason or "本项尚未完成。"
                 completed[table_name] = status
@@ -284,6 +309,13 @@ async def _execute_durable_multi(executor: AgentExecutor, ctx: AgentContext, mes
                         return
                     continue
                 if isinstance(event, dict) and event.get("type") == "__branch_abort__":
+                    kind = event.get("kind")
+                    summary = event.get("summary") or ""
+                    yield {"type": "execution_stop", "scope": "task",
+                           "status": "waiting" if kind == "clarify" else "failed",
+                           "code": "clarification_requested" if kind == "clarify" else "agent_error",
+                           "summary": summary, "verified": False}
+                    yield {"type": "final_text", "content": ""}
                     return
                 yield event
         finally:

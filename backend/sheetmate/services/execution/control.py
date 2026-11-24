@@ -231,8 +231,9 @@ class ExecutionControl:
         return durable_value(checkpoint)
 
     def persist(self, runtime_state: dict[str, Any] | None = None, *, status: str = "running",
-                receipt: tuple[str, dict[str, Any]] | None = None) -> None:
-        checkpoint = self.snapshot(runtime_state)
+                receipt: tuple[str, dict[str, Any]] | None = None,
+                prepared_checkpoint: dict[str, Any] | None = None) -> None:
+        checkpoint = prepared_checkpoint if prepared_checkpoint is not None else self.snapshot(runtime_state)
         with session_scope() as db:
             if receipt is not None:
                 call_id, result = receipt
@@ -259,7 +260,9 @@ class ExecutionControl:
             self._recipe_binding_starts.pop(receipt[0], None)
 
     async def save(self, state: dict[str, Any]) -> None:
-        await asyncio.to_thread(self.persist, state)
+        # 在事件循环同步生成不可变快照后再交工作线程写库，防止多专员并发修改 evidence_store / budget 导致跨线程迭代崩溃。
+        prepared = self.snapshot(state)
+        await asyncio.to_thread(self.persist, state, prepared_checkpoint=prepared)
 
     def _start_tool_sync(self, call_id: str, name: str, arguments: dict[str, Any]) -> dict[str, Any] | None:
         readonly = name in {

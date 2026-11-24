@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import sys
 import threading
+import weakref
 from concurrent.futures import Future
 import time
 from collections.abc import AsyncIterator
@@ -33,6 +34,58 @@ from sheetmate.agent.tools.contracts import (
 
 _LOG_DATA_EVENTS = {"file", "table", "script", "clarify", "memory_saved", "field_mapping_saved",
                     "recipe_saved", "recipe_completed", "recipe_deleted", "recipe_failed", "recipe_run_done"}
+_SYNC_STATE_GUARD = threading.Lock()
+_HOST_PUBLISH_LOCKS: weakref.WeakKeyDictionary[Any, threading.Lock] = weakref.WeakKeyDictionary()
+_ACTIVE_WS_OPS: weakref.WeakKeyDictionary[Any, int] = weakref.WeakKeyDictionary()
+
+
+def _host_publish_lock(host: Any) -> threading.Lock:
+    """同一个 host 实例共享一把发布锁，防止并行工具或多专员并发覆写 vars(ctx.host)。"""
+    if host is None:
+        return threading.Lock()
+    with _SYNC_STATE_GUARD:
+        lock = _HOST_PUBLISH_LOCKS.get(host)
+        if lock is None:
+            lock = threading.Lock()
+            try:
+                _HOST_PUBLISH_LOCKS[host] = lock
+            except TypeError:
+                return lock
+        return lock
+
+
+def _ws_op_enter(ws: Any) -> None:
+    if ws is None:
+        return
+    with _SYNC_STATE_GUARD:
+        try:
+            _ACTIVE_WS_OPS[ws] = _ACTIVE_WS_OPS.get(ws, 0) + 1
+        except TypeError:
+            pass
+
+
+def _ws_op_exit(ws: Any) -> None:
+    if ws is None:
+        return
+    with _SYNC_STATE_GUARD:
+        try:
+            remaining = _ACTIVE_WS_OPS.get(ws, 0) - 1
+            if remaining <= 0:
+                _ACTIVE_WS_OPS.pop(ws, None)
+            else:
+                _ACTIVE_WS_OPS[ws] = remaining
+        except TypeError:
+            pass
+
+
+def _ws_active_ops(ws: Any) -> int:
+    if ws is None:
+        return 0
+    with _SYNC_STATE_GUARD:
+        try:
+            return _ACTIVE_WS_OPS.get(ws, 0)
+        except TypeError:
+            return 0
 
 
 class _ToolCancelled(BaseException):
@@ -87,16 +140,17 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
     timeout = getattr(policy, "tool_timeout_seconds", 1800)
     grace = getattr(policy, "cancellation_grace_seconds", 5)
     cancelled = threading.Event()
-    publication = threading.Lock()
+    publication = _host_publish_lock(ctx.host)
     future: Future[ToolResult] = Future()
     ws = _CallCapability(ctx.ws, cancelled)
-    host = copy(ctx.host) if ctx.host is not None else None
-    host_baseline = dict(vars(host)) if host is not None and hasattr(host, "__dict__") else {}
-    # Mutable bookkeeping also stays private until this invocation settles;
-    # late native callbacks must not append to the live host after revocation.
-    for name, value in host_baseline.items():
-        if type(value) in {list, dict, set}:
-            setattr(host, name, copy(value))
+    with publication:
+        host = copy(ctx.host) if ctx.host is not None else None
+        host_baseline = dict(vars(host)) if host is not None and hasattr(host, "__dict__") else {}
+        # Mutable bookkeeping also stays private until this invocation settles;
+        # late native callbacks must not append to the live host after revocation.
+        for name, value in host_baseline.items():
+            if type(value) in {list, dict, set}:
+                setattr(host, name, copy(value))
     if host is not None and hasattr(host, "ws"):
         host.ws = ws
     worker_ctx = replace(ctx, ws=ws, host=_CallCapability(host, cancelled) if host is not None else None)
@@ -131,6 +185,8 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
 
     def run():
         future.set_running_or_notify_cancel()
+        if not use_worker:
+            _ws_op_enter(ctx.ws)
         try:
             # The cooperative tracer handles Python work; native pure data
             # computations run in a separate, killable process instead.
@@ -171,6 +227,8 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
             future.set_result(result)
         finally:
             sys.settrace(None)
+            if not use_worker:
+                _ws_op_exit(ctx.ws)
 
     with phase("executing_tool", tool.name) as item:
         register_tool_worker(future)
@@ -182,7 +240,9 @@ async def _sync_tool(tool: Tool, args: dict[str, Any], ctx: AgentContext) -> Too
         async def revoke() -> bool:
             with publication:
                 cancelled.set()
-            ctx.ws.interrupt()
+            # 当多个并发专员/并行只读查询共享同一个 DuckDB 连接时，避免 interrupt() 误杀兄弟查询。
+            if use_worker or _ws_active_ops(ctx.ws) <= 1:
+                ctx.ws.interrupt()
             done, _ = await asyncio.wait({wrapped}, timeout=grace)
             if done:
                 if not wrapped.cancelled():

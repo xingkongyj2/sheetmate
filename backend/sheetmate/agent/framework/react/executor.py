@@ -811,10 +811,17 @@ class AgentExecutor:
             content, reasoning = "", ""
             calls_acc: dict[int, dict[str, str]] = {}
             # 文件任务要先确认没有违规工具调用再发布正文；普通闲聊保留逐字流式输出。
-            # 即使 tool_choice=none，也不能提前把尚未执行的声明当作最终回答。
-            live = not tools and not protocol_pending
+            # 当 tool_choice=none 且外层已接管完成核对的纯分析收尾阶段，同样可以直接逐字流式推送。
+            live = not protocol_pending and (
+                not tools
+                or (skip_completion_check and (final_round or compose_only)
+                    and ctx.mode == "analyze" and stop_scope == "task")
+            )
             streamed_text = False
             suppress = False
+            reasoning_activity_sent = False
+            drafting_activity_sent = False
+            tool_prep_activity_sent = False
             finish_reason = None
             saw_choice = False
             model_started = time.perf_counter()
@@ -856,13 +863,22 @@ class AgentExecutor:
                     piece = getattr(delta, "reasoning_content", None)
                     if piece:
                         reasoning += piece
+                        if not live and not reasoning_activity_sent:
+                            reasoning_activity_sent = True
+                            yield {"type": "activity", "text": "正在深入推理分析…"}
                     if delta.content:
                         content += delta.content
                         suppress = suppress or _TOOL_MARKER in content
                         if live and not suppress:
                             streamed_text = True
                             yield {"type": "text_chunk", "content": delta.content}
+                        elif not live and not suppress and not calls_acc and not drafting_activity_sent and content.strip():
+                            drafting_activity_sent = True
+                            yield {"type": "activity", "text": "正在整理分析结论…" if budget.used > 0 else "正在组织回复…"}
                     for tc in delta.tool_calls or []:
+                        if not live and not tool_prep_activity_sent:
+                            tool_prep_activity_sent = True
+                            yield {"type": "activity", "text": "正在准备工具调用参数…"}
                         slot = calls_acc.setdefault(tc.index, {"id": "", "name": "", "arguments": ""})
                         if tc.id:
                             slot["id"] = tc.id
@@ -1282,7 +1298,8 @@ class AgentExecutor:
                 method_blocked = False
                 read_blocked = False
                 read_blocked_key: str | None = None
-                read_ref = _tool_result_read_ref(args) if name == "read_tool_result" else None
+                read_ref = (_tool_result_read_ref(args, tool_name=name)
+                            if name in {"read_tool_result", "inspect_execution_evidence"} else None)
                 if prefetched is not None:
                     result = ToolResult(**prefetched["result"])
                     executed = True
@@ -1310,16 +1327,16 @@ class AgentExecutor:
                         _approach_switch_message(recovery), ok=False, summary="当前方法已达到失败阈值，须先调整方法",
                         public_summary="正在调整处理方法", public_text="当前方法多次未通过，将重新选择处理方法。",
                     )
-                elif name == "read_tool_result" and read_ref is not None and (
-                    guard := _tool_result_read_guard(budget.results, ctx.branch_id, original_scope, read_ref)
+                elif name in {"read_tool_result", "inspect_execution_evidence"} and read_ref is not None and (
+                    guard := _tool_result_read_guard(budget.results, ctx.branch_id, original_scope, read_ref, tool_name=name)
                 ) is not None:
                     read_blocked = True
                     guard_message, read_blocked_key = guard
                     result = ToolResult(
                         guard_message, ok=False,
-                        summary="已停止重复翻读同一工具结果，请改用精简脚本或直接推进任务",
-                        public_summary="已跳过重复读取工具结果片段",
-                        public_text="该工具结果已读取多次，正在调整获取方式继续处理。",
+                        summary="已停止重复翻读同一工具结果或证据，请改用精简脚本或直接推进任务",
+                        public_summary="已跳过重复翻读历史结果片段",
+                        public_text="该结果已读取多次，正在调整获取方式继续处理。",
                     )
                 else:
                     if name == _SCRIPT_TOOL:
@@ -1562,10 +1579,11 @@ def _unique_call_ids(calls: list[dict[str, Any]], messages: list[dict[str, Any]]
     return errors
 
 
-def _tool_result_read_ref(args: dict[str, Any] | None) -> dict[str, Any] | None:
+def _tool_result_read_ref(args: dict[str, Any] | None, *, tool_name: str = "read_tool_result") -> dict[str, Any] | None:
     if not isinstance(args, dict):
         return None
-    result_id = args.get("result_id")
+    id_key = "evidence_id" if tool_name == "inspect_execution_evidence" else "result_id"
+    result_id = args.get(id_key)
     if not isinstance(result_id, str) or not result_id.strip():
         return None
     section = args.get("section")
@@ -1577,15 +1595,15 @@ def _tool_result_read_ref(args: dict[str, Any] | None) -> dict[str, Any] | None:
 
 
 def _tool_result_read_guard(results: dict[str, dict[str, Any]], branch_id: str | None, scope: str,
-                            read_ref: dict[str, Any]) -> tuple[str, str] | None:
-    """拦截对同一工具结果的循环重读或过度逐页翻读，引导模型改用精简脚本提取摘要。"""
+                            read_ref: dict[str, Any], *, tool_name: str = "read_tool_result") -> tuple[str, str] | None:
+    """拦截对同一工具结果或执行证据的循环重读与过度逐页翻读，引导模型改用精简脚本提取摘要。"""
     target_id = read_ref["result_id"]
     target_section = read_ref["section"]
     target_offset = read_ref["offset"]
     total_reads = 0
     same_page_reads = 0
     for item in results.values():
-        if (item.get("tool") != "read_tool_result" or item.get("ok") is not True
+        if (item.get("tool") != tool_name or item.get("ok") is not True
                 or item.get("branch_id") != branch_id or item.get("scope") != scope):
             continue
         prev = item.get("read_ref")
@@ -1596,20 +1614,20 @@ def _tool_result_read_guard(results: dict[str, dict[str, Any]], branch_id: str |
             same_page_reads += 1
 
     if same_page_reads >= _MAX_SAME_TOOL_RESULT_PAGE_READS:
-        key = f"read_tool_result_repeat:{target_id}:{target_section}:{target_offset}"
+        key = f"{tool_name}_repeat:{target_id}:{target_section}:{target_offset}"
         msg = (
             f"已拦截重复读取：你已经多次读取过 `{target_id}`（section={target_section}, offset={target_offset}），"
             "继续重复翻读同一分段不会带来新信息，且会把早期上下文挤出窗口。\n"
-            "请立即停止调用 `read_tool_result` 翻读这份超长文本："
+            f"请立即停止调用 `{tool_name}` 翻读这份超长文本："
             "如果原 Python 脚本输出过于冗长（例如逐格打印了几百个单元格样式），"
             "请改写一段更精简的 `run_python_script`（只汇总去重后的样式/结构摘要或直接写入目标表），"
             "或依据已经掌握的信息直接完成下一步。"
         )
         return msg, key
     if total_reads >= _MAX_TOOL_RESULT_READS_PER_ID:
-        key = f"read_tool_result_limit:{target_id}"
+        key = f"{tool_name}_limit:{target_id}"
         msg = (
-            f"已达到单个工具结果的分页读取上限：你已经对 `{target_id}` 累计读取了 {total_reads} 次片段，"
+            f"已达到单个结果的分页读取上限：你已经对 `{target_id}` 累计读取了 {total_reads} 次片段，"
             "逐页通读超长结果效率极低且容易导致前页被上下文折叠。\n"
             "请立即停止继续翻读该结果：请直接改写更精简的 `run_python_script` / SQL 只输出所需的关键摘要，"
             "或直接基于已有信息完成目标表格处理。"
